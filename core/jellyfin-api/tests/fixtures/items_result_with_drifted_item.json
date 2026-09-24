@@ -1,0 +1,27 @@
+{
+  "Items": [
+    {
+      "Id": "e2f5a5f1-1a0b-4b3a-9c2e-000000000010",
+      "Name": "Known Movie",
+      "Type": "Movie"
+    },
+    {
+      "Id": "e2f5a5f1-1a0b-4b3a-9c2e-000000000011",
+      "Name": "Drifted Item From A Newer Server",
+      "Type": "SomeBrandNewItemKindThisClientHasNeverHeardOf",
+      "MediaStreams": [
+        {
+          "Type": "SomeBrandNewStreamTypeThisClientHasNeverHeardOf",
+          "Codec": "someBrandNewCodec"
+        }
+      ]
+    },
+    {
+      "Id": "e2f5a5f1-1a0b-4b3a-9c2e-000000000012",
+      "Name": "Known Episode",
+      "Type": "Episode"
+    }
+  ],
+  "StartIndex": 0,
+  "TotalRecordCount": 3
+}

@@ -1,0 +1,27 @@
+[package]
+name = "jellyfin-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "rt"] }
+uuid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+# TLS choice: rustls (via ring), not native-tls/OpenSSL — no system OpenSSL
+# dependency, same backend for both reqwest and tokio-tungstenite, and
+# consistent behavior across dev/CI/notarized-release builds. See lib.rs
+# module docs for the note.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util", "rt", "test-util"] }
+
+[lints]
+workspace = true

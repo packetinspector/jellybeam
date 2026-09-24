@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "ffi",
+    "jellyfin-api",
+    "jellyfin-core",
+    "media-cache",
+    "playback-policy",
+    "seerr-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"   # library code must not panic on recoverable paths
+
+[workspace.lints.rust]
+# jellyfin-api carries a cfg(fuzzing)-gated re-export from an external
+# fuzz workspace; declare the cfg so check-cfg doesn't flag the gate.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+# The cdylib shipped in the APK. Whole-program LTO on one codegen unit buys speed and size on the
+# TV's 32-bit cores. Never `strip` here: uniffi-bindgen's library mode reads the metadata out of
+# `.symtab`; AGP strips the packaged copy instead (app/build.gradle.kts `ndkVersion`).
+[profile.release]
+lto = "fat"
+codegen-units = 1

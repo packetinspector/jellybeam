@@ -1,0 +1,32 @@
+{
+  "Id": "e2f5a5f1-1a0b-4b3a-9c2e-000000000001",
+  "Name": "Sample Movie",
+  "SortName": "sample movie",
+  "Type": "Movie",
+  "ProductionYear": 2019,
+  "PremiereDate": "2019-05-01T00:00:00.0000000Z",
+  "RunTimeTicks": 72000000000,
+  "DateCreated": "2023-01-01T00:00:00.0000000Z",
+  "CommunityRating": 7.8,
+  "OfficialRating": "PG-13",
+  "ParentId": "e2f5a5f1-1a0b-4b3a-9c2e-000000000002",
+  "IndexNumber": null,
+  "ParentIndexNumber": null,
+  "UserData": {
+    "Key": "e2f5a5f1-1a0b-4b3a-9c2e-000000000001",
+    "ItemId": "e2f5a5f1-1a0b-4b3a-9c2e-000000000001",
+    "Played": false,
+    "PlaybackPositionTicks": 1200000000,
+    "PlayCount": 0,
+    "IsFavorite": true
+  },
+  "ImageTags": {
+    "Primary": "abc123hash"
+  },
+  "BackdropImageTags": ["def456hash"],
+  "ImageBlurHashes": {
+    "Primary": {
+      "abc123hash": "L6PZfSi_.AyE_3t7t7R**0o#DgR4"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "User": {
+    "Id": "e2f5a5f1-1a0b-4b3a-9c2e-0000000000aa",
+    "Name": "jellybeam-admin",
+    "ServerId": "server-id-123",
+    "HasPassword": true,
+    "HasConfiguredPassword": true
+  },
+  "SessionInfo": {
+    "Id": "session-id-123",
+    "UserId": "e2f5a5f1-1a0b-4b3a-9c2e-0000000000aa",
+    "UserName": "jellybeam-admin",
+    "Client": "Jellybeam",
+    "DeviceId": "device-123",
+    "DeviceName": "Test Mac"
+  },
+  "AccessToken": "test-access-token-abc123",
+  "ServerId": "server-id-123",
+  "AnUndocumentedFutureField": { "nested": true }
+}

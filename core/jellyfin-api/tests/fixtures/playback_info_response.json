@@ -1,0 +1,43 @@
+{
+  "MediaSources": [
+    {
+      "Id": "e2f5a5f1-1a0b-4b3a-9c2e-000000000001",
+      "Path": "/media/movies/Sample Movie (2019)/Sample Movie.mkv",
+      "Protocol": "File",
+      "Container": "mkv",
+      "Size": 4294967296,
+      "Name": "Sample Movie",
+      "IsRemote": false,
+      "RunTimeTicks": 72000000000,
+      "SupportsDirectPlay": true,
+      "SupportsDirectStream": true,
+      "SupportsTranscoding": true,
+      "Bitrate": 8000000,
+      "DefaultAudioStreamIndex": 1,
+      "DefaultSubtitleStreamIndex": -1,
+      "MediaStreams": [
+        {
+          "Codec": "hevc",
+          "Language": "und",
+          "Type": "Video",
+          "Index": 0,
+          "IsDefault": true,
+          "Width": 3840,
+          "Height": 2160,
+          "VideoRange": "HDR",
+          "VideoRangeType": "HDR10"
+        },
+        {
+          "Codec": "eac3",
+          "Language": "eng",
+          "Type": "Audio",
+          "Index": 1,
+          "IsDefault": true,
+          "Channels": 6,
+          "ChannelLayout": "5.1"
+        }
+      ]
+    }
+  ],
+  "PlaySessionId": "play-session-abc123"
+}

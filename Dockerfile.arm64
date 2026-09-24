@@ -1,0 +1,54 @@
+# Native arm64 build image (docs/06-build-container.md "arm64 image"): Gradle,
+# Kotlin, JVM tests, lint, R8, rustc and cargo run native on Apple Silicon.
+# Google ships aapt2 and the NDK toolchain for Linux as x86_64 only, so those
+# two run under Rosetta via the x86_64 glibc multiarch libraries installed
+# below (OrbStack executes amd64 ELF binaries inside arm64 containers).
+FROM --platform=linux/arm64 debian:trixie-slim
+
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358
+ENV PATH="${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/35.0.0"
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Native toolchain for host-arch Rust deps (rusqlite's bundled SQLite, ring),
+# an arm64 JDK 21, and the x86_64 runtime libraries aapt2 and NDK clang need.
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    dpkg --add-architecture amd64 && \
+    for i in 1 2 3 4 5; do \
+        apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates unzip wget git curl build-essential pkg-config perl \
+            openjdk-21-jdk-headless \
+            libc6:amd64 libstdc++6:amd64 libgcc-s1:amd64 zlib1g:amd64 \
+        && break || { echo "apt-get attempt $i failed, retrying..."; sleep 5; }; \
+    done && rm -rf /var/lib/apt/lists/*
+
+# Command line tools are JVM code: the "linux" zip is architecture-neutral.
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
+    wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip && \
+    unzip -q /tmp/cmdline-tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
+    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
+    rm /tmp/cmdline-tools.zip
+
+RUN yes | sdkmanager --licenses
+
+# Same components as the amd64 image; build-tools and the NDK arrive as
+# x86_64 binaries and run under Rosetta.
+RUN sdkmanager \
+    "platforms;android-36" \
+    "build-tools;35.0.0" \
+    "platform-tools" \
+    "ndk;28.2.13676358"
+
+ENV RUSTUP_HOME=/opt/rustup
+ENV CARGO_HOME=/opt/cargo
+ENV PATH="${PATH}:/opt/cargo/bin"
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain 1.98.1 && \
+    rustup component add rustfmt clippy && \
+    rustup target add aarch64-linux-android x86_64-linux-android armv7-linux-androideabi && \
+    cargo install cargo-ndk --version 4.1.2 --locked
+
+WORKDIR /app
+ENV GRADLE_USER_HOME=/app/.gradle-home

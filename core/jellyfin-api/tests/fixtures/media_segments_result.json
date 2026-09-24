@@ -1,0 +1,20 @@
+{
+  "Items": [
+    {
+      "Id": "e2f5a5f1-1a0b-4b3a-9c2e-0000000000c1",
+      "ItemId": "e2f5a5f1-1a0b-4b3a-9c2e-000000000001",
+      "Type": "Intro",
+      "StartTicks": 0,
+      "EndTicks": 900000000
+    },
+    {
+      "Id": "e2f5a5f1-1a0b-4b3a-9c2e-0000000000c2",
+      "ItemId": "e2f5a5f1-1a0b-4b3a-9c2e-000000000001",
+      "Type": "Outro",
+      "StartTicks": 68400000000,
+      "EndTicks": 72000000000
+    }
+  ],
+  "TotalRecordCount": 2,
+  "StartIndex": 0
+}

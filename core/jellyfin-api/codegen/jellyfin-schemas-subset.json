@@ -1,0 +1,4397 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JellyfinSchemas",
+  "$defs": {
+    "AccessSchedule": {
+      "type": "object",
+      "properties": {
+        "Id": {
+          "type": "integer",
+          "description": "Gets the id of this instance.",
+          "format": "int32",
+          "readOnly": true
+        },
+        "UserId": {
+          "type": "string",
+          "description": "Gets the id of the associated user.",
+          "format": "uuid"
+        },
+        "DayOfWeek": {
+          "enum": [
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Everyday",
+            "Weekday",
+            "Weekend"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/DynamicDayOfWeek"
+            }
+          ],
+          "description": "Gets or sets the day of week."
+        },
+        "StartHour": {
+          "type": "number",
+          "description": "Gets or sets the start hour.",
+          "format": "double"
+        },
+        "EndHour": {
+          "type": "number",
+          "description": "Gets or sets the end hour.",
+          "format": "double"
+        }
+      },
+      "description": "An entity representing a user's access schedule."
+    },
+    "AudioSpatialFormat": {
+      "enum": [
+        "None",
+        "DolbyAtmos",
+        "DTSX"
+      ],
+      "type": "string",
+      "description": "An enum representing formats of spatial audio."
+    },
+    "AuthenticateUserByName": {
+      "type": "object",
+      "properties": {
+        "Username": {
+          "type": "string",
+          "description": "Gets or sets the username.",
+          "nullable": true
+        },
+        "Pw": {
+          "type": "string",
+          "description": "Gets or sets the plain text password.",
+          "nullable": true
+        }
+      },
+      "description": "The authenticate user by name request body."
+    },
+    "AuthenticationResult": {
+      "type": "object",
+      "properties": {
+        "User": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UserDto"
+            }
+          ],
+          "description": "Gets or sets the user.",
+          "nullable": true
+        },
+        "SessionInfo": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/SessionInfoDto"
+            }
+          ],
+          "description": "Gets or sets the session info.",
+          "nullable": true
+        },
+        "AccessToken": {
+          "type": "string",
+          "description": "Gets or sets the access token.",
+          "nullable": true
+        },
+        "ServerId": {
+          "type": "string",
+          "description": "Gets or sets the server id.",
+          "nullable": true
+        }
+      },
+      "description": "A class representing an authentication result."
+    },
+    "BaseItemDto": {
+      "type": "object",
+      "properties": {
+        "Name": {
+          "type": "string",
+          "description": "Gets or sets the name.",
+          "nullable": true
+        },
+        "OriginalTitle": {
+          "type": "string",
+          "nullable": true
+        },
+        "ServerId": {
+          "type": "string",
+          "description": "Gets or sets the server identifier.",
+          "nullable": true
+        },
+        "Id": {
+          "type": "string",
+          "description": "Gets or sets the id.",
+          "format": "uuid"
+        },
+        "Etag": {
+          "type": "string",
+          "description": "Gets or sets the etag.",
+          "nullable": true
+        },
+        "SourceType": {
+          "type": "string",
+          "description": "Gets or sets the type of the source.",
+          "nullable": true
+        },
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets or sets the playlist item identifier.",
+          "nullable": true
+        },
+        "DateCreated": {
+          "type": "string",
+          "description": "Gets or sets the date created.",
+          "format": "date-time",
+          "nullable": true
+        },
+        "DateLastMediaAdded": {
+          "type": "string",
+          "format": "date-time",
+          "nullable": true
+        },
+        "ExtraType": {
+          "enum": [
+            "Unknown",
+            "Clip",
+            "Trailer",
+            "BehindTheScenes",
+            "DeletedScene",
+            "Interview",
+            "Scene",
+            "Sample",
+            "ThemeSong",
+            "ThemeVideo",
+            "Featurette",
+            "Short"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExtraType"
+            }
+          ],
+          "nullable": true
+        },
+        "AirsBeforeSeasonNumber": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "AirsAfterSeasonNumber": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "AirsBeforeEpisodeNumber": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "CanDelete": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "CanDownload": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "HasLyrics": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "HasSubtitles": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "PreferredMetadataLanguage": {
+          "type": "string",
+          "nullable": true
+        },
+        "PreferredMetadataCountryCode": {
+          "type": "string",
+          "nullable": true
+        },
+        "Container": {
+          "type": "string",
+          "nullable": true
+        },
+        "SortName": {
+          "type": "string",
+          "description": "Gets or sets the name of the sort.",
+          "nullable": true
+        },
+        "ForcedSortName": {
+          "type": "string",
+          "nullable": true
+        },
+        "Video3DFormat": {
+          "enum": [
+            "HalfSideBySide",
+            "FullSideBySide",
+            "FullTopAndBottom",
+            "HalfTopAndBottom",
+            "MVC"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/Video3DFormat"
+            }
+          ],
+          "description": "Gets or sets the video3 D format.",
+          "nullable": true
+        },
+        "PremiereDate": {
+          "type": "string",
+          "description": "Gets or sets the premiere date.",
+          "format": "date-time",
+          "nullable": true
+        },
+        "ExternalUrls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExternalUrl"
+          },
+          "description": "Gets or sets the external urls.",
+          "nullable": true
+        },
+        "MediaSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaSourceInfo"
+          },
+          "description": "Gets or sets the media versions.",
+          "nullable": true
+        },
+        "CriticRating": {
+          "type": "number",
+          "description": "Gets or sets the critic rating.",
+          "format": "float",
+          "nullable": true
+        },
+        "ProductionLocations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "Path": {
+          "type": "string",
+          "description": "Gets or sets the path.",
+          "nullable": true
+        },
+        "EnableMediaSourceDisplay": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "OfficialRating": {
+          "type": "string",
+          "description": "Gets or sets the official rating.",
+          "nullable": true
+        },
+        "CustomRating": {
+          "type": "string",
+          "description": "Gets or sets the custom rating.",
+          "nullable": true
+        },
+        "ChannelId": {
+          "type": "string",
+          "description": "Gets or sets the channel identifier.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "ChannelName": {
+          "type": "string",
+          "nullable": true
+        },
+        "Overview": {
+          "type": "string",
+          "description": "Gets or sets the overview.",
+          "nullable": true
+        },
+        "Taglines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the taglines.",
+          "nullable": true
+        },
+        "Genres": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the genres.",
+          "nullable": true
+        },
+        "CommunityRating": {
+          "type": "number",
+          "description": "Gets or sets the community rating.",
+          "format": "float",
+          "nullable": true
+        },
+        "CumulativeRunTimeTicks": {
+          "type": "integer",
+          "description": "Gets or sets the cumulative run time ticks.",
+          "format": "int64",
+          "nullable": true
+        },
+        "RunTimeTicks": {
+          "type": "integer",
+          "description": "Gets or sets the run time ticks.",
+          "format": "int64",
+          "nullable": true
+        },
+        "PlayAccess": {
+          "enum": [
+            "Full",
+            "None"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/PlayAccess"
+            }
+          ],
+          "description": "Gets or sets the play access.",
+          "nullable": true
+        },
+        "AspectRatio": {
+          "type": "string",
+          "description": "Gets or sets the aspect ratio.",
+          "nullable": true
+        },
+        "ProductionYear": {
+          "type": "integer",
+          "description": "Gets or sets the production year.",
+          "format": "int32",
+          "nullable": true
+        },
+        "IsPlaceHolder": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is place holder.",
+          "nullable": true
+        },
+        "Number": {
+          "type": "string",
+          "description": "Gets or sets the number.",
+          "nullable": true
+        },
+        "ChannelNumber": {
+          "type": "string",
+          "nullable": true
+        },
+        "IndexNumber": {
+          "type": "integer",
+          "description": "Gets or sets the index number.",
+          "format": "int32",
+          "nullable": true
+        },
+        "IndexNumberEnd": {
+          "type": "integer",
+          "description": "Gets or sets the index number end.",
+          "format": "int32",
+          "nullable": true
+        },
+        "ParentIndexNumber": {
+          "type": "integer",
+          "description": "Gets or sets the parent index number.",
+          "format": "int32",
+          "nullable": true
+        },
+        "RemoteTrailers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaUrl"
+          },
+          "description": "Gets or sets the trailer urls.",
+          "nullable": true
+        },
+        "ProviderIds": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          },
+          "description": "Gets or sets the provider ids.",
+          "nullable": true
+        },
+        "IsHD": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is HD.",
+          "nullable": true
+        },
+        "IsFolder": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is folder.",
+          "nullable": true
+        },
+        "ParentId": {
+          "type": "string",
+          "description": "Gets or sets the parent id.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "Type": {
+          "enum": [
+            "AggregateFolder",
+            "Audio",
+            "AudioBook",
+            "BasePluginFolder",
+            "Book",
+            "BoxSet",
+            "Channel",
+            "ChannelFolderItem",
+            "CollectionFolder",
+            "Episode",
+            "Folder",
+            "Genre",
+            "ManualPlaylistsFolder",
+            "Movie",
+            "LiveTvChannel",
+            "LiveTvProgram",
+            "MusicAlbum",
+            "MusicArtist",
+            "MusicGenre",
+            "MusicVideo",
+            "Person",
+            "Photo",
+            "PhotoAlbum",
+            "Playlist",
+            "PlaylistsFolder",
+            "Program",
+            "Recording",
+            "Season",
+            "Series",
+            "Studio",
+            "Trailer",
+            "TvChannel",
+            "TvProgram",
+            "UserRootFolder",
+            "UserView",
+            "Video",
+            "Year"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/BaseItemKind"
+            }
+          ],
+          "description": "Gets or sets the type."
+        },
+        "People": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BaseItemPerson"
+          },
+          "description": "Gets or sets the people.",
+          "nullable": true
+        },
+        "Studios": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NameGuidPair"
+          },
+          "description": "Gets or sets the studios.",
+          "nullable": true
+        },
+        "GenreItems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NameGuidPair"
+          },
+          "nullable": true
+        },
+        "ParentLogoItemId": {
+          "type": "string",
+          "description": "Gets or sets whether the item has a logo, this will hold the Id of the Parent that has one.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "ParentBackdropItemId": {
+          "type": "string",
+          "description": "Gets or sets whether the item has any backdrops, this will hold the Id of the Parent that has one.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "ParentBackdropImageTags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the parent backdrop image tags.",
+          "nullable": true
+        },
+        "LocalTrailerCount": {
+          "type": "integer",
+          "description": "Gets or sets the local trailer count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "UserData": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UserItemDataDto"
+            }
+          ],
+          "description": "Gets or sets the user data for this item based on the user it's being requested for.",
+          "nullable": true
+        },
+        "RecursiveItemCount": {
+          "type": "integer",
+          "description": "Gets or sets the recursive item count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "ChildCount": {
+          "type": "integer",
+          "description": "Gets or sets the child count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "SeriesName": {
+          "type": "string",
+          "description": "Gets or sets the name of the series.",
+          "nullable": true
+        },
+        "SeriesId": {
+          "type": "string",
+          "description": "Gets or sets the series id.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "SeasonId": {
+          "type": "string",
+          "description": "Gets or sets the season identifier.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "SpecialFeatureCount": {
+          "type": "integer",
+          "description": "Gets or sets the special feature count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "DisplayPreferencesId": {
+          "type": "string",
+          "description": "Gets or sets the display preferences id.",
+          "nullable": true
+        },
+        "Status": {
+          "type": "string",
+          "description": "Gets or sets the status.",
+          "nullable": true
+        },
+        "AirTime": {
+          "type": "string",
+          "description": "Gets or sets the air time.",
+          "nullable": true
+        },
+        "AirDays": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DayOfWeek"
+          },
+          "description": "Gets or sets the air days.",
+          "nullable": true
+        },
+        "Tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the tags.",
+          "nullable": true
+        },
+        "PrimaryImageAspectRatio": {
+          "type": "number",
+          "description": "Gets or sets the primary image aspect ratio, after image enhancements.",
+          "format": "double",
+          "nullable": true
+        },
+        "Artists": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the artists.",
+          "nullable": true
+        },
+        "ArtistItems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NameGuidPair"
+          },
+          "description": "Gets or sets the artist items.",
+          "nullable": true
+        },
+        "Album": {
+          "type": "string",
+          "description": "Gets or sets the album.",
+          "nullable": true
+        },
+        "CollectionType": {
+          "enum": [
+            "unknown",
+            "movies",
+            "tvshows",
+            "music",
+            "musicvideos",
+            "trailers",
+            "homevideos",
+            "boxsets",
+            "books",
+            "photos",
+            "livetv",
+            "playlists",
+            "folders"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/CollectionType"
+            }
+          ],
+          "description": "Gets or sets the type of the collection.",
+          "nullable": true
+        },
+        "DisplayOrder": {
+          "type": "string",
+          "description": "Gets or sets the display order.",
+          "nullable": true
+        },
+        "AlbumId": {
+          "type": "string",
+          "description": "Gets or sets the album id.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "AlbumPrimaryImageTag": {
+          "type": "string",
+          "description": "Gets or sets the album image tag.",
+          "nullable": true
+        },
+        "SeriesPrimaryImageTag": {
+          "type": "string",
+          "description": "Gets or sets the series primary image tag.",
+          "nullable": true
+        },
+        "AlbumArtist": {
+          "type": "string",
+          "description": "Gets or sets the album artist.",
+          "nullable": true
+        },
+        "AlbumArtists": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NameGuidPair"
+          },
+          "description": "Gets or sets the album artists.",
+          "nullable": true
+        },
+        "SeasonName": {
+          "type": "string",
+          "description": "Gets or sets the name of the season.",
+          "nullable": true
+        },
+        "MediaStreams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaStream"
+          },
+          "description": "Gets or sets the media streams.",
+          "nullable": true
+        },
+        "VideoType": {
+          "enum": [
+            "VideoFile",
+            "Iso",
+            "Dvd",
+            "BluRay"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/VideoType"
+            }
+          ],
+          "description": "Gets or sets the type of the video.",
+          "nullable": true
+        },
+        "PartCount": {
+          "type": "integer",
+          "description": "Gets or sets the part count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "MediaSourceCount": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "ImageTags": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          },
+          "description": "Gets or sets the image tags.",
+          "nullable": true
+        },
+        "BackdropImageTags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the backdrop image tags.",
+          "nullable": true
+        },
+        "ScreenshotImageTags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the screenshot image tags.",
+          "nullable": true
+        },
+        "ParentLogoImageTag": {
+          "type": "string",
+          "description": "Gets or sets the parent logo image tag.",
+          "nullable": true
+        },
+        "ParentArtItemId": {
+          "type": "string",
+          "description": "Gets or sets whether the item has fan art, this will hold the Id of the Parent that has one.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "ParentArtImageTag": {
+          "type": "string",
+          "description": "Gets or sets the parent art image tag.",
+          "nullable": true
+        },
+        "SeriesThumbImageTag": {
+          "type": "string",
+          "description": "Gets or sets the series thumb image tag.",
+          "nullable": true
+        },
+        "ImageBlurHashes": {
+          "$ref": "#/$defs/ImageBlurHashes"
+        },
+        "SeriesStudio": {
+          "type": "string",
+          "description": "Gets or sets the series studio.",
+          "nullable": true
+        },
+        "ParentThumbItemId": {
+          "type": "string",
+          "description": "Gets or sets the parent thumb item id.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "ParentThumbImageTag": {
+          "type": "string",
+          "description": "Gets or sets the parent thumb image tag.",
+          "nullable": true
+        },
+        "ParentPrimaryImageItemId": {
+          "type": "string",
+          "description": "Gets or sets the parent primary image item identifier.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "ParentPrimaryImageTag": {
+          "type": "string",
+          "description": "Gets or sets the parent primary image tag.",
+          "nullable": true
+        },
+        "Chapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChapterInfo"
+          },
+          "description": "Gets or sets the chapters.",
+          "nullable": true
+        },
+        "Trickplay": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/TrickplayInfoDto"
+            },
+            "nullable": true
+          },
+          "description": "Gets or sets the trickplay manifest.",
+          "nullable": true
+        },
+        "LocationType": {
+          "enum": [
+            "FileSystem",
+            "Remote",
+            "Virtual",
+            "Offline"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/LocationType"
+            }
+          ],
+          "description": "Gets or sets the type of the location.",
+          "nullable": true
+        },
+        "IsoType": {
+          "enum": [
+            "Dvd",
+            "BluRay"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/IsoType"
+            }
+          ],
+          "description": "Gets or sets the type of the iso.",
+          "nullable": true
+        },
+        "MediaType": {
+          "enum": [
+            "Unknown",
+            "Video",
+            "Audio",
+            "Photo",
+            "Book"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/MediaType"
+            }
+          ],
+          "description": "Gets or sets the type of the media.",
+          "default": "Unknown"
+        },
+        "EndDate": {
+          "type": "string",
+          "description": "Gets or sets the end date.",
+          "format": "date-time",
+          "nullable": true
+        },
+        "LockedFields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MetadataField"
+          },
+          "description": "Gets or sets the locked fields.",
+          "nullable": true
+        },
+        "TrailerCount": {
+          "type": "integer",
+          "description": "Gets or sets the trailer count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "MovieCount": {
+          "type": "integer",
+          "description": "Gets or sets the movie count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "SeriesCount": {
+          "type": "integer",
+          "description": "Gets or sets the series count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "ProgramCount": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "EpisodeCount": {
+          "type": "integer",
+          "description": "Gets or sets the episode count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "SongCount": {
+          "type": "integer",
+          "description": "Gets or sets the song count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "AlbumCount": {
+          "type": "integer",
+          "description": "Gets or sets the album count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "ArtistCount": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "MusicVideoCount": {
+          "type": "integer",
+          "description": "Gets or sets the music video count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "LockData": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether [enable internet providers].",
+          "nullable": true
+        },
+        "Width": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "Height": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "CameraMake": {
+          "type": "string",
+          "nullable": true
+        },
+        "CameraModel": {
+          "type": "string",
+          "nullable": true
+        },
+        "Software": {
+          "type": "string",
+          "nullable": true
+        },
+        "ExposureTime": {
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "FocalLength": {
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "ImageOrientation": {
+          "enum": [
+            "TopLeft",
+            "TopRight",
+            "BottomRight",
+            "BottomLeft",
+            "LeftTop",
+            "RightTop",
+            "RightBottom",
+            "LeftBottom"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/ImageOrientation"
+            }
+          ],
+          "nullable": true
+        },
+        "Aperture": {
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "ShutterSpeed": {
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "Latitude": {
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "Longitude": {
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "Altitude": {
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "IsoSpeedRating": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "SeriesTimerId": {
+          "type": "string",
+          "description": "Gets or sets the series timer identifier.",
+          "nullable": true
+        },
+        "ProgramId": {
+          "type": "string",
+          "description": "Gets or sets the program identifier.",
+          "nullable": true
+        },
+        "ChannelPrimaryImageTag": {
+          "type": "string",
+          "description": "Gets or sets the channel primary image tag.",
+          "nullable": true
+        },
+        "StartDate": {
+          "type": "string",
+          "description": "Gets or sets the start date of the recording, in UTC.",
+          "format": "date-time",
+          "nullable": true
+        },
+        "CompletionPercentage": {
+          "type": "number",
+          "description": "Gets or sets the completion percentage.",
+          "format": "double",
+          "nullable": true
+        },
+        "IsRepeat": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is repeat.",
+          "nullable": true
+        },
+        "EpisodeTitle": {
+          "type": "string",
+          "description": "Gets or sets the episode title.",
+          "nullable": true
+        },
+        "ChannelType": {
+          "enum": [
+            "TV",
+            "Radio"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/ChannelType"
+            }
+          ],
+          "description": "Gets or sets the type of the channel.",
+          "nullable": true
+        },
+        "Audio": {
+          "enum": [
+            "Mono",
+            "Stereo",
+            "Dolby",
+            "DolbyDigital",
+            "Thx",
+            "Atmos"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/ProgramAudio"
+            }
+          ],
+          "description": "Gets or sets the audio.",
+          "nullable": true
+        },
+        "IsMovie": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is movie.",
+          "nullable": true
+        },
+        "IsSports": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is sports.",
+          "nullable": true
+        },
+        "IsSeries": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is series.",
+          "nullable": true
+        },
+        "IsLive": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is live.",
+          "nullable": true
+        },
+        "IsNews": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is news.",
+          "nullable": true
+        },
+        "IsKids": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is kids.",
+          "nullable": true
+        },
+        "IsPremiere": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is premiere.",
+          "nullable": true
+        },
+        "TimerId": {
+          "type": "string",
+          "description": "Gets or sets the timer identifier.",
+          "nullable": true
+        },
+        "NormalizationGain": {
+          "type": "number",
+          "description": "Gets or sets the gain required for audio normalization.",
+          "format": "float",
+          "nullable": true
+        },
+        "AlbumNormalizationGain": {
+          "type": "number",
+          "description": "Gets or sets the gain required for audio normalization. This field is inherited from music album normalization gain.",
+          "format": "float",
+          "nullable": true
+        },
+        "CurrentProgram": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/BaseItemDto"
+            }
+          ],
+          "description": "Gets or sets the current program.",
+          "nullable": true
+        },
+        "OriginalLanguage": {
+          "type": "string",
+          "nullable": true
+        }
+      },
+      "description": "This is strictly used as a data transfer object from the api layer.\nThis holds information about a BaseItem in a format that is convenient for the client."
+    },
+    "BaseItemDtoQueryResult": {
+      "type": "object",
+      "properties": {
+        "Items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BaseItemDto"
+          },
+          "description": "Gets or sets the items."
+        },
+        "TotalRecordCount": {
+          "type": "integer",
+          "description": "Gets or sets the total number of records available.",
+          "format": "int32"
+        },
+        "StartIndex": {
+          "type": "integer",
+          "description": "Gets or sets the index of the first record in Items.",
+          "format": "int32"
+        }
+      },
+      "description": "Query result container."
+    },
+    "BaseItemKind": {
+      "enum": [
+        "AggregateFolder",
+        "Audio",
+        "AudioBook",
+        "BasePluginFolder",
+        "Book",
+        "BoxSet",
+        "Channel",
+        "ChannelFolderItem",
+        "CollectionFolder",
+        "Episode",
+        "Folder",
+        "Genre",
+        "ManualPlaylistsFolder",
+        "Movie",
+        "LiveTvChannel",
+        "LiveTvProgram",
+        "MusicAlbum",
+        "MusicArtist",
+        "MusicGenre",
+        "MusicVideo",
+        "Person",
+        "Photo",
+        "PhotoAlbum",
+        "Playlist",
+        "PlaylistsFolder",
+        "Program",
+        "Recording",
+        "Season",
+        "Series",
+        "Studio",
+        "Trailer",
+        "TvChannel",
+        "TvProgram",
+        "UserRootFolder",
+        "UserView",
+        "Video",
+        "Year"
+      ],
+      "type": "string",
+      "description": "The base item kind."
+    },
+    "BaseItemPerson": {
+      "type": "object",
+      "properties": {
+        "Name": {
+          "type": "string",
+          "description": "Gets or sets the name.",
+          "nullable": true
+        },
+        "Id": {
+          "type": "string",
+          "description": "Gets or sets the identifier.",
+          "format": "uuid"
+        },
+        "Role": {
+          "type": "string",
+          "description": "Gets or sets the role.",
+          "nullable": true
+        },
+        "Type": {
+          "enum": [
+            "Unknown",
+            "Actor",
+            "Director",
+            "Composer",
+            "Writer",
+            "GuestStar",
+            "Producer",
+            "Conductor",
+            "Lyricist",
+            "Arranger",
+            "Engineer",
+            "Mixer",
+            "Remixer",
+            "Creator",
+            "Artist",
+            "AlbumArtist",
+            "Author",
+            "Illustrator",
+            "Penciller",
+            "Inker",
+            "Colorist",
+            "Letterer",
+            "CoverArtist",
+            "Editor",
+            "Translator",
+            "Narrator"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/PersonKind"
+            }
+          ],
+          "description": "Gets or sets the type.",
+          "default": "Unknown"
+        },
+        "PrimaryImageTag": {
+          "type": "string",
+          "description": "Gets or sets the primary image tag.",
+          "nullable": true
+        },
+        "ImageBlurHashes": {
+          "$ref": "#/$defs/ImageBlurHashes"
+        }
+      },
+      "description": "This is used by the api to get information about a Person within a BaseItem."
+    },
+    "ChannelType": {
+      "enum": [
+        "TV",
+        "Radio"
+      ],
+      "type": "string",
+      "description": "Enum ChannelType."
+    },
+    "ChapterInfo": {
+      "type": "object",
+      "properties": {
+        "StartPositionTicks": {
+          "type": "integer",
+          "description": "Gets or sets the start position ticks.",
+          "format": "int64"
+        },
+        "Name": {
+          "type": "string",
+          "description": "Gets or sets the name.",
+          "nullable": true
+        },
+        "ImagePath": {
+          "type": "string",
+          "description": "Gets or sets the image path.",
+          "nullable": true
+        },
+        "ImageDateModified": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ImageTag": {
+          "type": "string",
+          "nullable": true
+        }
+      },
+      "description": "Class ChapterInfo."
+    },
+    "ClientCapabilitiesDto": {
+      "type": "object",
+      "properties": {
+        "PlayableMediaTypes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaType"
+          },
+          "description": "Gets or sets the list of playable media types."
+        },
+        "SupportedCommands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeneralCommandType"
+          },
+          "description": "Gets or sets the list of supported commands."
+        },
+        "SupportsMediaControl": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether session supports media control."
+        },
+        "SupportsPersistentIdentifier": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether session supports a persistent identifier."
+        },
+        "DeviceProfile": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/DeviceProfile"
+            }
+          ],
+          "description": "Gets or sets the device profile.",
+          "nullable": true
+        },
+        "AppStoreUrl": {
+          "type": "string",
+          "description": "Gets or sets the app store url.",
+          "nullable": true
+        },
+        "IconUrl": {
+          "type": "string",
+          "description": "Gets or sets the icon url.",
+          "nullable": true
+        }
+      },
+      "description": "Client capabilities dto."
+    },
+    "CodecProfile": {
+      "type": "object",
+      "properties": {
+        "Type": {
+          "enum": [
+            "Video",
+            "VideoAudio",
+            "Audio"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/CodecType"
+            }
+          ],
+          "description": "Gets or sets the MediaBrowser.Model.Dlna.CodecType which this container must meet."
+        },
+        "Conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProfileCondition"
+          },
+          "description": "Gets or sets the list of MediaBrowser.Model.Dlna.ProfileCondition which this profile must meet."
+        },
+        "ApplyConditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProfileCondition"
+          },
+          "description": "Gets or sets the list of MediaBrowser.Model.Dlna.ProfileCondition to apply if this profile is met."
+        },
+        "Codec": {
+          "type": "string",
+          "description": "Gets or sets the codec(s) that this profile applies to.",
+          "nullable": true
+        },
+        "Container": {
+          "type": "string",
+          "description": "Gets or sets the container(s) which this profile will be applied to.",
+          "nullable": true
+        },
+        "SubContainer": {
+          "type": "string",
+          "description": "Gets or sets the sub-container(s) which this profile will be applied to.",
+          "nullable": true
+        }
+      },
+      "description": "Defines the MediaBrowser.Model.Dlna.CodecProfile."
+    },
+    "CodecType": {
+      "enum": [
+        "Video",
+        "VideoAudio",
+        "Audio"
+      ],
+      "type": "string",
+      "description": "The codec type of a codec profile."
+    },
+    "CollectionType": {
+      "enum": [
+        "unknown",
+        "movies",
+        "tvshows",
+        "music",
+        "musicvideos",
+        "trailers",
+        "homevideos",
+        "boxsets",
+        "books",
+        "photos",
+        "livetv",
+        "playlists",
+        "folders"
+      ],
+      "type": "string",
+      "description": "Collection type."
+    },
+    "ContainerProfile": {
+      "type": "object",
+      "properties": {
+        "Type": {
+          "enum": [
+            "Audio",
+            "Video",
+            "Photo",
+            "Subtitle",
+            "Lyric"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/DlnaProfileType"
+            }
+          ],
+          "description": "Gets or sets the MediaBrowser.Model.Dlna.DlnaProfileType which this container must meet."
+        },
+        "Conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProfileCondition"
+          },
+          "description": "Gets or sets the list of MediaBrowser.Model.Dlna.ProfileCondition which this container will be applied to."
+        },
+        "Container": {
+          "type": "string",
+          "description": "Gets or sets the container(s) which this container must meet.",
+          "nullable": true
+        },
+        "SubContainer": {
+          "type": "string",
+          "description": "Gets or sets the sub container(s) which this container must meet.",
+          "nullable": true
+        }
+      },
+      "description": "Defines the MediaBrowser.Model.Dlna.ContainerProfile."
+    },
+    "DayOfWeek": {
+      "enum": [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday"
+      ],
+      "type": "string"
+    },
+    "DeviceProfile": {
+      "type": "object",
+      "properties": {
+        "Name": {
+          "type": "string",
+          "description": "Gets or sets the name of this device profile. User profiles must have a unique name.",
+          "nullable": true
+        },
+        "Id": {
+          "type": "string",
+          "description": "Gets or sets the unique internal identifier.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "MaxStreamingBitrate": {
+          "type": "integer",
+          "description": "Gets or sets the maximum allowed bitrate for all streamed content.",
+          "format": "int32",
+          "nullable": true
+        },
+        "MaxStaticBitrate": {
+          "type": "integer",
+          "description": "Gets or sets the maximum allowed bitrate for statically streamed content (= direct played files).",
+          "format": "int32",
+          "nullable": true
+        },
+        "MusicStreamingTranscodingBitrate": {
+          "type": "integer",
+          "description": "Gets or sets the maximum allowed bitrate for transcoded music streams.",
+          "format": "int32",
+          "nullable": true
+        },
+        "MaxStaticMusicBitrate": {
+          "type": "integer",
+          "description": "Gets or sets the maximum allowed bitrate for statically streamed (= direct played) music files.",
+          "format": "int32",
+          "nullable": true
+        },
+        "DirectPlayProfiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DirectPlayProfile"
+          },
+          "description": "Gets or sets the direct play profiles."
+        },
+        "TranscodingProfiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TranscodingProfile"
+          },
+          "description": "Gets or sets the transcoding profiles."
+        },
+        "ContainerProfiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContainerProfile"
+          },
+          "description": "Gets or sets the container profiles. Failing to meet these optional conditions causes transcoding to occur."
+        },
+        "CodecProfiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CodecProfile"
+          },
+          "description": "Gets or sets the codec profiles."
+        },
+        "SubtitleProfiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubtitleProfile"
+          },
+          "description": "Gets or sets the subtitle profiles."
+        }
+      },
+      "description": "A MediaBrowser.Model.Dlna.DeviceProfile represents a set of metadata which determines which content a certain device is able to play.\n\n\nSpecifically, it defines the supported <see cref=\"P:MediaBrowser.Model.Dlna.DeviceProfile.ContainerProfiles\">containers</see> and\n<see cref=\"P:MediaBrowser.Model.Dlna.DeviceProfile.CodecProfiles\">codecs</see> (video and/or audio, including codec profiles and levels)\nthe device is able to direct play (without transcoding or remuxing),\nas well as which <see cref=\"P:MediaBrowser.Model.Dlna.DeviceProfile.TranscodingProfiles\">containers/codecs to transcode to</see> in case it isn't."
+    },
+    "DirectPlayProfile": {
+      "type": "object",
+      "properties": {
+        "Container": {
+          "type": "string",
+          "description": "Gets or sets the container."
+        },
+        "AudioCodec": {
+          "type": "string",
+          "description": "Gets or sets the audio codec.",
+          "nullable": true
+        },
+        "VideoCodec": {
+          "type": "string",
+          "description": "Gets or sets the video codec.",
+          "nullable": true
+        },
+        "Type": {
+          "enum": [
+            "Audio",
+            "Video",
+            "Photo",
+            "Subtitle",
+            "Lyric"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/DlnaProfileType"
+            }
+          ],
+          "description": "Gets or sets the Dlna profile type."
+        }
+      },
+      "description": "Defines the MediaBrowser.Model.Dlna.DirectPlayProfile."
+    },
+    "DlnaProfileType": {
+      "enum": [
+        "Audio",
+        "Video",
+        "Photo",
+        "Subtitle",
+        "Lyric"
+      ],
+      "type": "string"
+    },
+    "DynamicDayOfWeek": {
+      "enum": [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Everyday",
+        "Weekday",
+        "Weekend"
+      ],
+      "type": "string",
+      "description": "An enum that represents a day of the week, weekdays, weekends, or all days."
+    },
+    "EncodingContext": {
+      "enum": [
+        "Streaming",
+        "Static"
+      ],
+      "type": "string",
+      "description": "The encoding context."
+    },
+    "ExternalUrl": {
+      "type": "object",
+      "properties": {
+        "Name": {
+          "type": "string",
+          "description": "Gets or sets the name.",
+          "nullable": true
+        },
+        "Url": {
+          "type": "string",
+          "description": "Gets or sets the type of the item.",
+          "nullable": true
+        }
+      }
+    },
+    "ExtraType": {
+      "enum": [
+        "Unknown",
+        "Clip",
+        "Trailer",
+        "BehindTheScenes",
+        "DeletedScene",
+        "Interview",
+        "Scene",
+        "Sample",
+        "ThemeSong",
+        "ThemeVideo",
+        "Featurette",
+        "Short"
+      ],
+      "type": "string"
+    },
+    "GeneralCommandType": {
+      "enum": [
+        "MoveUp",
+        "MoveDown",
+        "MoveLeft",
+        "MoveRight",
+        "PageUp",
+        "PageDown",
+        "PreviousLetter",
+        "NextLetter",
+        "ToggleOsd",
+        "ToggleContextMenu",
+        "Select",
+        "Back",
+        "TakeScreenshot",
+        "SendKey",
+        "SendString",
+        "GoHome",
+        "GoToSettings",
+        "VolumeUp",
+        "VolumeDown",
+        "Mute",
+        "Unmute",
+        "ToggleMute",
+        "SetVolume",
+        "SetAudioStreamIndex",
+        "SetSubtitleStreamIndex",
+        "ToggleFullscreen",
+        "DisplayContent",
+        "GoToSearch",
+        "DisplayMessage",
+        "SetRepeatMode",
+        "ChannelUp",
+        "ChannelDown",
+        "Guide",
+        "ToggleStats",
+        "PlayMediaSource",
+        "PlayTrailers",
+        "SetShuffleQueue",
+        "PlayState",
+        "PlayNext",
+        "ToggleOsdMenu",
+        "Play",
+        "SetMaxStreamingBitrate",
+        "SetPlaybackOrder"
+      ],
+      "type": "string",
+      "description": "This exists simply to identify a set of known commands."
+    },
+    "HardwareAccelerationType": {
+      "enum": [
+        "none",
+        "amf",
+        "qsv",
+        "nvenc",
+        "v4l2m2m",
+        "vaapi",
+        "videotoolbox",
+        "rkmpp"
+      ],
+      "type": "string",
+      "description": "Enum containing hardware acceleration types."
+    },
+    "ImageBlurHashes": {
+      "type": "object",
+      "properties": {
+        "Primary": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Art": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Backdrop": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Banner": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Logo": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Thumb": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Disc": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Box": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Screenshot": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Menu": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Chapter": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "BoxRear": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "Profile": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "nullable": true
+    },
+    "ImageOrientation": {
+      "enum": [
+        "TopLeft",
+        "TopRight",
+        "BottomRight",
+        "BottomLeft",
+        "LeftTop",
+        "RightTop",
+        "RightBottom",
+        "LeftBottom"
+      ],
+      "type": "string"
+    },
+    "IsoType": {
+      "enum": [
+        "Dvd",
+        "BluRay"
+      ],
+      "type": "string",
+      "description": "Enum IsoType."
+    },
+    "LibraryUpdateInfo": {
+      "type": "object",
+      "properties": {
+        "FoldersAddedTo": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the folders added to."
+        },
+        "FoldersRemovedFrom": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the folders removed from."
+        },
+        "ItemsAdded": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the items added."
+        },
+        "ItemsRemoved": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the items removed."
+        },
+        "ItemsUpdated": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets or sets the items updated."
+        },
+        "CollectionFolders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "IsEmpty": {
+          "type": "boolean",
+          "readOnly": true
+        }
+      },
+      "description": "Class LibraryUpdateInfo."
+    },
+    "LocationType": {
+      "enum": [
+        "FileSystem",
+        "Remote",
+        "Virtual",
+        "Offline"
+      ],
+      "type": "string",
+      "description": "Enum LocationType."
+    },
+    "MediaAttachment": {
+      "type": "object",
+      "properties": {
+        "Codec": {
+          "type": "string",
+          "description": "Gets or sets the codec.",
+          "nullable": true
+        },
+        "CodecTag": {
+          "type": "string",
+          "description": "Gets or sets the codec tag.",
+          "nullable": true
+        },
+        "Comment": {
+          "type": "string",
+          "description": "Gets or sets the comment.",
+          "nullable": true
+        },
+        "Index": {
+          "type": "integer",
+          "description": "Gets or sets the index.",
+          "format": "int32"
+        },
+        "FileName": {
+          "type": "string",
+          "description": "Gets or sets the filename.",
+          "nullable": true
+        },
+        "MimeType": {
+          "type": "string",
+          "description": "Gets or sets the MIME type.",
+          "nullable": true
+        },
+        "DeliveryUrl": {
+          "type": "string",
+          "description": "Gets or sets the delivery URL.",
+          "nullable": true
+        }
+      },
+      "description": "Class MediaAttachment."
+    },
+    "MediaProtocol": {
+      "enum": [
+        "File",
+        "Http",
+        "Rtmp",
+        "Rtsp",
+        "Udp",
+        "Rtp",
+        "Ftp"
+      ],
+      "type": "string"
+    },
+    "MediaSegmentDto": {
+      "type": "object",
+      "properties": {
+        "Id": {
+          "type": "string",
+          "description": "Gets or sets the id of the media segment.",
+          "format": "uuid"
+        },
+        "ItemId": {
+          "type": "string",
+          "description": "Gets or sets the id of the associated item.",
+          "format": "uuid"
+        },
+        "Type": {
+          "enum": [
+            "Unknown",
+            "Commercial",
+            "Preview",
+            "Recap",
+            "Outro",
+            "Intro"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/MediaSegmentType"
+            }
+          ],
+          "description": "Gets or sets the type of content this segment defines.",
+          "default": "Unknown"
+        },
+        "StartTicks": {
+          "type": "integer",
+          "description": "Gets or sets the start of the segment.",
+          "format": "int64"
+        },
+        "EndTicks": {
+          "type": "integer",
+          "description": "Gets or sets the end of the segment.",
+          "format": "int64"
+        }
+      },
+      "description": "Api model for MediaSegment's."
+    },
+    "MediaSegmentDtoQueryResult": {
+      "type": "object",
+      "properties": {
+        "Items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaSegmentDto"
+          },
+          "description": "Gets or sets the items."
+        },
+        "TotalRecordCount": {
+          "type": "integer",
+          "description": "Gets or sets the total number of records available.",
+          "format": "int32"
+        },
+        "StartIndex": {
+          "type": "integer",
+          "description": "Gets or sets the index of the first record in Items.",
+          "format": "int32"
+        }
+      },
+      "description": "Query result container."
+    },
+    "MediaSegmentType": {
+      "enum": [
+        "Unknown",
+        "Commercial",
+        "Preview",
+        "Recap",
+        "Outro",
+        "Intro"
+      ],
+      "type": "string",
+      "description": "Defines the types of content an individual Jellyfin.Database.Implementations.Entities.MediaSegment represents."
+    },
+    "MediaSourceInfo": {
+      "type": "object",
+      "properties": {
+        "Protocol": {
+          "enum": [
+            "File",
+            "Http",
+            "Rtmp",
+            "Rtsp",
+            "Udp",
+            "Rtp",
+            "Ftp"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/MediaProtocol"
+            }
+          ]
+        },
+        "Id": {
+          "type": "string",
+          "nullable": true
+        },
+        "Path": {
+          "type": "string",
+          "nullable": true
+        },
+        "EncoderPath": {
+          "type": "string",
+          "nullable": true
+        },
+        "EncoderProtocol": {
+          "enum": [
+            "File",
+            "Http",
+            "Rtmp",
+            "Rtsp",
+            "Udp",
+            "Rtp",
+            "Ftp"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/MediaProtocol"
+            }
+          ],
+          "nullable": true
+        },
+        "Type": {
+          "enum": [
+            "Default",
+            "Grouping",
+            "Placeholder"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/MediaSourceType"
+            }
+          ],
+          "description": "The type of a media source."
+        },
+        "Container": {
+          "type": "string",
+          "nullable": true
+        },
+        "Size": {
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "Name": {
+          "type": "string",
+          "nullable": true
+        },
+        "IsRemote": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the media is remote.\nDifferentiate internet url vs local network."
+        },
+        "ETag": {
+          "type": "string",
+          "nullable": true
+        },
+        "RunTimeTicks": {
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "ReadAtNativeFramerate": {
+          "type": "boolean"
+        },
+        "IgnoreDts": {
+          "type": "boolean"
+        },
+        "IgnoreIndex": {
+          "type": "boolean"
+        },
+        "GenPtsInput": {
+          "type": "boolean"
+        },
+        "SupportsTranscoding": {
+          "type": "boolean"
+        },
+        "SupportsDirectStream": {
+          "type": "boolean"
+        },
+        "SupportsDirectPlay": {
+          "type": "boolean"
+        },
+        "IsInfiniteStream": {
+          "type": "boolean"
+        },
+        "UseMostCompatibleTranscodingProfile": {
+          "type": "boolean",
+          "default": false
+        },
+        "RequiresOpening": {
+          "type": "boolean"
+        },
+        "OpenToken": {
+          "type": "string",
+          "nullable": true
+        },
+        "RequiresClosing": {
+          "type": "boolean"
+        },
+        "LiveStreamId": {
+          "type": "string",
+          "nullable": true
+        },
+        "BufferMs": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "RequiresLooping": {
+          "type": "boolean"
+        },
+        "SupportsProbing": {
+          "type": "boolean"
+        },
+        "VideoType": {
+          "enum": [
+            "VideoFile",
+            "Iso",
+            "Dvd",
+            "BluRay"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/VideoType"
+            }
+          ],
+          "nullable": true
+        },
+        "IsoType": {
+          "enum": [
+            "Dvd",
+            "BluRay"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/IsoType"
+            }
+          ],
+          "nullable": true
+        },
+        "Video3DFormat": {
+          "enum": [
+            "HalfSideBySide",
+            "FullSideBySide",
+            "FullTopAndBottom",
+            "HalfTopAndBottom",
+            "MVC"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/Video3DFormat"
+            }
+          ],
+          "nullable": true
+        },
+        "MediaStreams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaStream"
+          },
+          "nullable": true
+        },
+        "MediaAttachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaAttachment"
+          },
+          "nullable": true
+        },
+        "Formats": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "Bitrate": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "FallbackMaxStreamingBitrate": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "Timestamp": {
+          "enum": [
+            "None",
+            "Zero",
+            "Valid"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/TransportStreamTimestamp"
+            }
+          ],
+          "nullable": true
+        },
+        "RequiredHttpHeaders": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "nullable": true
+          },
+          "nullable": true
+        },
+        "TranscodingUrl": {
+          "type": "string",
+          "nullable": true
+        },
+        "TranscodingSubProtocol": {
+          "enum": [
+            "http",
+            "hls"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/MediaStreamProtocol"
+            }
+          ],
+          "description": "Media streaming protocol.\nLowercase for backwards compatibility."
+        },
+        "TranscodingContainer": {
+          "type": "string",
+          "nullable": true
+        },
+        "AnalyzeDurationMs": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "DefaultAudioStreamIndex": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "DefaultSubtitleStreamIndex": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "HasSegments": {
+          "type": "boolean"
+        }
+      }
+    },
+    "MediaSourceType": {
+      "enum": [
+        "Default",
+        "Grouping",
+        "Placeholder"
+      ],
+      "type": "string",
+      "description": "The type of a media source."
+    },
+    "MediaStream": {
+      "type": "object",
+      "properties": {
+        "Codec": {
+          "type": "string",
+          "description": "Gets or sets the codec.",
+          "nullable": true
+        },
+        "CodecTag": {
+          "type": "string",
+          "description": "Gets or sets the codec tag.",
+          "nullable": true
+        },
+        "Language": {
+          "type": "string",
+          "description": "Gets or sets the language.",
+          "nullable": true
+        },
+        "ColorRange": {
+          "type": "string",
+          "description": "Gets or sets the color range.",
+          "nullable": true
+        },
+        "ColorSpace": {
+          "type": "string",
+          "description": "Gets or sets the color space.",
+          "nullable": true
+        },
+        "ColorTransfer": {
+          "type": "string",
+          "description": "Gets or sets the color transfer.",
+          "nullable": true
+        },
+        "ColorPrimaries": {
+          "type": "string",
+          "description": "Gets or sets the color primaries.",
+          "nullable": true
+        },
+        "DvVersionMajor": {
+          "type": "integer",
+          "description": "Gets or sets the Dolby Vision version major.",
+          "format": "int32",
+          "nullable": true
+        },
+        "DvVersionMinor": {
+          "type": "integer",
+          "description": "Gets or sets the Dolby Vision version minor.",
+          "format": "int32",
+          "nullable": true
+        },
+        "DvProfile": {
+          "type": "integer",
+          "description": "Gets or sets the Dolby Vision profile.",
+          "format": "int32",
+          "nullable": true
+        },
+        "DvLevel": {
+          "type": "integer",
+          "description": "Gets or sets the Dolby Vision level.",
+          "format": "int32",
+          "nullable": true
+        },
+        "RpuPresentFlag": {
+          "type": "integer",
+          "description": "Gets or sets the Dolby Vision rpu present flag.",
+          "format": "int32",
+          "nullable": true
+        },
+        "ElPresentFlag": {
+          "type": "integer",
+          "description": "Gets or sets the Dolby Vision el present flag.",
+          "format": "int32",
+          "nullable": true
+        },
+        "BlPresentFlag": {
+          "type": "integer",
+          "description": "Gets or sets the Dolby Vision bl present flag.",
+          "format": "int32",
+          "nullable": true
+        },
+        "DvBlSignalCompatibilityId": {
+          "type": "integer",
+          "description": "Gets or sets the Dolby Vision bl signal compatibility id.",
+          "format": "int32",
+          "nullable": true
+        },
+        "Rotation": {
+          "type": "integer",
+          "description": "Gets or sets the Rotation in degrees.",
+          "format": "int32",
+          "nullable": true
+        },
+        "Comment": {
+          "type": "string",
+          "description": "Gets or sets the comment.",
+          "nullable": true
+        },
+        "TimeBase": {
+          "type": "string",
+          "description": "Gets or sets the time base.",
+          "nullable": true
+        },
+        "CodecTimeBase": {
+          "type": "string",
+          "description": "Gets or sets the codec time base.",
+          "nullable": true
+        },
+        "Title": {
+          "type": "string",
+          "description": "Gets or sets the title.",
+          "nullable": true
+        },
+        "Hdr10PlusPresentFlag": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "VideoRange": {
+          "enum": [
+            "Unknown",
+            "SDR",
+            "HDR"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/VideoRange"
+            }
+          ],
+          "description": "Gets the video range.",
+          "default": "Unknown",
+          "readOnly": true
+        },
+        "VideoRangeType": {
+          "enum": [
+            "Unknown",
+            "SDR",
+            "HDR10",
+            "HLG",
+            "DOVI",
+            "DOVIWithHDR10",
+            "DOVIWithHLG",
+            "DOVIWithSDR",
+            "DOVIWithEL",
+            "DOVIWithHDR10Plus",
+            "DOVIWithELHDR10Plus",
+            "DOVIInvalid",
+            "HDR10Plus"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/VideoRangeType"
+            }
+          ],
+          "description": "Gets the video range type.",
+          "default": "Unknown",
+          "readOnly": true
+        },
+        "VideoDoViTitle": {
+          "type": "string",
+          "description": "Gets the video dovi title.",
+          "nullable": true,
+          "readOnly": true
+        },
+        "AudioSpatialFormat": {
+          "enum": [
+            "None",
+            "DolbyAtmos",
+            "DTSX"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/AudioSpatialFormat"
+            }
+          ],
+          "description": "Gets the audio spatial format.",
+          "default": "None",
+          "readOnly": true
+        },
+        "LocalizedUndefined": {
+          "type": "string",
+          "nullable": true
+        },
+        "LocalizedDefault": {
+          "type": "string",
+          "nullable": true
+        },
+        "LocalizedForced": {
+          "type": "string",
+          "nullable": true
+        },
+        "LocalizedExternal": {
+          "type": "string",
+          "nullable": true
+        },
+        "LocalizedHearingImpaired": {
+          "type": "string",
+          "nullable": true
+        },
+        "LocalizedLanguage": {
+          "type": "string",
+          "nullable": true
+        },
+        "LocalizedOriginal": {
+          "type": "string",
+          "nullable": true
+        },
+        "DisplayTitle": {
+          "type": "string",
+          "nullable": true,
+          "readOnly": true
+        },
+        "NalLengthSize": {
+          "type": "string",
+          "nullable": true
+        },
+        "IsInterlaced": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is interlaced."
+        },
+        "IsAVC": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "ChannelLayout": {
+          "type": "string",
+          "description": "Gets or sets the channel layout.",
+          "nullable": true
+        },
+        "BitRate": {
+          "type": "integer",
+          "description": "Gets or sets the bit rate.",
+          "format": "int32",
+          "nullable": true
+        },
+        "BitDepth": {
+          "type": "integer",
+          "description": "Gets or sets the bit depth.",
+          "format": "int32",
+          "nullable": true
+        },
+        "RefFrames": {
+          "type": "integer",
+          "description": "Gets or sets the reference frames.",
+          "format": "int32",
+          "nullable": true
+        },
+        "PacketLength": {
+          "type": "integer",
+          "description": "Gets or sets the length of the packet.",
+          "format": "int32",
+          "nullable": true
+        },
+        "Channels": {
+          "type": "integer",
+          "description": "Gets or sets the channels.",
+          "format": "int32",
+          "nullable": true
+        },
+        "SampleRate": {
+          "type": "integer",
+          "description": "Gets or sets the sample rate.",
+          "format": "int32",
+          "nullable": true
+        },
+        "IsDefault": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is default."
+        },
+        "IsForced": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is forced."
+        },
+        "IsHearingImpaired": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is for the hearing impaired."
+        },
+        "IsOriginal": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is original."
+        },
+        "Height": {
+          "type": "integer",
+          "description": "Gets or sets the height.",
+          "format": "int32",
+          "nullable": true
+        },
+        "Width": {
+          "type": "integer",
+          "description": "Gets or sets the width.",
+          "format": "int32",
+          "nullable": true
+        },
+        "AverageFrameRate": {
+          "type": "number",
+          "description": "Gets or sets the average frame rate.",
+          "format": "float",
+          "nullable": true
+        },
+        "RealFrameRate": {
+          "type": "number",
+          "description": "Gets or sets the real frame rate.",
+          "format": "float",
+          "nullable": true
+        },
+        "ReferenceFrameRate": {
+          "type": "number",
+          "description": "Gets the framerate used as reference.\nPrefer AverageFrameRate, if that is null or an unrealistic value\nthen fallback to RealFrameRate.",
+          "format": "float",
+          "nullable": true,
+          "readOnly": true
+        },
+        "Profile": {
+          "type": "string",
+          "description": "Gets or sets the profile.",
+          "nullable": true
+        },
+        "Type": {
+          "enum": [
+            "Audio",
+            "Video",
+            "Subtitle",
+            "EmbeddedImage",
+            "Data",
+            "Lyric"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/MediaStreamType"
+            }
+          ],
+          "description": "Gets or sets the type."
+        },
+        "AspectRatio": {
+          "type": "string",
+          "description": "Gets or sets the aspect ratio.",
+          "nullable": true
+        },
+        "Index": {
+          "type": "integer",
+          "description": "Gets or sets the index.",
+          "format": "int32"
+        },
+        "Score": {
+          "type": "integer",
+          "description": "Gets or sets the score.",
+          "format": "int32",
+          "nullable": true
+        },
+        "IsExternal": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is external."
+        },
+        "DeliveryMethod": {
+          "enum": [
+            "Encode",
+            "Embed",
+            "External",
+            "Hls",
+            "Drop"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/SubtitleDeliveryMethod"
+            }
+          ],
+          "description": "Gets or sets the method.",
+          "nullable": true
+        },
+        "DeliveryUrl": {
+          "type": "string",
+          "description": "Gets or sets the delivery URL.",
+          "nullable": true
+        },
+        "IsExternalUrl": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is external URL.",
+          "nullable": true
+        },
+        "IsTextSubtitleStream": {
+          "type": "boolean",
+          "readOnly": true
+        },
+        "SupportsExternalStream": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether [supports external stream]."
+        },
+        "Path": {
+          "type": "string",
+          "description": "Gets or sets the filename.",
+          "nullable": true
+        },
+        "PixelFormat": {
+          "type": "string",
+          "description": "Gets or sets the pixel format.",
+          "nullable": true
+        },
+        "Level": {
+          "type": "number",
+          "description": "Gets or sets the level.",
+          "format": "double",
+          "nullable": true
+        },
+        "IsAnamorphic": {
+          "type": "boolean",
+          "description": "Gets or sets whether this instance is anamorphic.",
+          "nullable": true
+        }
+      },
+      "description": "Class MediaStream."
+    },
+    "MediaStreamProtocol": {
+      "enum": [
+        "http",
+        "hls"
+      ],
+      "type": "string",
+      "description": "Media streaming protocol.\nLowercase for backwards compatibility."
+    },
+    "MediaStreamType": {
+      "enum": [
+        "Audio",
+        "Video",
+        "Subtitle",
+        "EmbeddedImage",
+        "Data",
+        "Lyric"
+      ],
+      "type": "string",
+      "description": "Enum MediaStreamType."
+    },
+    "MediaType": {
+      "enum": [
+        "Unknown",
+        "Video",
+        "Audio",
+        "Photo",
+        "Book"
+      ],
+      "type": "string",
+      "description": "Media types."
+    },
+    "MediaUrl": {
+      "type": "object",
+      "properties": {
+        "Url": {
+          "type": "string",
+          "nullable": true
+        },
+        "Name": {
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "MetadataField": {
+      "enum": [
+        "Cast",
+        "Genres",
+        "ProductionLocations",
+        "Studios",
+        "Tags",
+        "Name",
+        "Overview",
+        "Runtime",
+        "OfficialRating"
+      ],
+      "type": "string",
+      "description": "Enum MetadataFields."
+    },
+    "NameGuidPair": {
+      "type": "object",
+      "properties": {
+        "Name": {
+          "type": "string",
+          "nullable": true
+        },
+        "Id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "PersonKind": {
+      "enum": [
+        "Unknown",
+        "Actor",
+        "Director",
+        "Composer",
+        "Writer",
+        "GuestStar",
+        "Producer",
+        "Conductor",
+        "Lyricist",
+        "Arranger",
+        "Engineer",
+        "Mixer",
+        "Remixer",
+        "Creator",
+        "Artist",
+        "AlbumArtist",
+        "Author",
+        "Illustrator",
+        "Penciller",
+        "Inker",
+        "Colorist",
+        "Letterer",
+        "CoverArtist",
+        "Editor",
+        "Translator",
+        "Narrator"
+      ],
+      "type": "string",
+      "description": "The person kind."
+    },
+    "PlayAccess": {
+      "enum": [
+        "Full",
+        "None"
+      ],
+      "type": "string",
+      "description": "The play access of an item."
+    },
+    "PlayMethod": {
+      "enum": [
+        "Transcode",
+        "DirectStream",
+        "DirectPlay"
+      ],
+      "type": "string",
+      "description": "The play method."
+    },
+    "PlaybackErrorCode": {
+      "enum": [
+        "NotAllowed",
+        "NoCompatibleStream",
+        "RateLimitExceeded"
+      ],
+      "type": "string",
+      "description": "The playback error code."
+    },
+    "PlaybackInfoDto": {
+      "type": "object",
+      "properties": {
+        "UserId": {
+          "type": "string",
+          "description": "Gets or sets the playback userId.",
+          "format": "uuid",
+          "nullable": true
+        },
+        "MaxStreamingBitrate": {
+          "type": "integer",
+          "description": "Gets or sets the max streaming bitrate.",
+          "format": "int32",
+          "nullable": true
+        },
+        "StartTimeTicks": {
+          "type": "integer",
+          "description": "Gets or sets the start time in ticks.",
+          "format": "int64",
+          "nullable": true
+        },
+        "AudioStreamIndex": {
+          "type": "integer",
+          "description": "Gets or sets the audio stream index.",
+          "format": "int32",
+          "nullable": true
+        },
+        "SubtitleStreamIndex": {
+          "type": "integer",
+          "description": "Gets or sets the subtitle stream index.",
+          "format": "int32",
+          "nullable": true
+        },
+        "MaxAudioChannels": {
+          "type": "integer",
+          "description": "Gets or sets the max audio channels.",
+          "format": "int32",
+          "nullable": true
+        },
+        "MediaSourceId": {
+          "type": "string",
+          "description": "Gets or sets the media source id.",
+          "nullable": true
+        },
+        "LiveStreamId": {
+          "type": "string",
+          "description": "Gets or sets the live stream id.",
+          "nullable": true
+        },
+        "DeviceProfile": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/DeviceProfile"
+            }
+          ],
+          "description": "Gets or sets the device profile.",
+          "nullable": true
+        },
+        "EnableDirectPlay": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether to enable direct play.",
+          "nullable": true
+        },
+        "EnableDirectStream": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether to enable direct stream.",
+          "nullable": true
+        },
+        "EnableTranscoding": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether to enable transcoding.",
+          "nullable": true
+        },
+        "AllowVideoStreamCopy": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether to enable video stream copy.",
+          "nullable": true
+        },
+        "AllowAudioStreamCopy": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether to allow audio stream copy.",
+          "nullable": true
+        },
+        "AutoOpenLiveStream": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether to auto open the live stream.",
+          "nullable": true
+        },
+        "AlwaysBurnInSubtitleWhenTranscoding": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether always burn in subtitles when transcoding.",
+          "nullable": true
+        }
+      },
+      "description": "Playback info dto."
+    },
+    "PlaybackInfoResponse": {
+      "type": "object",
+      "properties": {
+        "MediaSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaSourceInfo"
+          },
+          "description": "Gets or sets the media sources."
+        },
+        "PlaySessionId": {
+          "type": "string",
+          "description": "Gets or sets the play session identifier.",
+          "nullable": true
+        },
+        "ErrorCode": {
+          "enum": [
+            "NotAllowed",
+            "NoCompatibleStream",
+            "RateLimitExceeded"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/PlaybackErrorCode"
+            }
+          ],
+          "description": "Gets or sets the error code.",
+          "nullable": true
+        }
+      },
+      "description": "Class PlaybackInfoResponse."
+    },
+    "PlaybackOrder": {
+      "enum": [
+        "Default",
+        "Shuffle"
+      ],
+      "type": "string",
+      "description": "Enum PlaybackOrder."
+    },
+    "PlayerStateInfo": {
+      "type": "object",
+      "properties": {
+        "PositionTicks": {
+          "type": "integer",
+          "description": "Gets or sets the now playing position ticks.",
+          "format": "int64",
+          "nullable": true
+        },
+        "CanSeek": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance can seek."
+        },
+        "IsPaused": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is paused."
+        },
+        "IsMuted": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is muted."
+        },
+        "VolumeLevel": {
+          "type": "integer",
+          "description": "Gets or sets the volume level.",
+          "format": "int32",
+          "nullable": true
+        },
+        "AudioStreamIndex": {
+          "type": "integer",
+          "description": "Gets or sets the index of the now playing audio stream.",
+          "format": "int32",
+          "nullable": true
+        },
+        "SubtitleStreamIndex": {
+          "type": "integer",
+          "description": "Gets or sets the index of the now playing subtitle stream.",
+          "format": "int32",
+          "nullable": true
+        },
+        "MediaSourceId": {
+          "type": "string",
+          "description": "Gets or sets the now playing media version identifier.",
+          "nullable": true
+        },
+        "PlayMethod": {
+          "enum": [
+            "Transcode",
+            "DirectStream",
+            "DirectPlay"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/PlayMethod"
+            }
+          ],
+          "description": "Gets or sets the play method.",
+          "nullable": true
+        },
+        "RepeatMode": {
+          "enum": [
+            "RepeatNone",
+            "RepeatAll",
+            "RepeatOne"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/RepeatMode"
+            }
+          ],
+          "description": "Gets or sets the repeat mode."
+        },
+        "PlaybackOrder": {
+          "enum": [
+            "Default",
+            "Shuffle"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/PlaybackOrder"
+            }
+          ],
+          "description": "Gets or sets the playback order."
+        },
+        "LiveStreamId": {
+          "type": "string",
+          "description": "Gets or sets the now playing live stream identifier.",
+          "nullable": true
+        }
+      }
+    },
+    "ProfileCondition": {
+      "type": "object",
+      "properties": {
+        "Condition": {
+          "enum": [
+            "Equals",
+            "NotEquals",
+            "LessThanEqual",
+            "GreaterThanEqual",
+            "EqualsAny"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/ProfileConditionType"
+            }
+          ]
+        },
+        "Property": {
+          "enum": [
+            "AudioChannels",
+            "AudioBitrate",
+            "AudioProfile",
+            "Width",
+            "Height",
+            "Has64BitOffsets",
+            "PacketLength",
+            "VideoBitDepth",
+            "VideoBitrate",
+            "VideoFramerate",
+            "VideoLevel",
+            "VideoProfile",
+            "VideoTimestamp",
+            "IsAnamorphic",
+            "RefFrames",
+            "NumAudioStreams",
+            "NumVideoStreams",
+            "IsSecondaryAudio",
+            "VideoCodecTag",
+            "IsAvc",
+            "IsInterlaced",
+            "AudioSampleRate",
+            "AudioBitDepth",
+            "VideoRangeType",
+            "NumStreams",
+            "VideoRotation"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/ProfileConditionValue"
+            }
+          ]
+        },
+        "Value": {
+          "type": "string",
+          "nullable": true
+        },
+        "IsRequired": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ProfileConditionType": {
+      "enum": [
+        "Equals",
+        "NotEquals",
+        "LessThanEqual",
+        "GreaterThanEqual",
+        "EqualsAny"
+      ],
+      "type": "string"
+    },
+    "ProfileConditionValue": {
+      "enum": [
+        "AudioChannels",
+        "AudioBitrate",
+        "AudioProfile",
+        "Width",
+        "Height",
+        "Has64BitOffsets",
+        "PacketLength",
+        "VideoBitDepth",
+        "VideoBitrate",
+        "VideoFramerate",
+        "VideoLevel",
+        "VideoProfile",
+        "VideoTimestamp",
+        "IsAnamorphic",
+        "RefFrames",
+        "NumAudioStreams",
+        "NumVideoStreams",
+        "IsSecondaryAudio",
+        "VideoCodecTag",
+        "IsAvc",
+        "IsInterlaced",
+        "AudioSampleRate",
+        "AudioBitDepth",
+        "VideoRangeType",
+        "NumStreams",
+        "VideoRotation"
+      ],
+      "type": "string"
+    },
+    "ProgramAudio": {
+      "enum": [
+        "Mono",
+        "Stereo",
+        "Dolby",
+        "DolbyDigital",
+        "Thx",
+        "Atmos"
+      ],
+      "type": "string"
+    },
+    "QueueItem": {
+      "type": "object",
+      "properties": {
+        "Id": {
+          "type": "string",
+          "description": "Gets or sets the item id.",
+          "format": "uuid"
+        },
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets or sets the playlist item id.",
+          "nullable": true
+        }
+      },
+      "description": "An item in a play queue."
+    },
+    "QuickConnectDto": {
+      "required": [
+        "Secret"
+      ],
+      "type": "object",
+      "properties": {
+        "Secret": {
+          "minLength": 1,
+          "type": "string",
+          "description": "Gets or sets the quick connect secret."
+        }
+      },
+      "description": "The quick connect request body."
+    },
+    "QuickConnectResult": {
+      "type": "object",
+      "properties": {
+        "Authenticated": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this request is authorized."
+        },
+        "Secret": {
+          "type": "string",
+          "description": "Gets the secret value used to uniquely identify this request. Can be used to retrieve authentication information."
+        },
+        "Code": {
+          "type": "string",
+          "description": "Gets the user facing code used so the user can quickly differentiate this request from others."
+        },
+        "DeviceId": {
+          "type": "string",
+          "description": "Gets the requesting device id."
+        },
+        "DeviceName": {
+          "type": "string",
+          "description": "Gets the requesting device name."
+        },
+        "AppName": {
+          "type": "string",
+          "description": "Gets the requesting app name."
+        },
+        "AppVersion": {
+          "type": "string",
+          "description": "Gets the requesting app version."
+        },
+        "DateAdded": {
+          "type": "string",
+          "description": "Gets or sets the DateTime that this request was created.",
+          "format": "date-time"
+        }
+      },
+      "description": "Stores the state of an quick connect request."
+    },
+    "RepeatMode": {
+      "enum": [
+        "RepeatNone",
+        "RepeatAll",
+        "RepeatOne"
+      ],
+      "type": "string",
+      "description": "The repeat mode of a play queue."
+    },
+    "SessionInfoDto": {
+      "type": "object",
+      "properties": {
+        "PlayState": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/PlayerStateInfo"
+            }
+          ],
+          "description": "Gets or sets the play state.",
+          "nullable": true
+        },
+        "AdditionalUsers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionUserInfo"
+          },
+          "description": "Gets or sets the additional users.",
+          "nullable": true
+        },
+        "Capabilities": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ClientCapabilitiesDto"
+            }
+          ],
+          "description": "Gets or sets the client capabilities.",
+          "nullable": true
+        },
+        "RemoteEndPoint": {
+          "type": "string",
+          "description": "Gets or sets the remote end point.",
+          "nullable": true
+        },
+        "PlayableMediaTypes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaType"
+          },
+          "description": "Gets or sets the playable media types."
+        },
+        "Id": {
+          "type": "string",
+          "description": "Gets or sets the id.",
+          "nullable": true
+        },
+        "UserId": {
+          "type": "string",
+          "description": "Gets or sets the user id.",
+          "format": "uuid"
+        },
+        "UserName": {
+          "type": "string",
+          "description": "Gets or sets the username.",
+          "nullable": true
+        },
+        "Client": {
+          "type": "string",
+          "description": "Gets or sets the type of the client.",
+          "nullable": true
+        },
+        "LastActivityDate": {
+          "type": "string",
+          "description": "Gets or sets the last activity date.",
+          "format": "date-time"
+        },
+        "LastPlaybackCheckIn": {
+          "type": "string",
+          "description": "Gets or sets the last playback check in.",
+          "format": "date-time"
+        },
+        "LastPausedDate": {
+          "type": "string",
+          "description": "Gets or sets the last paused date.",
+          "format": "date-time",
+          "nullable": true
+        },
+        "DeviceName": {
+          "type": "string",
+          "description": "Gets or sets the name of the device.",
+          "nullable": true
+        },
+        "DeviceType": {
+          "type": "string",
+          "description": "Gets or sets the type of the device.",
+          "nullable": true
+        },
+        "NowPlayingItem": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/BaseItemDto"
+            }
+          ],
+          "description": "Gets or sets the now playing item.",
+          "nullable": true
+        },
+        "NowViewingItem": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/BaseItemDto"
+            }
+          ],
+          "description": "Gets or sets the now viewing item.",
+          "nullable": true
+        },
+        "DeviceId": {
+          "type": "string",
+          "description": "Gets or sets the device id.",
+          "nullable": true
+        },
+        "ApplicationVersion": {
+          "type": "string",
+          "description": "Gets or sets the application version.",
+          "nullable": true
+        },
+        "TranscodingInfo": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/TranscodingInfo"
+            }
+          ],
+          "description": "Gets or sets the transcoding info.",
+          "nullable": true
+        },
+        "IsActive": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this session is active."
+        },
+        "SupportsMediaControl": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the session supports media control."
+        },
+        "SupportsRemoteControl": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the session supports remote control."
+        },
+        "NowPlayingQueue": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QueueItem"
+          },
+          "description": "Gets or sets the now playing queue.",
+          "nullable": true
+        },
+        "HasCustomDeviceName": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this session has a custom device name."
+        },
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets or sets the playlist item id.",
+          "nullable": true
+        },
+        "ServerId": {
+          "type": "string",
+          "description": "Gets or sets the server id.",
+          "nullable": true
+        },
+        "UserPrimaryImageTag": {
+          "type": "string",
+          "description": "Gets or sets the user primary image tag.",
+          "nullable": true
+        },
+        "SupportedCommands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GeneralCommandType"
+          },
+          "description": "Gets or sets the supported commands."
+        }
+      },
+      "description": "Session info DTO."
+    },
+    "SessionUserInfo": {
+      "type": "object",
+      "properties": {
+        "UserId": {
+          "type": "string",
+          "description": "Gets or sets the user identifier.",
+          "format": "uuid"
+        },
+        "UserName": {
+          "type": "string",
+          "description": "Gets or sets the name of the user.",
+          "nullable": true
+        }
+      },
+      "description": "Class SessionUserInfo."
+    },
+    "SubtitleDeliveryMethod": {
+      "enum": [
+        "Encode",
+        "Embed",
+        "External",
+        "Hls",
+        "Drop"
+      ],
+      "type": "string",
+      "description": "Delivery method to use during playback of a specific subtitle format."
+    },
+    "SubtitlePlaybackMode": {
+      "enum": [
+        "Default",
+        "Always",
+        "OnlyForced",
+        "None",
+        "Smart"
+      ],
+      "type": "string",
+      "description": "An enum representing a subtitle playback mode."
+    },
+    "SubtitleProfile": {
+      "type": "object",
+      "properties": {
+        "Format": {
+          "type": "string",
+          "description": "Gets or sets the format.",
+          "nullable": true
+        },
+        "Method": {
+          "enum": [
+            "Encode",
+            "Embed",
+            "External",
+            "Hls",
+            "Drop"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/SubtitleDeliveryMethod"
+            }
+          ],
+          "description": "Gets or sets the delivery method."
+        },
+        "DidlMode": {
+          "type": "string",
+          "description": "Gets or sets the DIDL mode.",
+          "nullable": true
+        },
+        "Language": {
+          "type": "string",
+          "description": "Gets or sets the language.",
+          "nullable": true
+        },
+        "Container": {
+          "type": "string",
+          "description": "Gets or sets the container.",
+          "nullable": true
+        }
+      },
+      "description": "A class for subtitle profile information."
+    },
+    "SyncPlayUserAccessType": {
+      "enum": [
+        "CreateAndJoinGroups",
+        "JoinGroups",
+        "None"
+      ],
+      "type": "string",
+      "description": "Enum SyncPlayUserAccessType."
+    },
+    "TranscodeReason": {
+      "enum": [
+        "ContainerNotSupported",
+        "VideoCodecNotSupported",
+        "AudioCodecNotSupported",
+        "SubtitleCodecNotSupported",
+        "AudioIsExternal",
+        "SecondaryAudioNotSupported",
+        "VideoProfileNotSupported",
+        "VideoLevelNotSupported",
+        "VideoResolutionNotSupported",
+        "VideoBitDepthNotSupported",
+        "VideoFramerateNotSupported",
+        "RefFramesNotSupported",
+        "AnamorphicVideoNotSupported",
+        "InterlacedVideoNotSupported",
+        "AudioChannelsNotSupported",
+        "AudioProfileNotSupported",
+        "AudioSampleRateNotSupported",
+        "AudioBitDepthNotSupported",
+        "ContainerBitrateExceedsLimit",
+        "VideoBitrateNotSupported",
+        "AudioBitrateNotSupported",
+        "UnknownVideoStreamInfo",
+        "UnknownAudioStreamInfo",
+        "DirectPlayError",
+        "VideoRangeTypeNotSupported",
+        "VideoCodecTagNotSupported",
+        "StreamCountExceedsLimit",
+        "VideoRotationNotSupported"
+      ],
+      "type": "string"
+    },
+    "TranscodeSeekInfo": {
+      "enum": [
+        "Auto",
+        "Bytes"
+      ],
+      "type": "string",
+      "description": "The transcode seek info."
+    },
+    "TranscodingInfo": {
+      "type": "object",
+      "properties": {
+        "AudioCodec": {
+          "type": "string",
+          "description": "Gets or sets the thread count used for encoding.",
+          "nullable": true
+        },
+        "VideoCodec": {
+          "type": "string",
+          "description": "Gets or sets the thread count used for encoding.",
+          "nullable": true
+        },
+        "Container": {
+          "type": "string",
+          "description": "Gets or sets the thread count used for encoding.",
+          "nullable": true
+        },
+        "IsVideoDirect": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the video is passed through."
+        },
+        "IsAudioDirect": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the audio is passed through."
+        },
+        "Bitrate": {
+          "type": "integer",
+          "description": "Gets or sets the bitrate.",
+          "format": "int32",
+          "nullable": true
+        },
+        "Framerate": {
+          "type": "number",
+          "description": "Gets or sets the framerate.",
+          "format": "float",
+          "nullable": true
+        },
+        "CompletionPercentage": {
+          "type": "number",
+          "description": "Gets or sets the completion percentage.",
+          "format": "double",
+          "nullable": true
+        },
+        "Width": {
+          "type": "integer",
+          "description": "Gets or sets the video width.",
+          "format": "int32",
+          "nullable": true
+        },
+        "Height": {
+          "type": "integer",
+          "description": "Gets or sets the video height.",
+          "format": "int32",
+          "nullable": true
+        },
+        "AudioChannels": {
+          "type": "integer",
+          "description": "Gets or sets the audio channels.",
+          "format": "int32",
+          "nullable": true
+        },
+        "HardwareAccelerationType": {
+          "enum": [
+            "none",
+            "amf",
+            "qsv",
+            "nvenc",
+            "v4l2m2m",
+            "vaapi",
+            "videotoolbox",
+            "rkmpp"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/HardwareAccelerationType"
+            }
+          ],
+          "description": "Gets or sets the hardware acceleration type.",
+          "nullable": true
+        },
+        "TranscodeReasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TranscodeReason"
+          },
+          "description": "Gets or sets the transcode reasons."
+        }
+      },
+      "description": "Class holding information on a running transcode."
+    },
+    "TranscodingProfile": {
+      "type": "object",
+      "properties": {
+        "Container": {
+          "type": "string",
+          "description": "Gets or sets the container."
+        },
+        "Type": {
+          "enum": [
+            "Audio",
+            "Video",
+            "Photo",
+            "Subtitle",
+            "Lyric"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/DlnaProfileType"
+            }
+          ],
+          "description": "Gets or sets the DLNA profile type."
+        },
+        "VideoCodec": {
+          "type": "string",
+          "description": "Gets or sets the video codec."
+        },
+        "AudioCodec": {
+          "type": "string",
+          "description": "Gets or sets the audio codec."
+        },
+        "Protocol": {
+          "enum": [
+            "http",
+            "hls"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/MediaStreamProtocol"
+            }
+          ],
+          "description": "Gets or sets the protocol."
+        },
+        "EstimateContentLength": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the content length should be estimated.",
+          "default": false
+        },
+        "EnableMpegtsM2TsMode": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether M2TS mode is enabled.",
+          "default": false
+        },
+        "TranscodeSeekInfo": {
+          "enum": [
+            "Auto",
+            "Bytes"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/TranscodeSeekInfo"
+            }
+          ],
+          "description": "Gets or sets the transcoding seek info mode.",
+          "default": "Auto"
+        },
+        "CopyTimestamps": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether timestamps should be copied.",
+          "default": false
+        },
+        "Context": {
+          "enum": [
+            "Streaming",
+            "Static"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/EncodingContext"
+            }
+          ],
+          "description": "Gets or sets the encoding context.",
+          "default": "Streaming"
+        },
+        "EnableSubtitlesInManifest": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether subtitles are allowed in the manifest.",
+          "default": false
+        },
+        "MaxAudioChannels": {
+          "type": "string",
+          "description": "Gets or sets the maximum audio channels.",
+          "nullable": true
+        },
+        "MinSegments": {
+          "type": "integer",
+          "description": "Gets or sets the minimum amount of segments.",
+          "format": "int32",
+          "default": 0
+        },
+        "SegmentLength": {
+          "type": "integer",
+          "description": "Gets or sets the segment length.",
+          "format": "int32",
+          "default": 0
+        },
+        "BreakOnNonKeyFrames": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether breaking the video stream on non-keyframes is supported.",
+          "default": false,
+          "nullable": true,
+          "deprecated": true
+        },
+        "Conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProfileCondition"
+          },
+          "description": "Gets or sets the profile conditions."
+        },
+        "EnableAudioVbrEncoding": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether variable bitrate encoding is supported.",
+          "default": true
+        }
+      },
+      "description": "A class for transcoding profile information.\nNote for client developers: Conditions defined in MediaBrowser.Model.Dlna.CodecProfile has higher priority and can override values defined here."
+    },
+    "TransportStreamTimestamp": {
+      "enum": [
+        "None",
+        "Zero",
+        "Valid"
+      ],
+      "type": "string",
+      "description": "The type of timestamps used in a transport stream."
+    },
+    "TrickplayInfoDto": {
+      "type": "object",
+      "properties": {
+        "Width": {
+          "type": "integer",
+          "description": "Gets the width of an individual thumbnail.",
+          "format": "int32"
+        },
+        "Height": {
+          "type": "integer",
+          "description": "Gets the height of an individual thumbnail.",
+          "format": "int32"
+        },
+        "TileWidth": {
+          "type": "integer",
+          "description": "Gets the amount of thumbnails per row.",
+          "format": "int32"
+        },
+        "TileHeight": {
+          "type": "integer",
+          "description": "Gets the amount of thumbnails per column.",
+          "format": "int32"
+        },
+        "ThumbnailCount": {
+          "type": "integer",
+          "description": "Gets the total amount of non-black thumbnails.",
+          "format": "int32"
+        },
+        "Interval": {
+          "type": "integer",
+          "description": "Gets the interval in milliseconds between each trickplay thumbnail.",
+          "format": "int32"
+        },
+        "Bandwidth": {
+          "type": "integer",
+          "description": "Gets the peak bandwidth usage in bits per second.",
+          "format": "int32"
+        }
+      },
+      "description": "The trickplay api model."
+    },
+    "UnratedItem": {
+      "enum": [
+        "Movie",
+        "Trailer",
+        "Series",
+        "Music",
+        "Book",
+        "LiveTvChannel",
+        "LiveTvProgram",
+        "ChannelContent",
+        "Other"
+      ],
+      "type": "string",
+      "description": "An enum representing an unrated item."
+    },
+    "UserConfiguration": {
+      "type": "object",
+      "properties": {
+        "AudioLanguagePreference": {
+          "type": "string",
+          "description": "Gets or sets the audio language preference.",
+          "nullable": true
+        },
+        "PlayDefaultAudioTrack": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether [play default audio track]."
+        },
+        "SubtitleLanguagePreference": {
+          "type": "string",
+          "description": "Gets or sets the subtitle language preference.",
+          "nullable": true
+        },
+        "DisplayMissingEpisodes": {
+          "type": "boolean"
+        },
+        "GroupedFolders": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "SubtitleMode": {
+          "enum": [
+            "Default",
+            "Always",
+            "OnlyForced",
+            "None",
+            "Smart"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/SubtitlePlaybackMode"
+            }
+          ],
+          "description": "An enum representing a subtitle playback mode."
+        },
+        "DisplayCollectionsView": {
+          "type": "boolean"
+        },
+        "EnableLocalPassword": {
+          "type": "boolean"
+        },
+        "OrderedViews": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "LatestItemsExcludes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "MyMediaExcludes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "HidePlayedInLatest": {
+          "type": "boolean"
+        },
+        "RememberAudioSelections": {
+          "type": "boolean"
+        },
+        "RememberSubtitleSelections": {
+          "type": "boolean"
+        },
+        "EnableNextEpisodeAutoPlay": {
+          "type": "boolean"
+        },
+        "CastReceiverId": {
+          "type": "string",
+          "description": "Gets or sets the id of the selected cast receiver.",
+          "nullable": true
+        }
+      },
+      "description": "Class UserConfiguration."
+    },
+    "UserDataChangeInfo": {
+      "type": "object",
+      "properties": {
+        "UserId": {
+          "type": "string",
+          "description": "Gets or sets the user id.",
+          "format": "uuid"
+        },
+        "UserDataList": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UserItemDataDto"
+          },
+          "description": "Gets or sets the user data list."
+        }
+      },
+      "description": "Class UserDataChangeInfo."
+    },
+    "UserDto": {
+      "type": "object",
+      "properties": {
+        "Name": {
+          "type": "string",
+          "description": "Gets or sets the name.",
+          "nullable": true
+        },
+        "ServerId": {
+          "type": "string",
+          "description": "Gets or sets the server identifier.",
+          "nullable": true
+        },
+        "ServerName": {
+          "type": "string",
+          "description": "Gets or sets the name of the server.\nThis is not used by the server and is for client-side usage only.",
+          "nullable": true
+        },
+        "Id": {
+          "type": "string",
+          "description": "Gets or sets the id.",
+          "format": "uuid"
+        },
+        "PrimaryImageTag": {
+          "type": "string",
+          "description": "Gets or sets the primary image tag.",
+          "nullable": true
+        },
+        "HasPassword": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance has password.",
+          "nullable": true,
+          "deprecated": true
+        },
+        "HasConfiguredPassword": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance has configured password.",
+          "nullable": true,
+          "deprecated": true
+        },
+        "HasConfiguredEasyPassword": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance has configured easy password.",
+          "nullable": true,
+          "deprecated": true
+        },
+        "EnableAutoLogin": {
+          "type": "boolean",
+          "description": "Gets or sets whether async login is enabled or not.",
+          "nullable": true
+        },
+        "LastLoginDate": {
+          "type": "string",
+          "description": "Gets or sets the last login date.",
+          "format": "date-time",
+          "nullable": true
+        },
+        "LastActivityDate": {
+          "type": "string",
+          "description": "Gets or sets the last activity date.",
+          "format": "date-time",
+          "nullable": true
+        },
+        "Configuration": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UserConfiguration"
+            }
+          ],
+          "description": "Gets or sets the configuration.",
+          "nullable": true
+        },
+        "Policy": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/UserPolicy"
+            }
+          ],
+          "description": "Gets or sets the policy.",
+          "nullable": true
+        },
+        "PrimaryImageAspectRatio": {
+          "type": "number",
+          "description": "Gets or sets the primary image aspect ratio.",
+          "format": "double",
+          "nullable": true
+        }
+      },
+      "description": "Class UserDto."
+    },
+    "UserItemDataDto": {
+      "type": "object",
+      "properties": {
+        "Rating": {
+          "type": "number",
+          "description": "Gets or sets the rating.",
+          "format": "double",
+          "nullable": true
+        },
+        "PlayedPercentage": {
+          "type": "number",
+          "description": "Gets or sets the played percentage.",
+          "format": "double",
+          "nullable": true
+        },
+        "UnplayedItemCount": {
+          "type": "integer",
+          "description": "Gets or sets the unplayed item count.",
+          "format": "int32",
+          "nullable": true
+        },
+        "PlaybackPositionTicks": {
+          "type": "integer",
+          "description": "Gets or sets the playback position ticks.",
+          "format": "int64"
+        },
+        "PlayCount": {
+          "type": "integer",
+          "description": "Gets or sets the play count.",
+          "format": "int32"
+        },
+        "IsFavorite": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is favorite."
+        },
+        "Likes": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this MediaBrowser.Model.Dto.UserItemDataDto is likes.",
+          "nullable": true
+        },
+        "LastPlayedDate": {
+          "type": "string",
+          "description": "Gets or sets the last played date.",
+          "format": "date-time",
+          "nullable": true
+        },
+        "Played": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this MediaBrowser.Model.Dto.UserItemDataDto is played."
+        },
+        "Key": {
+          "type": "string",
+          "description": "Gets or sets the key."
+        },
+        "ItemId": {
+          "type": "string",
+          "description": "Gets or sets the item identifier.",
+          "format": "uuid"
+        }
+      },
+      "description": "Class UserItemDataDto."
+    },
+    "UserPolicy": {
+      "type": "object",
+      "properties": {
+        "IsAdministrator": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is administrator."
+        },
+        "IsHidden": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is hidden."
+        },
+        "EnableCollectionManagement": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance can manage collections.",
+          "default": false
+        },
+        "EnableSubtitleManagement": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance can manage subtitles.",
+          "default": false
+        },
+        "EnableLyricManagement": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this user can manage lyrics.",
+          "default": false
+        },
+        "IsDisabled": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether this instance is disabled."
+        },
+        "MaxParentalRating": {
+          "type": "integer",
+          "description": "Gets or sets the max parental rating.",
+          "format": "int32",
+          "nullable": true
+        },
+        "MaxParentalSubRating": {
+          "type": "integer",
+          "format": "int32",
+          "nullable": true
+        },
+        "BlockedTags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "AllowedTags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "EnableUserPreferenceAccess": {
+          "type": "boolean"
+        },
+        "AccessSchedules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccessSchedule"
+          },
+          "nullable": true
+        },
+        "BlockUnratedItems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UnratedItem"
+          },
+          "nullable": true
+        },
+        "EnableRemoteControlOfOtherUsers": {
+          "type": "boolean"
+        },
+        "EnableSharedDeviceControl": {
+          "type": "boolean"
+        },
+        "EnableRemoteAccess": {
+          "type": "boolean"
+        },
+        "EnableLiveTvManagement": {
+          "type": "boolean"
+        },
+        "EnableLiveTvAccess": {
+          "type": "boolean"
+        },
+        "EnableMediaPlayback": {
+          "type": "boolean"
+        },
+        "EnableAudioPlaybackTranscoding": {
+          "type": "boolean"
+        },
+        "EnableVideoPlaybackTranscoding": {
+          "type": "boolean"
+        },
+        "EnablePlaybackRemuxing": {
+          "type": "boolean"
+        },
+        "ForceRemoteSourceTranscoding": {
+          "type": "boolean"
+        },
+        "EnableContentDeletion": {
+          "type": "boolean"
+        },
+        "EnableContentDeletionFromFolders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "EnableContentDownloading": {
+          "type": "boolean"
+        },
+        "EnableSyncTranscoding": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether [enable synchronize]."
+        },
+        "EnableMediaConversion": {
+          "type": "boolean"
+        },
+        "EnabledDevices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true
+        },
+        "EnableAllDevices": {
+          "type": "boolean"
+        },
+        "EnabledChannels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "nullable": true
+        },
+        "EnableAllChannels": {
+          "type": "boolean"
+        },
+        "EnabledFolders": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "nullable": true
+        },
+        "EnableAllFolders": {
+          "type": "boolean"
+        },
+        "InvalidLoginAttemptCount": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "LoginAttemptsBeforeLockout": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "MaxActiveSessions": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "EnablePublicSharing": {
+          "type": "boolean"
+        },
+        "BlockedMediaFolders": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "nullable": true
+        },
+        "BlockedChannels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "nullable": true
+        },
+        "RemoteClientBitrateLimit": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "AuthenticationProviderId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "PasswordResetProviderId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "SyncPlayAccess": {
+          "enum": [
+            "CreateAndJoinGroups",
+            "JoinGroups",
+            "None"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/SyncPlayUserAccessType"
+            }
+          ],
+          "description": "Gets or sets a value indicating what SyncPlay features the user can access."
+        }
+      }
+    },
+    "Video3DFormat": {
+      "enum": [
+        "HalfSideBySide",
+        "FullSideBySide",
+        "FullTopAndBottom",
+        "HalfTopAndBottom",
+        "MVC"
+      ],
+      "type": "string"
+    },
+    "VideoRange": {
+      "enum": [
+        "Unknown",
+        "SDR",
+        "HDR"
+      ],
+      "type": "string",
+      "description": "An enum representing video ranges."
+    },
+    "VideoRangeType": {
+      "enum": [
+        "Unknown",
+        "SDR",
+        "HDR10",
+        "HLG",
+        "DOVI",
+        "DOVIWithHDR10",
+        "DOVIWithHLG",
+        "DOVIWithSDR",
+        "DOVIWithEL",
+        "DOVIWithHDR10Plus",
+        "DOVIWithELHDR10Plus",
+        "DOVIInvalid",
+        "HDR10Plus"
+      ],
+      "type": "string",
+      "description": "An enum representing types of video ranges."
+    },
+    "VideoType": {
+      "enum": [
+        "VideoFile",
+        "Iso",
+        "Dvd",
+        "BluRay"
+      ],
+      "type": "string",
+      "description": "Enum VideoType."
+    }
+  }
+}

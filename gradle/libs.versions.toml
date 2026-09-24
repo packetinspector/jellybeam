@@ -1,0 +1,78 @@
+[versions]
+# Kept in step with the build container image (same JDK).
+android-gradle = "8.13.2"
+kotlin = "2.3.0"
+android-compileSdk = "36"
+android-minSdk = "23"
+android-targetSdk = "36"
+
+androidx-activity = "1.12.2"
+androidx-compose-ui = "1.10.0"
+androidx-core = "1.17.0"
+# Android 12+ SplashScreen API compat shim (docs/brand.md §6.3), independent release train
+# from core-ktx above.
+androidx-core-splashscreen = "1.0.1"
+androidx-lifecycle = "2.8.7"
+androidx-media3 = "1.9.0"
+# Explicit pin -- ProfileInstaller/ProfileVerifier were previously only
+# transitive via compose/activity. Pinned so the embedded Baseline Profile
+# (app/src/main/baseline-prof.txt) and the profile-status log line
+# (MainActivity.onResume, docs/10-perf-logging.md) depend on a known version.
+androidx-profileinstaller = "1.4.1"
+coil = "2.7.0"
+kotlinx-coroutines = "1.9.0"
+desugar-jdk-libs = "2.1.2"
+jna = "5.14.0"
+# Jellyfin's Media3 extension bundling FFmpeg software audio decoders
+# (DTS/TrueHD/edge-case FLAC-Vorbis...) so exotic audio Direct Plays
+# instead of forcing a server transcode. Resolves off mavenCentral();
+# no extra repository needed.
+jellyfin-media3-ffmpeg-decoder = "1.8.0+1"
+
+junit = "4.13.2"
+zxing = "3.5.3"
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "android-gradle" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+
+[libraries]
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activity" }
+androidx-compose-foundation = { module = "androidx.compose.foundation:foundation", version.ref = "androidx-compose-ui" }
+androidx-compose-ui = { module = "androidx.compose.ui:ui", version.ref = "androidx-compose-ui" }
+androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling", version.ref = "androidx-compose-ui" }
+androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview", version.ref = "androidx-compose-ui" }
+androidx-core = { module = "androidx.core:core-ktx", version.ref = "androidx-core" }
+androidx-core-splashscreen = { module = "androidx.core:core-splashscreen", version.ref = "androidx-core-splashscreen" }
+androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "androidx-lifecycle" }
+androidx-lifecycle-viewmodel-ktx = { module = "androidx.lifecycle:lifecycle-viewmodel-ktx", version.ref = "androidx-lifecycle" }
+androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "androidx-lifecycle" }
+coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinx-coroutines" }
+androidx-media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "androidx-media3" }
+androidx-media3-ui = { module = "androidx.media3:media3-ui", version.ref = "androidx-media3" }
+# HLS extractor/manifest support (docs/18-playback-quality.md §3): the Auto/
+# Cap transcode fallback loads the server's transcoded stream as an HLS
+# MediaItem (`MimeTypes.APPLICATION_M3U8`) -- media3-exoplayer alone has no
+# HLS module. Same version.ref as the other media3 artifacts above.
+androidx-media3-exoplayer-hls = { module = "androidx.media3:media3-exoplayer-hls", version.ref = "androidx-media3" }
+# Playback-latency audit Rank 3: OkHttp-backed DataSource for the player
+# (connection pooling/keep-alive across a session's own range requests),
+# mirroring the reference fork's PlaybackModule.kt (OkHttpDataSource.Factory
+# via the Jellyfin SDK's OkHttpFactory). Brings okhttp3.OkHttpClient onto
+# the classpath transitively -- no separate okhttp version pin needed.
+androidx-media3-datasource-okhttp = { module = "androidx.media3:media3-datasource-okhttp", version.ref = "androidx-media3" }
+# Publishes the shared ExoPlayer as an androidx.media3.session.MediaSession
+# (see player/MediaSessionHolder.kt) so the TV system UI / global
+# play-pause / Assistant can see and control playback -- same version as
+# the other media3 artifacts above, never independently bumped.
+androidx-media3-session = { module = "androidx.media3:media3-session", version.ref = "androidx-media3" }
+androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version.ref = "androidx-profileinstaller" }
+jellyfin-media3-ffmpeg-decoder = { module = "org.jellyfin.media3:media3-ffmpeg-decoder", version.ref = "jellyfin-media3-ffmpeg-decoder" }
+desugar-jdk-libs = { module = "com.android.tools:desugar_jdk_libs", version.ref = "desugar-jdk-libs" }
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
+junit = { module = "junit:junit", version.ref = "junit" }
+# docs/21 §4: QR code for the report screen (Apache 2.0). core only, no android module.
+zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }

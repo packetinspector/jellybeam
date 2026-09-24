@@ -1,0 +1,46 @@
+services:
+  android-build:
+    build: .
+    volumes:
+      - .:/app
+      - gradle-cache:/app/.gradle-home
+      - cargo-registry:/opt/cargo/registry
+      - android-keystore:/root/.android
+    working_dir: /app
+    environment:
+      # Keep container-built Rust artifacts (linux host-arch tests, Android
+      # cross-builds) out of core/target, which host cargo owns — the two
+      # toolchains would otherwise clobber each other's caches.
+      CARGO_TARGET_DIR: /app/core/target-docker
+    # Stays alive so build.sh can `exec` into it: a fresh `run --rm` per
+    # gate invocation meant a brand-new Gradle daemon (JVM + Kotlin
+    # compiler warmup, minutes under Rosetta) every single time. One
+    # long-lived container keeps the daemon warm across invocations.
+    command: sleep infinity
+    init: true
+
+  # Native arm64 variant (Dockerfile.arm64), build.sh's default; the amd64
+  # service above stays selectable with JELLYBEAM_BUILD_SERVICE=android-build.
+  # Own Gradle and cargo caches (host-arch artifacts differ), shared keystore.
+  android-build-arm64:
+    build:
+      context: .
+      dockerfile: Dockerfile.arm64
+    platform: linux/arm64
+    volumes:
+      - .:/app
+      - gradle-cache-arm64:/app/.gradle-home
+      - cargo-registry-arm64:/opt/cargo/registry
+      - android-keystore:/root/.android
+    working_dir: /app
+    environment:
+      CARGO_TARGET_DIR: /app/core/target-docker-arm64
+    command: sleep infinity
+    init: true
+
+volumes:
+  gradle-cache:
+  gradle-cache-arm64:
+  cargo-registry:
+  cargo-registry-arm64:
+  android-keystore:

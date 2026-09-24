@@ -1,0 +1,15 @@
+services:
+  synthetic-server:
+    image: python:3.12-slim
+    ports:
+      - "127.0.0.1:18096:18096"
+    volumes:
+      - .:/stress:ro
+      - ../../internal/stress/media:/media:ro
+    command: ["python", "/stress/server.py", "--bind", "0.0.0.0", "--items", "10000", "--libraries", "8", "--media", "/media/synthetic.mp4"]
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    labels:
+      jellybeam.synthetic-stress: "true"

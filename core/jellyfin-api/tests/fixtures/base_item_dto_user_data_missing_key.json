@@ -1,0 +1,11 @@
+{
+  "Id": "e2f5a5f1-1a0b-4b3a-9c2e-000000000001",
+  "Name": "Sample Movie",
+  "Type": "Movie",
+  "UserData": {
+    "Played": false,
+    "PlaybackPositionTicks": 1200000000,
+    "PlayCount": 0,
+    "IsFavorite": true
+  }
+}

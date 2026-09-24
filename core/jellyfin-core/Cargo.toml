@@ -1,0 +1,19 @@
+[package]
+name = "jellyfin-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jellyfin-api = { path = "../jellyfin-api" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

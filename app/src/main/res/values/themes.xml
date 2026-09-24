@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Jellybeam" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/notte</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
+
+    <!-- System splash (docs/brand.md §6.3): background + icon only, no keep-on-screen
+         condition; the Compose launch screen (ui/launch/LaunchScreen.kt) takes over immediately. -->
+    <style name="Theme.Jellybeam.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/notte</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/Theme.Jellybeam</item>
+    </style>
+
+    <!-- PlaybackActivity only: pure black, not Notte (#14100D); the
+         video surface's letterbox ground truth. Everything a viewer might
+         see behind/around the video (window background here, the Compose
+         root Box in PlaybackScreen.kt, PlayerView's own background +
+         shutter color) must agree on #000000, or an unencoded-letterbox
+         file (active-picture crop, no black bars baked into the stream)
+         shows a visible warm-gray bar where every other player shows pure
+         black. See CLAUDE.md task notes / evidence file B ("Silo S3E6"). -->
+    <style name="Theme.Jellybeam.Playback" parent="Theme.Jellybeam">
+        <item name="android:windowBackground">@color/player_black</item>
+    </style>
+</resources>

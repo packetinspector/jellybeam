@@ -1,0 +1,89 @@
+[package]
+name = "jellybeam-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Lib name "jellybeam_core" so the Android .so is libjellybeam_core.so.
+# "lib" (rlib) is needed too, for host-side `cargo test` and for the
+# uniffi-bindgen binary below to link against.
+[lib]
+name = "jellybeam_core"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+# The standard uniffi-bindgen binary (see src/bin/uniffi-bindgen.rs). Gated
+# behind the "cli" feature (see [features] below) so a plain `cargo build`
+# of the cdylib/staticlib the Android app links never pulls in clap/camino/
+# uniffi_bindgen -- only `cargo run --features cli --bin uniffi-bindgen`
+# (or `cargo build --features cli`) does.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+# uniffi's own "cli" feature bundles clap/camino/uniffi_bindgen -- exactly
+# the CLI generator, not the runtime scaffolding `#[uniffi::export]` needs.
+cli = ["uniffi/cli"]
+# Test-only escape hatch (code-review D4(a)): under this feature, the
+# mirror+bus bundle (`JellybeamCore::open_mirror_with_bus`) skips spawning the
+# real websocket `EventBus` when the `JELLYBEAM_DISABLE_EVENT_BUS` env var is
+# set to `1`. Exists solely so `core/ffi/tests/live_local_server.rs`'s
+# negative-control test can prove the positive test's signal genuinely
+# depends on the websocket bus (not some other path, e.g. a periodic
+# reconcile) by disabling it and asserting no event arrives. Never enabled
+# in a normal build -- not part of the default feature set, and nothing in
+# `src/` reads the env var unless this feature is on.
+live-test-knobs = []
+
+[dependencies]
+# 0.29.x (the version this crate's spec was written against) is no longer
+# the latest stable release on crates.io; 0.32.0 is, and it still ships the
+# same proc-macro surface (`uniffi::setup_scaffolding!()`, `#[uniffi::export]`,
+# `uniffi::uniffi_bindgen_main()`) this crate uses, so it's what's pinned
+# here.
+uniffi = { version = "0.32", default-features = false }
+# `Datelike::year()` only, to pull a series' end year out of `BaseItemDto`'s
+# `EndDate` (`ItemDetail::end_year`, docs/11-detail-ux-spec.md tier 1 item
+# 10's year-range rule) -- same feature set media-cache/jellyfin-api already
+# pin, kept consistent even though this crate doesn't need `Utc::now()`.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+media-cache = { path = "../media-cache" }
+jellyfin-core = { path = "../jellyfin-core" }
+jellyfin-api = { path = "../jellyfin-api" }
+playback-policy = { path = "../playback-policy" }
+seerr-api = { path = "../seerr-api" }
+# Already resolved transitively (jellyfin-api -> reqwest -> url); declared
+# directly for signin.rs's own URL parsing/validation, same version pin as
+# jellyfin-api's direct `url` dependency.
+url = "2"
+# "rt-multi-thread" for JellybeamCore's own owned runtime (2 worker threads);
+# "sync" for the broadcast channel it creates for jellyfin-core's BusEvent
+# bus and for consuming media-cache's MirrorChange broadcast receiver.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Device-id generation only (JellybeamCore::new's stable per-install id) --
+# jellyfin-api/media-cache both depend on uuid too but neither enables the
+# "v4" feature, so it's declared explicitly here rather than relied on via
+# workspace feature unification.
+uuid = { version = "1", features = ["v4"] }
+# Bounded-concurrency helpers only (`StreamExt::buffered`, `future::join_all`)
+# for `seerr.rs`'s `seerr_my_requests`/`seerr_request_options` fan-out --
+# same crate/version jellyfin-api already pins, feature set trimmed to just
+# what those two call sites need.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"
+# "net"/"io-util" only for `seerr.rs`'s own test-only scripted mock server
+# (proving `seerr_submit_request` invalidates the home cache end-to-end) --
+# unioned with this crate's own `[dependencies]` tokio feature set for test
+# builds, same convention jellyfin-api's `[dev-dependencies]` tokio entry
+# uses.
+tokio = { workspace = true, features = ["net", "io-util"] }
+
+[lints]
+workspace = true

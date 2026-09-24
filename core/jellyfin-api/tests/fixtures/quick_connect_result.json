@@ -1,0 +1,10 @@
+{
+  "AppName": "Jellybeam",
+  "AppVersion": "0.1.0",
+  "Authenticated": false,
+  "Code": "123456",
+  "DateAdded": "2026-08-09T00:00:00.000Z",
+  "DeviceId": "device-123",
+  "DeviceName": "Test Mac",
+  "Secret": "the-quick-connect-secret"
+}

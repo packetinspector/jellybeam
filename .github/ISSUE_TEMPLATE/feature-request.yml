@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest something Jellybeam TV doesn't do yet.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that the app doesn't support today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_behavior
+    attributes:
+      label: Proposed behaviour
+      description: What should Jellybeam TV do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other approaches or workarounds you've tried.
+  - type: input
+    id: server_version
+    attributes:
+      label: Jellyfin server version
+      description: Optional. Settings > About shows this on the TV.

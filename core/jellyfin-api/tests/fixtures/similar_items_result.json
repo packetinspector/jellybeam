@@ -1,0 +1,18 @@
+{
+  "Items": [
+    {
+      "Id": "e2f5a5f1-1a0b-4b3a-9c2e-000000000020",
+      "Name": "Similar Movie One",
+      "Type": "Movie",
+      "ProductionYear": 2019
+    },
+    {
+      "Id": "e2f5a5f1-1a0b-4b3a-9c2e-000000000021",
+      "Name": "Similar Movie Two",
+      "Type": "Movie",
+      "ProductionYear": 2021
+    }
+  ],
+  "StartIndex": 0,
+  "TotalRecordCount": 2
+}

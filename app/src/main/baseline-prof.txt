@@ -1,0 +1,58 @@
+# Hand-authored wildcard Baseline Profile.
+#
+# There is no Macrobenchmark generator module here: the build container has
+# no emulator or managed device on its toolchain, so a recorded/generated
+# profile isn't an option. A wildcard over the packages below reproduces
+# what the previous manual `adb shell cmd package compile -m speed -f
+# tv.jellybeam` ritual gave (full AOT of this app's own code and its hottest
+# library dependencies) and, unlike a generated method list, never rots
+# when a class or method gets renamed -- there's nothing here to regenerate.
+#
+# Library-shipped profiles (Compose, Coil, Lifecycle, Activity, Coroutines)
+# merge into the final baseline.prof automatically at build time; the rules
+# below only need to cover code those libraries don't already cover. AGP
+# rewrites every rule through the R8 mapping when isMinifyEnabled is on, so
+# these class/method names track post-shrink identifiers automatically --
+# nothing here needs to be R8-aware by hand.
+#
+# Format: Android's baseline profile human-readable format --
+#   L<class>            class-load rule
+#   HSPL<class>-><method>(<params>)<return>   method rule (Hot/Startup/Post-startup)
+# `**` wildcards any package/class/method segment, per package root below.
+
+# App code -- everything this app itself ships (UI, ViewModels, nav,
+# playback screen, data/FFI gateway, perf logging). This is the bulk of
+# what actually runs on every screen, so it gets the broadest rule.
+Ltv/jellybeam/**
+HSPLtv/jellybeam/**->**(**)**
+
+# uniffi-generated Kotlin bindings for the Rust core, plus JNA's native
+# marshalling underneath them -- both run on every single FFI call
+# (Home/Library loads, sign-in, playback prep), so they're as hot as any
+# app code above.
+Luniffi/jellybeam_core/**
+HSPLuniffi/jellybeam_core/**->**(**)**
+Lcom/sun/jna/**
+HSPLcom/sun/jna/**->**(**)**
+
+# Player: Media3 ExoPlayer (the actual player) plus Jellyfin's ffmpeg
+# software-audio-decoder extension (DTS/TrueHD/edge-case FLAC-Vorbis Direct
+# Play) -- hot for the whole duration of every play session, but first used
+# ~3s after core-ready, not on the startup path, so HP (hot + post-startup,
+# no `L` class-load line) still AOT-compiles these without paging their
+# classes in ahead of Application.onCreate.
+HPLandroidx/media3/**->**(**)**
+HPLorg/jellyfin/media3/**->**(**)**
+
+# Player HTTP: OkHttp/Okio back the Media3 OkHttpDataSource used for
+# playback range requests -- same startup-timing reasoning as Media3 above.
+HPLokhttp3/**->**(**)**
+HPLokio/**->**(**)**
+
+# Kotlin stdlib and coroutines -- hot on every screen (collections, string
+# formatting, structured concurrency for every suspend FFI wrapper and
+# ViewModel scope) rather than any one feature area.
+Lkotlin/**
+HSPLkotlin/**->**(**)**
+Lkotlinx/coroutines/**
+HSPLkotlinx/coroutines/**->**(**)**

@@ -1,0 +1,436 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<issues format="6" by="lint 8.13.2" type="baseline" client="gradle" dependencies="false" name="AGP (8.13.2)" variant="all" version="8.13.2">
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 24 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#DolbyVisionProfileDvheDtb`"
+        errorLine1="            CodecProfileLevel.DolbyVisionProfileDvheDtb,"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="200"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 24 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#DolbyVisionLevelHd24`"
+        errorLine1="            CodecProfileLevel.DolbyVisionLevelHd24,"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="201"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 24 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#HEVCProfileMain10HDR10`"
+        errorLine1="        CodecProfileLevel.HEVCProfileMain10HDR10,"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="205"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 29 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#HEVCProfileMain10HDR10Plus`"
+        errorLine1="        CodecProfileLevel.HEVCProfileMain10HDR10Plus,"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="210"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 30 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#DolbyVisionProfileDvav110`"
+        errorLine1="        CodecProfileLevel.DolbyVisionProfileDvav110,"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="248"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 24 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#DolbyVisionLevelHd24`"
+        errorLine1="        CodecProfileLevel.DolbyVisionLevelHd24,"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="249"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 29 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#AV1ProfileMain10HDR10`"
+        errorLine1="        CodecProfileLevel.AV1ProfileMain10HDR10,"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="253"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 29 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#AV1Level5`"
+        errorLine1="        CodecProfileLevel.AV1Level5,"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="254"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 29 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#AV1ProfileMain10HDR10Plus`"
+        errorLine1="        CodecProfileLevel.AV1ProfileMain10HDR10Plus,"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="258"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 29 (current min is 23): `android.media.MediaCodecInfo.CodecProfileLevel#AV1Level5`"
+        errorLine1="        CodecProfileLevel.AV1Level5,"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/tv/jellybeam/player/DeviceCapsProbe.kt"
+            line="259"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="NewApi"
+        message="Call requires API level 33 (current min is 23): `java.lang.ref.Cleaner#create`"
+        errorLine1="    val cleaner = java.lang.ref.Cleaner.create()"
+        errorLine2="                                        ~~~~~~">
+        <location
+            file="build/generated/uniffi/main/kotlin/uniffi/jellybeam_core/jellybeam_core.kt"
+            line="1169"
+            column="41"/>
+    </issue>
+
+    <issue
+        id="NewApi"
+        message="Call requires API level 33 (current min is 23): `java.lang.ref.Cleaner#register`"
+        errorLine1="        JavaLangRefCleanable(cleaner.register(value, cleanUpTask))"
+        errorLine2="                                     ~~~~~~~~">
+        <location
+            file="build/generated/uniffi/main/kotlin/uniffi/jellybeam_core/jellybeam_core.kt"
+            line="1172"
+            column="38"/>
+    </issue>
+
+    <issue
+        id="NewApi"
+        message="Call requires API level 33 (current min is 23): `java.lang.ref.Cleaner.Cleanable#clean`"
+        errorLine1="    override fun clean() = cleanable.clean()"
+        errorLine2="                                     ~~~~~">
+        <location
+            file="build/generated/uniffi/main/kotlin/uniffi/jellybeam_core/jellybeam_core.kt"
+            line="1178"
+            column="38"/>
+    </issue>
+
+    <issue
+        id="AndroidGradlePluginVersion"
+        message="A newer version of com.android.application than 8.13.2 is available: 9.3.2"
+        errorLine1="android-gradle = &quot;8.13.2&quot;"
+        errorLine2="                 ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="5"
+            column="18"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.activity:activity-compose than 1.12.2 is available: 1.13.0"
+        errorLine1="androidx-activity = &quot;1.12.2&quot;"
+        errorLine2="                    ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="11"
+            column="21"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.compose.ui:ui than 1.10.0 is available: 1.12.0"
+        errorLine1="androidx-compose-ui = &quot;1.10.0&quot;"
+        errorLine2="                      ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="12"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.compose.ui:ui-tooling than 1.10.0 is available: 1.12.0"
+        errorLine1="androidx-compose-ui = &quot;1.10.0&quot;"
+        errorLine2="                      ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="12"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.compose.ui:ui-tooling-preview than 1.10.0 is available: 1.12.0"
+        errorLine1="androidx-compose-ui = &quot;1.10.0&quot;"
+        errorLine2="                      ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="12"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="Upgrade `androidx.compose.foundation` for keyboard and mouse support"
+        errorLine1="androidx-compose-ui = &quot;1.10.0&quot;"
+        errorLine2="                      ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="12"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.core:core-ktx than 1.17.0 is available: 1.19.0"
+        errorLine1="androidx-core = &quot;1.17.0&quot;"
+        errorLine2="                ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="13"
+            column="17"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.lifecycle:lifecycle-runtime-ktx than 2.8.7 is available: 2.11.0"
+        errorLine1="androidx-lifecycle = &quot;2.8.7&quot;"
+        errorLine2="                     ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="14"
+            column="22"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.lifecycle:lifecycle-viewmodel-compose than 2.8.7 is available: 2.11.0"
+        errorLine1="androidx-lifecycle = &quot;2.8.7&quot;"
+        errorLine2="                     ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="14"
+            column="22"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.lifecycle:lifecycle-viewmodel-ktx than 2.8.7 is available: 2.11.0"
+        errorLine1="androidx-lifecycle = &quot;2.8.7&quot;"
+        errorLine2="                     ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="14"
+            column="22"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.media3:media3-exoplayer than 1.9.0 is available: 1.11.0"
+        errorLine1="androidx-media3 = &quot;1.9.0&quot;"
+        errorLine2="                  ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="15"
+            column="19"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.media3:media3-ui than 1.9.0 is available: 1.11.0"
+        errorLine1="androidx-media3 = &quot;1.9.0&quot;"
+        errorLine2="                  ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="15"
+            column="19"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of com.android.tools:desugar_jdk_libs than 2.1.2 is available: 2.1.5"
+        errorLine1="desugar-jdk-libs = &quot;2.1.2&quot;"
+        errorLine2="                   ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="18"
+            column="20"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of net.java.dev.jna:jna than 5.14.0 is available: 5.19.1"
+        errorLine1="    implementation(&quot;net.java.dev.jna:jna:${libs.versions.jna.get()}@aar&quot;)"
+        errorLine2="                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="106"
+            column="20"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlin.android than 2.3.0 is available: 2.4.10"
+        errorLine1="kotlin = &quot;2.3.0&quot;"
+        errorLine2="         ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="10"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlin.plugin.compose than 2.3.0 is available: 2.4.10"
+        errorLine1="kotlin = &quot;2.3.0&quot;"
+        errorLine2="         ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="10"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlinx:kotlinx-coroutines-android than 1.9.0 is available: 1.11.0"
+        errorLine1="kotlinx-coroutines = &quot;1.9.0&quot;"
+        errorLine2="                     ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="17"
+            column="22"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlinx:kotlinx-coroutines-test than 1.9.0 is available: 1.11.0"
+        errorLine1="kotlinx-coroutines = &quot;1.9.0&quot;"
+        errorLine2="                     ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="17"
+            column="22"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of net.java.dev.jna:jna than 5.14.0 is available: 5.19.1"
+        errorLine1="jna = &quot;5.14.0&quot;"
+        errorLine2="      ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="19"
+            column="7"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jellyfin.media3:media3-ffmpeg-decoder than 1.8.0+1 is available: 1.9.0+1"
+        errorLine1="jellyfin-media3-ffmpeg-decoder = &quot;1.8.0+1&quot;"
+        errorLine2="                                 ~~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="27"
+            column="34"/>
+    </issue>
+
+    <issue
+        id="Aligned16KB"
+        message="The native library `x86_64/libjnidispatch.so` (from `net.java.dev.jna:jna:5.14.0`) is not 16 KB aligned">
+        <location
+            file="$GRADLE_USER_HOME/caches/9.2.1/transforms/a9d1787acc726a27ad18d7111ab23e25/transformed/jna-5.14.0/jni/x86_64/libjnidispatch.so"/>
+    </issue>
+
+    <issue
+        id="Aligned16KB"
+        message="The native library `x86_64/libjnidispatch.so` (from `net.java.dev.jna:jna:5.14.0`) is not 16 KB aligned">
+        <location
+            file="$GRADLE_USER_HOME/caches/9.2.1/transforms/a9d1787acc726a27ad18d7111ab23e25/transformed/jna-5.14.0/jni/x86_64/libjnidispatch.so"/>
+    </issue>
+
+    <issue
+        id="Aligned16KB"
+        message="The native library `x86_64/libjnidispatch.so` (from `net.java.dev.jna:jna:5.14.0`) is not 16 KB aligned"
+        errorLine1="jna = { module = &quot;net.java.dev.jna:jna&quot;, version.ref = &quot;jna&quot; }"
+        errorLine2="       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="52"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="DiscouragedApi"
+        message="Fixed screen orientations will be ignored in most cases, starting from Android 16. Android is moving toward a model where apps are expected to adapt to various orientations, display sizes, and aspect ratios."
+        errorLine1="            android:screenOrientation=&quot;landscape&quot;"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/AndroidManifest.xml"
+            line="26"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="DiscouragedApi"
+        message="Fixed screen orientations will be ignored in most cases, starting from Android 16. Android is moving toward a model where apps are expected to adapt to various orientations, display sizes, and aspect ratios."
+        errorLine1="            android:screenOrientation=&quot;landscape&quot;"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/AndroidManifest.xml"
+            line="39"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="DataExtractionRules"
+        message="The attribute `android:allowBackup` is deprecated from Android 12 and higher and may be removed in future versions. Consider adding the attribute `android:dataExtractionRules` specifying an `@xml` resource which configures cloud backups and device transfers on Android 12 and higher."
+        errorLine1="        android:allowBackup=&quot;false&quot;"
+        errorLine2="                             ~~~~~">
+        <location
+            file="src/main/AndroidManifest.xml"
+            line="16"
+            column="30"/>
+    </issue>
+
+    <issue
+        id="UseTomlInstead"
+        message="Use the existing version catalog reference (`libs.jna`) instead"
+        errorLine1="    implementation(&quot;net.java.dev.jna:jna:${libs.versions.jna.get()}@aar&quot;)"
+        errorLine2="                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="106"
+            column="20"/>
+    </issue>
+
+</issues>

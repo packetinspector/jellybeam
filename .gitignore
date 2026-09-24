@@ -1,0 +1,42 @@
+# Rust
+/core/target/
+/core/target-docker/
+**/*.rs.bk
+
+# Android / Gradle
+/app/build/
+/build/
+# cargo-ndk's output -- rebuilt by the `cargoNdkBuild` Gradle task from
+# core/, never hand-authored or committed.
+/app/src/main/jniLibs/
+.gradle/
+.gradle-home/
+local.properties
+# Release signing (docs/06 "Signing releases")
+keystore.properties
+*.jks
+*.keystore
+*.apk
+*.aab
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+
+# Internal (never committed)
+internal/
+
+# Local-only agent instructions and state (CLAUDE.md is committed as a copy of AGENTS.md)
+CLAUDE.local.md
+.claude/
+
+# Kotlin daemon session files
+.kotlin/
+/core/target-docker-arm64/

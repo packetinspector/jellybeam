@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mirrors JellybeamTheme.NOTTE (Kotlin, the sole source of truth for
+         Jellybeam's palette). Duplicated here only because the platform
+         window background must be set before Compose ever runs, to avoid
+         a white flash on launch. -->
+    <color name="notte">#14100D</color>
+
+    <!-- Adaptive icon background layer (mipmap-anydpi-v26/ic_launcher.xml):
+         docs/brand.md §2 fixes the icon ground at #1A1D15, distinct
+         from Notte. -->
+    <color name="ic_launcher_background">#1A1D15</color>
+
+    <!-- Pure black, deliberately NOT Notte (#14100D): PlaybackActivity's
+         letterbox ground truth. A file with no encoded letterbox (active-
+         picture crop, e.g. a 2.39:1 image inside a 16:9 frame) exposes
+         whatever is behind/around the video surface as its bars; Notte
+         reads as a visible warm gray next to real video black, which is
+         wrong for *any* Direct Play file, HDR or SDR. See
+         Theme.Jellybeam.Playback below and PlaybackScreen.kt's root Box. -->
+    <color name="player_black">#FF000000</color>
+</resources>

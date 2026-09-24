@@ -1,0 +1,44 @@
+# docs/21-user-reporting.md §7: the form the TV's report page opens, prefilled through query
+# parameters (title, category, summary). The log itself is never in the URL; the user attaches
+# jellybeam-log.txt from their phone.
+name: Jellybeam TV problem report
+description: Report a problem with the Android TV app. Start from Settings > Troubleshooting > Report a problem on the TV.
+title: "[TV] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Attach **jellybeam-log.txt** from your phone's downloads in the "What happened" box below
+        (drag it in or use the attach button). It contains no names, titles, addresses or sign-in
+        details. This report is public.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Playback
+        - Sign-in
+        - Browsing
+        - Performance
+        - Crash
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: What you expected, and what the TV did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Optional. What to do to see it again.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary from the TV
+      description: Filled in by the TV. Edit if you like.
+      render: markdown

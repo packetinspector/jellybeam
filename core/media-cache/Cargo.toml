@@ -1,0 +1,28 @@
+[package]
+name = "media-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jellyfin-api = { path = "../jellyfin-api" }
+jellyfin-core = { path = "../jellyfin-core" }
+# P5e issue 7: RFC3339 stamping for `apply_local_user_data`'s `last_played_date`; same
+# version/features jellyfin-api already pulls in transitively.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "fs"] }
+tracing.workspace = true
+# Bundled SQLite: no system libsqlite3 dependency, identical version across builds.
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = "1"
+# Bounded-concurrency fan-out for `sync::reconcile_all` (`for_each_concurrent`).
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "test-util", "net", "io-util"] }
+
+[lints]
+workspace = true

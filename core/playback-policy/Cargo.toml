@@ -1,0 +1,17 @@
+[package]
+name = "playback-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+# Only for MediaSegmentDto/MediaSegmentType (pure data models) -- see
+# lib.rs's module doc for why this dependency is scoped to models only.
+jellyfin-api = { path = "../jellyfin-api" }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
