@@ -35,7 +35,12 @@ than a hardcoded address, so any locally-run Jellyfin/Jellyseerr pair works:
    `JELLYBEAM_SEERR_API_KEY`. From the emulator the instance is `http://10.0.2.2:5055`.
    `cargo test -p jellybeam-ffi -- --ignored live_seerr` covers all three Seerr sign-in methods
    against it.
-3. **Live servers (verification only, never hardcoded):** credentials and endpoints
+3. **Showcase server (screenshots)**, `http://localhost:8098`. `tools/showcase-server/up.sh`
+   builds a public-domain and CC-BY library from `catalog.tsv` (three Blender films downloaded
+   for playback, runtime-accurate stubs for the rest), matches it against TMDB, and seeds
+   Continue Watching and Next Up. User `sam` / `showcase`; from the emulator
+   `http://10.0.2.2:8098`. Marketing and README screenshots come from this server only.
+4. **Live servers (verification only, never hardcoded):** credentials and endpoints
    live only in ignored local storage. Read locally when needed; **never** commit,
    echo into shared output, or bake them into the Android app. Refer to any such
    endpoint only as "the live server" or `<REDACTED>`. Do not record its network,

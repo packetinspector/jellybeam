@@ -1,0 +1,42 @@
+# Showcase library: public-domain and CC-BY titles only (tools/showcase-server/up.sh).
+# Titles that match the wrong film by name alone carry a [tmdbid=N] folder hint.
+# kind	library	title (year)	minutes	profile	source
+# kind: movie | series (series rows add episodes: minutes is per episode, source is "SxxEyy-SxxEzz")
+# profile: real (downloaded, source is the URL), 1080 (H.264 + E-AC3 5.1), 4k (HEVC 2160p + E-AC3 5.1), sd (H.264 4:3 + AAC 2.0)
+movie	Open Movies	Tears of Steel (2012)	12	real	https://download.blender.org/demo/movies/ToS/tears_of_steel_1080p.mov.zip
+movie	Open Movies	Sintel (2010)	15	real	https://download.blender.org/demo/movies/Sintel.2010.1080p.mkv
+movie	Open Movies	Big Buck Bunny (2008)	10	real	https://download.blender.org/demo/movies/BBB/bbb_sunflower_1080p_30fps_normal.mp4.zip
+movie	Open Movies	Elephants Dream (2006)	11	4k	-
+movie	Open Movies	Cosmos Laundromat (2015)	12	4k	-
+movie	Open Movies	Agent 327 Operation Barbershop (2017)	4	4k	-
+movie	Open Movies	Hero (2018) [tmdbid=615324]	4	4k	-
+movie	Open Movies	Spring (2019) [tmdbid=593048]	8	4k	-
+movie	Open Movies	Coffee Run (2020)	3	4k	-
+movie	Open Movies	Sprite Fright (2021)	10	4k	-
+movie	Open Movies	Charge (2022)	4	4k	-
+movie	Open Movies	Wing It! (2023)	4	4k	-
+movie	Films	The Cabinet of Dr. Caligari (1920)	76	sd	-
+movie	Films	The Kid (1921)	68	sd	-
+movie	Films	Nosferatu (1922)	94	sd	-
+movie	Films	Safety Last! (1923)	74	sd	-
+movie	Films	Sherlock Jr. (1924)	45	sd	-
+movie	Films	The Phantom of the Opera (1925)	93	sd	-
+movie	Films	The General (1926)	79	sd	-
+movie	Films	Metropolis (1927)	148	sd	-
+movie	Films	Gulliver's Travels (1939)	76	1080	-
+movie	Films	His Girl Friday (1940)	92	1080	-
+movie	Films	Detour (1945)	68	1080	-
+movie	Films	Scarlet Street (1945)	102	1080	-
+movie	Films	D.O.A. (1949)	83	1080	-
+movie	Films	The Hitch-Hiker (1953)	71	1080	-
+movie	Films	Plan 9 from Outer Space (1957)	79	1080	-
+movie	Films	House on Haunted Hill (1959)	75	1080	-
+movie	Films	The Little Shop of Horrors (1960)	72	1080	-
+movie	Films	Carnival of Souls (1962)	78	1080	-
+movie	Films	Charade (1963)	113	1080	-
+movie	Films	The Last Man on Earth (1964)	86	1080	-
+movie	Films	Night of the Living Dead (1968)	96	1080	-
+series	Series	Sherlock Holmes (1954)	26	sd	S01E01-S01E10
+series	Series	One Step Beyond (1959)	25	sd	S01E01-S01E08
+series	Series	Bonanza (1959)	50	1080	S01E01-S01E08
+series	Series	The Beverly Hillbillies (1962)	25	sd	S01E01-S01E08

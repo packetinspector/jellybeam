@@ -40,3 +40,6 @@ CLAUDE.local.md
 # Kotlin daemon session files
 .kotlin/
 /core/target-docker-arm64/
+
+# Python
+__pycache__/
