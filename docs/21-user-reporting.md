@@ -295,9 +295,9 @@ The repository is public. Under `.github/ISSUE_TEMPLATE/` an issue form
   downloads below."
 
 Prefill uses GitHub's documented query parameters for issue forms
-(`title`, `labels`, and one parameter per field id). Labels are applied
-only if they exist in the repository; the form ships with none until the
-labels are created. The query string stays under 8 KB by construction:
+(`title` and one parameter per field id). The form itself applies `bug`
+and `needs-triage`; the TV sends no `labels` parameter, since GitHub drops
+it for reporters without triage access. The query string stays under 8 KB by construction:
 the summary is short and the log is never in the URL.
 
 ## 8. Ownership

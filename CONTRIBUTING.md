@@ -1,5 +1,7 @@
 # Contributing to Jellybeam TV
 
+Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
+
 ## Build
 
 Everything builds inside the Docker container described in

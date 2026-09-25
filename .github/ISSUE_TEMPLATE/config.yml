@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or setup help
+    url: https://github.com/packetinspector/jellybeam/discussions/categories/q-a
+    about: How-to, compatibility, and "does it work with…" questions go in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/packetinspector/jellybeam/security/advisories/new
+    about: Report privately, never in a public issue. See SECURITY.md.
+  - name: Jellyfin server problem
+    url: https://github.com/jellyfin/jellyfin/issues
+    about: If the server's own web client shows it too, it belongs upstream.

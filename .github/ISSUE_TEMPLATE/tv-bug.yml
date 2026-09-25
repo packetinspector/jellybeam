@@ -4,6 +4,7 @@
 name: Jellybeam TV problem report
 description: Report a problem with the Android TV app. Start from Settings > Troubleshooting > Report a problem on the TV.
 title: "[TV] "
+labels: ["bug", "needs-triage"]
 body:
   - type: markdown
     attributes:

@@ -1,7 +1,7 @@
 name: Feature request
 description: Suggest something Jellybeam TV doesn't do yet.
 title: "[Feature] "
-labels: ["enhancement"]
+labels: ["feature", "needs-triage"]
 body:
   - type: textarea
     id: problem
