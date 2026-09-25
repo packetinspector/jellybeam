@@ -1365,10 +1365,15 @@ private fun JellybeamRoot(
                     }
                 }
             } else {
-                // SignIn-rooted stack: no live Home layer to retain yet; a successful sign-in
-                // resets straight to a fresh Home-rooted stack.
+                // SignIn-rooted stack: a successful sign-in takes the same epoch reset as "Add
+                // server", since the drawer's account/library fetch already ran signed out.
                 when (current) {
-                    Screen.SignIn -> SignInScreen(onSignedIn = { navigate(NavBackStack.of(Screen.Home)) })
+                    Screen.SignIn -> SignInScreen(
+                        onSignedIn = {
+                            resetSessionState()
+                            sessionEpoch++
+                        },
+                    )
                     else -> Unit // unreachable: see NavBackStack's own construction sites
                 }
             }
