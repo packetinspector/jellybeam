@@ -17,10 +17,28 @@
 - **More Direct Play than you're used to.** The TV's decoders are probed, not assumed. Files other clients transcode play as files here.
 - **TrueHD, DTS, DTS-HD, Atmos, HDR10, Dolby Vision.** Decoded on the device or passed straight through. The server stays cool.
 - **Seerr is built in.** Trending, upcoming, search, request. From the couch, with the remote.
-- **A player that was designed, not inherited.** Glyph-only OSD, chapter ticks, trickplay that survives a hold-to-seek, skips per segment type.
+- **A player that was designed, not inherited.** Glyph-only OSD, chapter ticks, skips per segment type.
+- **Glide Seek with trickplay.** Hold Left or Right and the file glides at 6x, 30x, then 120x, with the server's own thumbnails on screen the whole way. Release and it seeks once, exactly where you stopped.
 - **Picture-in-picture.** Back or Home during playback tucks the video into a corner and keeps it playing while you browse.
 - **Fast enough to measure in milliseconds.** First frame around 80 ms. Press Play to player-prepare around 50 ms.
 - **Nothing phones home.** No analytics, no crash SDK, no telemetry. Two permissions: internet and network state.
+
+<br>
+
+<p align="center"><img src="docs/readme/screens/home.webp" width="100%" alt="Home: a Continue Watching hero with Continue Watching and Next Up shelves"></p>
+
+<table>
+<tr>
+<td width="50%"><img src="docs/readme/screens/detail.webp" alt="A movie detail page with cast and the file's format strip"></td>
+<td width="50%"><img src="docs/readme/screens/library.webp" alt="A library poster grid with the letter rail"></td>
+</tr>
+<tr>
+<td><img src="docs/readme/screens/filter.webp" alt="The sort and filter strip open on a library, filtered to one genre"></td>
+<td><img src="docs/readme/screens/osd.webp" alt="The player's on-screen controls showing Direct Play"></td>
+</tr>
+</table>
+
+<sub>Screenshots use public-domain films and Blender Foundation open movies (CC BY) on a demo server.</sub>
 
 <br>
 
@@ -74,9 +92,16 @@ The small things, learned from a lot of evenings on the couch with a lot of clie
 - **Honest buffering.** A buffering pill appears when the network is actually behind, and never for a routine decoder reposition. Reconnecting gets its own pill. You always know why you're waiting.
 - **A movie filter that thinks like you do.** Watched, unwatched, genre, decade, runtime, and Continuing or Ended for shows, with a summary line that always says what's applied and a right-edge rail that jumps the grid by letter, month, decade or duration.
 - **A context menu with the shortcuts you actually use.** Play a random episode, play from the beginning, play the next unwatched, mark a season or series watched, favourite it, add it to a collection, jump to the series from an episode. One press on `···` from any detail page.
+
+  <img src="docs/readme/screens/series-menu.webp" width="70%" alt="The ··· menu on a series page: mark watched, favourite, play next unwatched, play something random">
+
 - **Series pages open on the season you're actually watching.** Your own season choice is never overridden.
 - **Sorting uses the server's sort name.** "The" and leading numbers behave the way you expect.
-- **Fast, configurable seeking.** Skip back and forward at 5, 10, 15, 30 or 60 seconds, set separately for each direction, and hold for an accelerating glide across the whole file.
+- **Fast, configurable seeking.** Skip back and forward at 5, 10, 15, 30 or 60 seconds, set separately for each direction; hold for Glide Seek.
+- **Glide Seek with trickplay.** Hold to glide through the file at 6x, 30x and 120x, then a pace that crosses the whole file in about eight seconds. The server's trickplay thumbnail stays up the entire hold, re-sampled at a readable pace and never blanking, and sheets are fetched one ahead, so it feels the same over a VPN as on your LAN. As far as we know, no other Jellyfin client keeps thumbnails through a hold.
+
+  <img src="docs/readme/screens/glide-seek.webp" width="70%" alt="Glide Seek at 120x with a trickplay thumbnail above the progress bar">
+
 - **Sign-in that fixes itself.** If a saved account has expired, you go straight to re-authorizing it, and your library is right where you left it.
 - **Dead server addresses get re-resolved.** If your server advertises a bare hostname on the LAN, discovery probes the real ports and offers one that answers.
 - **A mascot with manners.** It greets you on launch, keeps you company on an empty library or a pairing screen, and never covers your posters.
