@@ -98,7 +98,7 @@ The small things, learned from a lot of evenings on the couch with a lot of clie
 - **Series pages open on the season you're actually watching.** Your own season choice is never overridden.
 - **Sorting uses the server's sort name.** "The" and leading numbers behave the way you expect.
 - **Fast, configurable seeking.** Skip back and forward at 5, 10, 15, 30 or 60 seconds, set separately for each direction; hold for Glide Seek.
-- **Glide Seek with trickplay.** Hold to glide through the file at 6x, 30x and 120x, then a pace that crosses the whole file in about eight seconds. The server's trickplay thumbnail stays up the entire hold, re-sampled at a readable pace and never blanking, and sheets are fetched one ahead, so it feels the same over a VPN as on your LAN. As far as we know, no other Jellyfin client keeps thumbnails through a hold.
+- **Glide Seek with trickplay.** Hold to glide through the file at 6x, 30x and 120x, then a pace that crosses the whole file in about eight seconds. The server's trickplay thumbnail stays up the entire hold, re-sampled at a readable pace and never blanking, and sheets are fetched one ahead, so it feels the same over a VPN as on your LAN.
 
   <img src="docs/readme/screens/glide-seek.webp" width="70%" alt="Glide Seek at 120x with a trickplay thumbnail above the progress bar">
 
