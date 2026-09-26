@@ -113,7 +113,7 @@ CREATE INDEX IF NOT EXISTS idx_items_grid_year ON items(parent_id, production_ye
 CREATE INDEX IF NOT EXISTS idx_items_grid_runtime ON items(parent_id, NULLIF(runtime_ticks, 0), sort_name COLLATE NOCASE, id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(
-    name, original_title, series_name, overview,
+    name, original_title, series_name,
     content='', tokenize='unicode61 remove_diacritics 2'
 );
 

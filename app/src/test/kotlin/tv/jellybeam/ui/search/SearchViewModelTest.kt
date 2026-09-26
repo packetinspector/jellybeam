@@ -12,7 +12,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import kotlinx.coroutines.test.advanceTimeBy
+import tv.jellybeam.data.emptySeerrPage
 import uniffi.jellybeam_core.Card
+import uniffi.jellybeam_core.SeerrAvailability
+import uniffi.jellybeam_core.SeerrCard
+import uniffi.jellybeam_core.SeerrMediaType
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SearchViewModelTest {
@@ -124,5 +129,168 @@ class SearchViewModelTest {
             hevcResults,
             viewModel.state.value.results,
         )
+    }
+
+    // -- Discover section (docs/14 "Unified search") --------------------------
+
+    private fun seerrCard(tmdbId: Long, jellyfinItemId: String? = null) = SeerrCard(
+        mediaType = SeerrMediaType.MOVIE,
+        tmdbId = tmdbId,
+        title = "t$tmdbId",
+        year = null,
+        overview = null,
+        posterUrl = null,
+        backdropUrl = null,
+        availability = SeerrAvailability.NOT_REQUESTED,
+        jellyfinItemId = jellyfinItemId,
+    )
+
+    private fun configuredFake(library: List<Card>, seerr: Result<List<SeerrCard>>) = FakeCoreGateway(
+        searchResultsByQuery = mapOf("quantum" to library),
+        seerrSearchResult = seerr.map { emptySeerrPage().copy(cards = it) },
+    )
+
+    private fun connectedViewModel(fake: FakeCoreGateway) = SearchViewModel(fake).apply { setDiscoverConfigured(true) }
+
+    @Test
+    fun `without Seerr the section stays hidden and Seerr is never searched`() = runTest {
+        val fake = FakeCoreGateway(searchResultsByQuery = mapOf("quantum" to listOf(testCard(id = "q1"))))
+        val viewModel = SearchViewModel(fake)
+
+        viewModel.onQueryChange("quantum")
+        advanceUntilIdle()
+
+        assertEquals(DiscoverSection.Hidden, viewModel.state.value.discover)
+        assertTrue(fake.seerrSearchCalls.isEmpty())
+    }
+
+    @Test
+    fun `library results land before Seerr is asked`() = runTest {
+        val library = listOf(testCard(id = "q1"))
+        val fake = configuredFake(library, Result.success(listOf(seerrCard(7))))
+        val viewModel = connectedViewModel(fake)
+
+        viewModel.onQueryChange("quantum")
+        advanceTimeBy(400)
+
+        assertEquals(library, viewModel.state.value.results)
+        assertEquals(DiscoverSection.Searching, viewModel.state.value.discover)
+        assertTrue(fake.seerrSearchCalls.isEmpty())
+
+        advanceUntilIdle()
+
+        assertEquals(listOf(FakeCoreGateway.SeerrSearchCall("quantum", 1)), fake.seerrSearchCalls)
+        assertEquals(DiscoverSection.Results(listOf(seerrCard(7))), viewModel.state.value.discover)
+    }
+
+    @Test
+    fun `Seerr results already in the library results are dropped`() = runTest {
+        val fake = configuredFake(listOf(testCard(id = "q1")), Result.success(listOf(seerrCard(7, "q1"), seerrCard(8))))
+        val viewModel = connectedViewModel(fake)
+
+        viewModel.onQueryChange("quantum")
+        advanceUntilIdle()
+
+        assertEquals(DiscoverSection.Results(listOf(seerrCard(8))), viewModel.state.value.discover)
+    }
+
+    @Test
+    fun `a Seerr failure marks only the section unavailable`() = runTest {
+        val library = listOf(testCard(id = "q1"))
+        val fake = configuredFake(library, Result.failure(RuntimeException("down")))
+        val viewModel = connectedViewModel(fake)
+
+        viewModel.onQueryChange("quantum")
+        advanceUntilIdle()
+
+        assertEquals(library, viewModel.state.value.results)
+        assertEquals(DiscoverSection.Unavailable, viewModel.state.value.discover)
+    }
+
+    @Test
+    fun `clearing the query hides the section`() = runTest {
+        val fake = configuredFake(emptyList(), Result.success(listOf(seerrCard(7))))
+        val viewModel = connectedViewModel(fake)
+
+        viewModel.onQueryChange("quantum")
+        advanceUntilIdle()
+        viewModel.onQueryChange("")
+        advanceUntilIdle()
+
+        assertEquals(DiscoverSection.Hidden, viewModel.state.value.discover)
+        assertEquals(1, fake.seerrSearchCalls.size)
+    }
+
+    @Test
+    fun `returning to the answered query shows its answer at once`() = runTest {
+        val fake = configuredFake(emptyList(), Result.success(listOf(seerrCard(7))))
+        val viewModel = connectedViewModel(fake)
+
+        viewModel.onQueryChange("quantum")
+        advanceUntilIdle()
+        viewModel.onQueryChange("quantumx")
+        assertEquals(DiscoverSection.Searching, viewModel.state.value.discover)
+        viewModel.onQueryChange("quantum")
+
+        assertEquals(DiscoverSection.Results(listOf(seerrCard(7))), viewModel.state.value.discover)
+        advanceUntilIdle()
+        assertEquals(DiscoverSection.Results(listOf(seerrCard(7))), viewModel.state.value.discover)
+    }
+
+    @Test
+    fun `a Seerr failure is retried when the same query is searched again`() = runTest {
+        val fake = configuredFake(emptyList(), Result.failure(RuntimeException("down")))
+        val viewModel = connectedViewModel(fake)
+        viewModel.onQueryChange("quantum")
+        advanceUntilIdle()
+        assertEquals(DiscoverSection.Unavailable, viewModel.state.value.discover)
+
+        fake.seerrSearchResult = Result.success(emptySeerrPage().copy(cards = listOf(seerrCard(7))))
+        viewModel.onQueryChange("")
+        advanceUntilIdle()
+        viewModel.onQueryChange("quantum")
+        advanceUntilIdle()
+
+        assertEquals(DiscoverSection.Results(listOf(seerrCard(7))), viewModel.state.value.discover)
+        assertEquals(2, fake.seerrSearchCalls.size)
+    }
+
+    @Test
+    fun `disconnecting Discover hides the section and the hint stops naming it`() = runTest {
+        val fake = configuredFake(emptyList(), Result.success(listOf(seerrCard(7))))
+        val viewModel = connectedViewModel(fake)
+        viewModel.onQueryChange("quantum")
+        advanceUntilIdle()
+
+        viewModel.setDiscoverConfigured(false)
+
+        assertEquals(DiscoverSection.Hidden, viewModel.state.value.discover)
+        assertEquals(false, viewModel.state.value.discoverEnabled)
+    }
+
+    @Test
+    fun `a one-letter query searches the library but never Seerr`() = runTest {
+        val fake = FakeCoreGateway(searchResultsByQuery = mapOf("q" to listOf(testCard(id = "q1"))))
+        val viewModel = connectedViewModel(fake)
+
+        viewModel.onQueryChange("q")
+        assertEquals(DiscoverSection.Hidden, viewModel.state.value.discover)
+        advanceUntilIdle()
+
+        assertEquals(listOf(testCard(id = "q1")), viewModel.state.value.results)
+        assertEquals(DiscoverSection.Hidden, viewModel.state.value.discover)
+        assertTrue(fake.seerrSearchCalls.isEmpty())
+    }
+
+    @Test
+    fun `a trailing space from a keyboard suggestion reaches Seerr trimmed`() = runTest {
+        val fake = FakeCoreGateway(seerrSearchResult = Result.success(emptySeerrPage().copy(cards = listOf(seerrCard(7)))))
+        val viewModel = connectedViewModel(fake)
+
+        viewModel.onQueryChange("quantum ")
+        advanceUntilIdle()
+
+        assertEquals(listOf(FakeCoreGateway.SeerrSearchCall("quantum", 1)), fake.seerrSearchCalls)
+        assertEquals(DiscoverSection.Results(listOf(seerrCard(7))), viewModel.state.value.discover)
     }
 }

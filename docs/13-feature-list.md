@@ -55,7 +55,11 @@ series from an episode; add to an existing collection; refresh metadata
 for administrators -- rows that cannot apply are absent, counts and
 episode numbers are shown as trailing subtext, and every action reports
 with one toast; docs/19-detail-action-menu.md);
-search (mirror-backed, live results as you type); hidden libraries (per-library Home
+search (mirror-backed, live results as you type; with Discover connected, Seerr
+results follow in their own labelled "From Discover" section after a longer pause
+(two characters or more; a hint above the field counts them while they are below the fold),
+never delaying library results, minus titles the library results already show;
+docs/14 "Unified search"); hidden libraries (per-library Home
 visibility toggle); hide-watched-in-Latest; startup screen (Home or a chosen
 library, stale id falls back to Home); password or Jellyfin Quick Connect sign-in
 (an address typed without a scheme gets http://, and a failed attempt says what
@@ -114,7 +118,7 @@ during playback.
 "Discover" side-drawer entry (shown only once connected) with Trending/
 Movies/TV/Upcoming Movies/Upcoming TV shelves, paged Movies/TV grids with
 sort (popularity/release date/rating/title) and genre filtering, live
-Discover search, and a title detail page (backdrop, genres, cast, critic/
+Discover search (its own screen, and a section under the main Search results), and a title detail page (backdrop, genres, cast, critic/
 audience scores, availability, Similar/Recommended shelves) with Request
 and Request 4K (per-server quality-profile/root-folder picker when the
 server exposes more than one option, TV per-season picker with already-
@@ -436,7 +440,8 @@ public display.)*
   right-edge index rail that jumps by letter, month, decade, or duration.
   <!-- verified: core/media-cache/src/query.rs library_grid_checked()/library_grid_groups()/library_genres(); app/src/main/kotlin/tv/jellybeam/ui/library/LibrarySortStrip.kt; app/src/main/kotlin/tv/jellybeam/ui/library/IndexRail.kt; docs/16-library-sort-filter.md -->
 - Search is instant, powered by a real SQLite FTS5 full-text index —
-  results appear as you type, entirely against the local mirror.
+  results appear as you type, entirely against the local mirror, matching
+  word prefixes in titles, original titles and series names (not synopses).
   <!-- verified: core/media-cache/src/schema.rs "CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(" -->
 - All local writes go through a single dedicated writer task with strict
   command ordering, so the mirror can never be corrupted by concurrent

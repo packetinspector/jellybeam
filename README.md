@@ -75,7 +75,7 @@
 
 - **Connect once** in Settings and Discover appears in the drawer.
 - **Trending, Upcoming, Movies, TV.** Shelves and paged grids with sort and genre filters.
-- **Search that searches Seerr**, not just what you already have.
+- **One search box for both.** Your library answers instantly; Seerr results follow in their own section, ready to request.
 - **Title pages** with backdrop, cast, scores, availability, Similar and Recommended.
 - **Request and Request 4K.** Quality-profile and root-folder pickers, per-season pickers for TV, and a Go to library shortcut for what's already yours.
 - **Free when it's off.** Not configured means not one network call. An unreachable Seerr never touches playback.

@@ -2140,6 +2140,42 @@ mod tests {
     }
 
     #[test]
+    fn search_matches_titles_but_not_overviews() {
+        let (_dir, mut conn) = open_test_db();
+        let mut overview_only = item_dto(&uuid_n(1), "Synthetic Short", None, BaseItemKind::Movie);
+        overview_only.overview = Some("An animated tale and another".to_string());
+        let mut original_title = item_dto(&uuid_n(2), "Localised", None, BaseItemKind::Movie);
+        original_title.original_title = Some("Anglerfish Nights".to_string());
+        let mut episode = item_dto(&uuid_n(3), "Pilot", None, BaseItemKind::Episode);
+        episode.series_name = Some("Antenna Hour".to_string());
+        apply_upsert_items(&mut conn, &[overview_only, original_title, episode]).expect("insert");
+
+        let mut names: Vec<String> = search(&conn, "an", 10)
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["Localised", "Pilot"]);
+    }
+
+    #[test]
+    fn search_ands_every_term_within_titles() {
+        let (_dir, mut conn) = open_test_db();
+        apply_upsert_items(
+            &mut conn,
+            &[
+                item_dto(&uuid_n(1), "Quantum Static", None, BaseItemKind::Series),
+                item_dto(&uuid_n(2), "Quantum Drift", None, BaseItemKind::Series),
+            ],
+        )
+        .expect("insert");
+
+        let rows = search(&conn, "quant stat", 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Quantum Static");
+    }
+
+    #[test]
     fn search_with_empty_query_returns_nothing() {
         let (_dir, conn) = open_test_db();
         assert!(search(&conn, "", 10).is_empty());

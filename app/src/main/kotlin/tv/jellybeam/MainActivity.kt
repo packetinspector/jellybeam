@@ -1134,6 +1134,10 @@ private fun JellybeamRoot(
 
                                 Screen.Search -> SearchScreen(
                                     onOpenDetail = { card -> navigate(stack.pushDetail(card)) },
+                                    onOpenDiscoverDetail = { mediaType, tmdbId ->
+                                        navigate(stack.push(Screen.DiscoverDetail(mediaType, tmdbId)))
+                                    },
+                                    discoverConfigured = discoverConfigured,
                                     isTop = isTop,
                                     focusGate = focusGate,
                                 )

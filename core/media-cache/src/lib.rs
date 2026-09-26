@@ -61,7 +61,9 @@ pub(crate) fn item_types_for_collection(collection_type: &str) -> &'static [&'st
 /// - 14 -> 15: `idx_items_browse` trails `sort_name COLLATE NOCASE` so `children()`'s
 ///   `Sort::NameAsc` (now also `COLLATE NOCASE`) stays index-served instead of a binary sort;
 ///   drops the dead `image_lru` table.
-pub const SCHEMA_VERSION: u32 = 15;
+/// - 15 -> 16: the `search` FTS table drops `overview`, so search matches titles only (a
+///   short prefix like "an" matched nearly every synopsis).
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// Read connections held open per `Mirror`.
 const READ_POOL_SIZE: usize = 4;
@@ -934,7 +936,7 @@ mod tests {
 
     #[test]
     fn schema_version_is_stable_constant() {
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
     }
 
     // `start_paused = true`: `recv_changes` always waits out `CHANGE_DEBOUNCE` before

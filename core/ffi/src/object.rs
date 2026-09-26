@@ -1198,7 +1198,7 @@ impl JellybeamCore {
         mirror.library_genres(&view_id)
     }
 
-    /// Mirror-backed free-text search (name/series-name/overview prefix
+    /// Mirror-backed free-text search (title/original-title/series-name prefix
     /// match, ranked -- see `media_cache::query::search`). Fails open: an
     /// empty vec, never an error, when the mirror isn't open yet.
     pub fn search(&self, query: String, limit: u32) -> Vec<Card> {

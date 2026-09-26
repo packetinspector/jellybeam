@@ -5,6 +5,7 @@
 //! via re-login, else `SeerrError::Unauthorized`. `Inner`/`AuthState` skip `Debug` so secrets
 //! never print.
 
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -298,12 +299,12 @@ impl SeerrClient {
         query: &[(&str, String)],
         body: &Option<serde_json::Value>,
     ) -> Result<reqwest::Response, SeerrError> {
-        let url = format!("{}{}", self.inner.base_url, path);
-        let mut builder = self.inner.http.request(method, &url);
-        if !query.is_empty() {
-            builder = builder.query(query);
-        }
-        builder = self.attach_auth(builder);
+        let url = if query.is_empty() {
+            format!("{}{}", self.inner.base_url, path)
+        } else {
+            format!("{}{}?{}", self.inner.base_url, path, encode_query(query))
+        };
+        let mut builder = self.attach_auth(self.inner.http.request(method, &url));
         if let Some(body) = body {
             builder = builder.json(body);
         }
@@ -694,6 +695,33 @@ impl SeerrClient {
             None,
         )
         .await
+    }
+}
+
+/// Seerr's request validator rejects reserved characters in query values, `+` for a space
+/// included (reqwest's form encoding), so every value is percent-encoded down to RFC 3986's
+/// unreserved set, as a browser's `encodeURIComponent` would.
+fn encode_query(query: &[(&str, String)]) -> String {
+    let mut out = String::new();
+    for (i, (key, value)) in query.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        push_encoded(&mut out, key);
+        out.push('=');
+        push_encoded(&mut out, value);
+    }
+    out
+}
+
+fn push_encoded(out: &mut String, text: &str) {
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            // Writing to a String never fails.
+            let _ = write!(out, "%{byte:02X}");
+        }
     }
 }
 

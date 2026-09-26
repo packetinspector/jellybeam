@@ -154,7 +154,15 @@
     <string name="search_chip">Search</string>
     <string name="search_field_label">Search</string>
     <string name="search_empty_hint">Search your library</string>
+    <string name="search_empty_hint_with_discover">Search your library and Discover</string>
     <string name="search_no_results">No matches</string>
+    <string name="search_discover_kicker">FROM DISCOVER · REQUEST WITH SEERR</string>
+    <string name="search_discover_searching">Searching Discover…</string>
+    <string name="search_discover_unavailable">Discover isn\'t answering right now</string>
+    <plurals name="search_discover_below">
+        <item quantity="one">↓ %d FROM DISCOVER BELOW</item>
+        <item quantity="other">↓ %d FROM DISCOVER BELOW</item>
+    </plurals>
 
     <!-- Settings screen (docs/09-settings-plan.md slice 2; sectioned-layout
          pass). Row-interaction mechanism (documented in SettingsScreen.kt's

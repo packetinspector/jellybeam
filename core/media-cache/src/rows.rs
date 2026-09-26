@@ -58,7 +58,6 @@ pub(crate) struct SearchText {
     pub name: String,
     pub original_title: String,
     pub series_name: String,
-    pub overview: String,
 }
 
 /// The `parent_id` to use for browsing (`idx_items_browse`/`children()`). For Season/Episode
@@ -156,7 +155,6 @@ pub(crate) fn search_text(item: &BaseItemDto) -> SearchText {
         name: item.name.clone().unwrap_or_default(),
         original_title: item.original_title.clone().unwrap_or_default(),
         series_name: item.series_name.clone().unwrap_or_default(),
-        overview: item.overview.clone().unwrap_or_default(),
     }
 }
 
@@ -485,7 +483,7 @@ mod tests {
         let text = search_text(&item);
         assert_eq!(text.name, "Sample Movie");
         assert_eq!(text.original_title, "");
-        assert_eq!(text.overview, "");
+        assert_eq!(text.series_name, "");
     }
 
     #[test]

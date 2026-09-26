@@ -10,13 +10,13 @@ patterns.
 - **Zero startup cost.** No Seerr code runs at cold start. The drawer's "is Discover
   configured" check is a local JSON read (`seerr_status`), performed in the existing
   post-startup drawer-metadata effect. No network happens until the user opens the
-  Discover screen or the Discover settings section.
+  Discover screen or the Discover settings section, or types a query into Search.
 - **No local mirror.** Seerr data is fetched on demand; caching is in-memory in the
   Rust core only (process-lifetime or shorter). Nothing Seerr touches the media-cache
   crate or mirror.db.
 - **Fail open.** A dead/misconfigured Seerr server degrades to an inline message inside
-  the Discover screen only. It must never affect Jellyfin browsing, playback, search,
-  or startup.
+  the Discover screen, or inside Search's Discover section. It must never affect Jellyfin
+  browsing, playback, library search results, or startup.
 - **Decisions in Rust** (docs/01): availability mapping, season requestability, POST-vs-PUT
   request logic, URL candidate probing, auth/re-auth — all in the core with unit tests.
   Kotlin renders snapshots and forwards commands.
@@ -194,7 +194,24 @@ Errors: new `CoreError::SeerrNotConfigured`; otherwise map to the existing
   My Requests keys its cells by `request_id` (rows de-duplicated by it), since one title can carry several
   requests (SD + 4K, season batches).
 - **Search**: field-atop-grid per SearchScreen recipe, 300ms debounce,
-  generation-guarded, results are Seerr movie/TV cards. Main (mirror) Search untouched.
+  generation-guarded, results are Seerr movie/TV cards (Seerr only).
+- **Unified search** (main Search screen): library results stay mirror-backed on their
+  own 300ms debounce and never wait on Seerr. When `seerr_status().configured` and the
+  trimmed query has two or more characters (`discoverQueryReady`), the same query goes to
+  `seerr_search` (page 1) after a 700ms pause, with its own generation guard
+  and a cancelled predecessor. Its cards follow the library cells in the same grid under
+  a full-width "FROM DISCOVER" kicker and 1px divider, rendered as `SeerrPosterCard`
+  (availability badge) and opening Discover detail. A Seerr card whose
+  `jellyfin_item_id` matches a shown library result's id or series id, or whose kind,
+  title and year match a shown Movie/Series (a Seerr linked to another server reports ids
+  that never match), is dropped (`discoverCardsBesideLibrary`); an empty remainder hides the section. While pending the
+  header shows "Searching Discover…"; a failure shows a one-line muted notice. "No
+  matches" waits until both sides settle empty (`showNoMatches`). Down from the field
+  lands on the first Discover card when the library side is empty. A new library answer
+  resets the grid to the top (its rows are inserted ahead of the Discover header, which the
+  grid would otherwise keep anchored). While Discover has results and its header is below the
+  last visible cell, the field label's line shows a muted "↓ N FROM DISCOVER BELOW"
+  (`discoverHintCount`), unfocusable.
 - **Detail**: availability/request state line, Request / Request 4K / Cancel request
   actions, season picker for TV (non-requestable seasons shown checked and inert),
   profile/root-folder pickers only when `SeerrRequestOptions` has entries, cast row,

@@ -802,8 +802,8 @@ fn fts_insert(
     text: &SearchText,
 ) -> rusqlite::Result<()> {
     tx.execute(
-        "INSERT INTO search (rowid, name, original_title, series_name, overview) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![rowid, text.name, text.original_title, text.series_name, text.overview],
+        "INSERT INTO search (rowid, name, original_title, series_name) VALUES (?1, ?2, ?3, ?4)",
+        params![rowid, text.name, text.original_title, text.series_name],
     )?;
     Ok(())
 }
@@ -814,8 +814,8 @@ fn fts_delete(
     text: &SearchText,
 ) -> rusqlite::Result<()> {
     tx.execute(
-        "INSERT INTO search (search, rowid, name, original_title, series_name, overview) VALUES ('delete', ?1, ?2, ?3, ?4, ?5)",
-        params![rowid, text.name, text.original_title, text.series_name, text.overview],
+        "INSERT INTO search (search, rowid, name, original_title, series_name) VALUES ('delete', ?1, ?2, ?3, ?4)",
+        params![rowid, text.name, text.original_title, text.series_name],
     )?;
     Ok(())
 }

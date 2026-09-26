@@ -618,3 +618,49 @@ fn browse_filters_default_sends_only_the_page_param() {
     let query = SeerrClient::browse_query(1, &BrowseFilters::default(), true);
     assert_eq!(query, vec![("page", "1".to_string())]);
 }
+
+#[test]
+fn query_values_are_percent_encoded_never_plus() {
+    let encoded = encode_query(&[
+        ("query", "harbor lights ".to_string()),
+        ("page", "1".to_string()),
+    ]);
+    assert_eq!(encoded, "query=harbor%20lights%20&page=1");
+}
+
+#[test]
+fn query_encoding_escapes_reserved_and_non_ascii() {
+    let encoded = encode_query(&[("query", "a+b&c=d/é:~".to_string())]);
+    assert_eq!(encoded, "query=a%2Bb%26c%3Dd%2F%C3%A9%3A~");
+}
+
+#[tokio::test]
+async fn search_sends_a_space_as_percent_twenty() {
+    let (base, captured) = scripted_server(vec![
+        ScriptedResponse::ok_json(sample_user_json(1)),
+        ScriptedResponse::ok_json(r#"{"page":1,"totalPages":1,"totalResults":0,"results":[]}"#),
+    ])
+    .await;
+    let (connect_timeout, request_timeout) = probe_timeouts();
+    let (client, _user) = SeerrClient::login(LoginArgs {
+        base_url: &base,
+        method: SeerrAuthMethod::ApiKey,
+        identity: "",
+        secret: "synthetic-key",
+        connect_timeout,
+        request_timeout,
+    })
+    .await
+    .expect("api key login should succeed");
+
+    client
+        .search("harbor lights", 1)
+        .await
+        .expect("search should succeed");
+
+    let requests = captured.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        requests[1].path,
+        "/api/v1/search?query=harbor%20lights&page=1"
+    );
+}
