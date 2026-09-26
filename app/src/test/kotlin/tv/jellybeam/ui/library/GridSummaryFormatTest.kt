@@ -45,6 +45,14 @@ class GridSummaryFormatTest {
         assertEquals(listOf("120 SHOWS", "NAME ↑"), segments)
     }
 
+    @Test
+    fun `a single title takes the singular noun`() {
+        val one = GridCounts(filtered = 1uL, total = 1uL)
+        val sort = GridSort(GridSortField.NAME, descending = false)
+        assertEquals("1 MOVIE", GridSummaryFormat.segments(one, sort, noFilters, isTv = false).first())
+        assertEquals("1 SHOW", GridSummaryFormat.segments(one, sort, noFilters, isTv = true).first())
+    }
+
     // ---- segments: filtered state -----------------------------------------
 
     @Test

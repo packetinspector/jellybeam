@@ -18,6 +18,7 @@ import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.LaunchWarmup
 import tv.jellybeam.player.PlaybackReports
 import tv.jellybeam.ui.common.ChangeRefreshScheduler
+import tv.jellybeam.ui.common.countLabel
 import tv.jellybeam.ui.common.serverHostLabel
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.LatestShelf
@@ -89,7 +90,7 @@ fun syncProgressText(status: SyncStatus.Syncing): String {
     return if (total != null) {
         "Syncing $library — ${status.itemsDone} of $total…"
     } else {
-        "Syncing $library — ${status.itemsDone} items…"
+        "Syncing $library — ${countLabel(status.itemsDone.toULong(), "item", "items")}…"
     }
 }
 

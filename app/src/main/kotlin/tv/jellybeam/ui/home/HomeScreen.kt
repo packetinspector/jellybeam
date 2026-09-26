@@ -1156,6 +1156,7 @@ private fun HeroBanner(
                 blurhash = blurhash,
                 placeholderDimAlpha = BACKDROP_PLACEHOLDER_DIM,
                 modifier = Modifier.fillMaxSize(),
+                placeholderGraceMs = 0L,
             )
         }
         // Two-layer scrim: near-opaque under the (Start-aligned) text column, clear over the art's

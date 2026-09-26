@@ -1,6 +1,7 @@
 package tv.jellybeam.ui.detail
 
 import kotlin.random.Random
+import tv.jellybeam.ui.common.countLabel
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.CollectionInfo
 
@@ -126,14 +127,14 @@ private fun buildThisTitleRows(input: MenuInput): List<MenuRow> {
             rows += MenuRow(
                 action = MenuAction.MarkScopeWatched(unwatchedCount, isSeason),
                 label = if (isSeason) "Mark season as watched" else "Mark series as watched",
-                subtext = "$unwatchedCount EPISODES",
+                subtext = countLabel(unwatchedCount, "EPISODE", "EPISODES"),
             )
         }
         if (watchedCount > 0) {
             rows += MenuRow(
                 action = MenuAction.MarkScopeUnwatched(watchedCount, isSeason),
                 label = if (isSeason) "Mark season as unwatched" else "Mark series as unwatched",
-                subtext = "$watchedCount EPISODES",
+                subtext = countLabel(watchedCount, "EPISODE", "EPISODES"),
             )
         }
     } else {

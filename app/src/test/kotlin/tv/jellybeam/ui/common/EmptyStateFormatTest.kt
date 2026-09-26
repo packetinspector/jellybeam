@@ -22,5 +22,6 @@ class EmptyStateFormatTest {
     fun spec_line_joins_host_libraries_and_items() {
         assertEquals("jellyfin.example.test:8096 │ 3 LIBRARIES │ 0 ITEMS", emptyLibrarySpecLine("jellyfin.example.test:8096", 3, 0))
         assertEquals("0 LIBRARIES │ 0 ITEMS", emptyLibrarySpecLine(null, 0, 0))
+        assertEquals("1 LIBRARY │ 1 ITEM", emptyLibrarySpecLine(null, 1, 1))
     }
 }

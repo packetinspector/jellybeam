@@ -19,6 +19,6 @@ fun serverHostLabel(serverUrl: String?): String? {
 
 /** The empty-library spec strip: `HOST:PORT │ N LIBRARIES │ 0 ITEMS` (§6.2), host omitted when unknown. */
 fun emptyLibrarySpecLine(host: String?, libraries: Int, items: Int): String {
-    val parts = listOfNotNull(host, "$libraries LIBRARIES", "$items ITEMS")
+    val parts = listOfNotNull(host, countLabel(libraries, "LIBRARY", "LIBRARIES"), countLabel(items, "ITEM", "ITEMS"))
     return parts.joinToString(" │ ")
 }

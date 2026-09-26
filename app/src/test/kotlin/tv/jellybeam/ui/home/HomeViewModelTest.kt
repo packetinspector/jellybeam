@@ -517,6 +517,13 @@ class HomeViewModelTest {
     }
 
     @Test
+    fun `syncing status counts a single item in the singular`() {
+        val status = SyncStatus.Syncing(libraryName = "TV Shows", pagesDone = 1u, itemsDone = 1u, totalItems = null)
+
+        assertEquals("Syncing TV Shows — 1 item…", loadingStatusText(status, tickCount = 0))
+    }
+
+    @Test
     fun `syncing status shows the server library name verbatim, never prettified`() {
         // Server-configured names render verbatim; deliberately not normal-looking, to prove
         // nothing reformats it.

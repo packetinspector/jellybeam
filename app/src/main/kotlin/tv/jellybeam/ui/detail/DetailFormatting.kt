@@ -11,6 +11,7 @@ import kotlin.math.max
 import kotlin.math.roundToLong
 import tv.jellybeam.ui.cards.ArtSource
 import tv.jellybeam.ui.cards.CardFormatting
+import tv.jellybeam.ui.common.countLabel
 import uniffi.jellybeam_core.AudioSpatialKind
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
@@ -624,7 +625,7 @@ object DetailFormatting {
      */
     fun seasonSummaryItems(seasonName: String, episodes: List<Card>): List<String> {
         val watched = episodes.count { it.played }
-        return listOf(seasonName.uppercase(Locale.US), "${episodes.size} EPISODES", "$watched WATCHED")
+        return listOf(seasonName.uppercase(Locale.US), countLabel(episodes.size, "EPISODE", "EPISODES"), "$watched WATCHED")
     }
 
     /** §4 item 7's file-size cell: `"7.2 GB"` / `"512 MB"` -- GB at one decimal once >= 1024MB,

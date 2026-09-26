@@ -1,6 +1,7 @@
 package tv.jellybeam.ui.library
 
 import java.util.Locale
+import tv.jellybeam.ui.common.countLabel
 import uniffi.jellybeam_core.Decade
 import uniffi.jellybeam_core.GridCounts
 import uniffi.jellybeam_core.GridFilters
@@ -32,8 +33,7 @@ object GridSummaryFormat {
         segments += if (isFiltered) {
             "${counts.filtered} OF ${counts.total}"
         } else {
-            val noun = if (isTv) "SHOWS" else "MOVIES"
-            "${counts.total} $noun"
+            if (isTv) countLabel(counts.total, "SHOW", "SHOWS") else countLabel(counts.total, "MOVIE", "MOVIES")
         }
 
         segments += "${sortFieldSummaryLabel(sort.field)} ${arrow(sort.descending)}"

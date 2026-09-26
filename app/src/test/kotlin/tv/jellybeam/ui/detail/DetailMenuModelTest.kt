@@ -211,7 +211,7 @@ class DetailMenuModelTest {
         val watchedRow = thisTitle.first { it.action is MenuAction.MarkScopeWatched }
         val unwatchedRow = thisTitle.first { it.action is MenuAction.MarkScopeUnwatched }
         assertEquals(1, (watchedRow.action as MenuAction.MarkScopeWatched).count)
-        assertEquals("1 EPISODES", watchedRow.subtext)
+        assertEquals("1 EPISODE", watchedRow.subtext)
         assertEquals(1, (unwatchedRow.action as MenuAction.MarkScopeUnwatched).count)
         assertEquals("Mark series as watched", watchedRow.label)
         assertEquals("Mark series as unwatched", unwatchedRow.label)

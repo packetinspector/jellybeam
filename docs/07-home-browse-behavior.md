@@ -45,7 +45,7 @@ Every card-derived value above (art source, progress bar, badge, timing label, a
 - 16:9 art fallback (`rail_art_source`, cards.rs:277-288): own primary_tag → (parent_backdrop_item_id, parent_backdrop_tag) → placeholder.
 - Missing-artwork placeholder: static SURFACE_PANEL box with the item NAME centered in small tertiary text (never initials/blank). Pre-texture loading placeholder: flat SURFACE_RAISED + skeleton pulse (0.85↔1.0 opacity, 2s), no text. The pulse stops once failed image requests exhaust their retries and resumes if a later foreground return triggers another load.
 - An empty Home keeps a focusable explanatory message so Left can open the drawer before the first titles arrive, after sync failure, or when every shelf is hidden. The normal focus-memory path restores this target on drawer close and transfers to content when it arrives.
-- Blurhash: interim only — texture (150ms cross-fade) → blurhash → pulsing flat.
+- Blurhash: interim only — texture (150ms cross-fade) → blurhash → pulsing flat. The interim chain stays hidden for the first 250 ms of a load, so art that arrives from cache fades straight in over the background instead of flashing flat → blurhash → art.
 - Failed load: Coil never retries a request that ended in error, so a card would keep its blurhash for as long as the screen lives; `CardArtImage` retries with backoff (2 s, 4 s, 8 s, three attempts) and once more, with a fresh attempt budget, when the app returns to the foreground. The blurhash stays up meanwhile; nothing is re-requested for a card that succeeded.
 
 ## 3. Library grid

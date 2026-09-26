@@ -58,6 +58,7 @@ import tv.jellybeam.JellybeamTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -125,6 +126,10 @@ private const val BLURHASH_DECODE_HEIGHT = 18
  */
 private const val BLURHASH_DIM_DEFAULT = 0.35f
 const val BACKDROP_PLACEHOLDER_DIM = 0.55f
+
+/** docs/07 §2: the interim chain stays hidden this long, so a cache-fast load fades straight in
+ * instead of flashing flat tile, then blurhash, then art. */
+private const val PLACEHOLDER_GRACE_MS = 250L
 
 /** [CardArtImage]'s retry cap per URL, before giving up until the next foreground return. */
 const val IMAGE_LOAD_MAX_RETRIES = 3
@@ -434,6 +439,8 @@ fun CardArtImage(
      * blurhash chain unchanged.
      */
     placeholderMemoryCacheKey: MemoryCache.Key? = null,
+    /** 0 when an outgoing image fades over this one (Home hero), since an empty grace dips to dark. */
+    placeholderGraceMs: Long = PLACEHOLDER_GRACE_MS,
 ) {
     // The ImageKind comes from the source case, never the caller: a fallback changes the image
     // type too.
@@ -497,12 +504,21 @@ fun CardArtImage(
         derivedStateOf { painter.state is AsyncImagePainter.State.Success }
     }
 
+    // Composed at once so the blurhash decodes during the grace, but drawn only after it; read in
+    // graphicsLayer so the reveal redraws without recomposing the card.
+    var placeholderShown by remember(url) { mutableStateOf(placeholderGraceMs <= 0L) }
+    LaunchedEffect(url) {
+        if (placeholderShown) return@LaunchedEffect
+        delay(placeholderGraceMs)
+        placeholderShown = true
+    }
+
     Box(modifier = modifier.alpha(contentAlpha)) {
         if (!isSuccess) {
             BlurhashOrPulsingTile(
                 blurhash = blurhash,
                 dimAlpha = placeholderDimAlpha,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = if (placeholderShown) 1f else 0f },
                 animate = errorState == null || retryAttempt < IMAGE_LOAD_MAX_RETRIES,
             )
         }

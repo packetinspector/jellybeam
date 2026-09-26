@@ -1031,7 +1031,7 @@ class DetailFormattingTest {
     @Test
     fun `seasonSummaryLine handles zero watched episodes`() {
         val unwatched = testCard(id = "e1", itemType = "Episode", played = false)
-        assertEquals("SPECIALS · 1 EPISODES · 0 WATCHED", DetailFormatting.seasonSummaryLine("Specials", listOf(unwatched)))
+        assertEquals("SPECIALS · 1 EPISODE · 0 WATCHED", DetailFormatting.seasonSummaryLine("Specials", listOf(unwatched)))
     }
 
     @Test
