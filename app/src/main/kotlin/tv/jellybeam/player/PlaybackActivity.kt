@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.Lifecycle
@@ -117,7 +118,7 @@ class PlaybackActivity : ComponentActivity() {
 
     /** Re-requests the one real Compose focus target when this window regains focus, or D-pad
      * keys go dead until recreation. */
-    private var windowFocusEpoch by mutableStateOf(0L)
+    private var windowFocusEpoch by mutableLongStateOf(0L)
 
     /** docs/17 §2/§3: Compose-visible mirror of `isInPictureInPictureMode`; [PlaybackScreen] gates
      * every overlay but the bare video surface on this. */

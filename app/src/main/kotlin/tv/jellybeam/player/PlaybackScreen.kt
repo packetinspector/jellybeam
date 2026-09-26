@@ -714,7 +714,7 @@ fun PlaybackScreen(
     val flashAlpha = remember { Animatable(0f) }
     var flashJob by remember { mutableStateOf<Job?>(null) }
     val focusRequester = remember { FocusRequester() }
-    var pickerFocusIndex by remember { mutableStateOf(0) }
+    var pickerFocusIndex by remember { mutableIntStateOf(0) }
     /** The button row's focused identity; null only while another overlay owns interaction. */
     var focusedButton by remember { mutableStateOf<ControlButton?>(null) }
     /** docs/15 §4: the button that opened the current nested surface, captured before
@@ -724,8 +724,8 @@ fun PlaybackScreen(
     var skipUndo by remember { mutableStateOf<SkipUndoState?>(null) }
     val sheetScrollState = rememberScrollState()
     val sheetScrollStepPx = remember(density) { with(density) { 120.dp.roundToPx() } }
-    var speedMenuFocusIndex by remember { mutableStateOf(0) }
-    var chaptersMenuFocusIndex by remember { mutableStateOf(0) }
+    var speedMenuFocusIndex by remember { mutableIntStateOf(0) }
+    var chaptersMenuFocusIndex by remember { mutableIntStateOf(0) }
 
     /**
      * docs/12 §9: one [GlideSeekController] per READY session, rebuilt only on item/duration
@@ -2227,7 +2227,7 @@ private fun OsdAnchoredMenu(
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
-    var heightPx by remember { mutableStateOf(0f) }
+    var heightPx by remember { mutableFloatStateOf(0f) }
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val screenWidthPx = with(density) { maxWidth.toPx() }
         val menuWidthPx = with(density) { Osd.MENU_WIDTH.toPx() }
@@ -2269,10 +2269,10 @@ private val OSD_MENU_ROW_LEADING_WIDTH = 20.dp
 private fun OsdMenuRow(
     label: String,
     focused: Boolean,
+    modifier: Modifier = Modifier,
     trailing: String? = null,
     trailingMuted: Boolean = false,
     leading: OsdRowLeading = OsdRowLeading.NONE,
-    modifier: Modifier = Modifier,
 ) {
     val labelColor = if (focused) JellybeamTheme.Notte else JellybeamTheme.Panna
     val trailingColor = if (focused) JellybeamTheme.Notte else if (trailingMuted) JellybeamTheme.Grigio else JellybeamTheme.Pistacchio
@@ -2500,9 +2500,9 @@ private fun TrickplaySeekPreviewPanel(
     tileBitmap: ImageBitmap?,
     widthDp: Dp,
     targetPositionMs: Long,
+    modifier: Modifier = Modifier,
     chapterName: String? = null,
     chip: GlideChipLine? = null,
-    modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         if (tileBitmap != null && meta != null && meta.width > 0u) {
@@ -2942,7 +2942,7 @@ private fun TrackPickerSectionHeader(text: String) {
 private val TRACK_SECTION_HEAD_REVEAL = 48.dp
 
 @Composable
-private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, revealAbove: Dp = 0.dp, modifier: Modifier = Modifier) {
+private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, modifier: Modifier = Modifier, revealAbove: Dp = 0.dp) {
     val focusFill = remember { JellybeamTheme.Panna.copy(alpha = 0x22 / 255f) }
     // Picker focus is a virtual index, not Compose focus, so the panel's scroll must be driven by
     // hand or long track lists run the cursor off the panel.

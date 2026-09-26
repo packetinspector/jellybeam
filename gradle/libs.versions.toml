@@ -1,19 +1,19 @@
 [versions]
 # Kept in step with the build container image (same JDK).
 android-gradle = "8.13.2"
-kotlin = "2.3.0"
+kotlin = "2.4.20"
 android-compileSdk = "36"
 android-minSdk = "23"
 android-targetSdk = "36"
 
 androidx-activity = "1.12.2"
-androidx-compose-ui = "1.10.0"
-androidx-core = "1.17.0"
+androidx-compose-ui = "1.11.4"
+androidx-core = "1.18.0"
 # Android 12+ SplashScreen API compat shim (docs/brand.md §6.3), independent release train
 # from core-ktx above.
-androidx-core-splashscreen = "1.0.1"
+androidx-core-splashscreen = "1.2.0"
 androidx-lifecycle = "2.8.7"
-androidx-media3 = "1.9.0"
+androidx-media3 = "1.11.1"
 # Explicit pin -- ProfileInstaller/ProfileVerifier were previously only
 # transitive via compose/activity. Pinned so the embedded Baseline Profile
 # (app/src/main/baseline-prof.txt) and the profile-status log line
@@ -27,10 +27,10 @@ jna = "5.14.0"
 # (DTS/TrueHD/edge-case FLAC-Vorbis...) so exotic audio Direct Plays
 # instead of forcing a server transcode. Resolves off mavenCentral();
 # no extra repository needed.
-jellyfin-media3-ffmpeg-decoder = "1.8.0+1"
+jellyfin-media3-ffmpeg-decoder = "1.9.0+1"
 
 junit = "4.13.2"
-zxing = "3.5.3"
+zxing = "3.5.4"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "android-gradle" }

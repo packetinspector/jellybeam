@@ -57,6 +57,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -304,7 +305,7 @@ internal fun DetailActionPanel(
                         // docs/19 §1.3/§1.5: unlike the first level, this one scrolls (up to 200
                         // rows); `PanelActionRow`'s `clickable` brings a focused row into view.
                         MenuLevel.COLLECTIONS -> Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                            HeadingBand(label = stringResource(R.string.detail_menu_collections_count, collections.size).uppercase(Locale.US), isFirst = true)
+                            HeadingBand(label = pluralStringResource(R.plurals.detail_menu_collections_count, collections.size, collections.size).uppercase(Locale.US), isFirst = true)
                             if (collectionRequesters.none { it != null }) {
                                 Box(Modifier.size(1.dp).focusRequester(collectionsAnchorRequester).focusable())
                             }
@@ -446,7 +447,7 @@ private fun footerText(level: MenuLevel, confirmVisible: Boolean, actionRowCount
     val backToCancel = stringResource(R.string.detail_menu_footer_back_to_cancel).uppercase(Locale.US)
     val backForActions = stringResource(R.string.detail_menu_footer_back_for_actions).uppercase(Locale.US)
     val backToClose = stringResource(R.string.detail_menu_footer_close).uppercase(Locale.US)
-    val actionsCount = stringResource(R.string.detail_menu_footer_actions_count, actionRowCount).uppercase(Locale.US)
+    val actionsCount = pluralStringResource(R.plurals.detail_menu_footer_actions_count, actionRowCount, actionRowCount).uppercase(Locale.US)
     return remember(level, confirmVisible, actionRowCount, backToCancel, backForActions, backToClose, actionsCount) {
         buildAnnotatedString {
             when {
@@ -488,9 +489,9 @@ private fun BulkConfirmBlock(
     onCancel: () -> Unit,
 ) {
     val title = if (confirm.played) {
-        stringResource(R.string.detail_menu_confirm_watched_title, confirm.count)
+        pluralStringResource(R.plurals.detail_menu_confirm_watched_title, confirm.count, confirm.count)
     } else {
-        stringResource(R.string.detail_menu_confirm_unwatched_title, confirm.count)
+        pluralStringResource(R.plurals.detail_menu_confirm_unwatched_title, confirm.count, confirm.count)
     }
     val body = if (confirm.played) {
         stringResource(R.string.detail_menu_confirm_watched_body, confirm.scopeName)

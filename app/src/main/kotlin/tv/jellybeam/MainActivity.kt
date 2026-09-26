@@ -38,6 +38,8 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -575,12 +577,12 @@ private fun JellybeamRoot(
     // docs/14-seerr-discover.md: whether the drawer's "Discover" entry shows at all -- a
     // local-file-only read, re-checked whenever [seerrEpoch] bumps or the session changes.
     var discoverConfigured by remember { mutableStateOf(false) }
-    var seerrEpoch by remember { mutableStateOf(0) }
+    var seerrEpoch by remember { mutableIntStateOf(0) }
 
     // Full in-app session reset (switching/adding a server): bumping this re-keys the startup
     // LaunchedEffect below to rerun restoreSession -> openMirror -> views. Plain Int, not a
     // Boolean, so a second switch requested before the first finishes is still a new key.
-    var sessionEpoch by remember { mutableStateOf(0) }
+    var sessionEpoch by remember { mutableIntStateOf(0) }
 
     // The ambient (Activity-level) ViewModelStore, resolved before any per-entry
     // CompositionLocalProvider could shadow it -- where Home/Search/Settings/SignIn
@@ -757,7 +759,7 @@ private fun JellybeamRoot(
     // Launch, account switch and re-authorization check at once ([sessionEpoch]); a return to the
     // foreground checks at most once a minute. A 401 reaches re-authorization through the
     // gateway's seam; every other outcome fails open.
-    var sessionCheckedAtMs by remember { mutableStateOf(Long.MIN_VALUE) }
+    var sessionCheckedAtMs by remember { mutableLongStateOf(Long.MIN_VALUE) }
     fun checkSession(force: Boolean) {
         val now = SystemClock.elapsedRealtime()
         if (!force && now - sessionCheckedAtMs < SESSION_CHECK_MIN_INTERVAL_MS) return

@@ -28,6 +28,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -196,7 +197,7 @@ fun LibraryScreen(
     var panel by remember { mutableStateOf<LibraryStripPanel?>(null) }
     val activeSortChipRequester = remember { FocusRequester() }
 
-    var railIndex by remember { mutableStateOf(0) }
+    var railIndex by remember { mutableIntStateOf(0) }
     var railOriginKey by remember { mutableStateOf<String?>(null) }
     val railRequester = remember { FocusRequester() }
     val railEntries = remember(state.sort, state.groups) { IndexRailModel.build(state.sort, state.groups, LocalDate.now()) }

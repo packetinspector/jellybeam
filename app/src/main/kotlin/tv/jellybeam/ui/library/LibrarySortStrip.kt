@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -99,7 +100,7 @@ internal fun LibrarySortStrip(
     val scope = rememberCoroutineScope()
 
     var focusRow by remember { mutableStateOf(StripRow.SORT) }
-    var focusIndex by remember { mutableStateOf(0) }
+    var focusIndex by remember { mutableIntStateOf(0) }
 
     // Which chip a panel Select/Back returns focus to (§4.3); stays composed while open.
     val genreChipRequester = remember { FocusRequester() }

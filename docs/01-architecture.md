@@ -72,7 +72,7 @@ that define the visual style map naturally onto TV focus states.
 
 ## Player backend
 
-Media3 ExoPlayer **1.9.0** + `org.jellyfin.media3:media3-ffmpeg-decoder`. libmpv is
+Media3 ExoPlayer **1.11.1** + `org.jellyfin.media3:media3-ffmpeg-decoder`. libmpv is
 explicitly rejected for TV: Media3 is the certified path for MediaCodec hardware
 decode, HDR/passthrough per chipset, and the ffmpeg extension covers software audio
 formats (DTS, TrueHD…) without server transcoding — which keeps the Direct-Play-first

@@ -79,11 +79,11 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -308,7 +308,9 @@ fun DetailScreen(
     // docs/19 §1.5 FIX D: real content width (screen width minus the panel's current reflow),
     // threaded down alongside [contentEndInset] so below-fold LazyRows slice to whole cards -- see
     // [rememberCardWindow].
-    val contentWidth = LocalConfiguration.current.screenWidthDp.dp - contentEndInset
+    val windowWidthPx = LocalWindowInfo.current.containerSize.width
+    val screenWidthDp = with(LocalDensity.current) { windowWidthPx.toDp() }
+    val contentWidth = screenWidthDp - contentEndInset
 
     // docs/19 §1.5: Left closes the panel; the nav drawer's "focus can't move left" open gesture
     // is always true inside the panel's focus trap, so it stands down while the panel is composed.
@@ -1460,9 +1462,9 @@ private fun SeasonEpisodeShelf(
     onOpenDetail: (Card) -> Unit,
     memory: FocusMemory,
     listState: LazyListState,
+    modifier: Modifier = Modifier,
     contentWidth: Dp = 0.dp,
     active: Boolean = false,
-    modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current
     val episodeImageWidth = remember(density) {
@@ -2358,13 +2360,13 @@ private val CAST_ROW_GAP = 22.dp
 private fun CastRow(
     members: List<PersonInfo>,
     memory: FocusMemory,
+    modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
     showRole: Boolean = true,
     showHeader: Boolean = false,
     // docs/19 §1.5 FIX D: defaults mean "no slicing", keeping any other/future caller safe.
     contentWidth: Dp = 0.dp,
     active: Boolean = false,
-    modifier: Modifier = Modifier,
 ) {
     if (members.isEmpty()) return
     // FIX D: whole cast cards only while the panel is open (see [rememberCardWindow]).

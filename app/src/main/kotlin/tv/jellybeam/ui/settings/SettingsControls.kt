@@ -253,8 +253,8 @@ internal fun ToggleRow(
     value: Boolean,
     onToggle: () -> Unit,
     key: String,
-    enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -305,8 +305,8 @@ internal fun ActionRow(
     description: String,
     onClick: () -> Unit,
     key: String,
-    enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -365,8 +365,8 @@ internal fun SettingsChip(
     label: String,
     selected: Boolean,
     onSelect: () -> Unit,
-    key: String = label,
     modifier: Modifier = Modifier,
+    key: String = label,
     focusRequester: FocusRequester? = null,
 ) {
     val interactionSource = remember { MutableInteractionSource() }

@@ -56,7 +56,8 @@
             android:resizeableActivity="true"
             android:screenOrientation="landscape"
             android:supportsPictureInPicture="true"
-            android:theme="@style/Theme.Jellybeam.Playback" />
+            android:theme="@style/Theme.Jellybeam.Playback"
+            tools:targetApi="n" />
 
         <!-- No emoji are rendered; strips the transitive emoji2 font-fetch initializer that was causing a Home relayout near home.focusReady (docs/10). -->
         <provider

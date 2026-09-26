@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- The TV launcher banner ships at xhdpi only, the size Android TV asks for; there are no other density drawables to add. -->
+    <issue id="IconMissingDensityFolder" severity="ignore" />
+</lint>

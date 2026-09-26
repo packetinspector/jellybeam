@@ -1,8 +1,8 @@
 package tv.jellybeam.ui.discover
 
+import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -64,6 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.net.toUri
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import tv.jellybeam.AppGraph
@@ -429,7 +430,7 @@ private fun DiscoverDetailContent(
                                 label = stringResource(R.string.discover_action_trailer),
                                 onClick = {
                                     try {
-                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(trailerUrl)))
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, trailerUrl.toUri()))
                                     } catch (_: ActivityNotFoundException) {
                                         // Fail open: no player installed for this link.
                                     }
@@ -907,6 +908,8 @@ private fun SeasonCheckbox(checked: Boolean, inert: Boolean) {
  * than overflowing the panel width. [firstChipModifier] applies to the selected chip (chip 0 if
  * none selected) -- see [RequestOptionsDialog]'s `seedFocusIfFirst`.
  */
+// firstChipModifier targets the seeded chip, not the row root; ModifierParameter doesn't apply.
+@SuppressLint("ModifierParameter")
 @Composable
 private fun <T> PickerRow(
     label: String,
@@ -936,6 +939,8 @@ private fun <T> PickerRow(
 
 /** [PickerRow]'s name-keyed overload -- [SeerrRootFolder] has no server-issued numeric id, only
  * a path. Same [FlowRow]/[firstChipModifier] treatment as the other overload. */
+// firstChipModifier targets the seeded chip, not the row root; ModifierParameter doesn't apply.
+@SuppressLint("ModifierParameter")
 @Composable
 private fun <T> PickerRow(
     label: String,
