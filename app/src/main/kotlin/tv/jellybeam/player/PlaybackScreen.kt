@@ -33,6 +33,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -61,6 +63,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.BlendMode
@@ -83,6 +86,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -98,6 +102,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
@@ -2903,7 +2908,7 @@ private fun TrackPickerPanel(picker: TrackPickerState, focusedIndex: Int, modifi
         TrackPickerSectionHeader(text = "Audio")
         Spacer(modifier = Modifier.height(8.dp))
         picker.audioTracks.forEachIndexed { index, choice ->
-            TrackChoiceRow(choice = choice, isFocused = index == focusedIndex)
+            TrackChoiceRow(choice = choice, isFocused = index == focusedIndex, revealAbove = if (index == 0) TRACK_SECTION_HEAD_REVEAL else 0.dp)
             Spacer(modifier = Modifier.height(4.dp))
         }
 
@@ -2913,7 +2918,7 @@ private fun TrackPickerPanel(picker: TrackPickerState, focusedIndex: Int, modifi
         Spacer(modifier = Modifier.height(8.dp))
         val audioCount = picker.audioTracks.size
         picker.subtitleTracks.forEachIndexed { index, choice ->
-            TrackChoiceRow(choice = choice, isFocused = audioCount + index == focusedIndex)
+            TrackChoiceRow(choice = choice, isFocused = audioCount + index == focusedIndex, revealAbove = if (index == 0) TRACK_SECTION_HEAD_REVEAL else 0.dp)
             Spacer(modifier = Modifier.height(4.dp))
         }
     }
@@ -2933,11 +2938,28 @@ private fun TrackPickerSectionHeader(text: String) {
     )
 }
 
+/** Extra height a section's first row reveals above itself so its header scrolls back into view. */
+private val TRACK_SECTION_HEAD_REVEAL = 48.dp
+
 @Composable
-private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, modifier: Modifier = Modifier) {
+private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, revealAbove: Dp = 0.dp, modifier: Modifier = Modifier) {
     val focusFill = remember { JellybeamTheme.Panna.copy(alpha = 0x22 / 255f) }
+    // Picker focus is a virtual index, not Compose focus, so the panel's scroll must be driven by
+    // hand or long track lists run the cursor off the panel.
+    val bringIntoView = remember { BringIntoViewRequester() }
+    val density = LocalDensity.current
+    var rowSize by remember { mutableStateOf(IntSize.Zero) }
+    // Keyed on rowSize too: the picker opens with a row already focused, before it has measured.
+    LaunchedEffect(isFocused, rowSize) {
+        if (isFocused && rowSize != IntSize.Zero) {
+            val abovePx = with(density) { revealAbove.toPx() }
+            bringIntoView.bringIntoView(Rect(0f, -abovePx, rowSize.width.toFloat(), rowSize.height.toFloat()))
+        }
+    }
     Row(
         modifier = modifier
+            .bringIntoViewRequester(bringIntoView)
+            .onSizeChanged { rowSize = it }
             .fillMaxWidth()
             .clip(RoundedCornerShape(TRACK_ROW_RADIUS))
             .background(if (isFocused) focusFill else Color.Transparent)
