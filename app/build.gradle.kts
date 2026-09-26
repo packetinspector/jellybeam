@@ -19,8 +19,8 @@ android {
         applicationId = "tv.jellybeam"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.1.3"
         // Only the ABIs the Rust core is built for. JNA's AAR also ships x86, mips and armeabi
         // slices; packaging them lets such a device install an APK with no core to load.
         // `-Pjellybeam.abi=armeabi-v7a` narrows a one-off build to a single slice.
