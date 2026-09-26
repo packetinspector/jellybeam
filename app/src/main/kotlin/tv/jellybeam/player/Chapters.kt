@@ -14,6 +14,15 @@ object Chapters {
             .maxByOrNull { it.startPositionTicks }
             ?.name
 
+    /** A chapter's own title for the chapters menu, or `null` when it's blank or only restates
+     * the chapter number ("Chapter 12"), since the menu already shows the number. Real titles
+     * pass through verbatim.
+     */
+    fun menuTitle(name: String?): String? =
+        name?.takeIf { it.isNotBlank() && !GENERIC_CHAPTER_NAME.matches(it.trim()) }
+
+    private val GENERIC_CHAPTER_NAME = Regex("""chapter\s*#?\s*\d+""", RegexOption.IGNORE_CASE)
+
     /** Index (into [chapters], not re-sorted) of the current chapter, same rule as [nameAt]; feeds
      * the Chapters menu's current-chapter dot (docs/15-focus-and-selection.md §1.2).
      */

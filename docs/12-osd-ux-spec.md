@@ -382,12 +382,15 @@ to tune):
   cannot change for up to 1.6s, then every 0.33s at tier 2, then every
   dwell from tier 3. A server interval of 5s halves those.
 
-## 12. Speed and chapters menus
+## 12. Speed, chapters and track menus
 
-Shared container: 170dp wide, OSD-surface@92%, 1dp Panna@12% border, 5dp
-radius, 10dp vertical padding, clipped to its corners. Centered above its
-own button (measured from the rendered row), clamped to the safe inset,
-bottom edge at datum + 8dp.
+Shared container: 170dp wide (chapters 260dp), OSD-surface@92%, 1dp
+Panna@12% border, 5dp radius, 10dp vertical padding, clipped to its corners.
+Centered above its own button (measured from the rendered row), clamped to
+the safe inset, bottom edge 8dp above the top of the OSD block (title and
+stream line included), placed from its measured height in the same layout
+pass so it never draws a frame out of position. Height caps at the space above that, down to the top
+safe inset; a longer list scrolls inside and keeps the focused row in view.
 
 Rows: Martian Mono 14sp, padding 13×8, a reserved 20dp leading gutter,
 optional trailing Martian Mono 10sp. Focused row = Pistacchio fill with
@@ -397,8 +400,10 @@ Notte text and markers. Up / Down clamp, no wrap.
   current rate, which carries a leading Pistacchio check. Select sets the
   rate and leaves the menu open. Rate is per session, not persisted.
   ENDS recomputes.
-- Chapters: one row per marker, name or `Chapter n` when unnamed, start
-  time trailing in Grigio; the playing chapter carries a 6dp leading
+- Chapters: one row per marker, labelled with its number, start time
+  trailing in Grigio. A real chapter title sits under the number in
+  Archivo 12sp Grigio, wrapped to two lines; blank names and names that only
+  restate the number ("Chapter 12") show none; the playing chapter carries a 6dp leading
   "current" dot, derived per chapter change, not per tick. Opens at the
   first row. Select jumps to the chapter's start and closes the menu;
   focus returns to the Chapters button.
@@ -509,12 +514,12 @@ text. No scrim, no layout shift; the video stays visible.
 
 ## 16. Track picker and subtitles
 
-Picker: anchored center-right at the 48dp inset, 320dp wide, max 480dp
-with internal scroll, SurfacePanel, 1dp Hairline border, 8dp radius,
-padding 16. Two sections in one list, "Audio" then "Subtitles" (Archivo
-13sp SemiBold Grigio, 1sp tracking). Rows: 6dp radius, padding 12×8, a
-20dp leading gutter with a Panna `✓` on the selected track, label Archivo
-16sp Panna, meta Archivo 11sp Grigio; focused row = Panna@0x22 fill. Opens
+Picker: §12's anchored menu above the Tracks button (same surface,
+placement and height cap), 320dp wide. Two sections in one
+list, "Audio" then "Subtitles" (Archivo 13sp SemiBold Grigio, 1sp
+tracking). Rows run edge to edge with no gap between them, padding 16×8, a 20dp leading gutter with
+a `✓` on the selected track, label Archivo 16sp Panna, meta Archivo 11sp
+Grigio; focused row = §12's Pistacchio fill with Notte text and markers. Opens
 with focus on the selected track; Up / Down clamp; Select chooses; Back,
 Escape or Menu close. Choices are remembered per series.
 

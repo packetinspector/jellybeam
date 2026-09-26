@@ -124,4 +124,19 @@ class ChaptersTest {
         val farIntoActOne = 999_000_000L
         assertEquals(200_000_000L, Chapters.jumpTargetTicks(chapters, farIntoActOne, forward = false))
     }
+
+    @Test
+    fun `menu title drops blank and number-only names`() {
+        assertNull(Chapters.menuTitle(null))
+        assertNull(Chapters.menuTitle("  "))
+        assertNull(Chapters.menuTitle("Chapter 12"))
+        assertNull(Chapters.menuTitle("chapter 01"))
+        assertNull(Chapters.menuTitle("Chapter #3 "))
+    }
+
+    @Test
+    fun `menu title keeps a real title verbatim`() {
+        assertEquals("The Heist", Chapters.menuTitle("The Heist"))
+        assertEquals("Chapter 3: The Heist", Chapters.menuTitle("Chapter 3: The Heist"))
+    }
 }

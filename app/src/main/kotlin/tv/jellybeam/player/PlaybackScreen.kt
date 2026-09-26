@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -100,8 +101,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -174,6 +175,8 @@ private object Osd {
      * constant. */
     val SHEET_LEFT_FADE_WIDTH = 81.dp
     val MENU_WIDTH = 170.dp
+    /** Wider than [MENU_WIDTH]: chapter rows carry a wrapped title under the number. */
+    val CHAPTERS_MENU_WIDTH = 260.dp
     val MENU_RADIUS = 5.dp
     val MENU_V_PADDING = 10.dp
 }
@@ -205,6 +208,11 @@ private val CONTROL_ZONE_HEIGHT_MINIMAL = 120.dp
 
 private fun controlZoneHeight(osdDetail: OsdDetailSetting): Dp =
     if (osdDetail == OsdDetailSetting.FULL) CONTROL_ZONE_HEIGHT_FULL else CONTROL_ZONE_HEIGHT_MINIMAL
+
+/** Where OSD menus rest: above the whole OSD block, title and stream line included, so they never
+ * cover that line; the control zone stands in until the block has measured. */
+private fun menuBottomPx(osdBlockHeightPx: Int, osdDetail: OsdDetailSetting, density: Density): Float =
+    maxOf(osdBlockHeightPx.toFloat(), with(density) { controlZoneHeight(osdDetail).toPx() })
 
 // -- Pure OSD logic (unit-tested: PlaybackScreenControlsTest, PlaybackScreenBackActionTest) --
 
@@ -664,9 +672,7 @@ private data class CenterFlashContent(val text: String? = null, val icon: Transp
 private data class SkipUndoState(val preSkipPositionTicks: Long, val segmentType: MediaSegmentKind)
 
 private val TRACK_PICKER_WIDTH = 320.dp
-private val TRACK_PICKER_MAX_HEIGHT = 480.dp
-private val TRACK_PICKER_RADIUS = 8.dp
-private val TRACK_ROW_RADIUS = 6.dp
+private val TRACK_ROW_H_PADDING = 16.dp
 
 /**
  * The playback surface + OSD, per docs/12. Full-bleed [PlayerView] (`useController = false`);
@@ -726,6 +732,7 @@ fun PlaybackScreen(
     val sheetScrollStepPx = remember(density) { with(density) { 120.dp.roundToPx() } }
     var speedMenuFocusIndex by remember { mutableIntStateOf(0) }
     var chaptersMenuFocusIndex by remember { mutableIntStateOf(0) }
+    var osdBlockHeightPx by remember { mutableIntStateOf(0) }
 
     /**
      * docs/12 §9: one [GlideSeekController] per READY session, rebuilt only on item/duration
@@ -1460,14 +1467,15 @@ fun PlaybackScreen(
                 positionTicks = viewModel.positionTicks,
                 bufferedPositionTicks = viewModel.bufferedPositionTicks,
                 onButtonCentersMeasured = { buttonCentersPx.value = it },
-                modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(),
+                modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().onSizeChanged { osdBlockHeightPx = it.height },
             )
+            val menuBottomPx = menuBottomPx(osdBlockHeightPx, state.osdDetail, density)
 
             if (state.speedMenuOpen) {
                 val anchorX = buttonCentersPx.value[ControlButton.SPEED] ?: 0f
                 OsdAnchoredMenu(
                     anchorXPx = anchorX,
-                    bottomPx = with(density) { (controlZoneHeight(state.osdDetail)).toPx() },
+                    bottomPx = menuBottomPx,
                     modifier = Modifier.align(Alignment.TopStart),
                 ) {
                     SPEED_OPTIONS.forEachIndexed { index, rate ->
@@ -1490,12 +1498,14 @@ fun PlaybackScreen(
                 }
                 OsdAnchoredMenu(
                     anchorXPx = anchorX,
-                    bottomPx = with(density) { (controlZoneHeight(state.osdDetail)).toPx() },
+                    bottomPx = menuBottomPx,
                     modifier = Modifier.align(Alignment.TopStart),
+                    width = Osd.CHAPTERS_MENU_WIDTH,
                 ) {
                     state.chapters.forEachIndexed { index, chapter ->
                         OsdMenuRow(
-                            label = chapter.name?.takeIf { it.isNotBlank() } ?: "Chapter ${index + 1}",
+                            label = "${index + 1}",
+                            subtitle = Chapters.menuTitle(chapter.name),
                             trailing = PlaybackTimeFormat.format(PlaybackTicks.ticksToMs(chapter.startPositionTicks)),
                             trailingMuted = true,
                             leading = if (index == currentIndex) OsdRowLeading.CURRENT_DOT else OsdRowLeading.NONE,
@@ -1596,11 +1606,14 @@ fun PlaybackScreen(
 
         if (state.phase == PlaybackUiState.Phase.READY) {
             state.trackPicker?.let { picker ->
-                TrackPickerPanel(
-                    picker = picker,
-                    focusedIndex = pickerFocusIndex,
-                    modifier = Modifier.align(Alignment.CenterEnd).padding(OSD_MARGIN),
-                )
+                OsdAnchoredMenu(
+                    anchorXPx = buttonCentersPx.value[ControlButton.TRACKS] ?: 0f,
+                    bottomPx = menuBottomPx(osdBlockHeightPx, state.osdDetail, density),
+                    modifier = Modifier.align(Alignment.TopStart),
+                    width = TRACK_PICKER_WIDTH,
+                ) {
+                    TrackPickerRows(picker = picker, focusedIndex = pickerFocusIndex)
+                }
             }
         }
 
@@ -2078,7 +2091,7 @@ private fun OsdSheetContainer(
     kicker: String,
     scrollState: ScrollState,
     modifier: Modifier = Modifier,
-    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     val background = remember {
         val leftFadeFraction = (Osd.SHEET_LEFT_FADE_WIDTH.value / Osd.SHEET_WIDTH.value).coerceIn(0f, 1f)
@@ -2212,44 +2225,59 @@ private fun LibrarySheetBody(content: LibrarySheetContent, modifier: Modifier = 
     }
 }
 
-// -- Speed & chapters menus (docs/12 §12) -------------------------------------------
+// -- Speed, chapters and track menus (docs/12 §12) ---------------------------------
 
 /**
- * Shared container for the speed and chapters menus (docs/12 §12). Centered on
- * [anchorXPx], clamped to [Osd.SAFE_INSET] margins, bottom [bottomPx] above
- * the screen edge -- an approximation of "just above the button row".
+ * Shared container for the speed, chapters and track menus (docs/12 §12). Centered on
+ * [anchorXPx], clamped to [Osd.SAFE_INSET] margins, bottom edge [MENU_GAP] above [bottomPx].
  */
 @Composable
 private fun OsdAnchoredMenu(
     anchorXPx: Float,
     bottomPx: Float,
     modifier: Modifier = Modifier,
-    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
+    width: Dp = Osd.MENU_WIDTH,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
-    var heightPx by remember { mutableFloatStateOf(0f) }
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val screenWidthPx = with(density) { maxWidth.toPx() }
-        val menuWidthPx = with(density) { Osd.MENU_WIDTH.toPx() }
+        val menuWidthPx = with(density) { width.toPx() }
         val insetPx = with(density) { Osd.SAFE_INSET.toPx() }
         val rawX = anchorXPx - menuWidthPx / 2f
         val x = rawX.coerceIn(insetPx, (screenWidthPx - insetPx - menuWidthPx).coerceAtLeast(insetPx))
-        val y = maxHeight - with(density) { (bottomPx + heightPx + 8f).toDp() }
+        val menuBottomY = constraints.maxHeight - bottomPx - with(density) { MENU_GAP.toPx() }
+        // Capped to the space above the OSD and scrolled inside, so a long list stays on screen.
+        val maxMenuHeight = with(density) { (menuBottomY - insetPx).coerceAtLeast(0f).toDp() }
         Column(
             modifier = Modifier
-                .offset { IntOffset(x.roundToInt(), with(density) { y.roundToPx() }) }
-                .width(Osd.MENU_WIDTH)
-                .onGloballyPositioned { heightPx = it.size.height.toFloat() }
-                .background(OsdColor.Surface.copy(alpha = 0.92f), RoundedCornerShape(Osd.MENU_RADIUS))
-                .border(1.dp, JellybeamTheme.Panna.copy(alpha = 0.12f), RoundedCornerShape(Osd.MENU_RADIUS))
-                // Clips each row's focused-fill to the container's rounded corners, else a
-                // first/last focused row overflows the radius.
-                .clip(RoundedCornerShape(Osd.MENU_RADIUS))
+                // Placed from its own measured height in the same pass, so it never draws a frame
+                // at a stale height and then jumps.
+                .layout { measurable, c ->
+                    val placeable = measurable.measure(c)
+                    layout(placeable.width, placeable.height) {
+                        placeable.place(x.roundToInt(), (menuBottomY - placeable.height).roundToInt())
+                    }
+                }
+                .width(width)
+                .heightIn(max = maxMenuHeight)
+                .osdMenuSurface()
+                .verticalScroll(rememberScrollState())
                 .padding(vertical = Osd.MENU_V_PADDING),
             content = content,
         )
     }
 }
+
+/** Gap between an anchored menu's bottom edge and the top of the OSD block. */
+private val MENU_GAP = 8.dp
+
+/** docs/12 §12's menu surface, shared by the speed, chapters and track menus. Clips so a first or
+ * last row's focused fill stays inside the rounded corners. */
+private fun Modifier.osdMenuSurface(): Modifier =
+    background(OsdColor.Surface.copy(alpha = 0.92f), RoundedCornerShape(Osd.MENU_RADIUS))
+        .border(1.dp, JellybeamTheme.Panna.copy(alpha = 0.12f), RoundedCornerShape(Osd.MENU_RADIUS))
+        .clip(RoundedCornerShape(Osd.MENU_RADIUS))
 
 /**
  * [OsdMenuRow]'s leading-gutter marker (docs/15-focus-and-selection.md
@@ -2263,6 +2291,8 @@ private enum class OsdRowLeading { NONE, CHECK, CURRENT_DOT }
  */
 private val OSD_MENU_ROW_LEADING_WIDTH = 20.dp
 
+private const val OSD_MENU_ROW_SUBTITLE_MAX_LINES = 2
+
 /** One row shared by both menus (docs/12 §12): mono 14sp label, optional mono 10sp trailing
  * marker, focused = accent fill + on-accent label. */
 @Composable
@@ -2273,44 +2303,60 @@ private fun OsdMenuRow(
     trailing: String? = null,
     trailingMuted: Boolean = false,
     leading: OsdRowLeading = OsdRowLeading.NONE,
+    /** A second line under [label], wrapped to [OSD_MENU_ROW_SUBTITLE_MAX_LINES]. */
+    subtitle: String? = null,
 ) {
     val labelColor = if (focused) JellybeamTheme.Notte else JellybeamTheme.Panna
     val trailingColor = if (focused) JellybeamTheme.Notte else if (trailingMuted) JellybeamTheme.Grigio else JellybeamTheme.Pistacchio
     // Same contrast swap as [trailingColor] -- a focused row's solid fill would swallow a
     // Pistacchio marker.
     val leadingColor = if (focused) JellybeamTheme.Notte else JellybeamTheme.Pistacchio
-    Row(
+    Column(
         modifier = modifier
+            .revealWhenFocused(focused)
             .fillMaxWidth()
             .background(if (focused) JellybeamTheme.Pistacchio else Color.Transparent)
             .padding(horizontal = 13.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(modifier = Modifier.weight(1f, fill = false), verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.width(OSD_MENU_ROW_LEADING_WIDTH), contentAlignment = Alignment.Center) {
-                when (leading) {
-                    OsdRowLeading.CHECK -> BasicText(
-                        text = "✓",
-                        style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = leadingColor, fontSize = 14.sp),
-                    )
-                    OsdRowLeading.CURRENT_DOT -> Box(
-                        modifier = Modifier.size(6.dp).background(leadingColor, CircleShape),
-                    )
-                    OsdRowLeading.NONE -> Unit
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(modifier = Modifier.weight(1f, fill = false), verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.width(OSD_MENU_ROW_LEADING_WIDTH), contentAlignment = Alignment.Center) {
+                    when (leading) {
+                        OsdRowLeading.CHECK -> BasicText(
+                            text = "✓",
+                            style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = leadingColor, fontSize = 14.sp),
+                        )
+                        OsdRowLeading.CURRENT_DOT -> Box(
+                            modifier = Modifier.size(6.dp).background(leadingColor, CircleShape),
+                        )
+                        OsdRowLeading.NONE -> Unit
+                    }
                 }
+                BasicText(
+                    text = label,
+                    modifier = Modifier.weight(1f, fill = false),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = labelColor, fontSize = 14.sp),
+                )
             }
-            BasicText(
-                text = label,
-                modifier = Modifier.weight(1f, fill = false),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = labelColor, fontSize = 14.sp),
-            )
+            trailing?.let {
+                Spacer(modifier = Modifier.width(8.dp))
+                BasicText(text = it, style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = trailingColor, fontSize = 10.sp))
+            }
         }
-        trailing?.let {
-            Spacer(modifier = Modifier.width(8.dp))
-            BasicText(text = it, style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = trailingColor, fontSize = 10.sp))
+        subtitle?.let {
+            BasicText(
+                text = it,
+                modifier = Modifier.padding(start = OSD_MENU_ROW_LEADING_WIDTH, top = 2.dp),
+                maxLines = OSD_MENU_ROW_SUBTITLE_MAX_LINES,
+                overflow = TextOverflow.Ellipsis,
+                style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (focused) JellybeamTheme.Notte else JellybeamTheme.Grigio, fontSize = 12.sp),
+            )
         }
     }
 }
@@ -2892,35 +2938,24 @@ private fun StillWatchingCard(
     )
 }
 
-// -- Track picker panel (A&S menu internals not yet designed -- docs/12 §16) -------
+// -- Track picker (docs/12 §16) ----------------------------------------------------
 
+/** The picker's rows inside [OsdAnchoredMenu]: "Audio" then "Subtitles" in one list, one focus index. */
 @Composable
-private fun TrackPickerPanel(picker: TrackPickerState, focusedIndex: Int, modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier
-            .width(TRACK_PICKER_WIDTH)
-            .heightIn(max = TRACK_PICKER_MAX_HEIGHT)
-            .background(JellybeamTheme.SurfacePanel, RoundedCornerShape(TRACK_PICKER_RADIUS))
-            .border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(TRACK_PICKER_RADIUS))
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-    ) {
-        TrackPickerSectionHeader(text = "Audio")
-        Spacer(modifier = Modifier.height(8.dp))
-        picker.audioTracks.forEachIndexed { index, choice ->
-            TrackChoiceRow(choice = choice, isFocused = index == focusedIndex, revealAbove = if (index == 0) TRACK_SECTION_HEAD_REVEAL else 0.dp)
-            Spacer(modifier = Modifier.height(4.dp))
-        }
+private fun ColumnScope.TrackPickerRows(picker: TrackPickerState, focusedIndex: Int) {
+    TrackPickerSectionHeader(text = "Audio")
+    Spacer(modifier = Modifier.height(8.dp))
+    picker.audioTracks.forEachIndexed { index, choice ->
+        TrackChoiceRow(choice = choice, isFocused = index == focusedIndex, revealAbove = if (index == 0) TRACK_SECTION_HEAD_REVEAL else 0.dp)
+    }
 
-        Spacer(modifier = Modifier.height(16.dp))
+    Spacer(modifier = Modifier.height(16.dp))
 
-        TrackPickerSectionHeader(text = "Subtitles")
-        Spacer(modifier = Modifier.height(8.dp))
-        val audioCount = picker.audioTracks.size
-        picker.subtitleTracks.forEachIndexed { index, choice ->
-            TrackChoiceRow(choice = choice, isFocused = audioCount + index == focusedIndex, revealAbove = if (index == 0) TRACK_SECTION_HEAD_REVEAL else 0.dp)
-            Spacer(modifier = Modifier.height(4.dp))
-        }
+    TrackPickerSectionHeader(text = "Subtitles")
+    Spacer(modifier = Modifier.height(8.dp))
+    val audioCount = picker.audioTracks.size
+    picker.subtitleTracks.forEachIndexed { index, choice ->
+        TrackChoiceRow(choice = choice, isFocused = audioCount + index == focusedIndex, revealAbove = if (index == 0) TRACK_SECTION_HEAD_REVEAL else 0.dp)
     }
 }
 
@@ -2928,6 +2963,7 @@ private fun TrackPickerPanel(picker: TrackPickerState, focusedIndex: Int, modifi
 private fun TrackPickerSectionHeader(text: String) {
     BasicText(
         text = text,
+        modifier = Modifier.padding(horizontal = TRACK_ROW_H_PADDING),
         style = TextStyle(
             fontFamily = JellybeamTheme.Archivo,
             fontWeight = FontWeight.SemiBold,
@@ -2938,39 +2974,45 @@ private fun TrackPickerSectionHeader(text: String) {
     )
 }
 
+/**
+ * Scrolls the enclosing scrollable to this row while [isFocused], plus [revealAbove] above it. OSD
+ * menu focus is a virtual index, not Compose focus, so nothing else scrolls a long list with it.
+ */
+@Composable
+private fun Modifier.revealWhenFocused(isFocused: Boolean, revealAbove: Dp = 0.dp): Modifier {
+    val requester = remember { BringIntoViewRequester() }
+    val density = LocalDensity.current
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    // Keyed on size too: a menu opens with a row already focused, before it has measured.
+    LaunchedEffect(isFocused, size) {
+        if (isFocused && size != IntSize.Zero) {
+            val abovePx = with(density) { revealAbove.toPx() }
+            requester.bringIntoView(Rect(0f, -abovePx, size.width.toFloat(), size.height.toFloat()))
+        }
+    }
+    return bringIntoViewRequester(requester).onSizeChanged { size = it }
+}
+
 /** Extra height a section's first row reveals above itself so its header scrolls back into view. */
 private val TRACK_SECTION_HEAD_REVEAL = 48.dp
 
 @Composable
 private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, modifier: Modifier = Modifier, revealAbove: Dp = 0.dp) {
-    val focusFill = remember { JellybeamTheme.Panna.copy(alpha = 0x22 / 255f) }
-    // Picker focus is a virtual index, not Compose focus, so the panel's scroll must be driven by
-    // hand or long track lists run the cursor off the panel.
-    val bringIntoView = remember { BringIntoViewRequester() }
-    val density = LocalDensity.current
-    var rowSize by remember { mutableStateOf(IntSize.Zero) }
-    // Keyed on rowSize too: the picker opens with a row already focused, before it has measured.
-    LaunchedEffect(isFocused, rowSize) {
-        if (isFocused && rowSize != IntSize.Zero) {
-            val abovePx = with(density) { revealAbove.toPx() }
-            bringIntoView.bringIntoView(Rect(0f, -abovePx, rowSize.width.toFloat(), rowSize.height.toFloat()))
-        }
-    }
+    // Same focus treatment as [OsdMenuRow]: Pistacchio fill, Notte text and markers.
+    val textColor = if (isFocused) JellybeamTheme.Notte else JellybeamTheme.Panna
     Row(
         modifier = modifier
-            .bringIntoViewRequester(bringIntoView)
-            .onSizeChanged { rowSize = it }
+            .revealWhenFocused(isFocused, revealAbove)
             .fillMaxWidth()
-            .clip(RoundedCornerShape(TRACK_ROW_RADIUS))
-            .background(if (isFocused) focusFill else Color.Transparent)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .background(if (isFocused) JellybeamTheme.Pistacchio else Color.Transparent)
+            .padding(horizontal = TRACK_ROW_H_PADDING, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(modifier = Modifier.width(20.dp)) {
             if (choice.selected) {
                 BasicText(
                     text = "✓",
-                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 14.sp),
+                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = textColor, fontSize = 14.sp),
                 )
             }
         }
@@ -2979,12 +3021,12 @@ private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, modifier: Mo
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 16.sp),
+            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = textColor, fontSize = 16.sp),
         )
         choice.meta?.let {
             BasicText(
                 text = it,
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 11.sp),
+                style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (isFocused) JellybeamTheme.Notte else JellybeamTheme.Grigio, fontSize = 11.sp),
             )
         }
     }

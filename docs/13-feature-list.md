@@ -198,7 +198,7 @@ Full) — Full adds a codec strip, an ENDS wall-clock readout, and speed +
 stats controls; restructured control row (episode previous/next for
 episodic content, resolved from the local mirror with one post-load server
 fallback for newly/deep-linked items, a combined audio-and-subtitles button with a
-non-default-track dot, a chapters menu when markers exist, and separate
+non-default-track dot, a scrolling chapters menu when markers exist (numbered rows, real chapter titles wrapped underneath), and separate
 library-info and playback-stats sheets); playback speed control, 0.5–2x
 (Full mode, per-session only — not persisted across playback sessions),
 ENDS-aware; server-configured item and series names shown verbatim; exact
