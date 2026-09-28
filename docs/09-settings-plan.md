@@ -29,7 +29,9 @@ the in-memory state and mirror side effects.
 - `hidden_library_ids: Vec<String>` → home_snapshot skips these views.
 - `hide_watched_in_latest: bool` → latest(..., hide_watched) wiring.
 - `home_shelf_size: u32` (presets [10,20,30], default 20) → the limit for
-  resume, next_up and every latest shelf in home_snapshot.
+  resume, next_up, favorites and every latest shelf in home_snapshot.
+- `home_show_favorites: bool` (default true) → whether home_snapshot returns
+  the Favorites shelf; the drawer's Favorites entry ignores it (docs/07 §5).
 - `startup_screen: Option<String>` (view id; None = Home) — Kotlin resolves at
   launch, stale id falls back to Home (docs/07 §5).
 - `skip_back_secs/skip_forward_secs: u32` (SkipLengthPrefs semantics; presets

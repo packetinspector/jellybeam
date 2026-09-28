@@ -108,6 +108,50 @@ class LibraryViewModelTest {
     }
 
     @Test
+    fun `the favorites page loads its type options and filters by type`() = runTest {
+        val view = ViewSnapshot(id = "favorites", name = "Favorites", kind = ViewKind.LIBRARY, collectionType = "favorites")
+        val gateway = FakeCoreGateway(libraryGridByView = mapOf("favorites" to listOf(testCard(id = "a"))))
+        gateway.favoriteItemTypesResult = listOf("Movie", "Episode")
+
+        withLibraryViewModel(gateway, view) { viewModel ->
+            assertEquals(listOf("Movie", "Episode"), viewModel.state.value.itemTypes)
+
+            viewModel.setItemType("Episode")
+            runCurrent()
+
+            assertEquals("Episode", viewModel.state.value.filters.itemType)
+        }
+    }
+
+    @Test
+    fun `a saved type filter no favorite has any more is cleared and saved`() = runTest {
+        val view = ViewSnapshot(id = "favorites", name = "Favorites", kind = ViewKind.LIBRARY, collectionType = "favorites")
+        val gateway = FakeCoreGateway(
+            libraryGridByView = mapOf("favorites" to listOf(testCard(id = "a"))),
+            libraryGridPrefsByView = mutableMapOf("favorites" to LibraryGridPrefs(nameAsc(), noFilters().copy(itemType = "Episode"))),
+        )
+        gateway.favoriteItemTypesResult = listOf("Movie")
+
+        withLibraryViewModel(gateway, view) { viewModel ->
+            runCurrent()
+
+            assertEquals(null, viewModel.state.value.filters.itemType)
+            assertEquals(null, gateway.getLibraryGridPrefs("favorites").filters.itemType)
+        }
+    }
+
+    @Test
+    fun `a library view never asks for favorite types`() = runTest {
+        val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY, collectionType = "movies")
+        val gateway = FakeCoreGateway(libraryGridByView = mapOf("view-1" to listOf(testCard(id = "a"))))
+        gateway.favoriteItemTypesResult = listOf("Movie")
+
+        withLibraryViewModel(gateway, view) { viewModel ->
+            assertEquals(emptyList<String>(), viewModel.state.value.itemTypes)
+        }
+    }
+
+    @Test
     fun `the first load also fetches counts groups and genres`() = runTest {
         val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
         val counts = GridCounts(filtered = 3uL, total = 5uL)

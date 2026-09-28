@@ -555,6 +555,12 @@ class FakeCoreGateway(
 
     override suspend fun views(): List<ViewSnapshot> = viewsList
 
+    var hasFavoritesResult: Boolean = false
+    override suspend fun hasFavorites(): Boolean = hasFavoritesResult
+
+    var favoriteItemTypesResult: List<String> = emptyList()
+    override suspend fun favoriteItemTypes(): List<String> = favoriteItemTypesResult
+
     override suspend fun search(query: String, limit: UInt): List<Card> {
         _searchCalls.add(SearchCall(query, limit))
         return searchResultsByQuery[query].orEmpty()

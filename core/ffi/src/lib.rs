@@ -53,6 +53,18 @@ pub use types::{
     WatchedFilter,
 };
 
+/// docs/16 §2.7: the drawer's Favorites page as a library view; Kotlin recognises it by
+/// collection type `"favorites"`. `name` is the app's localized label.
+#[uniffi::export]
+pub fn favorites_view(name: String) -> ViewSnapshot {
+    ViewSnapshot {
+        id: media_cache::FAVORITES_VIEW_ID.to_string(),
+        name,
+        kind: types::ViewKind::Library,
+        collection_type: Some("favorites".to_string()),
+    }
+}
+
 /// Human-readable version string, e.g. "jellybeam-core 0.1.0".
 #[uniffi::export]
 pub fn core_version() -> String {

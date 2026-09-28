@@ -10,6 +10,9 @@ import uniffi.jellybeam_core.GridSortField
 import uniffi.jellybeam_core.StatusFilter
 import uniffi.jellybeam_core.WatchedFilter
 
+/** What a grid's count segment counts (docs/16 §4.1, §2.7). */
+enum class GridNoun { MOVIES, SHOWS, FAVORITES }
+
 /** Pure Kotlin formatting for the library summary line and strip chips
  * (docs/16-library-sort-filter.md §4.1, §4.2), plain-JVM-testable like [RecordingFormatting].
  */
@@ -23,17 +26,22 @@ object GridSummaryFormat {
      * filter
      * segment is present only when it departs from its default (`Any`/`null`).
      */
-    fun segments(counts: GridCounts, sort: GridSort, filters: GridFilters, isTv: Boolean): List<String> {
+    fun segments(counts: GridCounts, sort: GridSort, filters: GridFilters, noun: GridNoun): List<String> {
         val segments = mutableListOf<String>()
 
         val isFiltered = filters.watched != WatchedFilter.ANY ||
             filters.genre != null ||
             filters.decade != null ||
-            filters.status != StatusFilter.ANY
+            filters.status != StatusFilter.ANY ||
+            filters.itemType != null
         segments += if (isFiltered) {
             "${counts.filtered} OF ${counts.total}"
         } else {
-            if (isTv) countLabel(counts.total, "SHOW", "SHOWS") else countLabel(counts.total, "MOVIE", "MOVIES")
+            when (noun) {
+                GridNoun.MOVIES -> countLabel(counts.total, "MOVIE", "MOVIES")
+                GridNoun.SHOWS -> countLabel(counts.total, "SHOW", "SHOWS")
+                GridNoun.FAVORITES -> countLabel(counts.total, "FAVORITE", "FAVORITES")
+            }
         }
 
         segments += "${sortFieldSummaryLabel(sort.field)} ${arrow(sort.descending)}"
@@ -51,8 +59,19 @@ object GridSummaryFormat {
             StatusFilter.ENDED -> segments += "ENDED"
             StatusFilter.ANY -> Unit
         }
+        filters.itemType?.let { segments += itemTypeLabel(it).uppercase(Locale.US) }
 
         return segments
+    }
+
+    /** docs/16 §2.7: a Type panel chip's label, plural; an unknown type shows verbatim. */
+    fun itemTypeLabel(itemType: String): String = when (itemType) {
+        "Movie" -> "Movies"
+        "Series" -> "Shows"
+        "Season" -> "Seasons"
+        "Episode" -> "Episodes"
+        "BoxSet" -> "Collections"
+        else -> itemType
     }
 
     /** A sort chip's label: the field name, with the direction arrow appended only when [field] is

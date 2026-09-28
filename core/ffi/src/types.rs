@@ -209,6 +209,10 @@ pub struct HomeSnapshot {
     pub resume: Vec<Card>,
     pub next_up: Vec<Card>,
     pub latest: Vec<LatestShelf>,
+    /// docs/07 §1: empty when the user has none or turned the shelf off. Last, with a
+    /// default, so positional Kotlin constructions keep compiling.
+    #[uniffi(default)]
+    pub favorites: Vec<Card>,
 }
 
 /// Account identity returned by [`crate::JellybeamCore::sign_in`] and
@@ -919,6 +923,10 @@ pub struct GridFilters {
     pub genre: Option<String>,
     pub decade: Option<Decade>,
     pub status: StatusFilter,
+    /// Exact item type (`"Movie"`, `"Series"`, ...): the Favorites grid's type chips
+    /// (docs/16 §2.7). `None` = every type.
+    #[uniffi(default = None)]
+    pub item_type: Option<String>,
 }
 
 impl From<GridFilters> for media_cache::GridFilters {
@@ -928,6 +936,7 @@ impl From<GridFilters> for media_cache::GridFilters {
             genre: filters.genre,
             decade: filters.decade.map(Into::into),
             status: filters.status.into(),
+            item_type: filters.item_type,
         }
     }
 }
@@ -945,6 +954,7 @@ impl From<media_cache::GridFilters> for GridFilters {
             genre: filters.genre,
             decade: filters.decade.map(Into::into),
             status: filters.status.into(),
+            item_type: filters.item_type,
         }
     }
 }
@@ -1639,6 +1649,7 @@ mod tests {
             genre: Some("Comedy".to_string()),
             decade: Some(Decade::D1990s),
             status: StatusFilter::Continuing,
+            item_type: None,
         };
         let cache: media_cache::GridFilters = filters.clone().into();
         assert_eq!(cache.watched, media_cache::WatchedFilter::Unwatched);
@@ -1712,6 +1723,7 @@ mod tests {
                 genre: Some("Drama".to_string()),
                 decade: Some(Decade::Older),
                 status: StatusFilter::Ended,
+                item_type: None,
             },
         };
         let json = serde_json::to_vec(&original).expect("serialize");

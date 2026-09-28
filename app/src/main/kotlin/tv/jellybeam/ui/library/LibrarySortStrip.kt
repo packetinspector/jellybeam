@@ -57,7 +57,7 @@ import uniffi.jellybeam_core.WatchedFilter
 /** docs/16-library-sort-filter.md §4.3: which panel, if any, the strip has open below FILTER;
  * hoisted to [LibraryScreen] so becoming-top can force it closed.
  */
-internal enum class LibraryStripPanel { GENRE, YEARS }
+internal enum class LibraryStripPanel { GENRE, YEARS, TYPE }
 
 /** Which strip row owns focus, for the strip's key edges (§4.2): Left/Right stop at row ends,
  * Up is a no-op on SORT, Down leaves from FILTER or the panel's last wrapped line.
@@ -105,6 +105,7 @@ internal fun LibrarySortStrip(
     // Which chip a panel Select/Back returns focus to (§4.3); stays composed while open.
     val genreChipRequester = remember { FocusRequester() }
     val yearsChipRequester = remember { FocusRequester() }
+    val typeChipRequester = remember { FocusRequester() }
     var openerRequester by remember { mutableStateOf<FocusRequester?>(null) }
     val panelCurrentRequester = remember { FocusRequester() }
 
@@ -112,10 +113,11 @@ internal fun LibrarySortStrip(
     // Remembered per [panel] so it's cleared before the chips relay out.
     val panelChipTops = remember(panel) { mutableStateMapOf<Int, Float>() }
 
-    val filterChipCount = if (view.isTvLibrary) 5 else 4
+    val filterChipCount = 4 + (if (view.isTvLibrary) 1 else 0) + (if (view.isFavorites) 1 else 0)
     val panelChipCount = when (panel) {
         LibraryStripPanel.GENRE -> state.genres.size + 1
         LibraryStripPanel.YEARS -> DECADES.size + 1
+        LibraryStripPanel.TYPE -> state.itemTypes.size + 1
         null -> 0
     }
 
@@ -239,6 +241,17 @@ internal fun LibrarySortStrip(
                         onFocusChange = { focused -> if (focused) { focusRow = StripRow.FILTER; focusIndex = yearsIndex } },
                     )
 
+                    if (view.isFavorites) {
+                        val typeIndex = index++
+                        StripChip(
+                            label = state.filters.itemType?.let { GridSummaryFormat.itemTypeLabel(it) } ?: stringResource(R.string.library_type),
+                            active = state.filters.itemType != null,
+                            onSelect = { openerRequester = typeChipRequester; onPanelChange(LibraryStripPanel.TYPE) },
+                            focusRequester = typeChipRequester,
+                            onFocusChange = { focused -> if (focused) { focusRow = StripRow.FILTER; focusIndex = typeIndex } },
+                        )
+                    }
+
                     if (view.isTvLibrary) {
                         val statusLabel = when (state.filters.status) {
                             StatusFilter.ANY -> stringResource(R.string.library_status_any)
@@ -310,6 +323,28 @@ internal fun LibrarySortStrip(
                                         focusRequester = if (active) panelCurrentRequester else null,
                                         onFocusChange = { focused -> if (focused) { focusRow = StripRow.PANEL; focusIndex = decadeIndex + 1 } },
                                         onTopPositioned = { panelChipTops[decadeIndex + 1] = it },
+                                    )
+                                }
+                            }
+                            LibraryStripPanel.TYPE -> {
+                                val anyActive = state.filters.itemType == null
+                                StripChip(
+                                    label = stringResource(R.string.library_any),
+                                    active = anyActive,
+                                    onSelect = { viewModel.setItemType(null); closePanel(commitFocus = true) },
+                                    focusRequester = if (anyActive) panelCurrentRequester else null,
+                                    onFocusChange = { focused -> if (focused) { focusRow = StripRow.PANEL; focusIndex = 0 } },
+                                    onTopPositioned = { panelChipTops[0] = it },
+                                )
+                                state.itemTypes.forEachIndexed { typeIndex, itemType ->
+                                    val active = state.filters.itemType == itemType
+                                    StripChip(
+                                        label = GridSummaryFormat.itemTypeLabel(itemType),
+                                        active = active,
+                                        onSelect = { viewModel.setItemType(itemType); closePanel(commitFocus = true) },
+                                        focusRequester = if (active) panelCurrentRequester else null,
+                                        onFocusChange = { focused -> if (focused) { focusRow = StripRow.PANEL; focusIndex = typeIndex + 1 } },
+                                        onTopPositioned = { panelChipTops[typeIndex + 1] = it },
                                     )
                                 }
                             }

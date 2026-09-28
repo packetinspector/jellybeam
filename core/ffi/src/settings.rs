@@ -109,6 +109,10 @@ fn default_home_shelf_size() -> u32 {
     20
 }
 
+const fn default_home_show_favorites() -> bool {
+    true
+}
+
 fn default_skip_back_secs() -> u32 {
     SkipLengthPrefs::default().back_secs
 }
@@ -313,6 +317,11 @@ pub struct Settings {
     /// Kotlin's shelf-size presets by convention, not validated here.
     #[serde(default = "default_home_shelf_size")]
     pub home_shelf_size: u32,
+    /// docs/07 §1: whether Home shows the Favorites shelf. The drawer's Favorites entry
+    /// ignores this; it shows whenever favorites exist.
+    #[serde(default = "default_home_show_favorites")]
+    #[uniffi(default = true)]
+    pub home_show_favorites: bool,
     /// Seek-back magnitude, in seconds. One of Kotlin's skip-length presets
     /// by convention, not validated as such here.
     #[serde(default = "default_skip_back_secs")]
@@ -444,6 +453,7 @@ impl Default for Settings {
             hide_watched_in_latest: false,
             startup_screen_view_id: None,
             home_shelf_size: default_home_shelf_size(),
+            home_show_favorites: default_home_show_favorites(),
             skip_back_secs: default_skip_back_secs(),
             skip_forward_secs: default_skip_forward_secs(),
             language: LanguageSettings::default(),
@@ -571,6 +581,7 @@ mod tests {
             hide_watched_in_latest: true,
             startup_screen_view_id: Some("view-1".to_string()),
             home_shelf_size: 30,
+            home_show_favorites: false,
             skip_back_secs: 15,
             skip_forward_secs: 30,
             language: LanguageSettings {
@@ -638,6 +649,7 @@ mod tests {
         assert!(!settings.hide_watched_in_latest);
         assert!(settings.startup_screen_view_id.is_none());
         assert_eq!(settings.home_shelf_size, 20);
+        assert!(settings.home_show_favorites);
         assert!(settings.language.audio.is_none());
         assert!(settings.language.subtitle.is_none());
         assert_eq!(settings.subtitle_scale, 1.0);
@@ -750,6 +762,8 @@ mod tests {
         assert_eq!(loaded.skip_forward_secs, 20);
         // Absent from the old file: falls back to 20, not 0.
         assert_eq!(loaded.home_shelf_size, 20);
+        // Absent from the old file: the shelf shows, not hides.
+        assert!(loaded.home_show_favorites);
         assert!(loaded.autoplay_enabled);
         // Missing field falls back to the playback-policy default, not 0.
         assert_eq!(

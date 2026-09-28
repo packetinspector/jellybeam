@@ -215,6 +215,12 @@ interface CoreGateway {
     /** The server-configured libraries, names shown verbatim (CLAUDE.md hard rule). */
     suspend fun views(): List<ViewSnapshot>
 
+    /** docs/07 §5: whether the drawer shows its Favorites entry. */
+    suspend fun hasFavorites(): Boolean
+
+    /** docs/16 §2.7: item types present among favorites, for the Favorites grid's Type panel. */
+    suspend fun favoriteItemTypes(): List<String>
+
     /** Mirror-backed free-text search (name/series-name/overview prefix match, ranked, capped
      * at [limit]). Fails open to an empty list; never throws.
      */
@@ -737,6 +743,12 @@ class RealCoreGateway(
 
     override suspend fun views(): List<ViewSnapshot> =
         ffi("ffi.views") { views() }
+
+    override suspend fun hasFavorites(): Boolean =
+        ffi("ffi.hasFavorites") { hasFavorites() }
+
+    override suspend fun favoriteItemTypes(): List<String> =
+        ffi("ffi.favoriteItemTypes") { favoriteItemTypes() }
 
     override suspend fun search(query: String, limit: UInt): List<Card> =
         ffi("ffi.search") { search(query, limit) }

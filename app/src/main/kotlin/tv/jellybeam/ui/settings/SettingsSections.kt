@@ -150,6 +150,13 @@ internal fun HomeSectionContent(state: SettingsUiState, viewModel: SettingsViewM
             )
         }
 
+        ToggleRow(
+            label = stringResource(R.string.settings_home_show_favorites),
+            description = stringResource(R.string.settings_desc_home_show_favorites),
+            value = settings.homeShowFavorites,
+            onToggle = viewModel::toggleHomeShowFavorites,
+            key = "home/show_favorites",
+        )
         ChipFieldRow(
             label = stringResource(R.string.settings_home_shelf_size),
             description = stringResource(R.string.settings_desc_home_shelf_size),

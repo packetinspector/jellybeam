@@ -84,28 +84,30 @@ class HomeViewModelTest {
 
     @Test
     fun `all shelves are hidden when the snapshot is empty`() {
-        val shelves = buildShelves(HomeUiState(isLoading = false), "Continue Watching", "Next Up") { "Latest in $it" }
+        val shelves = buildShelves(HomeUiState(isLoading = false), "Continue Watching", "Next Up", "Favorites") { "Latest in $it" }
         assertTrue(shelves.isEmpty())
     }
 
     @Test
-    fun `shelf order is continue watching then next up then latest per view`() {
+    fun `shelf order is continue watching, next up, favorites, then latest per view`() {
         val state = HomeUiState(
             isLoading = false,
             resume = listOf(testCard(id = "r1")),
             nextUp = listOf(testCard(id = "n1")),
+            favorites = listOf(testCard(id = "f1")),
             latest = listOf(
                 LatestShelf(viewId = "v1", viewName = "Movies", cards = listOf(testCard(id = "m1"))),
                 LatestShelf(viewId = "v2", viewName = "TV Shows", cards = listOf(testCard(id = "t1"))),
             ),
         )
 
-        val shelves = buildShelves(state, "Continue Watching", "Next Up") { "Latest in $it" }
+        val shelves = buildShelves(state, "Continue Watching", "Next Up", "Favorites") { "Latest in $it" }
 
         assertEquals(
-            listOf("Continue Watching", "Next Up", "Latest in Movies", "Latest in TV Shows"),
+            listOf("Continue Watching", "Next Up", "Favorites", "Latest in Movies", "Latest in TV Shows"),
             shelves.map { it.title },
         )
+        assertEquals(ShelfKind.POSTER, shelves[2].kind)
     }
 
     @Test
@@ -118,7 +120,7 @@ class HomeViewModelTest {
             ),
         )
 
-        val shelves = buildShelves(state, "Continue Watching", "Next Up") { "Latest in $it" }
+        val shelves = buildShelves(state, "Continue Watching", "Next Up", "Favorites") { "Latest in $it" }
 
         assertEquals(listOf("Latest in TV Shows"), shelves.map { it.title })
     }
@@ -127,7 +129,7 @@ class HomeViewModelTest {
     fun `continue watching and next up are hidden individually when empty`() {
         val state = HomeUiState(isLoading = false, nextUp = listOf(testCard(id = "n1")))
 
-        val shelves = buildShelves(state, "Continue Watching", "Next Up") { "Latest in $it" }
+        val shelves = buildShelves(state, "Continue Watching", "Next Up", "Favorites") { "Latest in $it" }
 
         assertEquals(listOf("Next Up"), shelves.map { it.title })
     }

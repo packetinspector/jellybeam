@@ -46,6 +46,7 @@ data class HomeUiState(
     val isSyncing: Boolean = false,
     val resume: List<Card> = emptyList(),
     val nextUp: List<Card> = emptyList(),
+    val favorites: List<Card> = emptyList(),
     val latest: List<LatestShelf> = emptyList(),
     /** The library/tab row above the shelves -- server order, names shown verbatim. */
     val views: List<ViewSnapshot> = emptyList(),
@@ -218,6 +219,7 @@ class HomeViewModel(
                 isLoading = false,
                 resume = reuseIfUnchanged(current.resume, snapshot.resume),
                 nextUp = reuseIfUnchanged(current.nextUp, nextUpDeduped),
+                favorites = reuseIfUnchanged(current.favorites, snapshot.favorites),
                 latest = mergeLatestShelves(current.latest, snapshot.latest),
                 views = reuseIfUnchanged(current.views, views),
                 showClock = settings.showClock,

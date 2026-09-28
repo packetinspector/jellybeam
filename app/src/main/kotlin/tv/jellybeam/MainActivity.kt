@@ -117,6 +117,7 @@ import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.SeerrBrowseKind
 import uniffi.jellybeam_core.SeerrMediaType
 import uniffi.jellybeam_core.ViewSnapshot
+import uniffi.jellybeam_core.favoritesView
 
 class MainActivity : ComponentActivity() {
     /** Non-null only while [PerfLog.enabled] and this Activity is resumed -- see
@@ -560,6 +561,12 @@ private fun JellybeamRoot(
     val gateway = AppGraph.gateway
     var backStack by remember { mutableStateOf<NavBackStack?>(null) }
     var libraryViews by remember { mutableStateOf<List<ViewSnapshot>>(emptyList()) }
+    // docs/07 §5: the drawer's Favorites entry sits first among the views, only while any exist.
+    var hasFavorites by remember { mutableStateOf(false) }
+    val favoritesLabel = androidx.compose.ui.res.stringResource(R.string.drawer_favorites)
+    val drawerViews = remember(libraryViews, hasFavorites, favoritesLabel) {
+        if (hasFavorites) listOf(favoritesView(favoritesLabel)) + libraryViews else libraryViews
+    }
 
     // ui/launch/LaunchScreen.kt state (docs/brand.md §6.3): the saved server's host, known
     // as soon as restoreSession resolves (local-only, no network round trip), and whether this
@@ -944,9 +951,17 @@ private fun JellybeamRoot(
     // HomeViewModel and fire its expensive homeSnapshot() call prematurely). Gated on
     // `stack != null` so the first fetch can't race openMirror() above; keyed on [sessionEpoch]
     // too, so a server switch doesn't leave this showing the old server's data.
+    suspend fun refreshDrawerViews() {
+        val views = gateway.views()
+        // Its own fallback, so a failed probe never discards a good library list.
+        val favorites = runCatching { gateway.hasFavorites() }.getOrDefault(hasFavorites)
+        libraryViews = views
+        hasFavorites = favorites
+    }
     if (stack != null) {
         LaunchedEffect(gateway, sessionEpoch) {
-            launch { runCatching { libraryViews = gateway.views() } }
+            // One write pair, so the drawer recomposes once, not twice, during Home's first frames.
+            launch { runCatching { refreshDrawerViews() } }
             launch { runCatching { accounts = gateway.listAccounts() } }
             launch { activeAccountIndex = runCatching { gateway.activeAccountIndex() }.getOrNull() }
             // conflate() + collect gives leading-edge refresh, collapsed bursts, and a
@@ -956,7 +971,7 @@ private fun JellybeamRoot(
             // drawer list doesn't warrant.
             launch {
                 gateway.changeEvents().conflate().collect {
-                    runCatching { libraryViews = gateway.views() }
+                    runCatching { refreshDrawerViews() }
                     delay(500L)
                 }
             }
@@ -1082,7 +1097,7 @@ private fun JellybeamRoot(
                             when (entry) {
                                 Screen.Home -> NavDrawerHost(
                                     currentScreen = Screen.Home,
-                                    libraries = libraryViews,
+                                    libraries = drawerViews,
                                     onNavigate = ::navigateFromDrawer,
                                     isTop = isTop,
                                     focusGate = focusGate,
@@ -1106,7 +1121,7 @@ private fun JellybeamRoot(
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
-                                        libraries = libraryViews,
+                                        libraries = drawerViews,
                                         onNavigate = ::navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
@@ -1148,7 +1163,7 @@ private fun JellybeamRoot(
                                 // above. Search stays drawer-less: its query field owns D-pad Left.
                                 Screen.Settings -> NavDrawerHost(
                                     currentScreen = Screen.Settings,
-                                    libraries = libraryViews,
+                                    libraries = drawerViews,
                                     onNavigate = ::navigateFromDrawer,
                                     isTop = isTop,
                                     focusGate = focusGate,
@@ -1173,7 +1188,7 @@ private fun JellybeamRoot(
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
-                                        libraries = libraryViews,
+                                        libraries = drawerViews,
                                         onNavigate = ::navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
@@ -1211,7 +1226,7 @@ private fun JellybeamRoot(
                                 // drawer entry gated on [discoverConfigured].
                                 Screen.Discover -> NavDrawerHost(
                                     currentScreen = Screen.Discover,
-                                    libraries = libraryViews,
+                                    libraries = drawerViews,
                                     onNavigate = ::navigateFromDrawer,
                                     isTop = isTop,
                                     focusGate = focusGate,
@@ -1242,7 +1257,7 @@ private fun JellybeamRoot(
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
-                                        libraries = libraryViews,
+                                        libraries = drawerViews,
                                         onNavigate = ::navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
@@ -1273,7 +1288,7 @@ private fun JellybeamRoot(
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
-                                        libraries = libraryViews,
+                                        libraries = drawerViews,
                                         onNavigate = ::navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
@@ -1304,7 +1319,7 @@ private fun JellybeamRoot(
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
-                                        libraries = libraryViews,
+                                        libraries = drawerViews,
                                         onNavigate = ::navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
@@ -1329,7 +1344,7 @@ private fun JellybeamRoot(
 
                                 Screen.DiscoverRequests -> NavDrawerHost(
                                     currentScreen = Screen.DiscoverRequests,
-                                    libraries = libraryViews,
+                                    libraries = drawerViews,
                                     onNavigate = ::navigateFromDrawer,
                                     isTop = isTop,
                                     focusGate = focusGate,

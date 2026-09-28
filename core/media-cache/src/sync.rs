@@ -11,7 +11,7 @@ use jellyfin_api::{ItemQuery, ServerEvent};
 use jellyfin_core::BusEvent;
 use tokio::sync::broadcast;
 
-use crate::{MirrorState, SyncActivity};
+use crate::{MirrorChange, MirrorState, SyncActivity};
 
 const PAGE_SIZE: u32 = 500;
 const WS_BATCH_SIZE: usize = 100;
@@ -242,12 +242,18 @@ pub(crate) fn spawn(
                 }
             });
 
+            // After everything Home's first frames need, before the long delta/reconcile work.
+            with_upgraded!(startup_weak, |s| ensure_favorite_indexes(&s).await);
+
             // Delta before reconcile, at every trigger: delta is the fast path (new/updated
             // items visible in seconds); reconcile is the backstop for what delta can't see
             // (deletions), and usually finds the library already in agreement after delta runs.
             with_upgraded!(startup_weak, |s| delta_sync(&s).await);
 
             with_upgraded!(startup_weak, |s| reconcile_all(&s).await);
+
+            // Last, so launch never waits on it: favorites are one shelf below the fold.
+            with_upgraded!(startup_weak, |s| sync_favorites(&s).await);
         }
     });
 
@@ -383,6 +389,72 @@ async fn sync_resume(state: &MirrorState) {
         Ok(result) => state.writer.upsert_items(result.items).await,
         Err(e) => tracing::error!(error = %e, "failed to fetch resume items"),
     }
+}
+
+/// Builds the deferred favorites indexes once on a populated mirror (see
+/// `schema::FAVORITE_INDEX_SQL`), then emits a `Refresh` so Home and the drawer pick
+/// favorites up. A no-op once they exist.
+pub(crate) async fn ensure_favorite_indexes(state: &MirrorState) {
+    if state.favorite_indexes_ready.load(Ordering::Acquire) {
+        return;
+    }
+    if state.writer.build_favorite_indexes().await {
+        state.favorite_indexes_ready.store(true, Ordering::Release);
+        let _ = state.changes_tx.send(MirrorChange::Refresh);
+    }
+}
+
+/// Makes the mirror's favorite flags match the server's per-user favorites list, since
+/// `delta_sync` can't see a UserData-only change: a favorite toggled on another client while
+/// this one was closed would otherwise never land. Always runs after reconcile, never ahead of
+/// anything Home's first frame needs; initial sync skips it (breadth DTOs carry `IsFavorite`).
+/// Id-only pages; any page error or incomplete enumeration leaves the flags untouched, since
+/// a partial list would clear real favorites.
+pub(crate) async fn sync_favorites(state: &MirrorState) {
+    const MAX_PAGES: u32 = 100;
+    let mut start_index: u32 = 0;
+    let mut ids: Vec<String> = Vec::new();
+    let mut progress = PageProgress::new(MAX_PAGES);
+    let since = crate::writer::now_millis();
+    loop {
+        let query = ItemQuery {
+            recursive: true,
+            is_favorite: Some(true),
+            start_index,
+            limit: ID_SWEEP_PAGE_SIZE,
+            enable_images: Some(false),
+            enable_user_data: Some(false),
+            ..ItemQuery::new()
+        };
+        let result = match state.client.get_items(&query).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, start_index, "failed to fetch favorites page");
+                return;
+            }
+        };
+        let complete = match progress.observe(&result.items, result.total_record_count) {
+            Ok(complete) => complete,
+            Err(reason) => {
+                tracing::warn!(
+                    reason,
+                    "favorites enumeration incomplete; keeping prior flags"
+                );
+                return;
+            }
+        };
+        start_index += u32::try_from(result.items.len()).unwrap_or(u32::MAX);
+        ids.extend(
+            result
+                .items
+                .iter()
+                .filter_map(|i| i.id.map(|id| id.to_string())),
+        );
+        if complete {
+            break;
+        }
+    }
+    state.writer.set_favorite_ids(ids, since).await;
 }
 
 /// Converts [`crate::NextUpOptions::cutoff_days`] into the RFC3339 UTC
@@ -819,6 +891,7 @@ async fn apply_bus_event(state: &MirrorState, event: BusEvent) {
             }
             delta_sync(state).await;
             reconcile_all(state).await;
+            sync_favorites(state).await;
         }
     }
 }
@@ -1824,6 +1897,9 @@ async fn reconcile_timer(state: Weak<MirrorState>) {
         sync_resume(&state).await;
         delta_sync(&state).await;
         reconcile_all(&state).await;
+        // Retries a startup build that failed.
+        ensure_favorite_indexes(&state).await;
+        sync_favorites(&state).await;
     }
 }
 
@@ -1833,7 +1909,6 @@ mod tests {
     use crate::mock_server::MockServer;
     use crate::pool::ReadPool;
     use crate::writer::WriterHandle;
-    use crate::MirrorChange;
     use jellyfin_api::{ClientIdentity, JellyfinClient};
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -4061,6 +4136,72 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// The deferred favorites indexes build once, flip the gate, and signal one `Refresh` so
+    /// Home and the drawer re-query; a second call is a silent no-op.
+    #[tokio::test]
+    async fn ensure_favorite_indexes_builds_once_and_signals_a_refresh() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        let mirror = TestMirror::new(client);
+        let mut changes = mirror.state.changes_tx.subscribe();
+        assert!(!mirror.state.favorite_indexes_ready.load(Ordering::Acquire));
+
+        ensure_favorite_indexes(&mirror.state).await;
+        assert!(mirror.state.favorite_indexes_ready.load(Ordering::Acquire));
+        assert!(matches!(changes.try_recv(), Ok(MirrorChange::Refresh)));
+
+        ensure_favorite_indexes(&mirror.state).await;
+        assert!(
+            changes.try_recv().is_err(),
+            "an already-built mirror signals nothing"
+        );
+    }
+
+    /// A favorite toggled on another client lands only through `sync_favorites`: the server's
+    /// list wins in both directions, and a failed fetch leaves the flags alone.
+    #[tokio::test]
+    async fn sync_favorites_mirrors_the_server_list_and_keeps_flags_on_failure() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        let was_favorite = "22222222-2222-2222-2222-222222222222";
+        let now_favorite = "33333333-3333-3333-3333-333333333333";
+        let mut old = movie_json(was_favorite, "Old Favorite");
+        old["UserData"] = json!({ "IsFavorite": true });
+        server.route(
+            "/UserItems/Resume",
+            &[],
+            json!({ "Items": [old, movie_json(now_favorite, "New Favorite")] }),
+        );
+        let mirror = TestMirror::new(client);
+        sync_resume(&mirror.state).await;
+        mirror.state.writer.barrier().await;
+        let favorites = |state: &MirrorState| -> Vec<String> {
+            state
+                .read_pool
+                .acquire()
+                .prepare("SELECT id FROM items WHERE is_favorite = 1")
+                .expect("prepare")
+                .query_map([], |r| r.get(0))
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows")
+        };
+
+        // No `/Items` route yet: the fetch fails and the old flag must survive.
+        sync_favorites(&mirror.state).await;
+        mirror.state.writer.barrier().await;
+        assert_eq!(favorites(&mirror.state), vec![was_favorite.to_string()]);
+
+        server.route(
+            "/Items",
+            &[("isFavorite", "true")],
+            json!({ "Items": [{ "Id": now_favorite }], "TotalRecordCount": 1 }),
+        );
+        sync_favorites(&mirror.state).await;
+        mirror.state.writer.barrier().await;
+        assert_eq!(favorites(&mirror.state), vec![now_favorite.to_string()]);
     }
 
     /// A warm-launch startup pass run twice against byte-identical server fixtures must emit

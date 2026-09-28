@@ -71,6 +71,7 @@ mod tests {
                     genre: Some("Comedy".to_string()),
                     decade: Some(Decade::D2010s),
                     status: StatusFilter::Any,
+                    item_type: None,
                 },
             },
         );
@@ -86,6 +87,7 @@ mod tests {
                     genre: None,
                     decade: None,
                     status: StatusFilter::Continuing,
+                    item_type: None,
                 },
             },
         );

@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
@@ -43,6 +44,8 @@ fun PosterCard(
     val artSource = CardFormatting.posterArtSource(card)
     val progress = CardFormatting.watchProgress(card)
     val indicator = CardFormatting.watchIndicator(card, progress)
+    val (title, meta) = CardFormatting.posterLines(card)
+    val episodeTag = CardFormatting.posterEpisodeTag(card)
 
     Column(
         modifier = modifier.clickable(onClick = onClick),
@@ -59,25 +62,26 @@ fun PosterCard(
             )
             progress?.let { WatchProgressBar(it) }
             WatchBadge(indicator)
+            episodeTag?.let { TimingPill(it, Alignment.BottomStart) }
         }
-        PosterTitleBlock(width = width, title = card.name, year = card.productionYear, isFocused = isFocused)
+        PosterTitleBlock(width = width, title = title, meta = meta, isFocused = isFocused)
     }
 }
 
 /**
- * docs/07 §0.5: fixed 2-line title (33dp reserved) plus 1-line year meta (16dp reserved),
+ * docs/07 §0.5: fixed 2-line title (33dp reserved) plus 1-line meta (16dp reserved),
  * reserved regardless of content so a row's cells stay level. Cross-screen rule, so
  * [PosterCard] (shared with Library/Search) follows it too.
  */
 @Composable
-private fun PosterTitleBlock(width: Dp, title: String, year: Int?, isFocused: Boolean) {
+private fun PosterTitleBlock(width: Dp, title: String, meta: String?, isFocused: Boolean) {
     val titleColor = if (isFocused) JellybeamTheme.Panna else JellybeamTheme.Panna2
     val metaColor = if (isFocused) JellybeamTheme.Panna2 else JellybeamTheme.Grigio
 
     Column(modifier = Modifier.width(width)) {
         CardTitleText(title = title, color = titleColor)
         BasicText(
-            text = year?.toString().orEmpty(),
+            text = meta.orEmpty(),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.height(16.dp),

@@ -620,12 +620,14 @@ val CARD_TITLE_LINE_HEIGHT = 16.25.sp
 /** §0.5: two lines, reserved whether or not the title wraps. */
 val CARD_TITLE_BLOCK_HEIGHT = 33.dp
 
-/** §7's resume-shelf thumb pill: small rounded label docked top-right; not Resume-specific. */
+/** §7's resume-shelf thumb pill: small rounded label docked top-right by default; not
+ * Resume-specific (a poster's episode tag docks it bottom-start).
+ */
 @Composable
-fun BoxScope.TimingPill(text: String) {
+fun BoxScope.TimingPill(text: String, alignment: Alignment = Alignment.TopEnd) {
     Box(
         modifier = Modifier
-            .align(Alignment.TopEnd)
+            .align(alignment)
             .padding(6.dp)
             .background(JellybeamTheme.Notte.copy(alpha = 0.82f), RoundedCornerShape(4.dp))
             .padding(horizontal = 6.dp, vertical = 3.dp),

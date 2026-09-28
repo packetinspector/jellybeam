@@ -229,6 +229,10 @@ pub(crate) fn open_and_prepare(path: &Path) -> Result<(Connection, bool), CacheE
     let has_items: bool = conn
         .query_row("SELECT EXISTS(SELECT 1 FROM items)", [], |row| row.get(0))
         .map_err(db_err)?;
+    // Free on an empty table; a populated one builds them off the launch path instead.
+    if !has_items {
+        conn.execute_batch(FAVORITE_INDEX_SQL).map_err(db_err)?;
+    }
 
     Ok((conn, !has_items))
 }
@@ -265,6 +269,29 @@ pub(crate) fn read_meta(conn: &Connection, key: &str) -> Option<String> {
 
 /// Fresh temp-dir mirror for a test -- shared by `query`'s and `writer`'s test modules so
 /// both open a db the same way.
+/// docs/16 §2.7's favorites indexes, kept out of [`SCHEMA_SQL`]: on a populated mirror their
+/// one-time build (hundreds of ms on a TV) would land inside launch, so the sync startup pass
+/// runs it through the writer instead (`sync::ensure_favorite_indexes`), and the Favorites
+/// shelf and drawer probe stay empty until [`favorite_indexes_ready`].
+pub(crate) const FAVORITE_INDEX_SQL: &str = "
+-- Favorites shelf/page: a partial index, so only the few favorite rows are indexed.
+CREATE INDEX IF NOT EXISTS idx_items_favorite ON items(item_type) WHERE is_favorite = 1;
+-- The shelf's \"last played\" for a favorite Series/Season: one seek each, over played rows only.
+CREATE INDEX IF NOT EXISTS idx_items_series_played ON items(series_id, last_played_date) WHERE last_played_date IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_items_parent_played ON items(parent_id, last_played_date) WHERE last_played_date IS NOT NULL;
+";
+
+/// Whether every [`FAVORITE_INDEX_SQL`] index exists.
+pub(crate) fn favorite_indexes_ready(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) = 3 FROM sqlite_master WHERE type = 'index' AND name IN \
+         ('idx_items_favorite', 'idx_items_series_played', 'idx_items_parent_played')",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
 #[cfg(test)]
 pub(crate) fn open_test_db() -> (tempfile::TempDir, Connection) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -276,6 +303,37 @@ pub(crate) fn open_test_db() -> (tempfile::TempDir, Connection) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn favorite_indexes_come_free_on_a_fresh_mirror_and_wait_on_a_populated_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mirror.db");
+        let (conn, _) = open_and_prepare(&path).expect("open");
+        assert!(
+            favorite_indexes_ready(&conn),
+            "a fresh mirror gets them at open"
+        );
+
+        conn.execute(
+            "INSERT INTO items (id, item_type, dto, updated_at) VALUES ('a', 'Movie', '{}', 0)",
+            [],
+        )
+        .expect("insert");
+        conn.execute_batch(
+            "DROP INDEX idx_items_favorite; DROP INDEX idx_items_series_played; \
+             DROP INDEX idx_items_parent_played;",
+        )
+        .expect("drop");
+        drop(conn);
+        let (conn, _) = open_and_prepare(&path).expect("reopen");
+        assert!(
+            !favorite_indexes_ready(&conn),
+            "a populated mirror defers the build"
+        );
+
+        conn.execute_batch(FAVORITE_INDEX_SQL).expect("build");
+        assert!(favorite_indexes_ready(&conn));
+    }
 
     #[test]
     fn fresh_open_creates_schema_and_reports_empty() {

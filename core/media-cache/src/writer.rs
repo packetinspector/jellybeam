@@ -86,6 +86,19 @@ pub(crate) enum WriteCmd {
     /// different show's episode outranks it -- with no individual item DTO changing, which
     /// would otherwise leave Home showing a stale shelf with no change event to react to.
     SetNextUpIds(Vec<String>),
+    /// Makes `is_favorite` match the server's complete favorites id list: sets it on listed
+    /// rows, clears it everywhere else. The only way a favorite changed on another client
+    /// while this one was closed reaches the mirror (`delta_sync` ignores UserData saves).
+    /// Only rows last written before `since` (the fetch's start, [`now_millis`]) change: any
+    /// write that landed during the fetch -- a toggle, a server event, an item upsert -- is
+    /// newer than the snapshot, which must not undo it.
+    SetFavoriteIds {
+        ids: Vec<String>,
+        since: i64,
+    },
+    /// Builds [`crate::schema::FAVORITE_INDEX_SQL`] on a populated mirror; replies whether it
+    /// succeeded.
+    BuildFavoriteIndexes(oneshot::Sender<bool>),
     /// Fired after enqueueing a batch the caller wants to know completed; commands are
     /// processed strictly in order, so this just drains to that point.
     Barrier(oneshot::Sender<bool>),
@@ -227,6 +240,18 @@ impl WriterHandle {
     /// See [`WriteCmd::SetNextUpIds`].
     pub(crate) async fn set_next_up_ids(&self, ids: Vec<String>) {
         self.send(WriteCmd::SetNextUpIds(ids)).await;
+    }
+
+    /// See [`WriteCmd::BuildFavoriteIndexes`].
+    pub(crate) async fn build_favorite_indexes(&self) -> bool {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::BuildFavoriteIndexes(tx)).await;
+        rx.await.unwrap_or(false)
+    }
+
+    /// See [`WriteCmd::SetFavoriteIds`].
+    pub(crate) async fn set_favorite_ids(&self, ids: Vec<String>, since: i64) {
+        self.send(WriteCmd::SetFavoriteIds { ids, since }).await;
     }
 
     /// Waits until every command enqueued before this call has been applied. Returns false
@@ -430,6 +455,25 @@ pub(crate) fn run(
                     tracing::error!(error = %e, "failed to write next_up_ids");
                 }
             },
+            WriteCmd::SetFavoriteIds { ids, since } => {
+                if let Some(ids) = changed_ids(
+                    &mut writer_healthy,
+                    apply_set_favorite_ids(&mut conn, &ids, since),
+                    |e| tracing::error!(error = %e, "failed to write favorite ids"),
+                ) {
+                    let _ = changes.send(MirrorChange::Upserted {
+                        ids,
+                        library_id: None,
+                    });
+                }
+            }
+            WriteCmd::BuildFavoriteIndexes(reply) => {
+                let result = conn.execute_batch(crate::schema::FAVORITE_INDEX_SQL);
+                if let Err(e) = &result {
+                    tracing::error!(error = %e, "failed to build favorite indexes");
+                }
+                let _ = reply.send(result.is_ok());
+            }
             WriteCmd::Barrier(reply) => {
                 let _ = reply.send(writer_healthy);
             }
@@ -1006,6 +1050,43 @@ pub(crate) fn apply_set_collection_members(
     tx.commit()
 }
 
+/// [`WriteCmd::SetFavoriteIds`]: returns only the ids whose flag actually flipped, so an
+/// unchanged favorites list emits no change event. Rows written at or after `since` are
+/// newer than the snapshot and keep their flag.
+pub(crate) fn apply_set_favorite_ids(
+    conn: &mut Connection,
+    favorite_ids: &[String],
+    since: i64,
+) -> rusqlite::Result<Vec<String>> {
+    let wanted: HashSet<&str> = favorite_ids.iter().map(String::as_str).collect();
+    let tx = conn.transaction()?;
+    let current: Vec<String> = tx
+        .prepare("SELECT id FROM items WHERE is_favorite = 1 AND updated_at < ?1")?
+        .query_map([since], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let now = now_millis();
+    let mut flipped = Vec::new();
+    for id in current.iter().filter(|id| !wanted.contains(id.as_str())) {
+        tx.execute(
+            "UPDATE items SET is_favorite = 0, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        flipped.push(id.clone());
+    }
+    for id in &wanted {
+        if tx.execute(
+            "UPDATE items SET is_favorite = 1, updated_at = ?1 \
+             WHERE id = ?2 AND is_favorite = 0 AND updated_at < ?3",
+            params![now, id, since],
+        )? > 0
+        {
+            flipped.push((*id).to_string());
+        }
+    }
+    tx.commit()?;
+    Ok(flipped)
+}
+
 /// `UserDataChanged` application: patches only the columns present in the event (
 /// §2), leaving everything else, including the blob, as is.
 pub(crate) fn apply_user_data(
@@ -1180,6 +1261,69 @@ mod tests {
             )
             .expect("row exists and the position write has committed");
         assert_eq!(position, 4_200);
+
+        drop(handle);
+        let _ = writer.await;
+    }
+
+    /// A favorites snapshot fetched before a newer favorite write -- a toggle or an item upsert
+    /// carrying `IsFavorite` -- must not undo it; a snapshot fetched after both applies.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_favorites_snapshot_never_undoes_a_newer_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mirror.db");
+        let (conn, _) = open_and_prepare(&path).expect("open");
+        let (tx, rx) = mpsc::channel(64);
+        let (changes, _changes_rx) = broadcast::channel(64);
+        let writer = tokio::task::spawn_blocking(move || run(conn, rx, changes));
+        let handle = WriterHandle::new(tx);
+        let toggled = "e2f5a5f1-1a0b-4b3a-9c2e-000000000001";
+        let upserted = "e2f5a5f1-1a0b-4b3a-9c2e-000000000002";
+        handle
+            .upsert_items(vec![item(toggled, "A Movie"), item(upserted, "B Movie")])
+            .await;
+        handle.barrier().await;
+        let tick = || tokio::time::sleep(std::time::Duration::from_millis(5));
+        let reader = Connection::open(&path).expect("second connection");
+        let is_favorite = |id: &str| -> bool {
+            reader
+                .query_row("SELECT is_favorite FROM items WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .expect("row")
+        };
+
+        tick().await;
+        let stale = now_millis();
+        tick().await;
+        let toggle = UserItemDataDto {
+            is_favorite: Some(true),
+            ..Default::default()
+        };
+        handle
+            .apply_user_data(vec![(toggled.to_string(), toggle.clone())])
+            .await;
+        let mut fetched = item(upserted, "B Movie");
+        fetched.user_data = Some(toggle);
+        handle.upsert_items(vec![fetched]).await;
+        handle.set_favorite_ids(Vec::new(), stale).await;
+        handle.barrier().await;
+        assert!(
+            is_favorite(toggled),
+            "the stale snapshot must not undo the toggle"
+        );
+        assert!(
+            is_favorite(upserted),
+            "the stale snapshot must not undo the upsert"
+        );
+
+        tick().await;
+        handle.set_favorite_ids(Vec::new(), now_millis()).await;
+        handle.barrier().await;
+        assert!(
+            !is_favorite(toggled) && !is_favorite(upserted),
+            "a fresh snapshot applies"
+        );
 
         drop(handle);
         let _ = writer.await;
@@ -2110,6 +2254,36 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
             .expect("count");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn set_favorite_ids_flips_only_the_differences() {
+        let (_dir, mut conn) = open_test_db();
+        let ids: Vec<String> = (1..=3)
+            .map(|n| format!("e2f5a5f1-1a0b-4b3a-9c2e-00000000000{n}"))
+            .collect();
+        let items: Vec<_> = ids.iter().map(|id| item(id, "Movie")).collect();
+        apply_upsert_items(&mut conn, &items).expect("insert");
+        apply_set_favorite_ids(&mut conn, &ids[..2], i64::MAX).expect("seed favorites");
+
+        let mut flipped =
+            apply_set_favorite_ids(&mut conn, &ids[1..], i64::MAX).expect("apply favorites");
+        flipped.sort();
+        assert_eq!(flipped, vec![ids[0].clone(), ids[2].clone()]);
+        let favorites: Vec<String> = conn
+            .prepare("SELECT id FROM items WHERE is_favorite = 1 ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(favorites, ids[1..].to_vec());
+        assert!(
+            apply_set_favorite_ids(&mut conn, &ids[1..], i64::MAX)
+                .expect("repeat")
+                .is_empty(),
+            "an unchanged list must flip nothing"
+        );
     }
 
     #[test]

@@ -9,6 +9,33 @@ import uniffi.jellybeam_core.ImageKind
 
 class CardFormattingTest {
 
+    // ---- posterLines / posterEpisodeTag (docs/07 §2) -------------------
+
+    @Test
+    fun `a poster episode names itself and its series, and carries the S E tag`() {
+        val episode = testCard(itemType = "Episode", name = "Pilot", indexNumber = 5, parentIndexNumber = 1, seriesName = "Harbor Lights")
+
+        assertEquals("E5 · Pilot" to "Harbor Lights · S1", CardFormatting.posterLines(episode))
+        assertEquals("S1 E5", CardFormatting.posterEpisodeTag(episode))
+    }
+
+    @Test
+    fun `a poster season shows its server name over the series name, with no tag`() {
+        val season = testCard(itemType = "Season", name = "Season 2", seriesName = "Harbor Lights", productionYear = 2020)
+
+        assertEquals("Season 2" to "Harbor Lights", CardFormatting.posterLines(season))
+        assertNull(CardFormatting.posterEpisodeTag(season))
+    }
+
+    @Test
+    fun `movies, series and collections keep title over year`() {
+        for (type in listOf("Movie", "Series", "BoxSet")) {
+            val card = testCard(itemType = type, name = "Harbor Lights", productionYear = 1999)
+            assertEquals("Harbor Lights" to "1999", CardFormatting.posterLines(card))
+            assertNull(CardFormatting.posterEpisodeTag(card))
+        }
+    }
+
     @Test
     fun `backdrop art source prefers the item's own backdrop tag`() {
         val card = testCard(itemType = "Movie", backdropTag = "bd-tag", primaryTag = "poster-tag")

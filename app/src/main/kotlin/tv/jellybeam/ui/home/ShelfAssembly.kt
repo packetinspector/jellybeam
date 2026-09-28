@@ -11,7 +11,7 @@ data class ShelfSpec(val id: String, val title: String, val items: List<Card>, v
 /**
  * Home's shelf order and empty-shelf hiding (docs/07-home-browse-behavior.md §1): Continue
  * Watching,
- * then Next Up, then one "Latest in {view}" shelf per library in server order; an empty shelf is
+ * then Next Up, then Favorites, then one "Latest in {view}" shelf per library in server order; an empty shelf is
  * omitted.
  * Pulled out of the Composable file so it's plain-JVM-testable.
  */
@@ -19,6 +19,7 @@ fun buildShelves(
     state: HomeUiState,
     continueWatchingTitle: String,
     nextUpTitle: String,
+    favoritesTitle: String,
     latestInTitle: (viewName: String) -> String,
 ): List<ShelfSpec> = buildList {
     if (state.resume.isNotEmpty()) {
@@ -26,6 +27,9 @@ fun buildShelves(
     }
     if (state.nextUp.isNotEmpty()) {
         add(ShelfSpec("next-up", nextUpTitle, state.nextUp, ShelfKind.RESUME))
+    }
+    if (state.favorites.isNotEmpty()) {
+        add(ShelfSpec("favorites", favoritesTitle, state.favorites, ShelfKind.POSTER))
     }
     for (shelf in state.latest) {
         if (shelf.cards.isNotEmpty()) {

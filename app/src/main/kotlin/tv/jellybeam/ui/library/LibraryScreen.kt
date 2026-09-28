@@ -544,7 +544,7 @@ fun LibraryScreen(
                             counts = state.counts,
                             sort = state.sort,
                             filters = state.filters,
-                            isTv = view.isTvLibrary,
+                            noun = view.gridNoun,
                             modifier = Modifier.padding(start = PAGE_MARGIN, end = PAGE_MARGIN, top = SUMMARY_TOP_PADDING, bottom = SUMMARY_BOTTOM_PADDING),
                         )
                     }
@@ -615,8 +615,8 @@ fun LibraryScreen(
  * every other segment `Panna`, `│` separators in `Grigio`; see [GridSummaryFormat.segments].
  */
 @Composable
-private fun LibrarySummaryLine(counts: GridCounts, sort: GridSort, filters: GridFilters, isTv: Boolean, modifier: Modifier = Modifier) {
-    val segments = remember(counts, sort, filters, isTv) { GridSummaryFormat.segments(counts, sort, filters, isTv) }
+private fun LibrarySummaryLine(counts: GridCounts, sort: GridSort, filters: GridFilters, noun: GridNoun, modifier: Modifier = Modifier) {
+    val segments = remember(counts, sort, filters, noun) { GridSummaryFormat.segments(counts, sort, filters, noun) }
     Row(modifier = modifier) {
         segments.forEachIndexed { index, segment ->
             if (index > 0) {

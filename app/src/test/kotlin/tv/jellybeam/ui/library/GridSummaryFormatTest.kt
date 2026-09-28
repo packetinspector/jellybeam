@@ -21,6 +21,33 @@ class GridSummaryFormatTest {
         status = StatusFilter.ANY,
     )
 
+    // ---- segments: favorites (docs/16 §2.7) ------------------------------
+
+    @Test
+    fun `favorites count favorites, and a type filter reads as filtered with its plural`() {
+        val counts = GridCounts(filtered = 2uL, total = 7uL)
+        val sort = GridSort(GridSortField.NAME, descending = false)
+
+        assertEquals("7 FAVORITES", GridSummaryFormat.segments(counts, sort, noFilters, GridNoun.FAVORITES).first())
+        val byType = GridSummaryFormat.segments(counts, sort, noFilters.copy(itemType = "Series"), GridNoun.FAVORITES)
+        assertEquals("2 OF 7", byType.first())
+        assertEquals("SHOWS", byType.last())
+    }
+
+    @Test
+    fun `type labels are plural, and an unknown type shows verbatim`() {
+        assertEquals("Collections", GridSummaryFormat.itemTypeLabel("BoxSet"))
+        assertEquals("Trailer", GridSummaryFormat.itemTypeLabel("Trailer"))
+    }
+
+    @Test
+    fun `a type filter is stale only when set and no longer present`() {
+        assertTrue(isStaleItemTypeFilter("Episode", listOf("Movie")))
+        assertTrue(isStaleItemTypeFilter("Episode", emptyList()))
+        assertFalse(isStaleItemTypeFilter("Movie", listOf("Movie")))
+        assertFalse(isStaleItemTypeFilter(null, emptyList()))
+    }
+
     // ---- segments: rest state -------------------------------------------
 
     @Test
@@ -29,7 +56,7 @@ class GridSummaryFormatTest {
             counts = GridCounts(filtered = 342uL, total = 342uL),
             sort = GridSort(GridSortField.NAME, descending = false),
             filters = noFilters,
-            isTv = false,
+            noun = GridNoun.MOVIES,
         )
         assertEquals(listOf("342 MOVIES", "NAME ↑"), segments)
     }
@@ -40,7 +67,7 @@ class GridSummaryFormatTest {
             counts = GridCounts(filtered = 120uL, total = 120uL),
             sort = GridSort(GridSortField.NAME, descending = false),
             filters = noFilters,
-            isTv = true,
+            noun = GridNoun.SHOWS,
         )
         assertEquals(listOf("120 SHOWS", "NAME ↑"), segments)
     }
@@ -49,8 +76,8 @@ class GridSummaryFormatTest {
     fun `a single title takes the singular noun`() {
         val one = GridCounts(filtered = 1uL, total = 1uL)
         val sort = GridSort(GridSortField.NAME, descending = false)
-        assertEquals("1 MOVIE", GridSummaryFormat.segments(one, sort, noFilters, isTv = false).first())
-        assertEquals("1 SHOW", GridSummaryFormat.segments(one, sort, noFilters, isTv = true).first())
+        assertEquals("1 MOVIE", GridSummaryFormat.segments(one, sort, noFilters, noun = GridNoun.MOVIES).first())
+        assertEquals("1 SHOW", GridSummaryFormat.segments(one, sort, noFilters, noun = GridNoun.SHOWS).first())
     }
 
     // ---- segments: filtered state -----------------------------------------
@@ -67,7 +94,7 @@ class GridSummaryFormatTest {
             counts = GridCounts(filtered = 23uL, total = 342uL),
             sort = GridSort(GridSortField.DATE_ADDED, descending = true),
             filters = filters,
-            isTv = true,
+            noun = GridNoun.SHOWS,
         )
         assertEquals(
             listOf("23 OF 342", "DATE ADDED ↓", "HAS UNWATCHED", "ACTION", "2010s", "CONTINUING"),
@@ -82,7 +109,7 @@ class GridSummaryFormatTest {
             counts = GridCounts(filtered = 7uL, total = 342uL),
             sort = GridSort(GridSortField.NAME, descending = false),
             filters = filters,
-            isTv = true,
+            noun = GridNoun.SHOWS,
         )
         assertEquals(listOf("7 OF 342", "NAME ↑", "HAS UNWATCHED"), segments)
     }
@@ -94,7 +121,7 @@ class GridSummaryFormatTest {
             counts = GridCounts(filtered = 5uL, total = 342uL),
             sort = GridSort(GridSortField.NAME, descending = false),
             filters = filters,
-            isTv = false,
+            noun = GridNoun.MOVIES,
         )
         assertEquals(listOf("5 OF 342", "NAME ↑", "WATCHED"), segments)
     }
@@ -106,7 +133,7 @@ class GridSummaryFormatTest {
             counts = GridCounts(filtered = 8uL, total = 342uL),
             sort = GridSort(GridSortField.YEAR, descending = true),
             filters = filters,
-            isTv = false,
+            noun = GridNoun.MOVIES,
         )
         assertEquals(listOf("8 OF 342", "YEAR ↓", "OLDER"), segments)
     }
@@ -118,7 +145,7 @@ class GridSummaryFormatTest {
             counts = GridCounts(filtered = 2uL, total = 342uL),
             sort = GridSort(GridSortField.RUNTIME, descending = true),
             filters = filters,
-            isTv = true,
+            noun = GridNoun.SHOWS,
         )
         assertEquals(listOf("2 OF 342", "RUNTIME ↓", "ENDED"), segments)
     }
@@ -130,7 +157,7 @@ class GridSummaryFormatTest {
             counts = GridCounts(filtered = 9uL, total = 342uL),
             sort = GridSort(GridSortField.NAME, descending = false),
             filters = filters,
-            isTv = false,
+            noun = GridNoun.MOVIES,
         )
         assertTrue(segments.contains("SCI-FI & FANTASY"))
     }
@@ -140,10 +167,10 @@ class GridSummaryFormatTest {
     @Test
     fun `sort segment arrow points up when ascending and down when descending`() {
         val ascending = GridSummaryFormat.segments(
-            GridCounts(1uL, 1uL), GridSort(GridSortField.YEAR, descending = false), noFilters, isTv = false,
+            GridCounts(1uL, 1uL), GridSort(GridSortField.YEAR, descending = false), noFilters, noun = GridNoun.MOVIES,
         )
         val descending = GridSummaryFormat.segments(
-            GridCounts(1uL, 1uL), GridSort(GridSortField.YEAR, descending = true), noFilters, isTv = false,
+            GridCounts(1uL, 1uL), GridSort(GridSortField.YEAR, descending = true), noFilters, noun = GridNoun.MOVIES,
         )
         assertEquals("YEAR ↑", ascending[1])
         assertEquals("YEAR ↓", descending[1])

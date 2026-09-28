@@ -13,7 +13,8 @@ Shelf order (`home.rs:118-159`); `size` is the Shelf size setting (10/20/30, def
 1. Hero banner — only when shelf 0 is Continue Watching (`hero_candidate`, home.rs:427-433); no hero otherwise, and the shelves then start below the floating masthead (`contentTopInset`).
 2. "Continue Watching" — `mirror.resume(size)`, hidden if empty.
 3. "Next Up" — `mirror.next_up(size + resume.len())`, de-duplicated against Continue Watching ids (`dedup_against`, home.rs:827-836); hidden if empty after dedup.
-4. "Latest in {library name}" — one shelf per view in server order, `latest(id, size, hide_watched)`; hidden if empty; hidden libraries skipped before querying.
+4. "Favorites" — `mirror.favorites(size)`: the user's favorite movies, shows, seasons, episodes and collections across every library, most recently played first (a show or season counts its episodes' plays), then by name. Poster shelf; hidden if empty or when Settings › Home › Favorites row is off.
+5. "Latest in {library name}" — one shelf per view in server order, `latest(id, size, hide_watched)`; hidden if empty; hidden libraries skipped before querying.
 
 Shelves beyond the first two mount progressively, one per frame, once initial focus has landed, rather than composing every shelf's cards in the first content frame. Any D-pad move or focus-memory restore that reaches an unmounted shelf mounts the rest immediately before the move completes.
 
@@ -21,7 +22,7 @@ Hero: item = shelves[0].items[0]. Full-bleed backdrop (own tag, else ancestor), 
 
 Card sizes:
 - Resume shelves (Continue Watching, Next Up): mixed-aspect single row, row height solved so 5.5 cards fit (`RESUME_CARDS_ACROSS = 5.5` — 5 visible + bleed). Episodes 16:9, movies 2:3 at the same height. Width clamp [180, 320]px.
-- Latest shelves: uniform 2:3 poster, `CELL_WIDTH = 160`px.
+- Favorites and Latest shelves: uniform 2:3 poster, `CELL_WIDTH = 160`px.
 
 Poster-slot image requests are bucketed to the nearest of a small fixed set of server widths (`CardFormatting.bucketedImageWidth`) rather than each surface's exact drawn size, so Home's POSTER shelf, the library grid, and Detail's hero-poster placeholder key all share one 240-wide rendition instead of fragmenting the server's resize cache.
 
@@ -38,7 +39,8 @@ Every card-derived value above (art source, progress bar, badge, timing label, a
 ## 2. Card details
 
 - Episode title format: `"E{n} · {name}"` (cards.rs:1154 — NOT "{n}. {name}"). Bare name if no index_number.
-- Series-name line only on resume-shelf episode cards.
+- Series-name line on resume-shelf episode cards, and on poster cards for episodes and seasons.
+- Poster card lines (`CardFormatting.posterLines`): an episode reads `"E{n} · {name}"` over `"{series} · S{s}"` and carries an `"S{s} E{e}"` tag bottom-left on its art, because a poster episode shows its series' poster; a season reads its server name over the series name; everything else is title over year.
 - Watched state = checkmark badge only; focus = ring only; never combined, no watched-dimming.
 - Virtual episodes (`is_virtual`): art at 40% opacity; status line `"Airs {abbrev date}"` if premiere_date parseable and future, else `"Missing"`; no runtime; no play affordance (navigation still allowed).
 - Poster (2:3) art fallback (`poster_art_source`, cards.rs:211-224): own primary_tag ONLY if item_type != Episode → (series_id, series_primary_tag) → placeholder.
@@ -123,6 +125,10 @@ Play/Resume plays it.
   120ms); closing is the exact reverse over 160ms. The chevron is never accent-coloured, the
   strip is never a focus target, and the feature carries no copy, coach mark, or setting.
   Not on Search or Discover Search (no drawer there) and not during playback.
+- **Favorites entry.** Directly under Home, only while the user has at least one favorite
+  (`has_favorites`, re-checked with the library list on every mirror change, one write so the
+  drawer recomposes once). It opens the Favorites page: the library grid scoped to every
+  favorite (docs/16 §2.7). Settings › Home › Favorites row hides only the Home shelf.
 
 ## 6. Metrics (theme.rs)
 

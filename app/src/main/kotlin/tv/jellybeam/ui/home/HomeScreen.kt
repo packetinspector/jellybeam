@@ -426,9 +426,10 @@ fun HomeScreen(
 
     val continueWatchingTitle = stringResource(R.string.shelf_continue_watching)
     val nextUpTitle = stringResource(R.string.shelf_next_up)
+    val favoritesTitle = stringResource(R.string.shelf_favorites)
     val latestInTemplate = stringResource(R.string.shelf_latest_in)
-    val shelves = remember(state.resume, state.nextUp, state.latest) {
-        buildShelves(state, continueWatchingTitle, nextUpTitle) { viewName ->
+    val shelves = remember(state.resume, state.nextUp, state.favorites, state.latest) {
+        buildShelves(state, continueWatchingTitle, nextUpTitle, favoritesTitle) { viewName ->
             String.format(latestInTemplate, viewName)
         }
     }

@@ -1066,6 +1066,7 @@ impl JellybeamCore {
                 resume: Vec::new(),
                 next_up: Vec::new(),
                 latest: Vec::new(),
+                favorites: Vec::new(),
             };
         };
         let settings = self.lock_state().settings.clone();
@@ -1082,6 +1083,11 @@ impl JellybeamCore {
             &resume,
             size as usize,
         );
+        let favorites = if settings.home_show_favorites {
+            mirror.favorites(size).into_iter().map(Card::from).collect()
+        } else {
+            Vec::new()
+        };
 
         let mut latest = Vec::new();
         for view in mirror.views() {
@@ -1114,7 +1120,23 @@ impl JellybeamCore {
             resume,
             next_up,
             latest,
+            favorites,
         }
+    }
+
+    /// docs/16 §2.7: the item types present among favorites (`"Movie"`, `"Series"`, ...), for
+    /// the Favorites grid's Type panel. Empty before the mirror opens.
+    pub fn favorite_item_types(&self) -> Vec<String> {
+        self.require_mirror()
+            .map(|mirror| mirror.favorite_item_types())
+            .unwrap_or_default()
+    }
+
+    /// docs/07 §5: whether the drawer shows its Favorites entry. One indexed probe; `false`
+    /// before the mirror opens.
+    pub fn has_favorites(&self) -> bool {
+        self.require_mirror()
+            .is_ok_and(|mirror| mirror.has_favorites())
     }
 
     /// `Settings::show_virtual_episodes` (default `false`) drops virtual
@@ -5939,6 +5961,7 @@ mod tests {
                 genre: Some("Comedy".to_string()),
                 decade: Some(crate::types::Decade::D2010s),
                 status: crate::types::StatusFilter::Any,
+                item_type: None,
             },
         };
 
@@ -7805,7 +7828,7 @@ mod tests {
     /// docs/19 §2.3: `set_favorite` applies the response DTO; `card_by_id`'s
     /// `is_favorite` flips.
     #[test]
-    fn set_favorite_flips_is_favorite_on_the_card() {
+    fn set_favorite_reaches_the_card_the_home_shelf_and_the_drawer() {
         const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
         const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000012";
 
@@ -7857,6 +7880,22 @@ mod tests {
             },
             "set_favorite's mirror write to commit",
         );
+
+        // docs/07 §1/§5: the shelf and the drawer entry follow the flag; the setting hides
+        // only the shelf.
+        assert!(core.has_favorites());
+        let shelf: Vec<String> = core
+            .home_snapshot()
+            .favorites
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(shelf, vec![MOVIE_ID.to_string()]);
+        let mut settings = core.get_settings();
+        settings.home_show_favorites = false;
+        core.set_settings(settings);
+        assert!(core.home_snapshot().favorites.is_empty());
+        assert!(core.has_favorites());
     }
 
     /// docs/19 §2.3: `list_collections` caches for its TTL -- a second call

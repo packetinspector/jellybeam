@@ -65,6 +65,10 @@ pub(crate) fn item_types_for_collection(collection_type: &str) -> &'static [&'st
 ///   short prefix like "an" matched nearly every synopsis).
 pub const SCHEMA_VERSION: u32 = 16;
 
+/// docs/16 §2.7: the reserved `view_id` that scopes the library grid queries to every
+/// favorite across libraries. Server ids are 32-hex, so it can never collide with one.
+pub const FAVORITES_VIEW_ID: &str = "favorites";
+
 /// Read connections held open per `Mirror`.
 const READ_POOL_SIZE: usize = 4;
 
@@ -169,6 +173,9 @@ pub(crate) struct MirrorState {
     /// atomic, since it's a two-field struct touched only on a rare settings change or read
     /// once per `refresh_next_up` call.
     pub(crate) next_up_options: std::sync::Mutex<NextUpOptions>,
+    /// [`schema::FAVORITE_INDEX_SQL`] exists; until then [`Mirror::favorites`] and
+    /// [`Mirror::has_favorites`] answer empty rather than scan the table during launch.
+    pub(crate) favorite_indexes_ready: std::sync::atomic::AtomicBool,
 }
 
 impl MirrorState {
@@ -206,6 +213,7 @@ impl MirrorState {
             self_weak,
             sync_activity,
             next_up_options: std::sync::Mutex::new(NextUpOptions::default()),
+            favorite_indexes_ready: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -340,10 +348,14 @@ impl Mirror {
         let db_path = dir.join("mirror.db");
 
         let open_path = db_path.clone();
-        let (conn, is_empty) =
-            tokio::task::spawn_blocking(move || schema::open_and_prepare(&open_path))
-                .await
-                .map_err(|e| CacheError::Db(e.to_string()))??;
+        let (conn, is_empty, favorite_indexes_ready) = tokio::task::spawn_blocking(move || {
+            schema::open_and_prepare(&open_path).map(|(conn, is_empty)| {
+                let ready = schema::favorite_indexes_ready(&conn);
+                (conn, is_empty, ready)
+            })
+        })
+        .await
+        .map_err(|e| CacheError::Db(e.to_string()))??;
 
         let pool_path = db_path.clone();
         let read_pool = tokio::task::spawn_blocking(move || {
@@ -370,6 +382,9 @@ impl Mirror {
             )
         });
 
+        state
+            .favorite_indexes_ready
+            .store(favorite_indexes_ready, std::sync::atomic::Ordering::Release);
         sync::spawn(state.clone(), bus, is_empty);
 
         Ok(Mirror { inner: state })
@@ -597,6 +612,30 @@ impl Mirror {
         query::library_genres(&self.inner.read_pool.acquire(), view_id)
     }
 
+    /// docs/07 §5: see `query::has_favorites`.
+    pub fn has_favorites(&self) -> bool {
+        self.favorite_indexes_ready() && query::has_favorites(&self.inner.read_pool.acquire())
+    }
+
+    fn favorite_indexes_ready(&self) -> bool {
+        self.inner
+            .favorite_indexes_ready
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// docs/16 §2.7: see `query::favorite_item_types`.
+    pub fn favorite_item_types(&self) -> Vec<String> {
+        query::favorite_item_types(&self.inner.read_pool.acquire())
+    }
+
+    /// docs/07 §1: the Home Favorites shelf; see `query::favorites`.
+    pub fn favorites(&self, limit: u32) -> Vec<CardRow> {
+        if !self.favorite_indexes_ready() {
+            return Vec::new();
+        }
+        query::favorites(&self.inner.read_pool.acquire(), limit)
+    }
+
     pub fn resume(&self, limit: u32) -> Vec<CardRow> {
         query::resume(&self.inner.read_pool.acquire(), limit)
     }
@@ -793,6 +832,8 @@ pub struct GridFilters {
     pub genre: Option<String>,
     pub decade: Option<Decade>,
     pub status: StatusFilter,
+    /// Exact `item_type` match; the Favorites grid's type chips (§2.7).
+    pub item_type: Option<String>,
 }
 
 /// [`Mirror::library_grid_counts`]'s result (§2.3): `filtered` matches the current

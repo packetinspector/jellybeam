@@ -3,12 +3,18 @@
 //! exceptions (Detail-only / explicitly batched); neither belongs on the grid/scroll path.
 
 use jellyfin_api::models::BaseItemDto;
+use std::borrow::Cow;
+
 use rusqlite::{params, Connection, Row};
 
 use crate::{
     CardRow, Decade, GridCounts, GridFilters, GridGroup, GridSort, GridSortField, Sort,
-    StatusFilter, WatchedFilter,
+    StatusFilter, WatchedFilter, FAVORITES_VIEW_ID,
 };
+
+/// The item types a favorite can be shown as (people, music and playlists are left out).
+const FAVORITES_FROM_SQL: &str =
+    "FROM items WHERE is_favorite = 1 AND item_type IN ('Movie', 'Series', 'Season', 'Episode', 'BoxSet')";
 
 const CARD_COLUMNS: &str = "id, item_type, name, primary_tag, primary_blurhash, played, \
      playback_position_ticks, runtime_ticks, unplayed_item_count, production_year, \
@@ -126,9 +132,8 @@ fn grid_sort_order(sort: GridSort) -> String {
     format!("{key} {dir} NULLS LAST, sort_name COLLATE NOCASE {dir}, id {dir}")
 }
 
-/// §2.2's filter table. Appends `AND ...` clauses for every active filter; only the Genre
-/// filter adds a `?` placeholder, so callers must push `filters.genre` right after
-/// `parent_id` whenever it's `Some`.
+/// §2.2's filter table. Appends `AND ...` clauses for every active filter; Genre and item
+/// type add `?` placeholders, bound in that order by [`grid_filter_params`].
 fn append_grid_filters(sql: &mut String, filters: &GridFilters) {
     match filters.watched {
         WatchedFilter::Any => {}
@@ -166,14 +171,20 @@ fn append_grid_filters(sql: &mut String, filters: &GridFilters) {
         StatusFilter::Continuing => sql.push_str(" AND series_status = 'Continuing'"),
         StatusFilter::Ended => sql.push_str(" AND series_status = 'Ended'"),
     }
+    if filters.item_type.is_some() {
+        sql.push_str(" AND item_type = ?");
+    }
 }
 
 /// The bound parameters `append_grid_filters` needs, in the same order its `?` placeholders
-/// appear (just Genre, today), kept separate so callers can slot them into their own list.
+/// appear, kept separate so callers can slot them into their own list.
 fn grid_filter_params(filters: &GridFilters) -> Vec<&dyn rusqlite::ToSql> {
     let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
     if let Some(genre) = &filters.genre {
         params.push(genre as &dyn rusqlite::ToSql);
+    }
+    if let Some(item_type) = &filters.item_type {
+        params.push(item_type as &dyn rusqlite::ToSql);
     }
     params
 }
@@ -198,14 +209,41 @@ pub(crate) fn library_grid(
 /// and append any paging params themselves, since those borrow the caller's own locals.
 fn grid_query_sql<'a>(
     select_expr: &str,
+    view_id: &str,
     sort: GridSort,
     filters: &'a GridFilters,
 ) -> (String, Vec<&'a dyn rusqlite::ToSql>) {
-    let index = grid_sort_index(sort.field);
-    let mut sql = format!("SELECT {select_expr} FROM items INDEXED BY {index} WHERE parent_id = ?");
+    let mut sql = format!(
+        "SELECT {select_expr} {}",
+        grid_scope(view_id, Some(sort.field))
+    );
     append_grid_filters(&mut sql, filters);
     sql.push_str(&format!(" ORDER BY {}", grid_sort_order(sort)));
     (sql, grid_filter_params(filters))
+}
+
+/// docs/16 §2.7: the grid's `FROM ... WHERE` population. A library view is `parent_id = ?`
+/// pinned to its sort's index; [`FAVORITES_VIEW_ID`] is every favorite across libraries (a
+/// small set off `idx_items_favorite`, so no pinned index) and binds no parameter.
+fn grid_scope(view_id: &str, sort_field: Option<GridSortField>) -> Cow<'static, str> {
+    if view_id == FAVORITES_VIEW_ID {
+        return Cow::Borrowed(FAVORITES_FROM_SQL);
+    }
+    sort_field.map_or(Cow::Borrowed("FROM items WHERE parent_id = ?"), |field| {
+        Cow::Owned(format!(
+            "FROM items INDEXED BY {} WHERE parent_id = ?",
+            grid_sort_index(field)
+        ))
+    })
+}
+
+/// The leading `view_id` bind [`grid_scope`] needs, if any.
+fn scope_params<'a>(view_id: &'a &str) -> Vec<&'a dyn rusqlite::ToSql> {
+    if *view_id == FAVORITES_VIEW_ID {
+        Vec::new()
+    } else {
+        vec![view_id as &dyn rusqlite::ToSql]
+    }
 }
 
 /// [`library_grid`] with the error surfaced instead of an empty list (§4.6: keep the last
@@ -218,10 +256,10 @@ pub(crate) fn library_grid_checked(
     offset: u32,
     limit: u32,
 ) -> rusqlite::Result<Vec<CardRow>> {
-    let (mut sql, filter_params) = grid_query_sql(CARD_COLUMNS, sort, filters);
+    let (mut sql, filter_params) = grid_query_sql(CARD_COLUMNS, view_id, sort, filters);
     sql.push_str(" LIMIT ? OFFSET ?");
 
-    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&view_id as &dyn rusqlite::ToSql];
+    let mut params = scope_params(&view_id);
     params.extend(filter_params);
     params.push(&limit);
     params.push(&offset);
@@ -254,16 +292,17 @@ pub(crate) fn library_grid_counts_checked(
     view_id: &str,
     filters: &GridFilters,
 ) -> rusqlite::Result<GridCounts> {
-    let mut filtered_sql = String::from("SELECT COUNT(*) FROM items WHERE parent_id = ?");
+    let scope = grid_scope(view_id, None);
+    let mut filtered_sql = format!("SELECT COUNT(*) {scope}");
     append_grid_filters(&mut filtered_sql, filters);
-    let mut filtered_params: Vec<&dyn rusqlite::ToSql> = vec![&view_id as &dyn rusqlite::ToSql];
+    let mut filtered_params = scope_params(&view_id);
     filtered_params.extend(grid_filter_params(filters));
     let filtered: i64 =
         conn.query_row(&filtered_sql, filtered_params.as_slice(), |row| row.get(0))?;
 
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM items WHERE parent_id = ?1",
-        [view_id],
+        &format!("SELECT COUNT(*) {scope}"),
+        scope_params(&view_id).as_slice(),
         |row| row.get(0),
     )?;
 
@@ -328,9 +367,9 @@ pub(crate) fn library_grid_groups_checked(
     filters: &GridFilters,
 ) -> rusqlite::Result<Vec<GridGroup>> {
     let key_expr = grid_group_key_expr(sort.field);
-    let (sql, filter_params) = grid_query_sql(key_expr, sort, filters);
+    let (sql, filter_params) = grid_query_sql(key_expr, view_id, sort, filters);
 
-    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&view_id as &dyn rusqlite::ToSql];
+    let mut params = scope_params(&view_id);
     params.extend(filter_params);
 
     let mut stmt = conn.prepare(&sql)?;
@@ -350,13 +389,16 @@ pub(crate) fn library_grid_groups_checked(
 /// `items` (indexed `parent_id`) into `item_genres`, same direction as the Genre filter's
 /// `EXISTS`.
 pub(crate) fn library_genres(conn: &Connection, view_id: &str) -> Vec<String> {
-    let sql = "SELECT DISTINCT g.genre FROM items i \
-               JOIN item_genres g ON g.item_id = i.id \
-               WHERE i.parent_id = ?1 \
-               ORDER BY g.genre COLLATE NOCASE ASC";
+    let sql = format!(
+        "SELECT DISTINCT g.genre FROM item_genres g WHERE g.item_id IN (SELECT id {}) \
+         ORDER BY g.genre COLLATE NOCASE ASC",
+        grid_scope(view_id, None)
+    );
     let result = (|| -> rusqlite::Result<Vec<String>> {
-        let mut stmt = conn.prepare_cached(sql)?;
-        let rows = stmt.query_map([view_id], |row| row.get::<_, String>(0))?;
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(scope_params(&view_id).as_slice(), |row| {
+            row.get::<_, String>(0)
+        })?;
         rows.collect()
     })();
     result.unwrap_or_else(|e| {
@@ -600,6 +642,67 @@ fn episodes_of_season_checked(
         row_to_card,
     )?;
     rows.collect()
+}
+
+/// [`favorites`]' statement. Only a Series or Season looks at its episodes, each through one
+/// seek on a played-rows partial index, so a long-running show costs no more than a movie.
+fn favorites_sql() -> String {
+    format!(
+        "SELECT {CARD_COLUMNS} {FAVORITES_FROM_SQL} \
+         ORDER BY COALESCE(last_played_date, CASE item_type \
+             WHEN 'Series' THEN (SELECT MAX(e.last_played_date) FROM items e \
+                 WHERE e.series_id = items.id AND e.last_played_date IS NOT NULL) \
+             WHEN 'Season' THEN (SELECT MAX(e.last_played_date) FROM items e \
+                 WHERE e.parent_id = items.id AND e.last_played_date IS NOT NULL) END) \
+             DESC NULLS LAST, sort_name COLLATE NOCASE, id \
+         LIMIT ?1"
+    )
+}
+
+/// docs/07 §1: the Home Favorites shelf, most recently played first (a Series or Season counts
+/// its episodes' plays), then by name. Favorites carry no timestamp of their own.
+pub(crate) fn favorites(conn: &Connection, limit: u32) -> Vec<CardRow> {
+    let result = (|| -> rusqlite::Result<Vec<CardRow>> {
+        let mut stmt = conn.prepare_cached(&favorites_sql())?;
+        let rows = stmt.query_map([limit], row_to_card)?;
+        rows.collect()
+    })();
+    result.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "favorites query failed");
+        Vec::new()
+    })
+}
+
+/// docs/07 §5: whether any favorite exists, for the drawer entry; one partial-index probe.
+pub(crate) fn has_favorites(conn: &Connection) -> bool {
+    conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 {FAVORITES_FROM_SQL})"),
+        [],
+        |row| row.get(0),
+    )
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "has_favorites query failed");
+        false
+    })
+}
+
+/// docs/16 §2.7: the item types present among favorites, for the Favorites grid's Type
+/// panel, in the fixed Movie/Series/Season/Episode/BoxSet order.
+pub(crate) fn favorite_item_types(conn: &Connection) -> Vec<String> {
+    let sql = format!(
+        "SELECT DISTINCT item_type {FAVORITES_FROM_SQL} \
+         ORDER BY CASE item_type WHEN 'Movie' THEN 0 WHEN 'Series' THEN 1 \
+         WHEN 'Season' THEN 2 WHEN 'Episode' THEN 3 ELSE 4 END"
+    );
+    let result = (|| -> rusqlite::Result<Vec<String>> {
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    })();
+    result.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "favorite_item_types query failed");
+        Vec::new()
+    })
 }
 
 pub(crate) fn resume(conn: &Connection, limit: u32) -> Vec<CardRow> {
@@ -2635,6 +2738,7 @@ mod tests {
             genre: None,
             decade: None,
             status: StatusFilter::Any,
+            item_type: None,
         }
     }
 
@@ -2675,6 +2779,153 @@ mod tests {
             played_percentage: None,
             rating: None,
         }
+    }
+
+    // ---- Favorites (docs/07 §1, docs/16 §2.7) --------------------------
+
+    /// `(id, item_type, sort_name, is_favorite, last_played_date, series_id, parent_id)`.
+    type FavoriteSeed<'a> = (
+        &'a str,
+        &'a str,
+        &'a str,
+        bool,
+        Option<&'a str>,
+        Option<&'a str>,
+        &'a str,
+    );
+
+    fn seed_favorites(conn: &Connection, rows: &[FavoriteSeed<'_>]) {
+        for (id, item_type, name, is_favorite, last_played, series_id, parent_id) in rows {
+            conn.execute(
+                "INSERT INTO items (id, item_type, name, sort_name, is_favorite, last_played_date, \
+                 series_id, parent_id, dto, updated_at) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, '{}', 0)",
+                params![id, item_type, name, is_favorite, last_played, series_id, parent_id],
+            )
+            .expect("insert");
+        }
+    }
+
+    fn favorites_fixture(conn: &Connection) {
+        seed_favorites(
+            conn,
+            &[
+                (
+                    "movie",
+                    "Movie",
+                    "Alpha",
+                    true,
+                    Some("2026-01-01T00:00:00Z"),
+                    None,
+                    "lib-a",
+                ),
+                ("series", "Series", "Delta", true, None, None, "lib-b"),
+                (
+                    "played-ep",
+                    "Episode",
+                    "Pilot",
+                    false,
+                    Some("2026-03-01T00:00:00Z"),
+                    Some("series"),
+                    "season",
+                ),
+                (
+                    "episode",
+                    "Episode",
+                    "Beta",
+                    true,
+                    None,
+                    Some("other"),
+                    "season-2",
+                ),
+                ("boxset", "BoxSet", "Gamma", true, None, None, "lib-c"),
+                ("song", "Audio", "Aria", true, None, None, "lib-d"),
+                ("plain", "Movie", "Zeta", false, None, None, "lib-a"),
+            ],
+        );
+    }
+
+    #[test]
+    fn favorites_shelf_puts_recent_plays_first_and_skips_undisplayable_types() {
+        let (_dir, conn) = open_test_db();
+        favorites_fixture(&conn);
+
+        let rows = favorites(&conn, 10);
+
+        // The Series ranks by its episode's play; unplayed favorites follow by name.
+        assert_eq!(ids(&rows), vec!["series", "movie", "episode", "boxset"]);
+        assert!(rows.iter().all(|r| r.is_favorite));
+        assert_eq!(ids(&favorites(&conn, 2)), vec!["series", "movie"]);
+        assert!(has_favorites(&conn));
+        conn.execute("UPDATE items SET is_favorite = 0", [])
+            .expect("clear");
+        assert!(!has_favorites(&conn));
+    }
+
+    #[test]
+    fn favorites_grid_spans_libraries_and_filters_by_type() {
+        let (_dir, conn) = open_test_db();
+        favorites_fixture(&conn);
+
+        let all = library_grid_checked(&conn, FAVORITES_VIEW_ID, name_sort(), &no_filters(), 0, 10)
+            .expect("grid");
+        assert_eq!(names(&all), vec!["Alpha", "Beta", "Delta", "Gamma"]);
+
+        let movies = GridFilters {
+            item_type: Some("Movie".to_string()),
+            ..no_filters()
+        };
+        let only_movies =
+            library_grid_checked(&conn, FAVORITES_VIEW_ID, name_sort(), &movies, 0, 10)
+                .expect("grid");
+        assert_eq!(names(&only_movies), vec!["Alpha"]);
+        assert_eq!(
+            library_grid_counts_checked(&conn, FAVORITES_VIEW_ID, &movies).expect("counts"),
+            GridCounts {
+                filtered: 1,
+                total: 4
+            }
+        );
+        assert_eq!(
+            favorite_item_types(&conn),
+            vec!["Movie", "Series", "Episode", "BoxSet"]
+        );
+        let groups =
+            library_grid_groups_checked(&conn, FAVORITES_VIEW_ID, name_sort(), &no_filters())
+                .expect("groups");
+        assert_eq!(groups.iter().map(|g| g.count).sum::<u64>(), 4);
+    }
+
+    #[test]
+    fn favorites_shelf_reads_episode_plays_through_the_played_indexes() {
+        let (_dir, conn) = open_test_db();
+        let limit: u32 = 20;
+        let plan = explain(&conn, &favorites_sql(), &[&limit]);
+        assert_no_items_scan(&plan);
+        for index in [
+            "idx_items_favorite",
+            "idx_items_series_played",
+            "idx_items_parent_played",
+        ] {
+            assert!(
+                plan.iter().any(|l| l.contains(index)),
+                "{index} missing from plan: {plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn favorites_scope_is_served_by_the_partial_index() {
+        let (_dir, conn) = open_test_db();
+        let plan = explain(
+            &conn,
+            &format!("SELECT id {}", grid_scope(FAVORITES_VIEW_ID, None)),
+            &[],
+        );
+        assert_no_items_scan(&plan);
+        assert!(
+            plan.iter().any(|l| l.contains("idx_items_favorite")),
+            "plan: {plan:?}"
+        );
     }
 
     fn names(rows: &[CardRow]) -> Vec<&str> {

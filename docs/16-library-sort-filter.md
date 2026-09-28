@@ -178,6 +178,38 @@ the groups scan additionally uses the index as covering.
 
 ---
 
+### 2.7 Favorites scope
+
+The drawer's Favorites page reuses this grid. `FAVORITES_VIEW_ID` (`"favorites"`, never a
+32-hex server id) passed as `view_id` swaps the `parent_id = ?` population for every favorite
+of a shown type (Movie, Series, Season, Episode, BoxSet; people, music and playlists are left
+out) across libraries, off the partial index `idx_items_favorite`, with no pinned sort index:
+the set is small. The Home shelf's "last played" order reads a favorite show's or season's
+episodes through `idx_items_series_played` / `idx_items_parent_played` (partial, played rows
+only, covering), one seek per favorite rather than one row read per episode. The three favorites
+indexes live in `FAVORITE_INDEX_SQL`, not the launch schema: a fresh mirror creates them at open
+(free on an empty table), and a populated one builds them through the writer once the startup
+pass has fetched what Home needs. Until then the Home shelf and the drawer probe answer empty
+rather than scan the table; the build ends with a `Refresh` that brings both in. Counts, groups and genres follow the same scope. The core's
+`favorites_view(name)` builds the page's `ViewSnapshot` with collection type `"favorites"`,
+which is how Kotlin recognises it.
+
+`GridFilters.item_type` is an exact item-type match. Only the Favorites strip sets it, through
+a **Type** chip whose panel lists `favorite_item_types()` (the types present, fixed order) plus
+Any; the summary line counts `FAVORITES` and adds the type's plural (`SHOWS`, `EPISODES`, ...).
+
+Favorites are per user on the server. The mirror's `is_favorite` flag follows the app's own
+toggle, live `UserDataChanged` events, and `sync_favorites`: an id-only `isFavorite=true` walk
+that runs last in the warm startup pass, after each reconnect and on the reconcile timer, and
+makes the flag match the server list (any failed or incomplete page changes nothing, and it
+leaves alone any row written after the fetch began, so a stale snapshot never undoes a newer
+toggle, server event or item fetch). That guard reads each row's general write time, so any
+write to an item during the sync -- a playback position, a metadata refresh -- also shields
+that item's favorite flag from the snapshot. The window spans the whole paged fetch plus the
+wait for the writer to apply it. A favorite changed elsewhere on such an item stays stale until
+a later favorites sync completes successfully (next launch, reconnect, or reconcile tick). It never
+runs ahead of anything Home's first frame needs.
+
 ## 3. FFI surface (`core/ffi`)
 
 Records/enums mirror §2.1 one-to-one as `uniffi::Record`/`uniffi::Enum`

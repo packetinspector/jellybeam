@@ -108,6 +108,20 @@ object CardFormatting {
         }
     }
 
+    /** docs/07 §2: a poster card's two text lines. An episode or season shows its series' poster,
+     * so its lines name what it is (`"E5 · Title"` / `"Series · S1"`, `"Season 2"` / `"Series"`);
+     * everything else is title / year.
+     */
+    fun posterLines(card: Card): Pair<String, String?> = when (card.itemType) {
+        "Episode" -> episodeTitle(card.name, card.indexNumber) to resumeSeriesSeasonLine(card)
+        "Season" -> card.name to card.seriesName?.takeIf { it.isNotBlank() }
+        else -> card.name to card.productionYear?.toString()
+    }
+
+    /** docs/07 §2: the art tag that tells a favorited episode apart from its series' poster. */
+    fun posterEpisodeTag(card: Card): String? =
+        if (card.itemType == "Episode") seasonEpisodeLabel(card.parentIndexNumber, card.indexNumber) else null
+
     /** Fraction clamped 0..1, only when runtime is present and position > 0. */
     fun watchProgress(card: Card): Float? {
         val runtime = card.runtimeTicks ?: return null

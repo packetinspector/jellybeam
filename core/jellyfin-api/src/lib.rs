@@ -355,6 +355,9 @@ pub struct ItemQuery {
     /// "unplayed, position 0" to `rows::extract_columns`, so it's only safe for id-only
     /// enumeration; the sweep re-fetches full DTOs for stored ids.
     pub enable_user_data: Option<bool>,
+    /// `isFavorite` query param: the requesting user's favorites only (favorites are per user).
+    /// `None` omits it.
+    pub is_favorite: Option<bool>,
 }
 
 impl ItemQuery {
@@ -704,6 +707,9 @@ impl JellyfinClient {
         }
         if let Some(is_missing) = q.is_missing {
             query.push(("isMissing", is_missing.to_string()));
+        }
+        if let Some(is_favorite) = q.is_favorite {
+            query.push(("isFavorite", is_favorite.to_string()));
         }
         if let Some(min_date_last_saved) = &q.min_date_last_saved {
             query.push(("minDateLastSaved", min_date_last_saved.clone()));
@@ -2141,6 +2147,26 @@ mod tests {
         assert!(
             !request_line.contains("fields"),
             "request line should omit fields when empty: {request_line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_items_sends_is_favorite_when_set() {
+        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        let query = ItemQuery {
+            is_favorite: Some(true),
+            ..ItemQuery::new()
+        };
+        client
+            .get_items(&query)
+            .await
+            .expect("get_items against mock server");
+        let request = rx.await.expect("mock server captured a request");
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.contains("isFavorite=true"),
+            "request line missing isFavorite: {request_line}"
         );
     }
 

@@ -60,6 +60,10 @@ data class LibraryUiState(
      * mirror change events only.
      */
     val genres: List<String> = emptyList(),
+    /** docs/16 §2.7: the Favorites page's Type panel options (item types present), refreshed
+     * alongside [genres]; always empty for a library view.
+     */
+    val itemTypes: List<String> = emptyList(),
     /** True once [CoreGateway.getLibraryGridPrefs] resolved and [sort]/[filters] reflect the saved
      * value; the first [CoreGateway.libraryGrid] query never fires before this flips.
      */
@@ -165,8 +169,9 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
         // Hoisted out of the `any {}` lambdas below so a burst of N ids isn't O(N*M) per id.
         val currentItemIds = currentItemIds()
         return when (event) {
-            is ChangeEvent.Upserted -> event.libraryId == view.id || currentItemIds.isEmpty() || event.ids.any { it == view.id || it in currentItemIds }
-            is ChangeEvent.Removed -> event.libraryId == view.id || event.ids.any { it == view.id || it in currentItemIds }
+            // Favorites spans libraries and a newly favorited item isn't loaded yet.
+            is ChangeEvent.Upserted -> view.isFavorites || event.libraryId == view.id || currentItemIds.isEmpty() || event.ids.any { it == view.id || it in currentItemIds }
+            is ChangeEvent.Removed -> view.isFavorites || event.libraryId == view.id || event.ids.any { it == view.id || it in currentItemIds }
             ChangeEvent.Refresh -> true
             ChangeEvent.ViewsChanged -> true
         }
@@ -244,6 +249,7 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
             val requested = maxOf(PAGE_SIZE, current.items.size)
             val read = readGrid(current.sort, current.filters, requested)
             val genres = if (reloadGenres) gateway.libraryGenres(view.id) else current.genres
+            val itemTypes = if (reloadGenres && view.isFavorites) gateway.favoriteItemTypes() else current.itemTypes
             if (myGeneration != generation) {
                 // A newer intent's requery() already holds the correct results; touch nothing but
                 // this stale fetch's own loading flags.
@@ -252,7 +258,8 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
             }
             // Same fail-soft reasoning as the live branch, via a null result instead of a thrown
             // exception (see [GridRead]'s null-vs-empty contract).
-            _state.update { it.applying(read).copy(isLoading = false, isLoadingMore = false, genres = genres) }
+            _state.update { it.applying(read).copy(isLoading = false, isLoadingMore = false, genres = genres, itemTypes = itemTypes) }
+            if (reloadGenres && isStaleItemTypeFilter(current.filters.itemType, itemTypes)) setItemType(null)
         }
     }
 
@@ -316,6 +323,9 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
 
     /** Genre panel Select (docs/16 §4.3) -- `null` commits "Any". */
     fun setGenre(genre: String?) = applyIntent { state -> state.copy(filters = state.filters.copy(genre = genre)) }
+
+    /** Favorites' Type panel Select (docs/16 §2.7) -- `null` commits "Any". */
+    fun setItemType(itemType: String?) = applyIntent { state -> state.copy(filters = state.filters.copy(itemType = itemType)) }
 
     /** Years panel Select (docs/16 §4.3) -- `null` commits "Any". */
     fun setDecade(decade: Decade?) = applyIntent { state -> state.copy(filters = state.filters.copy(decade = decade)) }

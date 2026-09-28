@@ -212,6 +212,16 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `the favorites row toggle flips the home setting`() = runTest {
+        val gateway = FakeCoreGateway(settings = defaultTestSettings().copy(homeShowFavorites = true))
+        val viewModel = SettingsViewModel(gateway)
+
+        viewModel.toggleHomeShowFavorites()
+
+        assertEquals(false, viewModel.state.value.settings.homeShowFavorites)
+    }
+
+    @Test
     fun `selecting Off for next-up cutoff sets it back to null`() = runTest {
         val seeded = defaultTestSettings().copy(nextUpCutoffDays = 365u)
         val gateway = FakeCoreGateway(settings = seeded)

@@ -10,6 +10,8 @@
          server-configured library name, shown as-is (never prettified). -->
     <string name="shelf_continue_watching">Continue Watching</string>
     <string name="shelf_next_up">Next Up</string>
+    <string name="shelf_favorites">Favorites</string>
+    <string name="drawer_favorites">Favorites</string>
     <string name="shelf_latest_in">Latest in %1$s</string>
     <!-- docs/brand.md §6.2: one factual line each, no button; the mascot carries the warmth. -->
     <string name="home_empty_title">No items in your libraries yet.</string>
@@ -205,6 +207,8 @@
     <string name="settings_desc_home_cutoff">Hide shows from Next Up after this many days of inactivity.</string>
     <string name="settings_next_up_rewatching">Include rewatching in Next Up</string>
     <string name="settings_desc_home_next_up_rewatching">Include already-watched shows you are rewatching in Next Up.</string>
+    <string name="settings_home_show_favorites">Favorites row</string>
+    <string name="settings_desc_home_show_favorites">Show your favorites as a Home row. Favorites stays in the side menu either way.</string>
     <string name="settings_hide_watched_in_latest">Hide watched in Latest</string>
     <string name="settings_desc_home_hide_watched_in_latest">Hide fully watched items from the Latest row.</string>
     <string name="settings_libraries_on_home">Libraries on Home</string>
@@ -572,6 +576,7 @@
     <string name="library_has_unwatched">Has unwatched</string>
     <string name="library_genre">Genre</string>
     <string name="library_years">Years</string>
+    <string name="library_type">Type</string>
     <string name="library_status_any">Status: any</string>
     <string name="library_status_continuing">Continuing</string>
     <string name="library_status_ended">Ended</string>
