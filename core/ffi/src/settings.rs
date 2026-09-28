@@ -105,6 +105,10 @@ fn default_subtitle_scale() -> f32 {
     1.0
 }
 
+fn default_home_shelf_size() -> u32 {
+    20
+}
+
 fn default_skip_back_secs() -> u32 {
     SkipLengthPrefs::default().back_secs
 }
@@ -305,6 +309,10 @@ pub struct Settings {
     /// (docs/07 §5); nothing here validates it.
     #[serde(default)]
     pub startup_screen_view_id: Option<String>,
+    /// Cards per Home shelf (Continue Watching, Next Up, each Latest). One of
+    /// Kotlin's shelf-size presets by convention, not validated here.
+    #[serde(default = "default_home_shelf_size")]
+    pub home_shelf_size: u32,
     /// Seek-back magnitude, in seconds. One of Kotlin's skip-length presets
     /// by convention, not validated as such here.
     #[serde(default = "default_skip_back_secs")]
@@ -435,6 +443,7 @@ impl Default for Settings {
             hidden_library_ids: Vec::new(),
             hide_watched_in_latest: false,
             startup_screen_view_id: None,
+            home_shelf_size: default_home_shelf_size(),
             skip_back_secs: default_skip_back_secs(),
             skip_forward_secs: default_skip_forward_secs(),
             language: LanguageSettings::default(),
@@ -561,6 +570,7 @@ mod tests {
             hidden_library_ids: vec!["lib-1".to_string()],
             hide_watched_in_latest: true,
             startup_screen_view_id: Some("view-1".to_string()),
+            home_shelf_size: 30,
             skip_back_secs: 15,
             skip_forward_secs: 30,
             language: LanguageSettings {
@@ -627,6 +637,7 @@ mod tests {
         assert!(settings.hidden_library_ids.is_empty());
         assert!(!settings.hide_watched_in_latest);
         assert!(settings.startup_screen_view_id.is_none());
+        assert_eq!(settings.home_shelf_size, 20);
         assert!(settings.language.audio.is_none());
         assert!(settings.language.subtitle.is_none());
         assert_eq!(settings.subtitle_scale, 1.0);
@@ -737,6 +748,8 @@ mod tests {
         assert!(loaded.startup_screen_view_id.is_none());
         assert_eq!(loaded.skip_back_secs, 20);
         assert_eq!(loaded.skip_forward_secs, 20);
+        // Absent from the old file: falls back to 20, not 0.
+        assert_eq!(loaded.home_shelf_size, 20);
         assert!(loaded.autoplay_enabled);
         // Missing field falls back to the playback-policy default, not 0.
         assert_eq!(

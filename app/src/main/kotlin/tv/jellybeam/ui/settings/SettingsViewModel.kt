@@ -29,6 +29,9 @@ import uniffi.jellybeam_core.ViewSnapshot
  * order. */
 val NEXT_UP_CUTOFF_DAY_PRESETS: List<UInt?> = listOf(null, 7u, 14u, 30u, 90u, 365u)
 
+/** Home shelf-size presets (docs/09). Chip options, in display order. */
+val HOME_SHELF_SIZE_PRESETS: List<UInt> = listOf(10u, 20u, 30u)
+
 /** Skip back/forward presets, shared by both rows (docs/09). Chip options, in display order. */
 val SKIP_SECONDS_PRESETS: List<UInt> = listOf(5u, 10u, 15u, 30u, 60u)
 
@@ -117,6 +120,7 @@ fun defaultSettings(): Settings = Settings(
     hiddenLibraryIds = emptyList(),
     hideWatchedInLatest = false,
     startupScreenViewId = null,
+    homeShelfSize = 20u,
     skipBackSecs = 10u,
     skipForwardSecs = 10u,
     language = LanguageSettings(audio = null, subtitle = null, subtitleMode = SubtitleModeSetting.DEFAULT),
@@ -262,6 +266,8 @@ class SettingsViewModel(
     }
 
     fun selectNextUpCutoff(days: UInt?) = updateSettings { it.copy(nextUpCutoffDays = days) }
+
+    fun selectHomeShelfSize(size: UInt) = updateSettings { it.copy(homeShelfSize = size) }
 
     fun toggleNextUpRewatching() = updateSettings { it.copy(nextUpRewatching = !it.nextUpRewatching) }
 

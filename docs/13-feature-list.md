@@ -20,7 +20,8 @@ session resolves.
 
 **Browsing & library** — mirror-backed instant browse everywhere (local SQLite
 mirror, no server round-trip for navigation); Home shelves (resume, next-up,
-latest, per-library visibility); library grid (Page Up / Page Down, or the
+latest, per-library visibility; a user-set shelf size caps every row, and Next
+Up never repeats a Continue Watching title); library grid (Page Up / Page Down, or the
 remote's Channel Up / Down rocker, move focus by one screenful of rows in the
 same column -- library grids only, never Home, detail pages, or a plugin
 channel's live folder-listing); Movies and TV Shows libraries sort and
@@ -304,7 +305,8 @@ payload.
 **Settings** — whole-record Rust-owned settings store (`get_settings`/
 `set_settings`, tolerant load/migration, atomic file replacement and ordered
 Settings-screen saves); Home section (Next Up cutoff
-presets + rewatching toggle, per-library Home visibility, hide-watched-in-Latest,
+presets + rewatching toggle, per-library Home visibility, shelf size (10/20/30,
+default 20, every Home row), hide-watched-in-Latest,
 startup screen picker, clock toggle, show/hide missing episodes); Playback
 section (skip back/forward, Quality chips (Direct Play / Auto / 20 / 8 / 3
 Mbps, default Direct Play), autoplay enabled + delay, mini player toggle

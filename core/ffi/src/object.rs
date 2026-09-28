@@ -1053,13 +1053,14 @@ impl JellybeamCore {
             .unwrap_or_default()
     }
 
-    /// The whole Home screen in one call: resume + next-up rails (12 items
-    /// each) and one "Latest" shelf per view with at least one card,
+    /// The whole Home screen in one call: resume + next-up rails and one
+    /// "Latest" shelf per view with at least one card, each holding up to
+    /// `Settings::home_shelf_size` items (next-up never repeats a resume card),
     /// skipping `Settings::hidden_library_ids` and honoring
     /// `Settings::hide_watched_in_latest`. [`Self::views`] itself stays
     /// unfiltered; only this method's "Latest" shelves are filtered.
     /// Resume/next-up are not filtered by hidden library in this slice.
-    pub fn home_snapshot(&self, latest_per_view: u32) -> HomeSnapshot {
+    pub fn home_snapshot(&self) -> HomeSnapshot {
         let Ok(mirror) = self.require_mirror() else {
             return HomeSnapshot {
                 resume: Vec::new(),
@@ -1069,8 +1070,18 @@ impl JellybeamCore {
         };
         let settings = self.lock_state().settings.clone();
 
-        let resume = mirror.resume(12).into_iter().map(Card::from).collect();
-        let next_up = mirror.next_up(12).into_iter().map(Card::from).collect();
+        let size = settings.home_shelf_size;
+        let resume: Vec<Card> = mirror.resume(size).into_iter().map(Card::from).collect();
+        // Over-fetch by the resume count so dropping repeats still fills the shelf.
+        let next_up = next_up_beside_resume(
+            mirror
+                .next_up(size.saturating_add(u32::try_from(resume.len()).unwrap_or(u32::MAX)))
+                .into_iter()
+                .map(Card::from)
+                .collect(),
+            &resume,
+            size as usize,
+        );
 
         let mut latest = Vec::new();
         for view in mirror.views() {
@@ -1086,7 +1097,7 @@ impl JellybeamCore {
                 continue;
             }
             let cards: Vec<Card> = mirror
-                .latest(&view_id, latest_per_view, settings.hide_watched_in_latest)
+                .latest(&view_id, size, settings.hide_watched_in_latest)
                 .into_iter()
                 .map(Card::from)
                 .collect();
@@ -1546,7 +1557,7 @@ impl JellybeamCore {
     /// `next_up_cutoff_days`/`next_up_rewatching` map onto
     /// `media_cache::NextUpOptions` and push to the open mirror if any
     /// (else deferred to the next `open_mirror`).
-    /// `hidden_library_ids`/`hide_watched_in_latest` need no push --
+    /// `hidden_library_ids`/`hide_watched_in_latest`/`home_shelf_size` need no push --
     /// [`Self::home_snapshot`] reads settings directly. Every other field is
     /// Kotlin-consumed state with no Rust-side effect yet (docs/09 steps 2-3).
     ///
@@ -3841,6 +3852,16 @@ fn refuse_if_virtual(
     Ok(())
 }
 
+/// Next Up minus anything already on Continue Watching (docs/07 §1), in
+/// server order, capped at `limit`; the same episode never sits on two rails.
+fn next_up_beside_resume(next_up: Vec<Card>, resume: &[Card], limit: usize) -> Vec<Card> {
+    next_up
+        .into_iter()
+        .filter(|card| resume.iter().all(|r| r.id != card.id))
+        .take(limit)
+        .collect()
+}
+
 /// The pure half of [`JellybeamCore::children`]'s virtual-episode filtering
 /// (`Settings::show_virtual_episodes`): drops any `cards` row that is both
 /// `item_type == "Episode"` and `is_virtual` when the setting is `false`,
@@ -4203,7 +4224,7 @@ mod tests {
             .children("any-parent".to_string(), SortOrder::NameAsc, 0, 10)
             .is_empty());
         assert!(core.search("anything".to_string(), 10).is_empty());
-        let home = core.home_snapshot(8);
+        let home = core.home_snapshot();
         assert!(home.resume.is_empty());
         assert!(home.next_up.is_empty());
         assert!(home.latest.is_empty());
@@ -4682,6 +4703,50 @@ mod tests {
             library_id: None,
             is_favorite: false,
         }
+    }
+
+    fn ids(cards: Vec<Card>) -> Vec<String> {
+        cards.into_iter().map(|c| c.id).collect()
+    }
+
+    #[test]
+    fn next_up_beside_resume_drops_resume_ids_and_keeps_server_order() {
+        let next_up = vec![
+            sample_card("e3", "Episode", false),
+            sample_card("e1", "Episode", false),
+            sample_card("e2", "Episode", false),
+        ];
+        let resume = vec![sample_card("e1", "Episode", false)];
+        assert_eq!(
+            ids(next_up_beside_resume(next_up, &resume, 10)),
+            ["e3", "e2"]
+        );
+    }
+
+    #[test]
+    fn next_up_beside_resume_caps_at_limit() {
+        let next_up = (0..5)
+            .map(|i| sample_card(&format!("e{i}"), "Episode", false))
+            .collect();
+        assert_eq!(
+            ids(next_up_beside_resume(next_up, &[], 3)),
+            ["e0", "e1", "e2"]
+        );
+    }
+
+    #[test]
+    fn next_up_beside_resume_still_fills_to_limit_after_drops() {
+        let next_up = (0..5)
+            .map(|i| sample_card(&format!("e{i}"), "Episode", false))
+            .collect();
+        let resume = vec![
+            sample_card("e0", "Episode", false),
+            sample_card("e1", "Episode", false),
+        ];
+        assert_eq!(
+            ids(next_up_beside_resume(next_up, &resume, 3)),
+            ["e2", "e3", "e4"]
+        );
     }
 
     #[test]
@@ -6021,7 +6086,7 @@ mod tests {
         };
         core.set_settings(new_settings);
 
-        let home = core.home_snapshot(8);
+        let home = core.home_snapshot();
         assert!(home.latest.is_empty());
     }
 

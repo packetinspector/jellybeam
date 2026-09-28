@@ -202,6 +202,16 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `selecting a shelf size chip sets that value exactly`() = runTest {
+        val gateway = FakeCoreGateway(settings = defaultTestSettings().copy(homeShelfSize = 20u))
+        val viewModel = SettingsViewModel(gateway)
+
+        viewModel.selectHomeShelfSize(30u)
+
+        assertEquals(30u, viewModel.state.value.settings.homeShelfSize)
+    }
+
+    @Test
     fun `selecting Off for next-up cutoff sets it back to null`() = runTest {
         val seeded = defaultTestSettings().copy(nextUpCutoffDays = 365u)
         val gateway = FakeCoreGateway(settings = seeded)

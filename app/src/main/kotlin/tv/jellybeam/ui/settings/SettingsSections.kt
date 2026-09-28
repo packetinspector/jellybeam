@@ -99,8 +99,8 @@ private fun nextUpCutoffChipLabel(days: UInt?): String = when (days) {
 }
 
 /**
- * Home section: Next Up cutoff + rewatching, per-library Home visibility, "hide watched from
- * Latest", and the startup screen picker, grouped into "Next Up" and "Show on Home" subgroups.
+ * Home section: Next Up cutoff + rewatching, per-library Home visibility, shelf size, "hide
+ * watched from Latest", and the startup screen picker, grouped into "Next Up" and "Libraries on Home" subgroups.
  * `showVirtualEpisodes` lives in [LibrarySectionContent] instead since it affects detail pages,
  * not Home.
  */
@@ -150,6 +150,22 @@ internal fun HomeSectionContent(state: SettingsUiState, viewModel: SettingsViewM
             )
         }
 
+        ChipFieldRow(
+            label = stringResource(R.string.settings_home_shelf_size),
+            description = stringResource(R.string.settings_desc_home_shelf_size),
+            key = "home/shelf_size",
+        ) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
+                HOME_SHELF_SIZE_PRESETS.forEach { size ->
+                    SettingsChip(
+                        label = size.toString(),
+                        selected = size == settings.homeShelfSize,
+                        onSelect = { viewModel.selectHomeShelfSize(size) },
+                        key = size.toString(),
+                    )
+                }
+            }
+        }
         ToggleRow(
             label = stringResource(R.string.settings_hide_watched_in_latest),
             description = stringResource(R.string.settings_desc_home_hide_watched_in_latest),

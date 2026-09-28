@@ -150,7 +150,7 @@ interface CoreGateway {
      */
     suspend fun setDeviceCaps(caps: DeviceCaps)
 
-    suspend fun homeSnapshot(latestPerView: UInt): HomeSnapshot
+    suspend fun homeSnapshot(): HomeSnapshot
 
     suspend fun isSyncing(): Boolean
 
@@ -696,8 +696,8 @@ class RealCoreGateway(
     override suspend fun setDeviceCaps(caps: DeviceCaps) =
         ffi("ffi.setDeviceCaps") { setDeviceCaps(caps) }
 
-    override suspend fun homeSnapshot(latestPerView: UInt): HomeSnapshot =
-        ffi("ffi.homeSnapshot") { homeSnapshot(latestPerView) }
+    override suspend fun homeSnapshot(): HomeSnapshot =
+        ffi("ffi.homeSnapshot") { homeSnapshot() }
 
     override suspend fun isSyncing(): Boolean =
         ffi("ffi.isSyncing") { isSyncing() }

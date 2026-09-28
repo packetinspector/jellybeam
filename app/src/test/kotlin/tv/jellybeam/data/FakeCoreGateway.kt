@@ -74,6 +74,7 @@ fun defaultTestSettings(): Settings = Settings(
     hiddenLibraryIds = emptyList(),
     hideWatchedInLatest = false,
     startupScreenViewId = null,
+    homeShelfSize = 20u,
     skipBackSecs = 10u,
     skipForwardSecs = 10u,
     language = LanguageSettings(audio = null, subtitle = null, subtitleMode = SubtitleModeSetting.DEFAULT),
@@ -478,7 +479,7 @@ class FakeCoreGateway(
         _setDeviceCapsCalls.add(caps)
     }
 
-    override suspend fun homeSnapshot(latestPerView: UInt): HomeSnapshot =
+    override suspend fun homeSnapshot(): HomeSnapshot =
         HomeSnapshot(resume = emptyList(), nextUp = emptyList(), latest = emptyList())
 
     override suspend fun isSyncing(): Boolean = false

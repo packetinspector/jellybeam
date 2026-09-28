@@ -303,9 +303,9 @@ class HomeViewModelTest {
         val fake = FakeHomeGateway()
         val gate = CompletableDeferred<Unit>()
         val gateway = object : CoreGateway by fake {
-            override suspend fun homeSnapshot(latestPerView: UInt): HomeSnapshot {
+            override suspend fun homeSnapshot(): HomeSnapshot {
                 gate.await()
-                return fake.homeSnapshot(latestPerView)
+                return fake.homeSnapshot()
             }
         }
         withViewModel(gateway) { viewModel ->
@@ -321,9 +321,9 @@ class HomeViewModelTest {
         val fake = FakeHomeGateway()
         val gate = CompletableDeferred<Unit>()
         val gateway = object : CoreGateway by fake {
-            override suspend fun homeSnapshot(latestPerView: UInt): HomeSnapshot {
+            override suspend fun homeSnapshot(): HomeSnapshot {
                 gate.await()
-                return fake.homeSnapshot(latestPerView)
+                return fake.homeSnapshot()
             }
         }
         withViewModel(gateway) { viewModel ->
@@ -351,7 +351,7 @@ class HomeViewModelTest {
     fun `the first load takes the launch prefetch instead of marshalling its own`() = runTest {
         val resume = listOf(testCard("prefetched"))
         val gateway = FakeHomeGateway(homeSnapshotResult = HomeSnapshot(resume, emptyList(), emptyList()))
-        val warmup = LaunchWarmup(signedIn(gateway), backgroundScope, HOME_LATEST_PER_VIEW)
+        val warmup = LaunchWarmup(signedIn(gateway), backgroundScope)
         runCurrent()
         assertEquals("the prefetch itself", 1, gateway.homeSnapshotCallCount)
 
@@ -373,7 +373,7 @@ class HomeViewModelTest {
     @Test
     fun `a prefetch the mirror has since changed under is followed by one real refresh`() = runTest {
         val gateway = FakeHomeGateway()
-        val warmup = LaunchWarmup(signedIn(gateway), backgroundScope, HOME_LATEST_PER_VIEW)
+        val warmup = LaunchWarmup(signedIn(gateway), backgroundScope)
         runCurrent()
         gateway.events.emit(ChangeEvent.Refresh)
         runCurrent()
@@ -548,9 +548,9 @@ class HomeViewModelTest {
         val fake = FakeHomeGateway(syncStatusResult = SyncStatus.Idle)
         val homeSnapshotGate = CompletableDeferred<Unit>()
         val gateway = object : CoreGateway by fake {
-            override suspend fun homeSnapshot(latestPerView: UInt): HomeSnapshot {
+            override suspend fun homeSnapshot(): HomeSnapshot {
                 homeSnapshotGate.await()
-                return fake.homeSnapshot(latestPerView)
+                return fake.homeSnapshot()
             }
         }
         withViewModel(gateway) { viewModel ->

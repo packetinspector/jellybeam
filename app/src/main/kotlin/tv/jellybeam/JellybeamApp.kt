@@ -33,7 +33,6 @@ import tv.jellybeam.player.DeviceCapsProbe
 import tv.jellybeam.player.OkHttpSheetFetcher
 import tv.jellybeam.player.SheetFetcher
 import tv.jellybeam.player.PlayerHolder
-import tv.jellybeam.ui.home.HOME_LATEST_PER_VIEW
 import java.io.File
 import java.util.Collections
 import java.util.IdentityHashMap
@@ -166,7 +165,7 @@ object AppGraph {
         }
         val deviceCapsReady = CompletableDeferred<Unit>()
         gateway = RealCoreGateway(coreDeferred, processScope, deviceCapsReady)
-        launchWarmup = LaunchWarmup(gateway, processScope, HOME_LATEST_PER_VIEW)
+        launchWarmup = LaunchWarmup(gateway, processScope)
 
         // Coil's ImageLoader is otherwise built lazily on the main thread by the first card
         // request, and its disk-cache journal parses under a lock on that same first access;

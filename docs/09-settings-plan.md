@@ -28,6 +28,8 @@ the in-memory state and mirror side effects.
   media-cache `NextUpOptions` via `set_next_up_options` on apply.
 - `hidden_library_ids: Vec<String>` → home_snapshot skips these views.
 - `hide_watched_in_latest: bool` → latest(..., hide_watched) wiring.
+- `home_shelf_size: u32` (presets [10,20,30], default 20) → the limit for
+  resume, next_up and every latest shelf in home_snapshot.
 - `startup_screen: Option<String>` (view id; None = Home) — Kotlin resolves at
   launch, stale id falls back to Home (docs/07 §5).
 - `skip_back_secs/skip_forward_secs: u32` (SkipLengthPrefs semantics; presets

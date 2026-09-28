@@ -25,11 +25,6 @@ import uniffi.jellybeam_core.LatestShelf
 import uniffi.jellybeam_core.SyncStatus
 import uniffi.jellybeam_core.ViewSnapshot
 
-/** How many "latest" items to ask the mirror for per library shelf; [LaunchWarmup] prefetches
- * the first snapshot with the same value.
- */
-const val HOME_LATEST_PER_VIEW = 30u
-
 /** No [uniffi.jellybeam_core.ChangeEvent] variant fires on sync start/stop, so
  * [HomeViewModel.pollSyncing] polls on its own timer.
  */
@@ -214,7 +209,7 @@ class HomeViewModel(
         // one trailing pass queued here.
         val prefetched = launchWarmup?.takeHome()
         if (prefetched?.stale == true) refreshQueued = true
-        val snapshot = prefetched?.snapshot ?: gateway.homeSnapshot(HOME_LATEST_PER_VIEW)
+        val snapshot = prefetched?.snapshot ?: gateway.homeSnapshot()
         val nextUpDeduped = dedupAgainst(snapshot.resume.map(Card::id).toSet(), snapshot.nextUp)
         val views = viewsDeferred.await()
         val settings = settingsDeferred.await()

@@ -43,8 +43,8 @@ class LaunchWarmupTest {
             openMirrorError?.let { throw it }
         }
 
-        override suspend fun homeSnapshot(latestPerView: UInt): HomeSnapshot {
-            calls += "homeSnapshot($latestPerView)"
+        override suspend fun homeSnapshot(): HomeSnapshot {
+            calls += "homeSnapshot"
             return snapshot
         }
 
@@ -57,12 +57,12 @@ class LaunchWarmupTest {
     @Test
     fun `a signed-in launch restores, opens the mirror, then reads Home, each exactly once`() = runTest {
         val gateway = Gateway()
-        val warmup = LaunchWarmup(gateway, backgroundScope, latestPerView = 30u)
+        val warmup = LaunchWarmup(gateway, backgroundScope)
         runCurrent()
 
         // The change subscription never precedes openMirror: the core binds its listener to the
         // mirror that is open when it registers.
-        assertEquals(listOf("restoreSession", "openMirror", "changeEvents", "homeSnapshot(30)"), gateway.calls)
+        assertEquals(listOf("restoreSession", "openMirror", "changeEvents", "homeSnapshot"), gateway.calls)
         assertSame(account, warmup.takeSession()?.account)
         assertSame(snapshot, warmup.takeHome()?.snapshot)
         assertEquals(4, gateway.calls.size)
@@ -70,7 +70,7 @@ class LaunchWarmupTest {
 
     @Test
     fun `each result is handed out once`() = runTest {
-        val warmup = LaunchWarmup(Gateway(), backgroundScope, latestPerView = 30u)
+        val warmup = LaunchWarmup(Gateway(), backgroundScope)
 
         assertNotNull(warmup.takeSession())
         assertNull(warmup.takeSession())
@@ -81,7 +81,7 @@ class LaunchWarmupTest {
     @Test
     fun `a signed-out launch opens nothing and prefetches nothing`() = runTest {
         val gateway = Gateway(restored = null)
-        val warmup = LaunchWarmup(gateway, backgroundScope, latestPerView = 30u)
+        val warmup = LaunchWarmup(gateway, backgroundScope)
 
         val session = warmup.takeSession()
         assertNotNull(session)
@@ -93,7 +93,7 @@ class LaunchWarmupTest {
     @Test
     fun `a mirror that fails to open still yields the session`() = runTest {
         val gateway = Gateway(openMirrorError = IllegalStateException("synthetic"))
-        val warmup = LaunchWarmup(gateway, backgroundScope, latestPerView = 30u)
+        val warmup = LaunchWarmup(gateway, backgroundScope)
 
         assertSame(account, warmup.takeSession()?.account)
         assertNotNull(warmup.takeHome())
@@ -102,7 +102,7 @@ class LaunchWarmupTest {
     @Test
     fun `a change after the prefetch marks it stale`() = runTest {
         val gateway = Gateway()
-        val warmup = LaunchWarmup(gateway, backgroundScope, latestPerView = 30u)
+        val warmup = LaunchWarmup(gateway, backgroundScope)
         runCurrent()
 
         gateway.events.emit(ChangeEvent.Refresh)
@@ -114,7 +114,7 @@ class LaunchWarmupTest {
     @Test
     fun `an untouched prefetch is not stale, and taking it ends the subscription`() = runTest {
         val gateway = Gateway()
-        val warmup = LaunchWarmup(gateway, backgroundScope, latestPerView = 30u)
+        val warmup = LaunchWarmup(gateway, backgroundScope)
         runCurrent()
 
         assertFalse(warmup.takeHome()!!.stale)
@@ -125,7 +125,7 @@ class LaunchWarmupTest {
     @Test
     fun `discard drops both results and the subscription`() = runTest {
         val gateway = Gateway()
-        val warmup = LaunchWarmup(gateway, backgroundScope, latestPerView = 30u)
+        val warmup = LaunchWarmup(gateway, backgroundScope)
         runCurrent()
 
         warmup.discard()

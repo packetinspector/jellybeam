@@ -1381,10 +1381,7 @@ mod tests {
         misfiled.type_ = Some(BaseItemKind::Series);
         misfiled.parent_id = Some(folder_uuid);
         // An Episode must never be touched by a Series heal.
-        let mut episode = item(
-            "e2f5a5f1-1a0b-4b3a-9c2e-000000000012",
-            "Episode Gamma",
-        );
+        let mut episode = item("e2f5a5f1-1a0b-4b3a-9c2e-000000000012", "Episode Gamma");
         episode.type_ = Some(BaseItemKind::Episode);
         episode.parent_id = Some(folder_uuid);
         apply_upsert_items_scoped(&mut conn, &[ok, misfiled, episode], Some(view)).expect("upsert");

@@ -40,7 +40,7 @@ class FakeHomeGateway(
     var syncStatusCallCount = 0
         private set
 
-    override suspend fun homeSnapshot(latestPerView: UInt): HomeSnapshot {
+    override suspend fun homeSnapshot(): HomeSnapshot {
         homeSnapshotCallCount++
         return homeSnapshotResult
     }

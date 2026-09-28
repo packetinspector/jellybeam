@@ -36,7 +36,7 @@ fn live_sign_in_sync_and_home() {
         core.is_syncing()
     );
 
-    let home = core.home_snapshot(8);
+    let home = core.home_snapshot();
     assert!(
         home.latest.iter().any(|shelf| !shelf.cards.is_empty()),
         "expected at least one 'latest' shelf with cards; got {} shelves",
@@ -150,7 +150,7 @@ fn live_settings_home_filtering() {
         .unwrap_or_else(|| panic!("expected a 'Shows' view on the dev server; got {views:?}"));
     let shows_view_id = shows_view.id.clone();
 
-    let home_before = core.home_snapshot(8);
+    let home_before = core.home_snapshot();
     assert!(
         home_before
             .latest
@@ -168,7 +168,7 @@ fn live_settings_home_filtering() {
     settings.hidden_library_ids = vec![shows_view_id.clone()];
     core.set_settings(settings);
 
-    let home_after = core.home_snapshot(8);
+    let home_after = core.home_snapshot();
     assert!(
         home_after
             .latest
@@ -378,7 +378,7 @@ fn find_episode(
 /// Depth-first search over Home's rails, then each view's children, for
 /// the first "Movie" card -- good enough for a small dev library.
 fn find_a_movie_id(core: &JellybeamCore) -> Option<String> {
-    let home = core.home_snapshot(50);
+    let home = core.home_snapshot();
     let home_cards = home
         .resume
         .into_iter()

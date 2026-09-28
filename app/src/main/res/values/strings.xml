@@ -209,6 +209,8 @@
     <string name="settings_desc_home_hide_watched_in_latest">Hide fully watched items from the Latest row.</string>
     <string name="settings_libraries_on_home">Libraries on Home</string>
     <string name="settings_desc_home_library_visibility">Show this library on the Home screen.</string>
+    <string name="settings_home_shelf_size">Shelf size</string>
+    <string name="settings_desc_home_shelf_size">How many titles each Home row shows: Continue Watching, Next Up and every Latest row.</string>
     <string name="settings_startup_screen">Startup screen</string>
     <string name="settings_startup_screen_home">Home</string>
     <string name="settings_desc_home_startup_screen">Choose which screen opens first when the app starts.</string>

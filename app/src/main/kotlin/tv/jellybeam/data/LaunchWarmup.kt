@@ -20,7 +20,6 @@ import uniffi.jellybeam_core.HomeSnapshot
 class LaunchWarmup(
     private val gateway: CoreGateway,
     private val scope: CoroutineScope,
-    latestPerView: UInt,
 ) {
     /** [account] is `null` for a signed-out launch. */
     class Session(val account: AccountInfo?)
@@ -53,7 +52,7 @@ class LaunchWarmup(
             gateway.changeEvents().collect { changed.set(true) }
         }
         if (released.get()) watcher?.cancel()
-        runCatching { gateway.homeSnapshot(latestPerView) }.getOrNull()
+        runCatching { gateway.homeSnapshot() }.getOrNull()
     }
 
     private val sessionSlot = AtomicReference<Deferred<Session>?>(session)
