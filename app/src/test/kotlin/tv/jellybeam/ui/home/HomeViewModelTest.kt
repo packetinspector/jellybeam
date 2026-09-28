@@ -1,5 +1,6 @@
 package tv.jellybeam.ui.home
 
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelStore
 import tv.jellybeam.MainDispatcherRule
 import tv.jellybeam.data.CoreGateway
@@ -152,6 +153,12 @@ class HomeViewModelTest {
         )
 
         assertEquals(null, heroCard(state))
+    }
+
+    @Test
+    fun `without a hero the content clears the masthead`() {
+        assertEquals(MASTHEAD_HEIGHT, contentTopInset(hero = null))
+        assertEquals(0.dp, contentTopInset(hero = testCard(id = "r1")))
     }
 
     // ---- refresh diffing + change-event scheduler (docs/16 §4.6, docs/17 §6) ----------

@@ -167,9 +167,6 @@ private val HERO_PROGRESS_BAR_WIDTH = 230.dp
 private val HERO_PROGRESS_BAR_HEIGHT = 4.dp
 private val HERO_PROGRESS_LABEL_GAP = 10.dp
 
-/** Masthead's top gradient, replacing the former solid header band -- see [HomeMasthead]. */
-private val MASTHEAD_GRADIENT_HEIGHT = 100.dp
-
 /** docs/07 §4: gradient overlay at a shelf's trailing/right scroll edge -- see
  * [LEFT_GUTTER_FADE_WIDTH] for why the leading edge differs.
  */
@@ -574,35 +571,36 @@ fun HomeScreen(
 
     // Compose Foundation's default focus-into-view behavior only scrolls enough to reveal the
     // focused element -- it has no idea the wordmark/hero sit above shelf 0, so landing focus back
-    // on shelf 0 doesn't necessarily scroll to the top. Wrapping the hero region
-    // (`onHeroRegionFocusChanged` below) gives an explicit "focus re-entered the top" signal and an
-    // explicit smooth-scroll to 0, rather than relying on the framework to infer it.
+    // on shelf 0 doesn't necessarily scroll to the top. Wrapping the top region -- the hero, or
+    // shelf 0 when there is no hero (docs/07 §1) -- in `onTopRegionFocusChanged` below gives an
+    // explicit "focus re-entered the top" signal and an explicit smooth-scroll to 0, rather than
+    // relying on the framework to infer it.
     //
-    // Edge-triggered, hero-only: firing on every FocusState emission relaunched a scroll-to-0 on
-    // every hero<->shelf-0 move that fought the newly-focused card's own bring-into-view. Only the
-    // hero subtree triggers it (shelf 0's cards are fully visible at scroll 0 anyway), and only on
-    // the false->true hasFocus edge, so moves within the hero row can't relaunch it.
-    var heroRegionHadFocus by remember { mutableStateOf(false) }
+    // Edge-triggered, top-region-only: firing on every FocusState emission relaunched a scroll-to-0
+    // on every hero<->shelf-0 move that fought the newly-focused card's own bring-into-view. Only
+    // the top region triggers it, and only on the false->true hasFocus edge, so moves within it
+    // can't relaunch it.
+    var topRegionHadFocus by remember { mutableStateOf(false) }
     // An organic D-pad move up from a shelf cell enters the hero at scroll=0, then the framework's
     // focus-triggered bring-into-view animates the column to scroll=82 for the Resume button,
     // clipping the masthead. The spec below is provided at the scrolling column: zero scroll
-    // distance while focus is anywhere in the hero region, default arithmetic otherwise, so shelf
-    // cards keep their genuine bring-into-view and [onHeroRegionFocusChanged] stays the hero
+    // distance while focus is anywhere in the top region, default arithmetic otherwise, so shelf
+    // cards keep their genuine bring-into-view and [onTopRegionFocusChanged] stays the top
     // region's only scroll authority.
-    val heroAwareBringIntoViewSpec = remember(homeScrollState) {
+    val topAwareBringIntoViewSpec = remember(homeScrollState) {
         @OptIn(ExperimentalFoundationApi::class)
         object : BringIntoViewSpec {
             override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float =
-                if (heroRegionHadFocus) 0f else super.calculateScrollDistance(offset, size, containerSize)
+                if (topRegionHadFocus) 0f else super.calculateScrollDistance(offset, size, containerSize)
         }
     }
-    val onHeroRegionFocusChanged: (FocusState) -> Unit = remember(homeScrollState, coroutineScope, hero?.id) {
+    val onTopRegionFocusChanged: (FocusState) -> Unit = remember(homeScrollState, coroutineScope, hero?.id) {
         { focusState ->
-            val entered = focusState.hasFocus && !heroRegionHadFocus
-            val exited = !focusState.hasFocus && heroRegionHadFocus
-            heroRegionHadFocus = focusState.hasFocus
+            val entered = focusState.hasFocus && !topRegionHadFocus
+            val exited = !focusState.hasFocus && topRegionHadFocus
+            topRegionHadFocus = focusState.hasFocus
             if (PerfLog.enabled) {
-                Log.d(PerfLog.TAG, "focus hero hasFocus=${focusState.hasFocus} entered=$entered frozen=${memory.frozen} scroll=${homeScrollState.value}")
+                Log.d(PerfLog.TAG, "focus top hasFocus=${focusState.hasFocus} entered=$entered frozen=${memory.frozen} scroll=${homeScrollState.value}")
             }
             // docs/18 preload: the hero region dwells like any other card once D-pad focus enters it.
             hero?.let { card ->
@@ -644,8 +642,8 @@ fun HomeScreen(
             // the only restore mechanism.
             .focusRequester(homeGroupFocusRequester)
             .focusGroup()
-            // Tracks [homeHasFocus] for the refresh guard below; [onHeroRegionFocusChanged] is a
-            // separate, narrower listener scoped to the hero subtree only.
+            // Tracks [homeHasFocus] for the refresh guard below; [onTopRegionFocusChanged] is a
+            // separate, narrower listener scoped to the top region only.
             .onFocusChanged {
                 homeHasFocus = it.hasFocus
                 if (it.hasFocus && !state.isLoading) {
@@ -691,8 +689,8 @@ fun HomeScreen(
         // cards, the eager version's whole-tree cost is bounded; memory cost is absorbed by the
         // RGB_565 + capped-cache Coil setup. Re-measure if Home ever grows beyond one shelf per
         // library.
-        // [heroAwareBringIntoViewSpec] must wrap the scrollable itself -- verticalScroll reads it.
-        CompositionLocalProvider(LocalBringIntoViewSpec provides heroAwareBringIntoViewSpec) {
+        // [topAwareBringIntoViewSpec] must wrap the scrollable itself -- verticalScroll reads it.
+        CompositionLocalProvider(LocalBringIntoViewSpec provides topAwareBringIntoViewSpec) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -727,7 +725,9 @@ fun HomeScreen(
                     )
                 }
                 Column(
-                    modifier = Modifier.graphicsLayer { alpha = contentRevealAlpha },
+                    modifier = Modifier
+                        .graphicsLayer { alpha = contentRevealAlpha }
+                        .padding(top = contentTopInset(hero)),
                     verticalArrangement = Arrangement.spacedBy(SHELF_GAP),
                 ) {
                     if (shelves.isEmpty() && !state.isLoading) {
@@ -749,7 +749,7 @@ fun HomeScreen(
                         // [shelf0FirstCellPositioned].
                         Box(
                             modifier = Modifier
-                                .onFocusChanged(onHeroRegionFocusChanged)
+                                .onFocusChanged(onTopRegionFocusChanged)
                                 .onGloballyPositioned { heroPositioned = true },
                         ) {
                             HeroBanner(
@@ -773,17 +773,18 @@ fun HomeScreen(
                         // shelf's horizontal scroll position stable against shelf-list reordering.
                         val listState = shelfListStates.getOrPut(spec.id) { LazyListState() }
                         if (index == 0) {
-                            // Shelf 0 is deliberately not a scroll-to-0 trigger; see
-                            // [onHeroRegionFocusChanged].
-                            Shelf(
-                                spec = spec,
-                                shelfWidthDp = shelfWidthDp,
-                                listState = listState,
-                                memory = memory,
-                                initialFocusRequester = initialFocusRequester,
-                                onFirstCellPositioned = { shelf0FirstCellPositioned = true },
-                                onOpenDetail = onOpenDetail,
-                            )
+                            // Shelf 0 is the top region only without a hero; see [onTopRegionFocusChanged].
+                            Box(modifier = if (hero == null) Modifier.onFocusChanged(onTopRegionFocusChanged) else Modifier) {
+                                Shelf(
+                                    spec = spec,
+                                    shelfWidthDp = shelfWidthDp,
+                                    listState = listState,
+                                    memory = memory,
+                                    initialFocusRequester = initialFocusRequester,
+                                    onFirstCellPositioned = { shelf0FirstCellPositioned = true },
+                                    onOpenDetail = onOpenDetail,
+                                )
+                            }
                         } else {
                             Shelf(
                                 spec = spec,
@@ -980,7 +981,7 @@ private fun HomeMasthead(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(MASTHEAD_GRADIENT_HEIGHT)
+                .height(MASTHEAD_HEIGHT)
                 .background(MASTHEAD_GRADIENT_BRUSH),
         )
         Row(
@@ -1317,7 +1318,7 @@ private fun HeroButton(label: String, isPrimary: Boolean, onClick: () -> Unit, m
 // OptIn: LocalBringIntoViewSpec/BringIntoViewSpec ([rememberShelfBringIntoViewSpec], the per-shelf
 // horizontal spec around this function's LazyRow) are still experimental foundation API in 1.10,
 // same as
-// [HomeScreen]'s vertical `heroAwareBringIntoViewSpec`.
+// [HomeScreen]'s vertical `topAwareBringIntoViewSpec`.
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Shelf(
@@ -1390,7 +1391,7 @@ private fun Shelf(
             // provider
             // only reaches composition below where it's declared, so this cannot touch the outer
             // column's
-            // own vertical spec (HomeScreen's `heroAwareBringIntoViewSpec`).
+            // own vertical spec (HomeScreen's `topAwareBringIntoViewSpec`).
             CompositionLocalProvider(LocalBringIntoViewSpec provides rememberShelfBringIntoViewSpec(startMargin = PAGE_MARGIN)) {
             LazyRow(
                 state = listState,

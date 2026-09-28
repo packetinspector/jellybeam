@@ -1,5 +1,7 @@
 package tv.jellybeam.ui.home
 
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import uniffi.jellybeam_core.Card
 
 enum class ShelfKind { RESUME, POSTER }
@@ -36,6 +38,12 @@ fun buildShelves(
  * [buildShelves] only ever places it at index 0, so this collapses to "resume has a first card".
  */
 fun heroCard(state: HomeUiState): Card? = state.resume.firstOrNull()
+
+/** Height of Home's floating wordmark band and its top wash. */
+val MASTHEAD_HEIGHT = 100.dp
+
+/** docs/07 §1: without a hero the shelves start below [MASTHEAD_HEIGHT], since the masthead floats over them. */
+fun contentTopInset(hero: Card?): Dp = if (hero == null) MASTHEAD_HEIGHT else 0.dp
 
 /** docs/07 §1: progressive shelf mounting's initial seed -- the hero plus
  * this many shelves compose in Home's first content frame regardless of mounting progress; shelf 0

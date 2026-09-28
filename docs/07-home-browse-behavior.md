@@ -10,7 +10,7 @@ event do not request duplicate loads; later host resumes, returns to Home, and
 mirror changes still refresh, including changes received during the initial load.
 
 Shelf order (`home.rs:118-159`); `size` is the Shelf size setting (10/20/30, default 20):
-1. Hero banner — only when shelf 0 is Continue Watching (`hero_candidate`, home.rs:427-433); no hero otherwise.
+1. Hero banner — only when shelf 0 is Continue Watching (`hero_candidate`, home.rs:427-433); no hero otherwise, and the shelves then start below the floating masthead (`contentTopInset`).
 2. "Continue Watching" — `mirror.resume(size)`, hidden if empty.
 3. "Next Up" — `mirror.next_up(size + resume.len())`, de-duplicated against Continue Watching ids (`dedup_against`, home.rs:827-836); hidden if empty after dedup.
 4. "Latest in {library name}" — one shelf per view in server order, `latest(id, size, hide_watched)`; hidden if empty; hidden libraries skipped before querying.
