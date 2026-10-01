@@ -6,6 +6,8 @@
 
 <a href="https://github.com/packetinspector/jellybeam/releases"><img src="https://img.shields.io/badge/download-latest%20APK-A8CB6B?style=flat-square&labelColor=14100D" alt="Download the latest APK"></a> <img src="https://img.shields.io/badge/Android%20TV-6.0%2B-1D1814?style=flat-square&labelColor=14100D" alt="Android TV 6.0+"> <img src="https://img.shields.io/badge/Jellyfin-10.11%20to%2012.x-1D1814?style=flat-square&labelColor=14100D" alt="Jellyfin 10.11 to 12.x"> <img src="https://img.shields.io/badge/core-Rust-1D1814?style=flat-square&logo=rust&logoColor=F7E9CE&labelColor=14100D" alt="Rust core"> <img src="https://img.shields.io/badge/licence-GPL--3.0-1D1814?style=flat-square&labelColor=14100D" alt="GPL-3.0">
 
+Want more Rust? [Try out Jellybeam on your Mac.](https://github.com/packetinspector/jellybeam-macos)
+
 </div>
 
 <br>
