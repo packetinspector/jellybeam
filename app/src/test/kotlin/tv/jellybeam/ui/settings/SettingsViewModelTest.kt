@@ -17,6 +17,7 @@ import uniffi.jellybeam_core.PlaybackQuality
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.Settings
 import uniffi.jellybeam_core.StillWatchingMode
+import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.ViewKind
 import uniffi.jellybeam_core.ViewSnapshot
@@ -434,6 +435,28 @@ class SettingsViewModelTest {
         viewModel.selectSubtitleBackgroundOpacity(0.75f)
 
         assertEquals(seeded.copy(subtitleBackgroundOpacity = 0.75f), viewModel.state.value.settings)
+    }
+
+    @Test
+    fun `selecting a subtitle color chip writes only that field`() = runTest {
+        val seeded = defaultTestSettings()
+        val gateway = FakeCoreGateway(settings = seeded)
+        val viewModel = SettingsViewModel(gateway)
+
+        viewModel.selectSubtitleColor(SubtitleColorPreset.LIGHT_GREEN)
+
+        assertEquals(seeded.copy(subtitleColor = SubtitleColorPreset.LIGHT_GREEN), viewModel.state.value.settings)
+    }
+
+    @Test
+    fun `toggling system subtitle style flips only that field`() = runTest {
+        val seeded = defaultTestSettings()
+        val gateway = FakeCoreGateway(settings = seeded)
+        val viewModel = SettingsViewModel(gateway)
+
+        viewModel.toggleSubtitleUseSystemStyle()
+
+        assertEquals(seeded.copy(subtitleUseSystemStyle = true), viewModel.state.value.settings)
     }
 
     // ---- Skip-segment rows (docs/09-settings-plan.md skip-segment settings) --

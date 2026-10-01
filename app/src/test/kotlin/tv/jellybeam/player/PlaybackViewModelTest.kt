@@ -44,6 +44,7 @@ import uniffi.jellybeam_core.PlayMethodFfi
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SubtitleActionFfi
+import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackKindFfi
@@ -1386,7 +1387,7 @@ class PlaybackViewModelTest {
         }
 
     @Test
-    fun `subtitle style prefs are read from settings once per session start`() = runTest(timeout = TEST_TIMEOUT) {
+    fun `subtitle style prefs are read from settings at session start`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan()
         val gateway = FakeCoreGateway(
             preparePlaybackResult = Result.success(plan),
@@ -1395,31 +1396,51 @@ class PlaybackViewModelTest {
                 subtitlePosition = SubtitlePositionPreset.HIGHER,
                 subtitleBold = true,
                 subtitleBackgroundOpacity = 0.5f,
+                subtitleColor = SubtitleColorPreset.LIGHT_GREEN,
+                subtitleUseSystemStyle = true,
             ),
         )
         val player = FakePlaybackPlayer()
 
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
-            assertEquals(1.5f, viewModel.state.value.subtitleScale)
-            assertEquals(SubtitlePositionPreset.HIGHER, viewModel.state.value.subtitlePosition)
-            assertTrue(viewModel.state.value.subtitleBold)
-            assertEquals(0.5f, viewModel.state.value.subtitleBackgroundOpacity)
+            assertEquals(
+                SubtitleStyle(
+                    scale = 1.5f,
+                    position = SubtitlePositionPreset.HIGHER,
+                    bold = true,
+                    backgroundOpacity = 0.5f,
+                    color = SubtitleColorPreset.LIGHT_GREEN,
+                    useSystemStyle = true,
+                ),
+                viewModel.state.value.subtitleStyle,
+            )
         }
     }
 
     @Test
     fun `default subtitle style prefs match the Rust Settings default`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan()
-        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan)) // defaultTestSettings(): scale 1.0, Default, not bold, 0.0 opacity
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
         val player = FakePlaybackPlayer()
 
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
-            assertEquals(1.0f, viewModel.state.value.subtitleScale)
-            assertEquals(SubtitlePositionPreset.DEFAULT, viewModel.state.value.subtitlePosition)
-            assertFalse(viewModel.state.value.subtitleBold)
-            assertEquals(0.0f, viewModel.state.value.subtitleBackgroundOpacity)
+            assertEquals(SubtitleStyle(), viewModel.state.value.subtitleStyle)
+        }
+    }
+
+    @Test
+    fun `refreshSubtitleStyle picks up a Settings change mid-session`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            gateway.setSettings(gateway.settings.copy(subtitleColor = SubtitleColorPreset.LIGHT_GREEN))
+            viewModel.refreshSubtitleStyle()
+            assertEquals(SubtitleColorPreset.LIGHT_GREEN, viewModel.state.value.subtitleStyle.color)
         }
     }
 

@@ -373,6 +373,7 @@ class PlaybackActivity : ComponentActivity() {
         super.onResume()
         // Any pending intent-driven PiP exit has fully completed once we're resumed.
         expandViaIntent = false
+        viewModel.refreshSubtitleStyle()
     }
 
     /**

@@ -21,6 +21,7 @@ import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.Settings
 import uniffi.jellybeam_core.StillWatchingMode
 import uniffi.jellybeam_core.StillWatchingSettings
+import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitleModeSetting
 import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.ViewSnapshot
@@ -56,8 +57,7 @@ val PLAYBACK_QUALITY_PRESETS: List<PlaybackQuality> = listOf(
 /** Subtitle style presets, discrete chip options rather than sliders. */
 val SUBTITLE_SCALE_PRESETS: List<Float> = listOf(0.75f, 1.0f, 1.25f, 1.5f)
 
-/** Vertical-position ladder, Default/Raised/Higher/Highest order, matched by
- * `PlaybackScreen.kt`'s bottom-padding-fraction presets. */
+/** Vertical-position ladder, matched by `SubtitleStyle.kt`'s bottom-padding fractions. */
 val SUBTITLE_POSITION_PRESETS: List<SubtitlePositionPreset> = listOf(
     SubtitlePositionPreset.DEFAULT,
     SubtitlePositionPreset.RAISED,
@@ -67,6 +67,14 @@ val SUBTITLE_POSITION_PRESETS: List<SubtitlePositionPreset> = listOf(
 
 /** Background opacity ladder -- `0.0f` is "Off" (no background, edge-outlined text instead). */
 val SUBTITLE_BACKGROUND_OPACITY_PRESETS: List<Float> = listOf(0.0f, 0.25f, 0.5f, 0.75f)
+
+/** docs/09: the curated colour list, White first as the default. */
+val SUBTITLE_COLOR_PRESETS: List<SubtitleColorPreset> = listOf(
+    SubtitleColorPreset.WHITE,
+    SubtitleColorPreset.SOFT_WHITE,
+    SubtitleColorPreset.YELLOW,
+    SubtitleColorPreset.LIGHT_GREEN,
+)
 
 /** The 3-way ladder every "Skip segments" row (docs/09-settings-plan.md) offers, in display
  * order. */
@@ -131,6 +139,8 @@ fun defaultSettings(): Settings = Settings(
     subtitlePosition = SubtitlePositionPreset.DEFAULT,
     subtitleBold = false,
     subtitleBackgroundOpacity = 0.0f,
+    subtitleColor = SubtitleColorPreset.WHITE,
+    subtitleUseSystemStyle = false,
     skipIntro = SegmentAction.ASK,
     skipOutro = SegmentAction.ASK,
     skipRecap = SegmentAction.ASK,
@@ -308,6 +318,11 @@ class SettingsViewModel(
 
     fun selectSubtitleBackgroundOpacity(opacity: Float) =
         updateSettings { it.copy(subtitleBackgroundOpacity = opacity) }
+
+    fun selectSubtitleColor(color: SubtitleColorPreset) = updateSettings { it.copy(subtitleColor = color) }
+
+    fun toggleSubtitleUseSystemStyle() =
+        updateSettings { it.copy(subtitleUseSystemStyle = !it.subtitleUseSystemStyle) }
 
     fun selectSkipIntro(action: SegmentAction) = updateSettings { it.copy(skipIntro = action) }
 

@@ -326,10 +326,7 @@
     <string name="settings_seek_preview_size_large">Large</string>
     <string name="settings_osd_detail_note">Full adds a codec strip, an ends-at clock, a buffered progress bar, and playback speed and stats controls.</string>
 
-    <!-- Subtitles section: style presets, row labels ("Size",
-         "Vertical position", "Bold text", "Background opacity"). Language/
-         subtitle-mode preferences remain out of scope (settings_language_note
-         below). -->
+    <!-- Subtitles section: style preset rows and chip labels. -->
     <string name="settings_subtitle_size">Size</string>
     <string name="settings_desc_subtitles_subtitle_size">The text size used for subtitles during playback.</string>
     <string name="settings_subtitle_position">Vertical position</string>
@@ -343,7 +340,14 @@
     <string name="settings_subtitle_position_raised">Raised</string>
     <string name="settings_subtitle_position_higher">Higher</string>
     <string name="settings_subtitle_position_highest">Highest</string>
-    <string name="settings_language_note">Language &amp; subtitle preferences — coming in a future update</string>
+    <string name="settings_subtitle_system_style">Use system caption style</string>
+    <string name="settings_desc_subtitles_subtitle_system_style">Use the colors and font from Android\'s caption settings.</string>
+    <string name="settings_subtitle_color">Text color</string>
+    <string name="settings_desc_subtitles_subtitle_color">Plain subtitles only; styled and image subtitles keep their own look.</string>
+    <string name="settings_subtitle_color_white">White</string>
+    <string name="settings_subtitle_color_soft_white">Soft white</string>
+    <string name="settings_subtitle_color_yellow">Yellow</string>
+    <string name="settings_subtitle_color_light_green">Light green</string>
 
     <!-- About section brand header (local-only content, no network); AboutSection.kt. The
          facts pill sets its last entry in the accent colour. -->

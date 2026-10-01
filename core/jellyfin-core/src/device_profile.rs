@@ -394,7 +394,8 @@ const ANDROID_WEBVTT_SUBTITLE_FORMATS: &[&str] = &["vtt", "webvtt"];
 /// Bitmap subtitle formats: Media3 composites embedded, else needs server burn-in.
 const ANDROID_BITMAP_SUBTITLE_FORMATS: &[&str] = &["pgssub", "dvdsub"];
 
-/// ASS/SSA: no libass renderer, so Jellybeam TV only accepts a server-side burned-in rendering.
+/// ASS/SSA: Media3's SSA parser renders them embedded (simplified styling, no libass); Encode
+/// covers transcodes. No sidecar, since Direct Play never attaches external files.
 const ANDROID_ASS_SUBTITLE_FORMATS: &[&str] = &["ass", "ssa"];
 
 /// Builds Jellybeam TV's device profile for the given probed capabilities (named "Jellybeam TV" so
@@ -595,7 +596,7 @@ fn android_codec_profiles(
     profiles
 }
 
-/// Android TV's subtitle matrix; ass/ssa is Encode-only.
+/// Android TV's subtitle matrix.
 fn android_subtitle_profiles() -> Vec<SubtitleProfile> {
     let mut profiles = Vec::new();
     for format in ANDROID_TEXT_SUBTITLE_FORMATS {
@@ -607,11 +608,11 @@ fn android_subtitle_profiles() -> Vec<SubtitleProfile> {
         profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::External));
         profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::Hls));
     }
-    for format in ANDROID_BITMAP_SUBTITLE_FORMATS {
+    for format in ANDROID_BITMAP_SUBTITLE_FORMATS
+        .iter()
+        .chain(ANDROID_ASS_SUBTITLE_FORMATS)
+    {
         profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::Embed));
-        profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::Encode));
-    }
-    for format in ANDROID_ASS_SUBTITLE_FORMATS {
         profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::Encode));
     }
     profiles
@@ -666,22 +667,19 @@ mod tests {
         }
     }
 
+    /// Embed keeps a file whose default track is ASS on Direct Play; Encode serves transcodes.
     #[test]
-    fn android_ass_ssa_never_embed_or_external() {
+    fn android_ass_ssa_embed_or_encode_never_external() {
         let v = android_json(&AndroidTvCaps::default(), true);
         let profiles = v["SubtitleProfiles"].as_array().expect("test assertion");
-        for p in profiles {
-            if matches!(p["Format"].as_str(), Some("ass") | Some("ssa")) {
-                assert_ne!(p["Method"], "Embed", "ass/ssa must not be Embed");
-                assert_ne!(p["Method"], "External", "ass/ssa must not be External");
-                assert_eq!(p["Method"], "Encode");
-            }
+        for f in ANDROID_ASS_SUBTITLE_FORMATS {
+            let methods: Vec<&str> = profiles
+                .iter()
+                .filter(|p| p["Format"] == *f)
+                .map(|p| p["Method"].as_str().expect("test assertion"))
+                .collect();
+            assert_eq!(methods, ["Embed", "Encode"], "{f}");
         }
-        // And they must appear at least once (Encode-only, not dropped).
-        let has_ass_ssa = profiles
-            .iter()
-            .any(|p| matches!(p["Format"].as_str(), Some("ass") | Some("ssa")));
-        assert!(has_ass_ssa);
     }
 
     #[test]

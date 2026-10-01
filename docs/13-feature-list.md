@@ -175,8 +175,8 @@ reset by any key press — Stop reports the finished episode normally, never sta
 marks the next one, and returns to its detail page;
 track selection
 (audio/subtitle) with per-series memory; subtitle mode Default/Always/
-OnlyForced/None; subtitle styling (size, vertical position, bold, background
-opacity); skip back/forward length presets (5/10/15/30/60s, default 10/10);
+OnlyForced/None; subtitle styling (size, vertical position, text color, bold,
+background opacity, or Android's system caption style); skip back/forward length presets (5/10/15/30/60s, default 10/10);
 on-demand playback-stats sheet with live pipeline stats (video/audio/subtitle
 stream breakdown, buffered-ahead time, allocated buffer size, network estimate,
 playback state, dropped frames, plus the source file's name/size); a separate, on-demand library-info panel for the current
@@ -321,7 +321,12 @@ thresholds, answer timeout, button-presses-reset-the-count toggle — greyed
 with a note when autoplay is off), per-segment skip behaviour, Advanced group:
 tolerate-mislabeled-levels + preload-on-focus + FFmpeg audio decoder
 preferences); OSD section (player OSD density, Minimal/Full, default Full; seek preview size, Small/Medium/Large, default Medium);
-Subtitles section (size, position, bold, background presets); Discover section
+Subtitles section (size, position, text color White/Soft white/Yellow/Light
+green with swatches, bold, background presets; a "Use system caption style"
+toggle hands color, font and background to Android's caption settings; a
+change made from the mini player applies when the player returns to full
+screen; styled (SSA) and image (PGS, VobSub) subtitles keep their own
+colors, size and placement); Discover section
 (Jellyseerr/Overseerr connect/disconnect: server address, auth method,
 credentials -- the identity field reads "Email address" for a Seerr account, a
 rejected sign-in says so in plain words instead of an HTTP status, a refusal on Seerr's
@@ -421,7 +426,7 @@ public display.)*
   simplified relative to a full libass renderer: text and basic styling
   render; elaborate typesetting is approximated. External sidecar files
   are not loaded yet — see Planned.)
-  <!-- verified live on-device (embedded ASS rendering during Direct Play); Media3 DefaultSubtitleParserFactory includes SsaParser for demuxed application/x-ssa tracks; no SubtitleConfiguration wiring exists in app/ so external sidecars are never attached; device_profile.rs subtitle profiles govern only server-side delivery, not Direct Play demux -->
+  <!-- verified live on-device (embedded ASS rendering during Direct Play); Media3 DefaultSubtitleParserFactory includes SsaParser for demuxed application/x-ssa tracks; no SubtitleConfiguration wiring exists in app/ so external sidecars are never attached; device_profile.rs declares ass/ssa (like PGS/VobSub) as Embed+Encode, since an Encode-only format makes the server refuse Direct Play whenever it is the default or selected track -->
 - Pure-black letterbox bars — no washed-out gray edges on OLED panels
   during scope/widescreen content.
   <!-- verified: app/src/main/kotlin/tv/jellybeam/player/PlaybackScreen.kt Color.Black background + setBackgroundColor/setShutterBackgroundColor BLACK, three-layer letterbox -->

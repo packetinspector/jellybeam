@@ -8,7 +8,6 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -25,9 +24,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
@@ -46,6 +45,7 @@ import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
 import tv.jellybeam.diag.DiagStatus
 import tv.jellybeam.player.pipController
+import tv.jellybeam.player.subtitleColorArgb
 import tv.jellybeam.ui.focus.focusKey
 import uniffi.jellybeam_core.OsdDetailSetting
 import uniffi.jellybeam_core.SeekPreviewSize
@@ -53,6 +53,7 @@ import uniffi.jellybeam_core.PlaybackQuality
 import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingMode
+import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
 
 /**
@@ -108,28 +109,24 @@ private fun nextUpCutoffChipLabel(days: UInt?): String = when (days) {
 internal fun HomeSectionContent(state: SettingsUiState, viewModel: SettingsViewModel) {
     val settings = state.settings
     val homeLabel = stringResource(R.string.settings_startup_screen_home)
-    val startupOptions = remember(state.views, homeLabel) {
-        listOf<Pair<String?, String>>(null to homeLabel) + state.views.map { it.id to it.name }
+    // Insertion-ordered: Home first, then the server's view order.
+    val startupNames = remember(state.views, homeLabel) {
+        mapOf<String?, String>(null to homeLabel) + state.views.associate { it.id to it.name }
     }
+    val startupIds = remember(startupNames) { startupNames.keys.toList() }
 
     Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
         SectionHeader(stringResource(R.string.settings_next_up_group))
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_cutoff),
             description = stringResource(R.string.settings_desc_home_cutoff),
             key = "home/cutoff",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                NEXT_UP_CUTOFF_DAY_PRESETS.forEach { days ->
-                    SettingsChip(
-                        label = nextUpCutoffChipLabel(days),
-                        selected = days == settings.nextUpCutoffDays,
-                        onSelect = { viewModel.selectNextUpCutoff(days) },
-                        key = days?.toString() ?: "off",
-                    )
-                }
-            }
-        }
+            options = NEXT_UP_CUTOFF_DAY_PRESETS,
+            selected = settings.nextUpCutoffDays,
+            onSelect = viewModel::selectNextUpCutoff,
+            chipLabel = { nextUpCutoffChipLabel(it) },
+            chipKey = { days -> days?.toString() ?: "off" },
+        )
         ToggleRow(
             label = stringResource(R.string.settings_next_up_rewatching),
             description = stringResource(R.string.settings_desc_home_next_up_rewatching),
@@ -157,22 +154,15 @@ internal fun HomeSectionContent(state: SettingsUiState, viewModel: SettingsViewM
             onToggle = viewModel::toggleHomeShowFavorites,
             key = "home/show_favorites",
         )
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_home_shelf_size),
             description = stringResource(R.string.settings_desc_home_shelf_size),
             key = "home/shelf_size",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                HOME_SHELF_SIZE_PRESETS.forEach { size ->
-                    SettingsChip(
-                        label = size.toString(),
-                        selected = size == settings.homeShelfSize,
-                        onSelect = { viewModel.selectHomeShelfSize(size) },
-                        key = size.toString(),
-                    )
-                }
-            }
-        }
+            options = HOME_SHELF_SIZE_PRESETS,
+            selected = settings.homeShelfSize,
+            onSelect = viewModel::selectHomeShelfSize,
+            chipLabel = { size -> size.toString() },
+        )
         ToggleRow(
             label = stringResource(R.string.settings_hide_watched_in_latest),
             description = stringResource(R.string.settings_desc_home_hide_watched_in_latest),
@@ -180,22 +170,16 @@ internal fun HomeSectionContent(state: SettingsUiState, viewModel: SettingsViewM
             onToggle = viewModel::toggleHideWatchedInLatest,
             key = "home/hide_watched_in_latest",
         )
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_startup_screen),
             description = stringResource(R.string.settings_desc_home_startup_screen),
             key = "home/startup_screen",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                startupOptions.forEach { (viewId, name) ->
-                    SettingsChip(
-                        label = name,
-                        selected = viewId == settings.startupScreenViewId,
-                        onSelect = { viewModel.selectStartupScreen(viewId) },
-                        key = viewId ?: "home",
-                    )
-                }
-            }
-        }
+            options = startupIds,
+            selected = settings.startupScreenViewId,
+            onSelect = viewModel::selectStartupScreen,
+            chipLabel = { startupNames.getValue(it) },
+            chipKey = { viewId -> viewId ?: "home" },
+        )
         // Home top bar's clock, default on.
         ToggleRow(
             label = stringResource(R.string.settings_show_clock),
@@ -256,18 +240,15 @@ private fun playbackQualityChipKey(quality: PlaybackQuality): String = when (qua
  */
 @Composable
 private fun SkipSegmentRow(label: String, description: String, key: String, current: SegmentAction, onSelect: (SegmentAction) -> Unit) {
-    ChipFieldRow(label = label, description = description, key = key) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-            SKIP_SEGMENT_ACTION_PRESETS.forEach { action ->
-                SettingsChip(
-                    label = skipSegmentActionChipLabel(action),
-                    selected = action == current,
-                    onSelect = { onSelect(action) },
-                    key = action.name.lowercase(),
-                )
-            }
-        }
-    }
+    PresetChipRow(
+        label = label,
+        description = description,
+        key = key,
+        options = SKIP_SEGMENT_ACTION_PRESETS,
+        selected = current,
+        onSelect = onSelect,
+        chipLabel = { skipSegmentActionChipLabel(it) },
+    )
 }
 
 /**
@@ -287,54 +268,34 @@ internal fun PlaybackSectionContent(state: SettingsUiState, viewModel: SettingsV
     Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
         // docs/18-playback-quality.md §1/§3: Direct Play (default) / Auto / three fixed bitrate
         // caps.
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_playback_quality),
             description = stringResource(R.string.settings_desc_playback_quality),
             key = "playback/quality",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                PLAYBACK_QUALITY_PRESETS.forEach { quality ->
-                    SettingsChip(
-                        label = playbackQualityChipLabel(quality),
-                        selected = quality == settings.playbackQuality,
-                        onSelect = { viewModel.selectPlaybackQuality(quality) },
-                        key = playbackQualityChipKey(quality),
-                    )
-                }
-            }
-        }
-        ChipFieldRow(
+            options = PLAYBACK_QUALITY_PRESETS,
+            selected = settings.playbackQuality,
+            onSelect = viewModel::selectPlaybackQuality,
+            chipLabel = { playbackQualityChipLabel(it) },
+            chipKey = ::playbackQualityChipKey,
+        )
+        PresetChipRow(
             label = stringResource(R.string.settings_skip_back),
             description = stringResource(R.string.settings_desc_playback_skip_back),
             key = "playback/skip_back",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                SKIP_SECONDS_PRESETS.forEach { secs ->
-                    SettingsChip(
-                        label = stringResource(R.string.settings_skip_seconds, secs.toInt()),
-                        selected = secs == settings.skipBackSecs,
-                        onSelect = { viewModel.selectSkipBack(secs) },
-                        key = secs.toString(),
-                    )
-                }
-            }
-        }
-        ChipFieldRow(
+            options = SKIP_SECONDS_PRESETS,
+            selected = settings.skipBackSecs,
+            onSelect = viewModel::selectSkipBack,
+            chipLabel = { secondsChipLabel(it) },
+        )
+        PresetChipRow(
             label = stringResource(R.string.settings_skip_forward),
             description = stringResource(R.string.settings_desc_playback_skip_forward),
             key = "playback/skip_forward",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                SKIP_SECONDS_PRESETS.forEach { secs ->
-                    SettingsChip(
-                        label = stringResource(R.string.settings_skip_seconds, secs.toInt()),
-                        selected = secs == settings.skipForwardSecs,
-                        onSelect = { viewModel.selectSkipForward(secs) },
-                        key = secs.toString(),
-                    )
-                }
-            }
-        }
+            options = SKIP_SECONDS_PRESETS,
+            selected = settings.skipForwardSecs,
+            onSelect = viewModel::selectSkipForward,
+            chipLabel = { secondsChipLabel(it) },
+        )
         ToggleRow(
             label = stringResource(R.string.settings_autoplay_enabled),
             description = stringResource(R.string.settings_desc_playback_autoplay_enabled),
@@ -342,22 +303,15 @@ internal fun PlaybackSectionContent(state: SettingsUiState, viewModel: SettingsV
             onToggle = viewModel::toggleAutoplayEnabled,
             key = "playback/autoplay_enabled",
         )
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_autoplay_delay),
             description = stringResource(R.string.settings_desc_playback_autoplay_delay),
             key = "playback/autoplay_delay",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                AUTOPLAY_DELAY_SECONDS_PRESETS.forEach { secs ->
-                    SettingsChip(
-                        label = stringResource(R.string.settings_skip_seconds, secs.toInt()),
-                        selected = secs == settings.autoplayDelaySecs,
-                        onSelect = { viewModel.selectAutoplayDelay(secs) },
-                        key = secs.toString(),
-                    )
-                }
-            }
-        }
+            options = AUTOPLAY_DELAY_SECONDS_PRESETS,
+            selected = settings.autoplayDelaySecs,
+            onSelect = viewModel::selectAutoplayDelay,
+            chipLabel = { secondsChipLabel(it) },
+        )
         ToggleRow(
             label = stringResource(R.string.settings_mini_player),
             description = if (miniPlayerSupported) {
@@ -468,8 +422,15 @@ private fun stillWatchingModeChipLabel(mode: StillWatchingMode): String = when (
 private fun stillWatchingTimeoutChipLabel(secs: UInt): String = when (secs) {
     120u -> stringResource(R.string.settings_still_watching_timeout_minutes, 2)
     300u -> stringResource(R.string.settings_still_watching_timeout_minutes, 5)
-    else -> stringResource(R.string.settings_skip_seconds, secs.toInt())
+    else -> secondsChipLabel(secs)
 }
+
+@Composable
+private fun secondsChipLabel(secs: UInt): String = stringResource(R.string.settings_skip_seconds, secs.toInt())
+
+@Composable
+private fun percentChipLabel(fraction: Float): String =
+    stringResource(R.string.settings_subtitle_percent, (fraction * 100).toInt())
 
 /**
  * "Still watching?" group, under Autoplay: mode row always shown; "Episodes"/"Hours" only for the
@@ -482,79 +443,51 @@ private fun StillWatchingGroup(state: SettingsUiState, viewModel: SettingsViewMo
     val stillWatching = settings.stillWatching
     val dimmed = Modifier.alpha(if (settings.autoplayEnabled) 1f else SETTINGS_DISABLED_ALPHA)
 
-    ChipFieldRow(
+    PresetChipRow(
         label = stringResource(R.string.settings_still_watching_mode),
         description = stringResource(R.string.settings_desc_playback_still_watching_mode),
         key = "playback/still_watching_mode",
         modifier = dimmed,
-    ) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-            STILL_WATCHING_MODE_PRESETS.forEach { mode ->
-                SettingsChip(
-                    label = stillWatchingModeChipLabel(mode),
-                    selected = mode == stillWatching.mode,
-                    onSelect = { viewModel.selectStillWatchingMode(mode) },
-                    key = mode.name.lowercase(),
-                )
-            }
-        }
-    }
+        options = STILL_WATCHING_MODE_PRESETS,
+        selected = stillWatching.mode,
+        onSelect = viewModel::selectStillWatchingMode,
+        chipLabel = { stillWatchingModeChipLabel(it) },
+    )
     if (stillWatching.mode == StillWatchingMode.AFTER_EPISODES) {
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_still_watching_episodes),
             description = stringResource(R.string.settings_desc_playback_still_watching_episodes),
             key = "playback/still_watching_episodes",
             modifier = dimmed,
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                STILL_WATCHING_EPISODE_PRESETS.forEach { episodes ->
-                    SettingsChip(
-                        label = episodes.toString(),
-                        selected = episodes == stillWatching.episodes,
-                        onSelect = { viewModel.selectStillWatchingEpisodes(episodes) },
-                        key = episodes.toString(),
-                    )
-                }
-            }
-        }
+            options = STILL_WATCHING_EPISODE_PRESETS,
+            selected = stillWatching.episodes,
+            onSelect = viewModel::selectStillWatchingEpisodes,
+            chipLabel = { episodes -> episodes.toString() },
+        )
     }
     if (stillWatching.mode == StillWatchingMode.AFTER_HOURS) {
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_still_watching_hours),
             description = stringResource(R.string.settings_desc_playback_still_watching_hours),
             key = "playback/still_watching_hours",
             modifier = dimmed,
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                STILL_WATCHING_HOUR_PRESETS.forEach { hours ->
-                    SettingsChip(
-                        label = stringResource(R.string.settings_still_watching_hours_value, hours.toInt()),
-                        selected = hours == stillWatching.hours,
-                        onSelect = { viewModel.selectStillWatchingHours(hours) },
-                        key = hours.toString(),
-                    )
-                }
-            }
-        }
+            options = STILL_WATCHING_HOUR_PRESETS,
+            selected = stillWatching.hours,
+            onSelect = viewModel::selectStillWatchingHours,
+            chipLabel = { hours -> stringResource(R.string.settings_still_watching_hours_value, hours.toInt()) },
+        )
     }
     if (stillWatching.mode != StillWatchingMode.OFF) {
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_still_watching_timeout),
             description = stringResource(R.string.settings_desc_playback_still_watching_timeout),
             key = "playback/still_watching_timeout",
             modifier = dimmed,
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                STILL_WATCHING_TIMEOUT_PRESETS.forEach { secs ->
-                    SettingsChip(
-                        label = stillWatchingTimeoutChipLabel(secs),
-                        selected = secs == stillWatching.timeoutSecs,
-                        onSelect = { viewModel.selectStillWatchingTimeout(secs) },
-                        key = secs.toString(),
-                    )
-                }
-            }
-        }
+            options = STILL_WATCHING_TIMEOUT_PRESETS,
+            selected = stillWatching.timeoutSecs,
+            onSelect = viewModel::selectStillWatchingTimeout,
+            chipLabel = { stillWatchingTimeoutChipLabel(it) },
+        )
         ToggleRow(
             label = stringResource(R.string.settings_still_watching_reset_on_input),
             description = stringResource(R.string.settings_desc_playback_still_watching_reset_on_input),
@@ -581,39 +514,25 @@ private fun osdDetailChipLabel(detail: OsdDetailSetting): String = when (detail)
 @Composable
 internal fun OsdSectionContent(state: SettingsUiState, viewModel: SettingsViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_osd_detail),
             description = stringResource(R.string.settings_desc_osd_osd_detail),
             key = "osd/osd_detail",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                OSD_DETAIL_PRESETS.forEach { detail ->
-                    SettingsChip(
-                        label = osdDetailChipLabel(detail),
-                        selected = detail == state.settings.osdDetail,
-                        onSelect = { viewModel.selectOsdDetail(detail) },
-                        key = detail.name.lowercase(),
-                    )
-                }
-            }
-        }
+            options = OSD_DETAIL_PRESETS,
+            selected = state.settings.osdDetail,
+            onSelect = viewModel::selectOsdDetail,
+            chipLabel = { osdDetailChipLabel(it) },
+        )
         SettingsNoteRow(stringResource(R.string.settings_osd_detail_note))
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_seek_preview_size),
             description = stringResource(R.string.settings_desc_osd_seek_preview_size),
             key = "osd/seek_preview_size",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                SEEK_PREVIEW_SIZE_PRESETS.forEach { size ->
-                    SettingsChip(
-                        label = seekPreviewSizeChipLabel(size),
-                        selected = size == state.settings.seekPreviewSize,
-                        onSelect = { viewModel.selectSeekPreviewSize(size) },
-                        key = size.name.lowercase(),
-                    )
-                }
-            }
-        }
+            options = SEEK_PREVIEW_SIZE_PRESETS,
+            selected = state.settings.seekPreviewSize,
+            onSelect = viewModel::selectSeekPreviewSize,
+            chipLabel = { seekPreviewSizeChipLabel(it) },
+        )
     }
 }
 
@@ -634,72 +553,80 @@ private fun subtitlePositionChipLabel(position: SubtitlePositionPreset): String 
     SubtitlePositionPreset.HIGHEST -> stringResource(R.string.settings_subtitle_position_highest)
 }
 
+/** [SubtitleColorPreset]'s row label. */
+@Composable
+private fun subtitleColorChipLabel(color: SubtitleColorPreset): String = when (color) {
+    SubtitleColorPreset.WHITE -> stringResource(R.string.settings_subtitle_color_white)
+    SubtitleColorPreset.SOFT_WHITE -> stringResource(R.string.settings_subtitle_color_soft_white)
+    SubtitleColorPreset.YELLOW -> stringResource(R.string.settings_subtitle_color_yellow)
+    SubtitleColorPreset.LIGHT_GREEN -> stringResource(R.string.settings_subtitle_color_light_green)
+}
+
 /**
- * Subtitle style presets (size/position/bold/background) on chip/toggle rows, the same presets
- * `PlaybackScreen.kt` applies live to the player. Language/subtitle-mode preferences stay out of
- * scope (needs Media3 track mapping in PlayerHolder) -- [SettingsNoteRow] covers that.
+ * docs/09 subtitle style presets, applied by `PlaybackScreen.kt`. Size and position always apply;
+ * the system-style toggle dims (but keeps editable) the color, bold and background rows it
+ * overrides, like the Still watching group.
  */
 @Composable
 internal fun SubtitlesSectionContent(state: SettingsUiState, viewModel: SettingsViewModel) {
     val settings = state.settings
+    val overridden = Modifier.alpha(if (settings.subtitleUseSystemStyle) SETTINGS_DISABLED_ALPHA else 1f)
 
     Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_subtitle_size),
             description = stringResource(R.string.settings_desc_subtitles_subtitle_size),
             key = "subtitles/subtitle_size",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                SUBTITLE_SCALE_PRESETS.forEach { scale ->
-                    SettingsChip(
-                        label = stringResource(R.string.settings_subtitle_percent, (scale * 100).toInt()),
-                        selected = scale == settings.subtitleScale,
-                        onSelect = { viewModel.selectSubtitleScale(scale) },
-                        key = scale.toString(),
-                    )
-                }
-            }
-        }
-        ChipFieldRow(
+            options = SUBTITLE_SCALE_PRESETS,
+            selected = settings.subtitleScale,
+            onSelect = viewModel::selectSubtitleScale,
+            chipLabel = { percentChipLabel(it) },
+        )
+        PresetChipRow(
             label = stringResource(R.string.settings_subtitle_position),
             description = stringResource(R.string.settings_desc_subtitles_subtitle_position),
             key = "subtitles/subtitle_position",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                SUBTITLE_POSITION_PRESETS.forEach { position ->
-                    SettingsChip(
-                        label = subtitlePositionChipLabel(position),
-                        selected = position == settings.subtitlePosition,
-                        onSelect = { viewModel.selectSubtitlePosition(position) },
-                        key = position.name.lowercase(),
-                    )
-                }
-            }
-        }
+            options = SUBTITLE_POSITION_PRESETS,
+            selected = settings.subtitlePosition,
+            onSelect = viewModel::selectSubtitlePosition,
+            chipLabel = { subtitlePositionChipLabel(it) },
+        )
+        ToggleRow(
+            label = stringResource(R.string.settings_subtitle_system_style),
+            description = stringResource(R.string.settings_desc_subtitles_subtitle_system_style),
+            value = settings.subtitleUseSystemStyle,
+            onToggle = viewModel::toggleSubtitleUseSystemStyle,
+            key = "subtitles/subtitle_system_style",
+        )
+        PresetChipRow(
+            label = stringResource(R.string.settings_subtitle_color),
+            description = stringResource(R.string.settings_desc_subtitles_subtitle_color),
+            key = "subtitles/subtitle_color",
+            modifier = overridden,
+            options = SUBTITLE_COLOR_PRESETS,
+            selected = settings.subtitleColor,
+            onSelect = viewModel::selectSubtitleColor,
+            chipLabel = { subtitleColorChipLabel(it) },
+            swatch = { Color(subtitleColorArgb(it)) },
+        )
         ToggleRow(
             label = stringResource(R.string.settings_subtitle_bold),
             description = stringResource(R.string.settings_desc_subtitles_subtitle_bold),
             value = settings.subtitleBold,
             onToggle = viewModel::toggleSubtitleBold,
             key = "subtitles/subtitle_bold",
+            modifier = overridden,
         )
-        ChipFieldRow(
+        PresetChipRow(
             label = stringResource(R.string.settings_subtitle_background),
             description = stringResource(R.string.settings_desc_subtitles_subtitle_background),
             key = "subtitles/subtitle_background",
-        ) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                SUBTITLE_BACKGROUND_OPACITY_PRESETS.forEach { opacity ->
-                    SettingsChip(
-                        label = stringResource(R.string.settings_subtitle_percent, (opacity * 100).toInt()),
-                        selected = opacity == settings.subtitleBackgroundOpacity,
-                        onSelect = { viewModel.selectSubtitleBackgroundOpacity(opacity) },
-                        key = opacity.toString(),
-                    )
-                }
-            }
-        }
-        SettingsNoteRow(stringResource(R.string.settings_language_note))
+            modifier = overridden,
+            options = SUBTITLE_BACKGROUND_OPACITY_PRESETS,
+            selected = settings.subtitleBackgroundOpacity,
+            onSelect = viewModel::selectSubtitleBackgroundOpacity,
+            chipLabel = { percentChipLabel(it) },
+        )
     }
 }
 
@@ -863,23 +790,16 @@ internal fun DiscoverSectionContent(
                 )
             }
         } else {
-            ChipFieldRow(
+            PresetChipRow(
                 label = stringResource(R.string.settings_discover_method_label),
                 description = stringResource(R.string.settings_desc_discover_method),
                 key = "discover/method",
-            ) {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-                    SEERR_AUTH_METHOD_OPTIONS.forEach { method ->
-                        SettingsChip(
-                            label = method.chipLabel(),
-                            selected = method == state.method,
-                            onSelect = { viewModel.onMethodChange(method) },
-                            key = method.name.lowercase(),
-                            focusRequester = if (method == state.method) formRequester else null,
-                        )
-                    }
-                }
-            }
+                options = SEERR_AUTH_METHOD_OPTIONS,
+                selected = state.method,
+                onSelect = viewModel::onMethodChange,
+                chipLabel = { method -> method.chipLabel() },
+                selectedFocusRequester = formRequester,
+            )
             DiscoverTextField(
                 label = stringResource(R.string.settings_discover_url_label),
                 value = state.url,

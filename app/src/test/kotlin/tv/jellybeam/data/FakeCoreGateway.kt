@@ -56,6 +56,7 @@ import uniffi.jellybeam_core.StillWatchingMode
 import uniffi.jellybeam_core.StillWatchingSettings
 import uniffi.jellybeam_core.SubtitleActionFfi
 import uniffi.jellybeam_core.SubtitleModeSetting
+import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.SyncStatus
 import uniffi.jellybeam_core.TrackDecisionFfi
@@ -84,6 +85,8 @@ fun defaultTestSettings(): Settings = Settings(
     subtitlePosition = SubtitlePositionPreset.DEFAULT,
     subtitleBold = false,
     subtitleBackgroundOpacity = 0.0f,
+    subtitleColor = SubtitleColorPreset.WHITE,
+    subtitleUseSystemStyle = false,
     skipIntro = SegmentAction.ASK,
     skipOutro = SegmentAction.ASK,
     skipRecap = SegmentAction.ASK,

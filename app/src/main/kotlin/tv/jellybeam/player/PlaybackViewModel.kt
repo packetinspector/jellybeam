@@ -43,7 +43,6 @@ import uniffi.jellybeam_core.PlayMethodFfi
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SubtitleActionFfi
-import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
@@ -142,14 +141,8 @@ data class PlaybackUiState(
     val skipBackMs: Long = SeekMath.SKIP_MS,
     /** dpad-right seek magnitude, from `Settings.skipForwardSecs` -- see [skipBackMs]. */
     val skipForwardMs: Long = SeekMath.SKIP_MS,
-    /** Subtitle style preferences, read once per session in [start] and applied live by
-     * [tv.jellybeam.player.PlaybackScreen]'s `AndroidView` update block. Defaults mirror
-     * `Settings::default()`.
-     */
-    val subtitleScale: Float = 1.0f,
-    val subtitlePosition: SubtitlePositionPreset = SubtitlePositionPreset.DEFAULT,
-    val subtitleBold: Boolean = false,
-    val subtitleBackgroundOpacity: Float = 0.0f,
+    /** Read once per session in [start]; PlaybackScreen's `AndroidView` update block applies it. */
+    val subtitleStyle: SubtitleStyle = SubtitleStyle(),
     /** The in-player track picker (docs/09 slice 3b): `null` closed, else [TrackPickerState]'s
      * rows. Independent of [PlaybackOsdController]'s `isVisible` -- see [TrackPickerState]'s own
      * doc comment.
@@ -1061,10 +1054,7 @@ class PlaybackViewModel(
         stillWatchingTimeoutSecs = settings?.stillWatching?.timeoutSecs?.toDouble() ?: 120.0
         val skipBackMs = (settings?.skipBackSecs?.toLong() ?: (SeekMath.SKIP_MS / 1000L)) * 1000L
         val skipForwardMs = (settings?.skipForwardSecs?.toLong() ?: (SeekMath.SKIP_MS / 1000L)) * 1000L
-        val subtitleScale = settings?.subtitleScale ?: 1.0f
-        val subtitlePosition = settings?.subtitlePosition ?: SubtitlePositionPreset.DEFAULT
-        val subtitleBold = settings?.subtitleBold ?: false
-        val subtitleBackgroundOpacity = settings?.subtitleBackgroundOpacity ?: 0.0f
+        val subtitleStyle = settings?.subtitleStyle() ?: SubtitleStyle()
         val skipSegmentActions = SkipSegmentActions(
             intro = settings?.skipIntro ?: SegmentAction.ASK,
             outro = settings?.skipOutro ?: SegmentAction.ASK,
@@ -1104,10 +1094,7 @@ class PlaybackViewModel(
                 stillWatching = null,
                 skipBackMs = skipBackMs,
                 skipForwardMs = skipForwardMs,
-                subtitleScale = subtitleScale,
-                subtitlePosition = subtitlePosition,
-                subtitleBold = subtitleBold,
-                subtitleBackgroundOpacity = subtitleBackgroundOpacity,
+                subtitleStyle = subtitleStyle,
                 skipSegmentActions = skipSegmentActions,
                 playMethod = plan.playMethod, // docs/18 §1/§3: reset per session from the fresh plan, never carried over
                 transcodeReason = plan.transcodeReason,
@@ -2185,6 +2172,21 @@ class PlaybackViewModel(
                 speedMenuOpen = false,
                 chaptersMenuOpen = false,
             )
+        }
+    }
+
+    /** docs/09: re-reads the subtitle style on resume, so a Settings change made from PiP or the
+     * background reaches the running session; a failed read keeps the current style. */
+    fun refreshSubtitleStyle() {
+        viewModelScope.launch {
+            val settings = try {
+                gateway.getSettings()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                return@launch
+            }
+            _state.update { it.copy(subtitleStyle = settings.subtitleStyle()) }
         }
     }
 

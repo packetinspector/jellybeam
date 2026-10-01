@@ -11,6 +11,7 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -37,6 +38,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -356,7 +360,8 @@ private val CHIP_HPADDING = 14.dp
  * otherwise. Individually focusable via its own [focusRing]. [key] combines with the enclosing
  * [ChipFieldRow]'s row key via [combineChipKey] (or is used as-is outside one) to form the full
  * docs/15-focus-and-selection.md §5 key; defaults to [label]. Also used outside this focus
- * scheme, where [LocalSettingsFocusMemory] is `null` and registration is skipped.
+ * scheme, where [LocalSettingsFocusMemory] is `null` and registration is skipped. [swatch] draws
+ * a colour dot before the label for colour pickers.
  */
 @Composable
 /** [focusRequester] lands on the chip's own focus target; a requester on [modifier] would sit on
@@ -368,6 +373,7 @@ internal fun SettingsChip(
     modifier: Modifier = Modifier,
     key: String = label,
     focusRequester: FocusRequester? = null,
+    swatch: Color? = null,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -400,18 +406,31 @@ internal fun SettingsChip(
                 .clickable(interactionSource = interactionSource, indication = null, onClick = onSelect)
                 .padding(horizontal = CHIP_HPADDING),
         ) {
-            BasicText(
-                text = label,
-                style = TextStyle(
-                    fontFamily = JellybeamTheme.Archivo,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (selected) JellybeamTheme.Notte else JellybeamTheme.Panna2,
-                    fontSize = 13.sp,
-                ),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (swatch != null) {
+                    Box(
+                        Modifier
+                            .padding(end = 8.dp)
+                            .size(CHIP_SWATCH_SIZE)
+                            .background(swatch, CircleShape)
+                            .border(1.dp, JellybeamTheme.Hairline, CircleShape),
+                    )
+                }
+                BasicText(
+                    text = label,
+                    style = TextStyle(
+                        fontFamily = JellybeamTheme.Archivo,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (selected) JellybeamTheme.Notte else JellybeamTheme.Panna2,
+                        fontSize = 13.sp,
+                    ),
+                )
+            }
         }
     }
 }
+
+private val CHIP_SWATCH_SIZE = 10.dp
 
 // Fixed width, unlike [rowLabelStyle]'s usual weighted sibling: a `FlowRow` of chips needs a
 // bounded max width to wrap correctly against the full row width.
@@ -433,11 +452,16 @@ internal fun ChipFieldRow(label: String, description: String, key: String, modif
         animationSpec = tween(SETTINGS_DESCRIPTION_FADE_MS),
         label = "chipFieldRowDescriptionAlpha",
     )
+    // A focused chip only scrolls its own bounds into view, leaving the last row's ring and
+    // description below the pane edge; reveal the whole row instead.
+    val rowIntoView = remember { BringIntoViewRequester() }
+    LaunchedEffect(chipsHaveFocus) { if (chipsHaveFocus) rowIntoView.bringIntoView() }
 
     // Label + chips on one line, description on a full-width line beneath (a 12sp sentence never
     // fits the 170dp label column). Row height is fixed; only description alpha moves with focus.
     Column(
         modifier = modifier
+            .bringIntoViewRequester(rowIntoView)
             .fillMaxWidth()
             .height(SETTINGS_CHIP_ROW_HEIGHT)
             .background(JellybeamTheme.SurfaceRaised, RoundedCornerShape(ROW_CORNER))
@@ -487,6 +511,42 @@ internal fun ChipFieldRow(label: String, description: String, key: String, modif
                 .graphicsLayer { alpha = descriptionAlpha },
             style = settingsDescriptionStyle(),
         )
+    }
+}
+
+/**
+ * A [ChipFieldRow] of one [SettingsChip] per entry in [options], [selected] filled. [chipKey]
+ * defaults to the lowercase enum name or `toString()`; [selectedFocusRequester] lands on the
+ * selected chip.
+ */
+@Composable
+internal fun <T> PresetChipRow(
+    label: String,
+    description: String,
+    key: String,
+    options: List<T>,
+    selected: T,
+    onSelect: (T) -> Unit,
+    chipLabel: @Composable (T) -> String,
+    modifier: Modifier = Modifier,
+    chipKey: (T) -> String = { (it as? Enum<*>)?.name?.lowercase() ?: it.toString() },
+    swatch: ((T) -> Color)? = null,
+    selectedFocusRequester: FocusRequester? = null,
+) {
+    ChipFieldRow(label = label, description = description, key = key, modifier = modifier) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
+            options.forEach { option ->
+                val isSelected = option == selected
+                SettingsChip(
+                    label = chipLabel(option),
+                    selected = isSelected,
+                    onSelect = { onSelect(option) },
+                    key = chipKey(option),
+                    focusRequester = if (isSelected) selectedFocusRequester else null,
+                    swatch = swatch?.invoke(option),
+                )
+            }
+        }
     }
 }
 

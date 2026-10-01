@@ -1,6 +1,7 @@
 package tv.jellybeam.player
 
 import android.graphics.Typeface
+import android.view.accessibility.CaptioningManager
 import android.text.format.DateFormat
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -135,7 +136,6 @@ import uniffi.jellybeam_core.MediaStreamKind
 import uniffi.jellybeam_core.OsdDetailSetting
 import uniffi.jellybeam_core.PlaybackOsdDetail
 import uniffi.jellybeam_core.PlayMethodFfi
-import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.TrickplayMetaFfi
 import uniffi.jellybeam_core.TrickplayTileFfi
 
@@ -373,18 +373,19 @@ private fun chipChannelLabel(channels: Int): String = when (channels) {
 private const val SUBTITLE_BOTTOM_FRACTION_DEFAULT = 0.08f
 private const val SUBTITLE_BOTTOM_FRACTION_OSD = 0.24f
 
-/** Subtitle style settings (docs/09-settings-plan.md): the "Vertical position" preset ladder,
- * expressed as bottom-padding-fraction steps. */
-private const val SUBTITLE_POSITION_DEFAULT_FRACTION = 0.08f
-private const val SUBTITLE_POSITION_RAISED_FRACTION = 0.16f
-private const val SUBTITLE_POSITION_HIGHER_FRACTION = 0.24f
-private const val SUBTITLE_POSITION_HIGHEST_FRACTION = 0.32f
-
-private fun subtitlePositionBottomFraction(position: SubtitlePositionPreset): Float = when (position) {
-    SubtitlePositionPreset.DEFAULT -> SUBTITLE_POSITION_DEFAULT_FRACTION
-    SubtitlePositionPreset.RAISED -> SUBTITLE_POSITION_RAISED_FRACTION
-    SubtitlePositionPreset.HIGHER -> SUBTITLE_POSITION_HIGHER_FRACTION
-    SubtitlePositionPreset.HIGHEST -> SUBTITLE_POSITION_HIGHEST_FRACTION
+/** docs/09: [captionColors]' presets, or Android's caption style when the user defers to it. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private fun captionStyleCompat(style: SubtitleStyle, captioning: CaptioningManager?): CaptionStyleCompat {
+    val colors = captionColors(style)
+        ?: return captioning?.let { CaptionStyleCompat.createFromCaptionStyle(it.userStyle) } ?: CaptionStyleCompat.DEFAULT
+    return CaptionStyleCompat(
+        /* foregroundColor = */ colors.foreground,
+        /* backgroundColor = */ colors.background,
+        /* windowColor = */ android.graphics.Color.TRANSPARENT,
+        /* edgeType = */ if (colors.outline) CaptionStyleCompat.EDGE_TYPE_OUTLINE else CaptionStyleCompat.EDGE_TYPE_NONE,
+        /* edgeColor = */ android.graphics.Color.BLACK,
+        /* typeface = */ if (style.bold) Typeface.DEFAULT_BOLD else null,
+    )
 }
 
 // -- Glyphs (no icon pack -- Canvas-drawn, plain shapes) -----------------
@@ -709,6 +710,7 @@ fun PlaybackScreen(
     val state by viewModel.state.collectAsState()
     val previewTile by viewModel.previewTile.collectAsState()
     val context = LocalContext.current
+    val captioningManager = remember(context) { context.getSystemService(CaptioningManager::class.java) }
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
 
@@ -1366,18 +1368,9 @@ fun PlaybackScreen(
             },
             update = { playerView ->
                 val subtitleView = playerView.subtitleView
-                subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * state.subtitleScale)
-                val backgroundAlpha = (state.subtitleBackgroundOpacity.coerceIn(0f, 1f) * 255).toInt()
-                val hasBackground = backgroundAlpha > 0
+                subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * state.subtitleStyle.scale)
                 subtitleView?.setStyle(
-                    CaptionStyleCompat(
-                        /* foregroundColor = */ android.graphics.Color.WHITE,
-                        /* backgroundColor = */ android.graphics.Color.argb(backgroundAlpha, 0, 0, 0),
-                        /* windowColor = */ android.graphics.Color.TRANSPARENT,
-                        /* edgeType = */ if (hasBackground) CaptionStyleCompat.EDGE_TYPE_NONE else CaptionStyleCompat.EDGE_TYPE_OUTLINE,
-                        /* edgeColor = */ android.graphics.Color.BLACK,
-                        /* typeface = */ if (state.subtitleBold) Typeface.DEFAULT_BOLD else null,
-                    ),
+                    captionStyleCompat(state.subtitleStyle, captioningManager),
                 )
                 // docs/12 §16: SubtitleView lays out cues within its own measured bounds, ignoring
                 // the sheet drawn over it. Shrinking the view's right margin by the sheet width
@@ -1393,7 +1386,7 @@ fun PlaybackScreen(
                     }
                 }
                 val osdFraction = if (osdVisible) SUBTITLE_BOTTOM_FRACTION_OSD else SUBTITLE_BOTTOM_FRACTION_DEFAULT
-                val positionFraction = subtitlePositionBottomFraction(state.subtitlePosition)
+                val positionFraction = subtitlePositionBottomFraction(state.subtitleStyle.position)
                 subtitleView?.setBottomPaddingFraction(maxOf(osdFraction, positionFraction))
             },
             onRelease = { playerView -> AppGraph.playerHolder.detach(playerView) },

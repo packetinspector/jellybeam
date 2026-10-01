@@ -38,6 +38,13 @@ the in-memory state and mirror side effects.
   [5,10,15,30,60], default 10/10) — PlaybackScreen seek magnitudes.
 - `language: LanguagePrefs` (audio/subtitle + SubtitleMode) — consumed by
   `resolve_track_selection` in the player's prepare/load path.
+- Subtitle style: `subtitle_scale`, `subtitle_position`, `subtitle_bold`,
+  `subtitle_background_opacity`, `subtitle_color` (White default / SoftWhite /
+  Yellow / LightGreen) and `subtitle_use_system_style` (Android's caption
+  style replaces color, bold, background and edge; size and position still
+  apply). Curated presets only, no free color picker: four colors cover
+  the real needs (HDR glare, classic yellow, color-vision preference) and
+  the system toggle is the escape hatch.
 - `autoplay: AutoplayPrefs` (enabled, delay_secs; default true/10).
 - `playback_quality: PlaybackQuality` (DirectPlay default / Auto / Cap {
   max_bps }) — docs/18; read by `prepare_playback` and

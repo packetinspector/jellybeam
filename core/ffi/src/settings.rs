@@ -99,6 +99,20 @@ pub enum SubtitlePositionPreset {
     Highest,
 }
 
+/// Subtitle text colour presets: a short curated list rather than a free
+/// picker (docs/09). `SubtitleStyle.kt` owns the RGB.
+#[derive(
+    uniffi::Enum, Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum SubtitleColorPreset {
+    #[default]
+    White,
+    /// Dimmed white, so HDR/OLED panels don't render text at peak brightness.
+    SoftWhite,
+    Yellow,
+    LightGreen,
+}
+
 /// [`Settings::subtitle_scale`]'s real default -- `1.0`, not `f32`'s zero
 /// value, so an explicit `#[serde(default = "...")]` is required.
 fn default_subtitle_scale() -> f32 {
@@ -353,6 +367,13 @@ pub struct Settings {
     /// zero value, is already the intended default.
     #[serde(default)]
     pub subtitle_background_opacity: f32,
+    /// Subtitle text colour -- see [`SubtitleColorPreset`].
+    #[serde(default)]
+    pub subtitle_color: SubtitleColorPreset,
+    /// Take colour, edge, background and typeface from Android's system
+    /// caption settings instead of the presets; size and position still apply.
+    #[serde(default)]
+    pub subtitle_use_system_style: bool,
     /// Per-`MediaSegmentKind` skip behavior -- see [`SegmentAction`]. Bare
     /// `#[serde(default)]` is correct: `SegmentAction::default()` (`Ask`)
     /// already matches this field's intended fallback.
@@ -463,6 +484,8 @@ impl Default for Settings {
             subtitle_position: SubtitlePositionPreset::default(),
             subtitle_bold: false,
             subtitle_background_opacity: 0.0,
+            subtitle_color: SubtitleColorPreset::default(),
+            subtitle_use_system_style: false,
             skip_intro: SegmentAction::Ask,
             skip_outro: SegmentAction::Ask,
             skip_recap: SegmentAction::Ask,
@@ -595,6 +618,8 @@ mod tests {
             subtitle_position: SubtitlePositionPreset::Higher,
             subtitle_bold: true,
             subtitle_background_opacity: 0.5,
+            subtitle_color: SubtitleColorPreset::Yellow,
+            subtitle_use_system_style: true,
             skip_intro: SegmentAction::Off,
             skip_outro: SegmentAction::AutoSkip,
             skip_recap: SegmentAction::Off,
@@ -656,6 +681,8 @@ mod tests {
         assert_eq!(settings.subtitle_position, SubtitlePositionPreset::Default);
         assert!(!settings.subtitle_bold);
         assert_eq!(settings.subtitle_background_opacity, 0.0);
+        assert_eq!(settings.subtitle_color, SubtitleColorPreset::White);
+        assert!(!settings.subtitle_use_system_style);
         assert_eq!(settings.skip_intro, SegmentAction::Ask);
         assert_eq!(settings.skip_outro, SegmentAction::Ask);
         assert_eq!(settings.skip_recap, SegmentAction::Ask);
@@ -775,6 +802,8 @@ mod tests {
         assert_eq!(loaded.subtitle_position, SubtitlePositionPreset::Default);
         assert!(!loaded.subtitle_bold);
         assert_eq!(loaded.subtitle_background_opacity, 0.0);
+        assert_eq!(loaded.subtitle_color, SubtitleColorPreset::White);
+        assert!(!loaded.subtitle_use_system_style);
         // Missing skip_* fields fall back to their own real defaults --
         // Ask for everything except commercial.
         assert_eq!(loaded.skip_intro, SegmentAction::Ask);
@@ -1122,6 +1151,8 @@ mod tests {
             subtitle_position: SubtitlePositionPreset::Highest,
             subtitle_bold: true,
             subtitle_background_opacity: 0.75,
+            subtitle_color: SubtitleColorPreset::LightGreen,
+            subtitle_use_system_style: true,
             ..Settings::default()
         };
         let json = serde_json::to_value(&original).expect("serialize");
@@ -1129,6 +1160,8 @@ mod tests {
         assert_eq!(json["subtitle_position"], "Highest");
         assert_eq!(json["subtitle_bold"], true);
         assert_eq!(json["subtitle_background_opacity"], 0.75);
+        assert_eq!(json["subtitle_color"], "LightGreen");
+        assert_eq!(json["subtitle_use_system_style"], true);
 
         let loaded: Settings = serde_json::from_value(json).expect("deserialize");
         assert_eq!(loaded, original);

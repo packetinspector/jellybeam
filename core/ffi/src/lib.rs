@@ -39,7 +39,7 @@ pub use seerr_types::{
 };
 pub use settings::{
     LanguageSettings, PlaybackQuality, SeekPreviewSize, SegmentAction, Settings, StillWatchingMode,
-    StillWatchingSettings, SubtitleModeSetting, SubtitlePositionPreset,
+    StillWatchingSettings, SubtitleColorPreset, SubtitleModeSetting, SubtitlePositionPreset,
 };
 pub use still_watching::StillWatchingDecision;
 pub use types::{
