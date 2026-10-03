@@ -103,7 +103,9 @@ perf startup phase=home.shelvesMounted atMs=1938
 
 `restoreSession`, `openMirror` and the first `homeSnapshot` do not wait for the Activity:
 `LaunchWarmup` starts them from `AppGraph.init`, behind `core.ready`, so they overlap
-`activity.firstFrame`. `JellybeamRoot` and `HomeViewModel` each take their result once; an account
+`activity.firstFrame`. The warm-up reads the persisted Home layout from settings (in memory) and
+prefetches that layout's snapshot (docs/25 §6.1). `JellybeamRoot` and the Home layout's feed each
+take their result once; an account
 switch, an added server or a recreated Activity finds nothing to take and runs the same calls
 itself. A cold launch therefore shows one `ffi.homeSnapshot` before `home.dataReady`, from the
 warm-up, and a second only when the mirror changed in between.

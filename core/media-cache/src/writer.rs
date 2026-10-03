@@ -96,9 +96,8 @@ pub(crate) enum WriteCmd {
         ids: Vec<String>,
         since: i64,
     },
-    /// Builds [`crate::schema::FAVORITE_INDEX_SQL`] on a populated mirror; replies whether it
-    /// succeeded.
-    BuildFavoriteIndexes(oneshot::Sender<bool>),
+    /// Builds one deferred [`crate::schema::IndexGroup`]; replies whether it succeeded.
+    BuildIndexGroup(crate::schema::IndexGroup, oneshot::Sender<bool>),
     /// Fired after enqueueing a batch the caller wants to know completed; commands are
     /// processed strictly in order, so this just drains to that point.
     Barrier(oneshot::Sender<bool>),
@@ -242,10 +241,10 @@ impl WriterHandle {
         self.send(WriteCmd::SetNextUpIds(ids)).await;
     }
 
-    /// See [`WriteCmd::BuildFavoriteIndexes`].
-    pub(crate) async fn build_favorite_indexes(&self) -> bool {
+    /// See [`WriteCmd::BuildIndexGroup`].
+    pub(crate) async fn build_index_group(&self, group: crate::schema::IndexGroup) -> bool {
         let (tx, rx) = oneshot::channel();
-        self.send(WriteCmd::BuildFavoriteIndexes(tx)).await;
+        self.send(WriteCmd::BuildIndexGroup(group, tx)).await;
         rx.await.unwrap_or(false)
     }
 
@@ -467,10 +466,10 @@ pub(crate) fn run(
                     });
                 }
             }
-            WriteCmd::BuildFavoriteIndexes(reply) => {
-                let result = conn.execute_batch(crate::schema::FAVORITE_INDEX_SQL);
+            WriteCmd::BuildIndexGroup(group, reply) => {
+                let result = group.build(&conn);
                 if let Err(e) = &result {
-                    tracing::error!(error = %e, "failed to build favorite indexes");
+                    tracing::error!(error = %e, ?group, "failed to build index group");
                 }
                 let _ = reply.send(result.is_ok());
             }

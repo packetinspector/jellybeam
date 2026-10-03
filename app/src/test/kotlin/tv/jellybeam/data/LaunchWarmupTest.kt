@@ -14,6 +14,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.ChangeEvent
+import uniffi.jellybeam_core.ClassicHome
+import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.HomeSnapshot
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -23,7 +25,7 @@ class LaunchWarmupTest {
         userId = "00000000-0000-4000-8000-000000000001",
         userName = "synthetic-user",
     )
-    private val snapshot = HomeSnapshot(resume = emptyList(), nextUp = emptyList(), latest = emptyList())
+    private val snapshot = HomeSnapshot.Classic(ClassicHome(hero = null, shelves = emptyList()))
 
     /** Records the launch calls in order; everything else is [FakeCoreGateway]. */
     private inner class Gateway(
@@ -31,6 +33,7 @@ class LaunchWarmupTest {
         private val openMirrorError: Throwable? = null,
     ) : CoreGateway by FakeCoreGateway() {
         val calls = mutableListOf<String>()
+        val requestedLayouts = mutableListOf<HomeLayout>()
         val events = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 8)
 
         override suspend fun restoreSession(): AccountInfo? {
@@ -43,8 +46,9 @@ class LaunchWarmupTest {
             openMirrorError?.let { throw it }
         }
 
-        override suspend fun homeSnapshot(): HomeSnapshot {
+        override suspend fun homeSnapshot(layout: HomeLayout): HomeSnapshot {
             calls += "homeSnapshot"
+            requestedLayouts += layout
             return snapshot
         }
 
@@ -66,6 +70,16 @@ class LaunchWarmupTest {
         assertSame(account, warmup.takeSession()?.account)
         assertSame(snapshot, warmup.takeHome()?.snapshot)
         assertEquals(4, gateway.calls.size)
+    }
+
+    @Test
+    fun `the prefetch builds the persisted layout, and the session carries it`() = runTest {
+        val gateway = Gateway()
+        val warmup = LaunchWarmup(gateway, backgroundScope)
+        runCurrent()
+
+        assertEquals(listOf(HomeLayout.CLASSIC), gateway.requestedLayouts)
+        assertEquals(HomeLayout.CLASSIC, warmup.takeSession()?.homeLayout)
     }
 
     @Test

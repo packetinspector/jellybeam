@@ -37,6 +37,8 @@ why, not how a change came to be.
 - `23-detail-layout-rules.md` — detail page layout rules
 - `24-server-virtual-items.md` — how virtual items and
   folder children from the server are handled
+- `25-home-layouts.md` — selectable Home layouts: how each stays
+  self-contained and costs nothing when inactive (proposed)
 - `jellybeam-osd-handoff/` — the OSD specification files that `12-osd-ux-spec.md`
   summarizes; code cites them by section, so they stay as they are
 - `brand.md` — name, colour tokens, wordmark, mascot usage, and the acceptance bar
@@ -54,7 +56,7 @@ why, not how a change came to be.
 
 | Work area | Directory | Spec |
 |---|---|---|
-| Home shelves, continue watching | `ui/home/` | 07 |
+| Home shelves, continue watching | `ui/home/` | 07, 25 |
 | Library grid, sort, filter, index rail | `ui/library/` | 07, 16 |
 | Detail pages and the `···` menu | `ui/detail/` | 11, 19, 23 |
 | Cards, posters, focus ring | `ui/cards/`, `ui/focus/` | 07, 15 |

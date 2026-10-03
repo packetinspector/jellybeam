@@ -1,4 +1,4 @@
-package tv.jellybeam.ui.home
+package tv.jellybeam.ui.home.classic
 
 import org.junit.Assert.assertEquals
 import org.junit.Test

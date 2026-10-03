@@ -12,6 +12,7 @@ mod diag;
 mod discovery;
 mod error;
 pub mod glide;
+mod home;
 mod library_prefs;
 mod next_episode;
 mod object;
@@ -29,6 +30,7 @@ pub use diag::{install_diag_sink, DiagLevel, DiagSink};
 pub use discovery::DiscoveredServer;
 pub use error::CoreError;
 pub use glide::GlideDirection;
+pub use home::{ClassicHome, HomeLayout, HomeShelf, HomeSnapshot, ShelfSource};
 pub use object::{ChangeListener, JellybeamCore};
 pub use seerr_types::{
     SeerrActiveRequest, SeerrAuthMethod, SeerrAvailability, SeerrBrowseFilters, SeerrBrowseKind,
@@ -44,13 +46,12 @@ pub use settings::{
 pub use still_watching::StillWatchingDecision;
 pub use types::{
     AccountInfo, AudioSpatialKind, Card, ChangeEvent, ChapterInfoFfi, Decade, DeviceCaps,
-    EpisodeNeighbors, GridCounts, GridFilters, GridGroup, GridSort, GridSortField, HomeSnapshot,
-    ImageKind, ItemDetail, LatestShelf, LibraryGridPrefs, LiveSort, MediaSegment, MediaSegmentKind,
-    MediaStreamInfo, MediaStreamKind, MirrorItemCounts, MirrorLibrary, MirrorStats, PersonInfo,
-    PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan, QuickConnectSession, ServerDetails,
-    ServerInfoSnapshot, SortOrder, StatusFilter, SubtitleActionFfi, TrackDecisionFfi, TrackInfo,
-    TrackKindFfi, TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId, ViewSnapshot,
-    WatchedFilter,
+    EpisodeNeighbors, GridCounts, GridFilters, GridGroup, GridSort, GridSortField, ImageKind,
+    ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MediaSegmentKind, MediaStreamInfo,
+    MediaStreamKind, MirrorItemCounts, MirrorLibrary, MirrorStats, PersonInfo, PlayMethodFfi,
+    PlaybackOsdDetail, PlaybackPlan, QuickConnectSession, ServerDetails, ServerInfoSnapshot,
+    SortOrder, StatusFilter, SubtitleActionFfi, TrackDecisionFfi, TrackInfo, TrackKindFfi,
+    TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId, ViewSnapshot, WatchedFilter,
 };
 
 /// docs/16 §2.7: the drawer's Favorites page as a library view; Kotlin recognises it by

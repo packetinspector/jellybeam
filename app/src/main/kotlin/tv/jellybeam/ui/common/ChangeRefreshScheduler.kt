@@ -11,7 +11,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * docs/16-library-sort-filter.md §4.6, docs/17-mini-player.md §6: shared refresh scheduler for
- * [tv.jellybeam.ui.home.HomeViewModel] and [tv.jellybeam.ui.library.LibraryViewModel]. A plain
+ * [tv.jellybeam.ui.home.common.HomeFeed] and [tv.jellybeam.ui.library.LibraryViewModel]. A plain
  * `debounce(500)` never fires while a sync burst keeps landing events under 500ms apart, leaving
  * the screen frozen on stale data; this refreshes on the leading event instead.
  *

@@ -88,6 +88,40 @@ pub struct Card {
     pub is_favorite: bool,
 }
 
+#[cfg(test)]
+impl Card {
+    /// A synthetic card for tests: `id` and `item_type` set, everything else empty.
+    pub(crate) fn sample(id: &str, item_type: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            item_type: item_type.to_string(),
+            name: format!("{id} name"),
+            primary_tag: None,
+            backdrop_tag: None,
+            thumb_tag: None,
+            blurhash: None,
+            played: false,
+            position_ticks: 0,
+            runtime_ticks: None,
+            unplayed_count: None,
+            production_year: None,
+            index_number: None,
+            premiere_date: None,
+            parent_index_number: None,
+            series_id: None,
+            series_primary_tag: None,
+            parent_backdrop_item_id: None,
+            parent_backdrop_tag: None,
+            series_name: None,
+            last_played_date: None,
+            overview: None,
+            is_virtual: false,
+            library_id: None,
+            is_favorite: false,
+        }
+    }
+}
+
 /// The two episodic transport targets surrounding the currently-playing
 /// episode, kept in one record so the mirror/server walk is atomic --
 /// Kotlin cannot observe Previous from one snapshot and Next from another.
@@ -192,27 +226,6 @@ impl TryFrom<&jellyfin_api::models::BaseItemDto> for Card {
 pub struct CollectionInfo {
     pub id: String,
     pub name: String,
-}
-
-/// One "Latest in <library>" shelf.
-#[derive(uniffi::Record, Debug, Clone, PartialEq)]
-pub struct LatestShelf {
-    pub view_id: String,
-    pub view_name: String,
-    pub cards: Vec<Card>,
-}
-
-/// The whole Home screen in one call -- resume/next-up rails plus one
-/// "Latest" shelf per (currently: every) library that has anything to show.
-#[derive(uniffi::Record, Debug, Clone, PartialEq)]
-pub struct HomeSnapshot {
-    pub resume: Vec<Card>,
-    pub next_up: Vec<Card>,
-    pub latest: Vec<LatestShelf>,
-    /// docs/07 §1: empty when the user has none or turned the shelf off. Last, with a
-    /// default, so positional Kotlin constructions keep compiling.
-    #[uniffi(default)]
-    pub favorites: Vec<Card>,
 }
 
 /// Account identity returned by [`crate::JellybeamCore::sign_in`] and

@@ -231,7 +231,9 @@ pub(crate) fn open_and_prepare(path: &Path) -> Result<(Connection, bool), CacheE
         .map_err(db_err)?;
     // Free on an empty table; a populated one builds them off the launch path instead.
     if !has_items {
-        conn.execute_batch(FAVORITE_INDEX_SQL).map_err(db_err)?;
+        for group in IndexGroup::ALL.into_iter().filter(|g| g.app_wide()) {
+            group.build(&conn).map_err(db_err)?;
+        }
     }
 
     Ok((conn, !has_items))
@@ -269,27 +271,87 @@ pub(crate) fn read_meta(conn: &Connection, key: &str) -> Option<String> {
 
 /// Fresh temp-dir mirror for a test -- shared by `query`'s and `writer`'s test modules so
 /// both open a db the same way.
-/// docs/16 §2.7's favorites indexes, kept out of [`SCHEMA_SQL`]: on a populated mirror their
-/// one-time build (hundreds of ms on a TV) would land inside launch, so the sync startup pass
-/// runs it through the writer instead (`sync::ensure_favorite_indexes`), and the Favorites
-/// shelf and drawer probe stay empty until [`favorite_indexes_ready`].
-pub(crate) const FAVORITE_INDEX_SQL: &str = "
--- Favorites shelf/page: a partial index, so only the few favorite rows are indexed.
-CREATE INDEX IF NOT EXISTS idx_items_favorite ON items(item_type) WHERE is_favorite = 1;
--- The shelf's \"last played\" for a favorite Series/Season: one seek each, over played rows only.
-CREATE INDEX IF NOT EXISTS idx_items_series_played ON items(series_id, last_played_date) WHERE last_played_date IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_items_parent_played ON items(parent_id, last_played_date) WHERE last_played_date IS NOT NULL;
-";
+/// docs/25 §4.8: index sets kept out of [`SCHEMA_SQL`], since building one on a populated
+/// mirror (hundreds of ms on a TV) would land inside launch; the writer builds them off the
+/// launch path (`sync::ensure_index_group`), and their queries answer empty until then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IndexGroup {
+    /// docs/16 §2.7: the favorites scope and its "last played" ordering.
+    Favorites,
+}
 
-/// Whether every [`FAVORITE_INDEX_SQL`] index exists.
-pub(crate) fn favorite_indexes_ready(conn: &Connection) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) = 3 FROM sqlite_master WHERE type = 'index' AND name IN \
-         ('idx_items_favorite', 'idx_items_series_played', 'idx_items_parent_played')",
-        [],
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
+impl IndexGroup {
+    pub(crate) const ALL: [Self; 1] = [Self::Favorites];
+
+    /// `(name, CREATE INDEX IF NOT EXISTS ...)` for every index in the group.
+    const fn indexes(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Favorites => &[
+                // A partial index, so only the few favorite rows are indexed.
+                (
+                    "idx_items_favorite",
+                    "CREATE INDEX IF NOT EXISTS idx_items_favorite ON items(item_type) \
+                     WHERE is_favorite = 1",
+                ),
+                // A favorite Series/Season's "last played": one seek each, over played rows only.
+                (
+                    "idx_items_series_played",
+                    "CREATE INDEX IF NOT EXISTS idx_items_series_played \
+                     ON items(series_id, last_played_date) WHERE last_played_date IS NOT NULL",
+                ),
+                (
+                    "idx_items_parent_played",
+                    "CREATE INDEX IF NOT EXISTS idx_items_parent_played \
+                     ON items(parent_id, last_played_date) WHERE last_played_date IS NOT NULL",
+                ),
+            ],
+        }
+    }
+
+    /// docs/25 §4.8: app-wide groups come free with an empty mirror at open; a layout's group
+    /// waits for that layout's first use, so an unused layout never taxes sync writes.
+    pub(crate) const fn app_wide(self) -> bool {
+        match self {
+            Self::Favorites => true,
+        }
+    }
+
+    /// This group's bit in `MirrorState::ready_index_groups`.
+    pub(crate) const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+
+    pub(crate) fn build(self, conn: &Connection) -> rusqlite::Result<()> {
+        self.indexes()
+            .iter()
+            .try_for_each(|(_, sql)| conn.execute_batch(sql))
+    }
+
+    /// One query for the whole group, since it runs on every mirror open.
+    pub(crate) fn is_built(self, conn: &Connection) -> bool {
+        let names = self.indexes();
+        let placeholders = vec!["?"; names.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ({placeholders})"
+        );
+        conn.query_row(
+            &sql,
+            rusqlite::params_from_iter(names.iter().map(|(name, _)| name)),
+            |row| row.get::<_, usize>(0),
+        )
+        .is_ok_and(|built| built == names.len())
+    }
+}
+
+// Ready flags are bits in an `AtomicU8`.
+const _: () = assert!(IndexGroup::ALL.len() <= 8);
+
+/// The [`IndexGroup::bit`]s of every group already built in `conn`.
+pub(crate) fn built_index_groups(conn: &Connection) -> u8 {
+    IndexGroup::ALL
+        .into_iter()
+        .filter(|g| g.is_built(conn))
+        .fold(0, |bits, g| bits | g.bit())
 }
 
 #[cfg(test)]
@@ -310,9 +372,10 @@ mod tests {
         let path = dir.path().join("mirror.db");
         let (conn, _) = open_and_prepare(&path).expect("open");
         assert!(
-            favorite_indexes_ready(&conn),
+            IndexGroup::Favorites.is_built(&conn),
             "a fresh mirror gets them at open"
         );
+        assert_eq!(built_index_groups(&conn), IndexGroup::Favorites.bit());
 
         conn.execute(
             "INSERT INTO items (id, item_type, dto, updated_at) VALUES ('a', 'Movie', '{}', 0)",
@@ -327,12 +390,21 @@ mod tests {
         drop(conn);
         let (conn, _) = open_and_prepare(&path).expect("reopen");
         assert!(
-            !favorite_indexes_ready(&conn),
+            !IndexGroup::Favorites.is_built(&conn),
             "a populated mirror defers the build"
         );
+        assert_eq!(built_index_groups(&conn), 0);
 
-        conn.execute_batch(FAVORITE_INDEX_SQL).expect("build");
-        assert!(favorite_indexes_ready(&conn));
+        IndexGroup::Favorites.build(&conn).expect("build");
+        assert!(IndexGroup::Favorites.is_built(&conn));
+        IndexGroup::Favorites
+            .build(&conn)
+            .expect("a rebuild is a no-op");
+
+        // One missing index is enough to count the group as unbuilt.
+        conn.execute_batch("DROP INDEX idx_items_parent_played;")
+            .expect("drop one");
+        assert!(!IndexGroup::Favorites.is_built(&conn));
     }
 
     #[test]

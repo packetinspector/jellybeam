@@ -173,9 +173,9 @@ pub(crate) struct MirrorState {
     /// atomic, since it's a two-field struct touched only on a rare settings change or read
     /// once per `refresh_next_up` call.
     pub(crate) next_up_options: std::sync::Mutex<NextUpOptions>,
-    /// [`schema::FAVORITE_INDEX_SQL`] exists; until then [`Mirror::favorites`] and
-    /// [`Mirror::has_favorites`] answer empty rather than scan the table during launch.
-    pub(crate) favorite_indexes_ready: std::sync::atomic::AtomicBool,
+    /// [`schema::IndexGroup::bit`]s of the deferred index groups that exist; a query needing
+    /// an unbuilt group answers empty rather than scan the table (docs/25 §4.8).
+    pub(crate) ready_index_groups: std::sync::atomic::AtomicU8,
 }
 
 impl MirrorState {
@@ -213,8 +213,16 @@ impl MirrorState {
             self_weak,
             sync_activity,
             next_up_options: std::sync::Mutex::new(NextUpOptions::default()),
-            favorite_indexes_ready: std::sync::atomic::AtomicBool::new(false),
+            ready_index_groups: std::sync::atomic::AtomicU8::new(0),
         }
+    }
+
+    /// Whether deferred index `group` exists (docs/25 §4.8).
+    pub(crate) fn index_group_ready(&self, group: schema::IndexGroup) -> bool {
+        self.ready_index_groups
+            .load(std::sync::atomic::Ordering::Acquire)
+            & group.bit()
+            != 0
     }
 }
 
@@ -348,10 +356,10 @@ impl Mirror {
         let db_path = dir.join("mirror.db");
 
         let open_path = db_path.clone();
-        let (conn, is_empty, favorite_indexes_ready) = tokio::task::spawn_blocking(move || {
+        let (conn, is_empty, built_index_groups) = tokio::task::spawn_blocking(move || {
             schema::open_and_prepare(&open_path).map(|(conn, is_empty)| {
-                let ready = schema::favorite_indexes_ready(&conn);
-                (conn, is_empty, ready)
+                let built = schema::built_index_groups(&conn);
+                (conn, is_empty, built)
             })
         })
         .await
@@ -383,8 +391,8 @@ impl Mirror {
         });
 
         state
-            .favorite_indexes_ready
-            .store(favorite_indexes_ready, std::sync::atomic::Ordering::Release);
+            .ready_index_groups
+            .store(built_index_groups, std::sync::atomic::Ordering::Release);
         sync::spawn(state.clone(), bus, is_empty);
 
         Ok(Mirror { inner: state })
@@ -614,13 +622,8 @@ impl Mirror {
 
     /// docs/07 §5: see `query::has_favorites`.
     pub fn has_favorites(&self) -> bool {
-        self.favorite_indexes_ready() && query::has_favorites(&self.inner.read_pool.acquire())
-    }
-
-    fn favorite_indexes_ready(&self) -> bool {
-        self.inner
-            .favorite_indexes_ready
-            .load(std::sync::atomic::Ordering::Acquire)
+        self.inner.index_group_ready(schema::IndexGroup::Favorites)
+            && query::has_favorites(&self.inner.read_pool.acquire())
     }
 
     /// docs/16 §2.7: see `query::favorite_item_types`.
@@ -630,7 +633,7 @@ impl Mirror {
 
     /// docs/07 §1: the Home Favorites shelf; see `query::favorites`.
     pub fn favorites(&self, limit: u32) -> Vec<CardRow> {
-        if !self.favorite_indexes_ready() {
+        if !self.inner.index_group_ready(schema::IndexGroup::Favorites) {
             return Vec::new();
         }
         query::favorites(&self.inner.read_pool.acquire(), limit)

@@ -1,47 +1,44 @@
-package tv.jellybeam.ui.home
+package tv.jellybeam.ui.home.classic
 
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import uniffi.jellybeam_core.Card
+import uniffi.jellybeam_core.HomeShelf
+import uniffi.jellybeam_core.ShelfSource
 
 enum class ShelfKind { RESUME, POSTER }
 
 data class ShelfSpec(val id: String, val title: String, val items: List<Card>, val kind: ShelfKind)
 
 /**
- * Home's shelf order and empty-shelf hiding (docs/07-home-browse-behavior.md §1): Continue
- * Watching,
- * then Next Up, then Favorites, then one "Latest in {view}" shelf per library in server order; an empty shelf is
- * omitted.
- * Pulled out of the Composable file so it's plain-JVM-testable.
+ * docs/25 §3: the core already decided which shelves show and in what order; this only gives each
+ * one its localised title and card treatment. Pulled out of the Composable file so it's
+ * plain-JVM-testable.
  */
 fun buildShelves(
-    state: HomeUiState,
+    shelves: List<HomeShelf>,
     continueWatchingTitle: String,
     nextUpTitle: String,
     favoritesTitle: String,
     latestInTitle: (viewName: String) -> String,
-): List<ShelfSpec> = buildList {
-    if (state.resume.isNotEmpty()) {
-        add(ShelfSpec("resume", continueWatchingTitle, state.resume, ShelfKind.RESUME))
-    }
-    if (state.nextUp.isNotEmpty()) {
-        add(ShelfSpec("next-up", nextUpTitle, state.nextUp, ShelfKind.RESUME))
-    }
-    if (state.favorites.isNotEmpty()) {
-        add(ShelfSpec("favorites", favoritesTitle, state.favorites, ShelfKind.POSTER))
-    }
-    for (shelf in state.latest) {
-        if (shelf.cards.isNotEmpty()) {
-            add(ShelfSpec("latest:${shelf.viewId}", latestInTitle(shelf.viewName), shelf.cards, ShelfKind.POSTER))
-        }
+): List<ShelfSpec> = shelves.map { shelf ->
+    when (val source = shelf.source) {
+        ShelfSource.ContinueWatching -> ShelfSpec(source.key(), continueWatchingTitle, shelf.cards, ShelfKind.RESUME)
+        ShelfSource.NextUp -> ShelfSpec(source.key(), nextUpTitle, shelf.cards, ShelfKind.RESUME)
+        ShelfSource.Favorites -> ShelfSpec(source.key(), favoritesTitle, shelf.cards, ShelfKind.POSTER)
+        is ShelfSource.Latest -> ShelfSpec(source.key(), latestInTitle(source.viewName), shelf.cards, ShelfKind.POSTER)
     }
 }
 
-/** docs/07 §1's hero banner: shown only when shelf 0 is Continue Watching, using its first card --
- * [buildShelves] only ever places it at index 0, so this collapses to "resume has a first card".
+/** docs/25 §10.1: a shelf's identity for focus memory (`shelf:<key>/card:<id>`), its scroll state
+ * and list reuse; these strings predate the core deciding shelves and must not change.
  */
-fun heroCard(state: HomeUiState): Card? = state.resume.firstOrNull()
+fun ShelfSource.key(): String = when (this) {
+    ShelfSource.ContinueWatching -> "resume"
+    ShelfSource.NextUp -> "next-up"
+    ShelfSource.Favorites -> "favorites"
+    is ShelfSource.Latest -> "latest:$viewId"
+}
 
 /** Height of Home's floating wordmark band and its top wash. */
 val MASTHEAD_HEIGHT = 100.dp

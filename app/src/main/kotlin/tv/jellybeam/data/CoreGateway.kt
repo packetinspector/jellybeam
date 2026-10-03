@@ -24,14 +24,16 @@ import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.DeviceCaps
 import uniffi.jellybeam_core.DiscoveredServer
 import uniffi.jellybeam_core.EpisodeNeighbors
-import uniffi.jellybeam_core.JellybeamCoreInterface
+import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.GridCounts
 import uniffi.jellybeam_core.GridFilters
 import uniffi.jellybeam_core.GridGroup
 import uniffi.jellybeam_core.GridSort
+import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.HomeSnapshot
 import uniffi.jellybeam_core.ImageKind
 import uniffi.jellybeam_core.ItemDetail
+import uniffi.jellybeam_core.JellybeamCoreInterface
 import uniffi.jellybeam_core.LibraryGridPrefs
 import uniffi.jellybeam_core.LiveSort
 import uniffi.jellybeam_core.MediaSegment
@@ -42,11 +44,11 @@ import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SeerrBrowseFilters
 import uniffi.jellybeam_core.SeerrBrowseKind
 import uniffi.jellybeam_core.SeerrGenre
+import uniffi.jellybeam_core.SeerrHome
 import uniffi.jellybeam_core.SeerrMediaType
 import uniffi.jellybeam_core.SeerrMovieDetail
 import uniffi.jellybeam_core.SeerrMyRequest
 import uniffi.jellybeam_core.SeerrPage
-import uniffi.jellybeam_core.SeerrHome
 import uniffi.jellybeam_core.SeerrPersonCredits
 import uniffi.jellybeam_core.SeerrRequestInput
 import uniffi.jellybeam_core.SeerrRequestOptions
@@ -61,7 +63,6 @@ import uniffi.jellybeam_core.SyncStatus
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
-import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.TrickplayMetaFfi
 import uniffi.jellybeam_core.TrickplayTileFfi
 import uniffi.jellybeam_core.ViewSnapshot
@@ -150,7 +151,8 @@ interface CoreGateway {
      */
     suspend fun setDeviceCaps(caps: DeviceCaps)
 
-    suspend fun homeSnapshot(): HomeSnapshot
+    /** docs/25 §4.3: the snapshot for [layout], the layout the caller will draw. */
+    suspend fun homeSnapshot(layout: HomeLayout): HomeSnapshot
 
     suspend fun isSyncing(): Boolean
 
@@ -702,8 +704,8 @@ class RealCoreGateway(
     override suspend fun setDeviceCaps(caps: DeviceCaps) =
         ffi("ffi.setDeviceCaps") { setDeviceCaps(caps) }
 
-    override suspend fun homeSnapshot(): HomeSnapshot =
-        ffi("ffi.homeSnapshot") { homeSnapshot() }
+    override suspend fun homeSnapshot(layout: HomeLayout): HomeSnapshot =
+        ffi("ffi.homeSnapshot") { homeSnapshot(layout) }
 
     override suspend fun isSyncing(): Boolean =
         ffi("ffi.isSyncing") { isSyncing() }

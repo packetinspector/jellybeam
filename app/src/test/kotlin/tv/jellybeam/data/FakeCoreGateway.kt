@@ -7,16 +7,19 @@ import kotlinx.coroutines.flow.asSharedFlow
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
+import uniffi.jellybeam_core.ClassicHome
 import uniffi.jellybeam_core.CollectionInfo
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.DeviceCaps
 import uniffi.jellybeam_core.DiscoveredServer
 import uniffi.jellybeam_core.EpisodeNeighbors
+import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.GridCounts
 import uniffi.jellybeam_core.GridFilters
 import uniffi.jellybeam_core.GridGroup
 import uniffi.jellybeam_core.GridSort
 import uniffi.jellybeam_core.GridSortField
+import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.HomeSnapshot
 import uniffi.jellybeam_core.ImageKind
 import uniffi.jellybeam_core.ItemDetail
@@ -26,12 +29,11 @@ import uniffi.jellybeam_core.LiveSort
 import uniffi.jellybeam_core.MediaSegment
 import uniffi.jellybeam_core.MediaSegmentKind
 import uniffi.jellybeam_core.OsdDetailSetting
-import uniffi.jellybeam_core.SeekPreviewSize
-import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.PlaybackOsdDetail
+import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.PlaybackQuality
 import uniffi.jellybeam_core.QuickConnectSession
-import uniffi.jellybeam_core.SegmentAction
+import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SeerrBrowseFilters
 import uniffi.jellybeam_core.SeerrBrowseKind
@@ -46,6 +48,7 @@ import uniffi.jellybeam_core.SeerrRequestInput
 import uniffi.jellybeam_core.SeerrRequestOptions
 import uniffi.jellybeam_core.SeerrStatus
 import uniffi.jellybeam_core.SeerrTvDetail
+import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.ServerDetails
 import uniffi.jellybeam_core.ServerInfoSnapshot
 import uniffi.jellybeam_core.Settings
@@ -62,7 +65,6 @@ import uniffi.jellybeam_core.SyncStatus
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
-import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.TrickplayMetaFfi
 import uniffi.jellybeam_core.TrickplayTileFfi
 import uniffi.jellybeam_core.ViewSnapshot
@@ -114,6 +116,7 @@ fun defaultTestSettings(): Settings = Settings(
     // docs/21 §6: mirrors Settings::default() -- logging off, crash capture on.
     diagnosticLoggingEnabled = false,
     crashReportsEnabled = true,
+    homeLayout = HomeLayout.CLASSIC,
 )
 
 /**
@@ -482,8 +485,8 @@ class FakeCoreGateway(
         _setDeviceCapsCalls.add(caps)
     }
 
-    override suspend fun homeSnapshot(): HomeSnapshot =
-        HomeSnapshot(resume = emptyList(), nextUp = emptyList(), latest = emptyList())
+    override suspend fun homeSnapshot(layout: HomeLayout): HomeSnapshot =
+        HomeSnapshot.Classic(ClassicHome(hero = null, shelves = emptyList()))
 
     override suspend fun isSyncing(): Boolean = false
 

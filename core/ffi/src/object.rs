@@ -13,16 +13,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::error::CoreError;
+use crate::home::{HomeLayout, HomeSnapshot};
 use crate::library_prefs::LibraryGridPrefsFile;
 use crate::settings::{PlaybackQuality, Settings};
 use crate::track_prefs::TrackPrefsFile;
 use crate::types::{
     AccountInfo, Card, ChangeEvent, CollectionInfo, DeviceCaps, EpisodeNeighbors, GridCounts,
-    GridFilters, GridGroup, GridSort, HomeSnapshot, ImageKind, ItemDetail, LatestShelf,
-    LibraryGridPrefs, LiveSort, MediaSegment, MirrorItemCounts, MirrorLibrary, MirrorStats,
-    PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan, QuickConnectSession, ServerDetails,
-    ServerInfoSnapshot, SortOrder, SyncStatus, TrackDecisionFfi, TrackInfo, TrackKindFfi,
-    TrickplayMetaFfi, ViewSnapshot,
+    GridFilters, GridGroup, GridSort, ImageKind, ItemDetail, LibraryGridPrefs, LiveSort,
+    MediaSegment, MirrorItemCounts, MirrorLibrary, MirrorStats, PlayMethodFfi, PlaybackOsdDetail,
+    PlaybackPlan, QuickConnectSession, ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus,
+    TrackDecisionFfi, TrackInfo, TrackKindFfi, TrickplayMetaFfi, ViewSnapshot,
 };
 use crate::{device_id, library_prefs, session, settings, signin, track_prefs};
 
@@ -1053,75 +1053,12 @@ impl JellybeamCore {
             .unwrap_or_default()
     }
 
-    /// The whole Home screen in one call: resume + next-up rails and one
-    /// "Latest" shelf per view with at least one card, each holding up to
-    /// `Settings::home_shelf_size` items (next-up never repeats a resume card),
-    /// skipping `Settings::hidden_library_ids` and honoring
-    /// `Settings::hide_watched_in_latest`. [`Self::views`] itself stays
-    /// unfiltered; only this method's "Latest" shelves are filtered.
-    /// Resume/next-up are not filtered by hidden library in this slice.
-    pub fn home_snapshot(&self) -> HomeSnapshot {
-        let Ok(mirror) = self.require_mirror() else {
-            return HomeSnapshot {
-                resume: Vec::new(),
-                next_up: Vec::new(),
-                latest: Vec::new(),
-                favorites: Vec::new(),
-            };
-        };
+    /// docs/25 §4.3: the Home snapshot for `layout`, the layout the caller will draw; never
+    /// the persisted `Settings::home_layout`, so a request can't race a settings write.
+    pub fn home_snapshot(&self, layout: HomeLayout) -> HomeSnapshot {
+        let mirror = self.require_mirror().ok();
         let settings = self.lock_state().settings.clone();
-
-        let size = settings.home_shelf_size;
-        let resume: Vec<Card> = mirror.resume(size).into_iter().map(Card::from).collect();
-        // Over-fetch by the resume count so dropping repeats still fills the shelf.
-        let next_up = next_up_beside_resume(
-            mirror
-                .next_up(size.saturating_add(u32::try_from(resume.len()).unwrap_or(u32::MAX)))
-                .into_iter()
-                .map(Card::from)
-                .collect(),
-            &resume,
-            size as usize,
-        );
-        let favorites = if settings.home_show_favorites {
-            mirror.favorites(size).into_iter().map(Card::from).collect()
-        } else {
-            Vec::new()
-        };
-
-        let mut latest = Vec::new();
-        for view in mirror.views() {
-            // A `Channel` view's content is never mirrored, so
-            // `mirror.latest` would always come back empty -- skip the
-            // wasted query rather than relying on `cards.is_empty()`.
-            if view.item_type == "Channel" {
-                continue;
-            }
-            let view_id = view.id;
-            let view_name = view.name;
-            if settings.hidden_library_ids.contains(&view_id) {
-                continue;
-            }
-            let cards: Vec<Card> = mirror
-                .latest(&view_id, size, settings.hide_watched_in_latest)
-                .into_iter()
-                .map(Card::from)
-                .collect();
-            if !cards.is_empty() {
-                latest.push(LatestShelf {
-                    view_id,
-                    view_name,
-                    cards,
-                });
-            }
-        }
-
-        HomeSnapshot {
-            resume,
-            next_up,
-            latest,
-            favorites,
-        }
+        crate::home::snapshot(layout, mirror.as_ref(), &settings)
     }
 
     /// docs/16 §2.7: the item types present among favorites (`"Movie"`, `"Series"`, ...), for
@@ -3874,16 +3811,6 @@ fn refuse_if_virtual(
     Ok(())
 }
 
-/// Next Up minus anything already on Continue Watching (docs/07 §1), in
-/// server order, capped at `limit`; the same episode never sits on two rails.
-fn next_up_beside_resume(next_up: Vec<Card>, resume: &[Card], limit: usize) -> Vec<Card> {
-    next_up
-        .into_iter()
-        .filter(|card| resume.iter().all(|r| r.id != card.id))
-        .take(limit)
-        .collect()
-}
-
 /// The pure half of [`JellybeamCore::children`]'s virtual-episode filtering
 /// (`Settings::show_virtual_episodes`): drops any `cards` row that is both
 /// `item_type == "Episode"` and `is_virtual` when the setting is `false`,
@@ -4246,10 +4173,8 @@ mod tests {
             .children("any-parent".to_string(), SortOrder::NameAsc, 0, 10)
             .is_empty());
         assert!(core.search("anything".to_string(), 10).is_empty());
-        let home = core.home_snapshot();
-        assert!(home.resume.is_empty());
-        assert!(home.next_up.is_empty());
-        assert!(home.latest.is_empty());
+        let HomeSnapshot::Classic { home } = core.home_snapshot(HomeLayout::Classic);
+        assert_eq!(home, crate::home::ClassicHome::default());
     }
 
     /// `card_by_id` has a `Result` (unlike the fail-open `Vec` queries
@@ -4699,76 +4624,9 @@ mod tests {
 
     fn sample_card(id: &str, item_type: &str, is_virtual: bool) -> Card {
         Card {
-            id: id.to_string(),
-            item_type: item_type.to_string(),
-            name: format!("{id} name"),
-            primary_tag: None,
-            backdrop_tag: None,
-            thumb_tag: None,
-            blurhash: None,
-            played: false,
-            position_ticks: 0,
-            runtime_ticks: None,
-            unplayed_count: None,
-            production_year: None,
-            index_number: None,
-            premiere_date: None,
-            parent_index_number: None,
-            series_id: None,
-            series_primary_tag: None,
-            parent_backdrop_item_id: None,
-            parent_backdrop_tag: None,
-            series_name: None,
-            last_played_date: None,
-            overview: None,
             is_virtual,
-            library_id: None,
-            is_favorite: false,
+            ..Card::sample(id, item_type)
         }
-    }
-
-    fn ids(cards: Vec<Card>) -> Vec<String> {
-        cards.into_iter().map(|c| c.id).collect()
-    }
-
-    #[test]
-    fn next_up_beside_resume_drops_resume_ids_and_keeps_server_order() {
-        let next_up = vec![
-            sample_card("e3", "Episode", false),
-            sample_card("e1", "Episode", false),
-            sample_card("e2", "Episode", false),
-        ];
-        let resume = vec![sample_card("e1", "Episode", false)];
-        assert_eq!(
-            ids(next_up_beside_resume(next_up, &resume, 10)),
-            ["e3", "e2"]
-        );
-    }
-
-    #[test]
-    fn next_up_beside_resume_caps_at_limit() {
-        let next_up = (0..5)
-            .map(|i| sample_card(&format!("e{i}"), "Episode", false))
-            .collect();
-        assert_eq!(
-            ids(next_up_beside_resume(next_up, &[], 3)),
-            ["e0", "e1", "e2"]
-        );
-    }
-
-    #[test]
-    fn next_up_beside_resume_still_fills_to_limit_after_drops() {
-        let next_up = (0..5)
-            .map(|i| sample_card(&format!("e{i}"), "Episode", false))
-            .collect();
-        let resume = vec![
-            sample_card("e0", "Episode", false),
-            sample_card("e1", "Episode", false),
-        ];
-        assert_eq!(
-            ids(next_up_beside_resume(next_up, &resume, 3)),
-            ["e2", "e3", "e4"]
-        );
     }
 
     #[test]
@@ -6109,8 +5967,8 @@ mod tests {
         };
         core.set_settings(new_settings);
 
-        let home = core.home_snapshot();
-        assert!(home.latest.is_empty());
+        let HomeSnapshot::Classic { home } = core.home_snapshot(HomeLayout::Classic);
+        assert!(home.shelves.is_empty());
     }
 
     fn track(id: i64, kind: TrackKindFfi, lang: Option<&str>) -> TrackInfo {
@@ -7884,17 +7742,20 @@ mod tests {
         // docs/07 §1/§5: the shelf and the drawer entry follow the flag; the setting hides
         // only the shelf.
         assert!(core.has_favorites());
-        let shelf: Vec<String> = core
-            .home_snapshot()
-            .favorites
-            .into_iter()
-            .map(|c| c.id)
-            .collect();
-        assert_eq!(shelf, vec![MOVIE_ID.to_string()]);
+        let favorites_shelf = |core: &JellybeamCore| -> Vec<String> {
+            let HomeSnapshot::Classic { home } = core.home_snapshot(HomeLayout::Classic);
+            home.shelves
+                .into_iter()
+                .filter(|s| s.source == crate::home::ShelfSource::Favorites)
+                .flat_map(|s| s.cards)
+                .map(|c| c.id)
+                .collect()
+        };
+        assert_eq!(favorites_shelf(&core), vec![MOVIE_ID.to_string()]);
         let mut settings = core.get_settings();
         settings.home_show_favorites = false;
         core.set_settings(settings);
-        assert!(core.home_snapshot().favorites.is_empty());
+        assert!(favorites_shelf(&core).is_empty());
         assert!(core.has_favorites());
     }
 

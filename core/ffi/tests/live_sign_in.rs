@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use jellybeam_core::JellybeamCore;
+use jellybeam_core::{HomeLayout, HomeSnapshot, JellybeamCore, ShelfSource};
 
 mod common;
 
@@ -36,11 +36,10 @@ fn live_sign_in_sync_and_home() {
         core.is_syncing()
     );
 
-    let home = core.home_snapshot();
+    let latest = latest_shelves(&core);
     assert!(
-        home.latest.iter().any(|shelf| !shelf.cards.is_empty()),
-        "expected at least one 'latest' shelf with cards; got {} shelves",
-        home.latest.len()
+        !latest.is_empty(),
+        "expected at least one 'latest' shelf with cards; got none"
     );
 }
 
@@ -150,36 +149,20 @@ fn live_settings_home_filtering() {
         .unwrap_or_else(|| panic!("expected a 'Shows' view on the dev server; got {views:?}"));
     let shows_view_id = shows_view.id.clone();
 
-    let home_before = core.home_snapshot();
+    let latest_before = latest_shelves(&core);
     assert!(
-        home_before
-            .latest
-            .iter()
-            .any(|shelf| shelf.view_id == shows_view_id),
-        "expected a 'Shows' Latest shelf before hiding it; got {:?}",
-        home_before
-            .latest
-            .iter()
-            .map(|s| &s.view_name)
-            .collect::<Vec<_>>()
+        latest_before.iter().any(|(id, _)| *id == shows_view_id),
+        "expected a 'Shows' Latest shelf before hiding it; got {latest_before:?}"
     );
 
     let mut settings = core.get_settings();
     settings.hidden_library_ids = vec![shows_view_id.clone()];
     core.set_settings(settings);
 
-    let home_after = core.home_snapshot();
+    let latest_after = latest_shelves(&core);
     assert!(
-        home_after
-            .latest
-            .iter()
-            .all(|shelf| shelf.view_id != shows_view_id),
-        "expected no 'Shows' Latest shelf after hiding it; got {:?}",
-        home_after
-            .latest
-            .iter()
-            .map(|s| &s.view_name)
-            .collect::<Vec<_>>()
+        latest_after.iter().all(|(id, _)| *id != shows_view_id),
+        "expected no 'Shows' Latest shelf after hiding it; got {latest_after:?}"
     );
 
     // `views()` itself must stay unfiltered.
@@ -378,13 +361,8 @@ fn find_episode(
 /// Depth-first search over Home's rails, then each view's children, for
 /// the first "Movie" card -- good enough for a small dev library.
 fn find_a_movie_id(core: &JellybeamCore) -> Option<String> {
-    let home = core.home_snapshot();
-    let home_cards = home
-        .resume
-        .into_iter()
-        .chain(home.next_up)
-        .chain(home.latest.into_iter().flat_map(|shelf| shelf.cards));
-    for card in home_cards {
+    let HomeSnapshot::Classic { home } = core.home_snapshot(HomeLayout::Classic);
+    for card in home.shelves.into_iter().flat_map(|shelf| shelf.cards) {
         if card.item_type == "Movie" {
             return Some(card.id);
         }
@@ -400,4 +378,16 @@ fn find_a_movie_id(core: &JellybeamCore) -> Option<String> {
     }
 
     None
+}
+
+/// Classic's non-empty "Latest" shelves as `(view_id, view_name)`.
+fn latest_shelves(core: &JellybeamCore) -> Vec<(String, String)> {
+    let HomeSnapshot::Classic { home } = core.home_snapshot(HomeLayout::Classic);
+    home.shelves
+        .into_iter()
+        .filter_map(|shelf| match shelf.source {
+            ShelfSource::Latest { view_id, view_name } => Some((view_id, view_name)),
+            _ => None,
+        })
+        .collect()
 }

@@ -1,4 +1,4 @@
-package tv.jellybeam.ui.home
+package tv.jellybeam.ui.home.classic
 
 import android.util.Log
 import android.view.ViewTreeObserver
@@ -7,7 +7,6 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -29,7 +28,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -49,7 +47,6 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,18 +71,15 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -114,7 +108,6 @@ import tv.jellybeam.ui.cards.ResumeCard
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
 import tv.jellybeam.ui.cards.rememberSkeletonPulseAlpha
-import tv.jellybeam.ui.common.emptyLibrarySpecLine
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
 import tv.jellybeam.ui.focus.FocusTarget
@@ -124,6 +117,10 @@ import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.refreshGuardEligible
 import tv.jellybeam.ui.focus.rememberFocusMemory
 import tv.jellybeam.ui.focus.restoreNow
+import tv.jellybeam.ui.home.common.EmptyLibraryState
+import tv.jellybeam.ui.home.common.HomeClock
+import tv.jellybeam.ui.home.common.HomeMarks
+import tv.jellybeam.ui.home.common.HomeSyncStatusPill
 import tv.jellybeam.ui.nav.LocalDrawerFocusCoordinator
 import tv.jellybeam.ui.theme.BackdropScrim
 import tv.jellybeam.ui.theme.JellybeamHeaderLockup
@@ -205,7 +202,7 @@ private val EDGE_FADE_RIGHT_BRUSH = Brush.horizontalGradient(listOf(Color.Transp
 
 /**
  * A shelf-shaped skeleton (hero block + pulsing tile rows, geometry borrowed from
- * [HeroBanner]/[Shelf]) fills the void during [HomeUiState.isLoading], cross-fading against
+ * [HeroBanner]/[Shelf]) fills the void during [tv.jellybeam.ui.home.common.HomeChrome.isLoading], cross-fading against
  * [contentRevealAlpha] as its exact inverse. Tile geometry reuses
  * [CardFormatting.resumeRowHeightDp] and [POSTER_CELL_WIDTH] so nothing visibly reflows when real
  * shelves replace the placeholders.
@@ -220,32 +217,33 @@ private val SKELETON_TITLE_RADIUS = 4.dp
 private val SKELETON_ART_RADIUS = 2.dp
 
 /**
- * docs/07-home-browse-behavior.md §1-2: Continue Watching, Next Up (de-duplicated in
- * [HomeViewModel]), then one "Latest in {view}" shelf per library, each hidden when empty, plus
- * §1's hero banner (shown only when Continue Watching has a first card, [heroCard]) and §4's
+ * docs/07-home-browse-behavior.md §1-2: the core's shelves in its order ([ClassicContent.shelves]),
+ * plus §1's hero banner ([ClassicContent.hero]) and §4's
  * per-shelf edge-fade overlays ([EdgeFadedRow]).
  */
 // OptIn: LocalBringIntoViewSpec (the hero region's no-op focus-scroll override) is still
 // experimental foundation API in 1.10.
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun HomeScreen(
+internal fun ClassicHomeScreen(
     onOpenDetail: (Card) -> Unit,
     isTop: Boolean = true,
     /** JellybeamRoot's focus gate: closed while hidden/transitioning; opened before each explicit
      * focus placement. See [tv.jellybeam.MainActivity.RetainedScreenLayer].
      */
     focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
-    viewModel: HomeViewModel = viewModel(
-        factory = HomeViewModelFactory(AppGraph.gateway, launchWarmup = AppGraph.launchWarmup),
+    viewModel: ClassicHomeViewModel = viewModel(
+        factory = ClassicHomeViewModelFactory(AppGraph.gateway, launchWarmup = AppGraph.launchWarmup),
     ),
 ) {
-    val state by viewModel.state.collectAsState()
+    val feedState by viewModel.state.collectAsState()
+    val chrome = feedState.chrome
+    val state = feedState.content
     // Hoisted here rather than down by [shelves] below, so the becoming-top restore effect's
     // hero/no-record branch (which needs to know whether a hero exists before deciding whether to
     // wait on [heroPositioned]) can reference it -- a local `val` isn't visible above its
     // declaration.
-    val hero = remember(state.resume) { heroCard(state) }
+    val hero = state.hero
     // Same signal as [shelf0FirstCellPositioned] below, but for the hero region: set by the hero
     // wrapper Box's `onGloballyPositioned` once actually measured/placed. Hoisted with [hero] for
     // the same reason; the becoming-top restore effect's hero/no-record branch reads it.
@@ -358,7 +356,7 @@ fun HomeScreen(
     }
 
     // docs/16-library-sort-filter.md §4.6, docs/17-mini-player.md §6: feeds this screen's
-    // top-of-stack-and-resumed signal into HomeViewModel.changeRefreshScheduler and the
+    // top-of-stack-and-resumed signal into HomeFeed's changeRefreshScheduler and the
     // pollSyncing/pollSyncStatus gating.
     LaunchedEffect(isTop) {
         viewModel.setActive(isTop)
@@ -393,10 +391,10 @@ fun HomeScreen(
     // effect runs must still reveal on the recomposition that carries the content, or the skeleton
     // retires before there is anything to show.
     var contentRevealed by remember { mutableStateOf(false) }
-    val isLoading = state.isLoading
+    val isLoading = chrome.isLoading
     LaunchedEffect(isLoading) {
         if (!isLoading) {
-            PerfLog.markStartup("home.dataReady")
+            HomeMarks.dataReady()
             contentRevealed = true
         }
     }
@@ -413,7 +411,7 @@ fun HomeScreen(
         if (contentRevealed) {
             delay(CONTENT_REVEAL_MS.toLong())
             showLoadingSkeleton = false
-            PerfLog.markStartup("home.revealEnd")
+            HomeMarks.revealEnd()
         }
     }
     // Set by shelf 0's first cell (`onFirstCellPositioned` in [Shelf]) once actually
@@ -428,8 +426,8 @@ fun HomeScreen(
     val nextUpTitle = stringResource(R.string.shelf_next_up)
     val favoritesTitle = stringResource(R.string.shelf_favorites)
     val latestInTemplate = stringResource(R.string.shelf_latest_in)
-    val shelves = remember(state.resume, state.nextUp, state.favorites, state.latest) {
-        buildShelves(state, continueWatchingTitle, nextUpTitle, favoritesTitle) { viewName ->
+    val shelves = remember(state.shelves) {
+        buildShelves(state.shelves, continueWatchingTitle, nextUpTitle, favoritesTitle) { viewName ->
             String.format(latestInTemplate, viewName)
         }
     }
@@ -469,7 +467,7 @@ fun HomeScreen(
         val listener = object : ViewTreeObserver.OnPreDrawListener {
             override fun onPreDraw(): Boolean {
                 localView.viewTreeObserver.removeOnPreDrawListener(this)
-                PerfLog.markStartup("home.contentDrawn")
+                HomeMarks.contentDrawn()
                 return true
             }
         }
@@ -483,7 +481,7 @@ fun HomeScreen(
     // transient/wrong position and animates the column to a wrong scroll target. Fix: [ready] stays
     // false -- so `FocusRestorer` places nothing yet -- until whichever of
     // [heroPositioned]/[shelf0FirstCellPositioned] this entry will seed has fired.
-    val ready = if (shelves.isEmpty()) !state.isLoading else if (hero != null) heroPositioned else shelf0FirstCellPositioned
+    val ready = if (shelves.isEmpty()) !chrome.isLoading else if (hero != null) heroPositioned else shelf0FirstCellPositioned
 
     // docs/15-focus-and-selection.md §5: scroll a not-yet-composed shelf cell into view by id
     // before `FocusRestorer`/`restoreNow` retries the lookup -- the shelf half of a
@@ -647,8 +645,8 @@ fun HomeScreen(
             // separate, narrower listener scoped to the top region only.
             .onFocusChanged {
                 homeHasFocus = it.hasFocus
-                if (it.hasFocus && !state.isLoading) {
-                    PerfLog.markStartup("home.focusReady")
+                if (it.hasFocus && !chrome.isLoading) {
+                    HomeMarks.focusReady()
                     initialFocusPlaced = true
                 }
             }
@@ -704,7 +702,7 @@ fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(SHELF_GAP),
         ) {
             // [HomeMasthead] below sits outside the `graphicsLayer`-alpha Column: it's visible
-            // throughout [state.isLoading] and must never blink. Everything arriving with the
+            // throughout [chrome.isLoading] and must never blink. Everything arriving with the
             // first snapshot (sync pill, hero, shelves) nests in the inner Column so one
             // `graphicsLayer` fades them in together; its `verticalArrangement` reproduces the
             // outer Column's [SHELF_GAP] so wrapping adds no spacing change.
@@ -731,11 +729,11 @@ fun HomeScreen(
                         .padding(top = contentTopInset(hero)),
                     verticalArrangement = Arrangement.spacedBy(SHELF_GAP),
                 ) {
-                    if (shelves.isEmpty() && !state.isLoading) {
+                    if (shelves.isEmpty() && !chrome.isLoading) {
                         LaunchedEffect(Unit) { viewModel.loadServerHost() }
                         EmptyLibraryState(
-                            host = state.serverHost,
-                            libraries = state.views.size,
+                            host = chrome.serverHost,
+                            libraries = chrome.views.size,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .focusRequester(initialFocusRequester)
@@ -814,7 +812,7 @@ fun HomeScreen(
                 // The floating masthead, declared last (draws on top), outside the alpha-gated
                 // Column (never blinks).
                 HomeMasthead(
-                    showClock = state.showClock,
+                    showClock = chrome.showClock,
                     modifier = Modifier.align(Alignment.TopStart),
                     onRowHeightMeasured = { mastheadRowHeight = it },
                 )
@@ -825,12 +823,12 @@ fun HomeScreen(
         // A sibling of the scrolling Column, not nested in the [contentRevealAlpha]-gated inner
         // Column: it must stay visible during the loading skeleton. Pinned top-end, independent of
         // scroll position, never overlapping the hero's bottom-left title/buttons or the top-left
-        // wordmark. Text comes from [HomeUiState.loadingStatusText] while loading, else the sync's
+        // wordmark. Text comes from [tv.jellybeam.ui.home.common.HomeChrome.loadingStatusText] while loading, else the sync's
         // own progress line while a background sync is still running post-reveal; `null` once
         // neither applies.
         val syncStatusPillText = when {
-            state.isLoading -> state.loadingStatusText
-            state.isSyncing -> state.syncProgressText ?: "Syncing…"
+            chrome.isLoading -> chrome.loadingStatusText
+            chrome.isSyncing -> chrome.syncProgressText ?: "Syncing…"
             else -> null
         }
         // The clock lives in [HomeMasthead] (shares a row with the wordmark), so only the
@@ -874,93 +872,6 @@ private fun homeRefreshFallback(
 }
 
 /**
- * The top-right clock, gated on `Settings.showClock` (default on). Format is the device's
- * locale-aware short time pattern via [android.text.format.DateFormat.getTimeFormat], never a
- * hand-rolled `SimpleDateFormat`. Ticks once a minute, aligned to the wall-clock minute boundary
- * so it never accumulates drift.
- */
-@Composable
-private fun HomeClock(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            nowMillis = System.currentTimeMillis()
-            val millisToNextMinute = 60_000L - (nowMillis % 60_000L)
-            delay(millisToNextMinute)
-        }
-    }
-    val timeFormat = remember(context) { android.text.format.DateFormat.getTimeFormat(context) }
-    val text = remember(nowMillis, timeFormat) { timeFormat.format(java.util.Date(nowMillis)) }
-    BasicText(
-        text = text,
-        modifier = modifier,
-        style = TextStyle(
-            fontFamily = JellybeamTheme.MartianMono,
-            color = JellybeamTheme.Panna2,
-            fontSize = 11.sp,
-            letterSpacing = (-0.02).em,
-        ),
-    )
-}
-
-/**
- * Home with a reachable server and no items anywhere (docs/brand.md §6.2): the curious
- * mascot on Notte, one factual title and body, and the spec strip; no button, since there is
- * nothing on the TV side to act on. The only §5 tier-2 surface on Home: it never renders once a
- * shelf exists.
- */
-@Composable
-private fun EmptyLibraryState(host: String?, libraries: Int, modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier.padding(top = EMPTY_STATE_TOP_PADDING),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Image(
-            painter = painterResource(R.drawable.jb_mascot_curious),
-            contentDescription = null,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.width(EMPTY_STATE_MASCOT_WIDTH),
-        )
-        BasicText(
-            text = stringResource(R.string.home_empty_title),
-            modifier = Modifier.padding(top = 15.dp),
-            style = TextStyle(
-                fontFamily = JellybeamTheme.Archivo,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = (-0.02).em,
-                color = JellybeamTheme.Panna,
-                fontSize = 22.sp,
-                textAlign = TextAlign.Center,
-            ),
-        )
-        BasicText(
-            text = stringResource(R.string.home_empty_body),
-            modifier = Modifier.padding(top = 8.dp).widthIn(max = EMPTY_STATE_BODY_MAX_WIDTH),
-            style = TextStyle(
-                fontFamily = JellybeamTheme.Archivo,
-                color = JellybeamTheme.Panna2,
-                fontSize = 14.sp,
-                textAlign = TextAlign.Center,
-            ),
-        )
-        BasicText(
-            text = emptyLibrarySpecLine(host, libraries, items = 0),
-            modifier = Modifier.padding(top = 18.dp),
-            style = TextStyle(
-                fontFamily = JellybeamTheme.MartianMono,
-                color = JellybeamTheme.Grigio,
-                fontSize = 11.sp,
-            ),
-        )
-    }
-}
-
-private val EMPTY_STATE_TOP_PADDING = 48.dp
-private val EMPTY_STATE_MASCOT_WIDTH = 180.dp
-private val EMPTY_STATE_BODY_MAX_WIDTH = 450.dp
-
-/**
  * Replacement for the solid header band: the logo lockup floats directly over the hero on a top
  * gradient. A short top-down [MASTHEAD_GRADIENT_BRUSH] wash (shorter than
  * [tv.jellybeam.ui.theme.BackdropScrim]'s hero scrim) keeps [JellybeamHeaderLockup] legible over
@@ -969,7 +880,7 @@ private val EMPTY_STATE_BODY_MAX_WIDTH = 450.dp
  *
  * One Row, wordmark start / clock end via `SpaceBetween`, so the clock scrolls away with the
  * wordmark/hero as one unit instead of staying pinned alone. [onRowHeightMeasured] reports this
- * row's measured height back to [HomeScreen] so the sync-status pill can sit just below the clock.
+ * row's measured height back to [ClassicHomeScreen] so the sync-status pill can sit just below the clock.
  */
 @Composable
 private fun HomeMasthead(
@@ -1005,8 +916,8 @@ private fun HomeMasthead(
 
 /**
  * A hero-shaped block plus [SKELETON_SHELF_COUNT] + 1 shelf-shaped rows of pulsing tiles, filling
- * the region [HomeScreen]'s real hero+shelves content occupies once it arrives. Every size is
- * borrowed from the real layout it stands in for -- [heroHeight] is the exact value [HomeScreen]
+ * the region [ClassicHomeScreen]'s real hero+shelves content occupies once it arrives. Every size is
+ * borrowed from the real layout it stands in for -- [heroHeight] is the exact value [ClassicHomeScreen]
  * computes for [HeroBanner], the first shelf's tiles use [CardFormatting.resumeRowHeightDp], and
  * the rest use [POSTER_CELL_WIDTH] -- so nothing visibly shifts when real content cross-fades in.
  *
@@ -1119,7 +1030,7 @@ private fun HeroBanner(
     val isEpisode = card.itemType == "Episode"
     val seriesName = card.seriesName
     // "CONTINUE · <SERIES NAME>" for an episode, bare "CONTINUE" otherwise -- the hero is always
-    // sourced from Continue Watching's first card ([heroCard]).
+    // sourced from the core's [ClassicContent.hero].
     val eyebrowText = if (isEpisode && !seriesName.isNullOrBlank()) {
         "${CONTINUE_EYEBROW_PREFIX} · ${seriesName.uppercase()}"
     } else {
@@ -1319,7 +1230,7 @@ private fun HeroButton(label: String, isPrimary: Boolean, onClick: () -> Unit, m
 // OptIn: LocalBringIntoViewSpec/BringIntoViewSpec ([rememberShelfBringIntoViewSpec], the per-shelf
 // horizontal spec around this function's LazyRow) are still experimental foundation API in 1.10,
 // same as
-// [HomeScreen]'s vertical `topAwareBringIntoViewSpec`.
+// [ClassicHomeScreen]'s vertical `topAwareBringIntoViewSpec`.
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Shelf(
@@ -1521,30 +1432,5 @@ private fun EdgeFadedRow(listState: LazyListState, artHeight: Dp, leftFadeHeight
                     .background(EDGE_FADE_RIGHT_BRUSH),
             )
         }
-    }
-}
-
-
-/**
- * Cold-start / background-sync status pill, positioned as a fixed top-end overlay by [HomeScreen].
- * Same
- * visual recipe as the player's `BufferingPill` (`PlaybackScreen.kt`): a rounded
- * [JellybeamTheme.SurfaceRaised] pill around small [JellybeamTheme.Grigio] text.
- */
-@Composable
-private fun HomeSyncStatusPill(text: String, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .background(JellybeamTheme.SurfaceRaised, RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-    ) {
-        BasicText(
-            text = text,
-            style = TextStyle(
-                fontFamily = JellybeamTheme.Archivo,
-                color = JellybeamTheme.Grigio,
-                fontSize = 13.sp,
-            ),
-        )
     }
 }

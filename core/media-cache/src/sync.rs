@@ -11,6 +11,7 @@ use jellyfin_api::{ItemQuery, ServerEvent};
 use jellyfin_core::BusEvent;
 use tokio::sync::broadcast;
 
+use crate::schema::IndexGroup;
 use crate::{MirrorChange, MirrorState, SyncActivity};
 
 const PAGE_SIZE: u32 = 500;
@@ -243,7 +244,9 @@ pub(crate) fn spawn(
             });
 
             // After everything Home's first frames need, before the long delta/reconcile work.
-            with_upgraded!(startup_weak, |s| ensure_favorite_indexes(&s).await);
+            with_upgraded!(startup_weak, |s| {
+                ensure_index_group(&s, IndexGroup::Favorites).await;
+            });
 
             // Delta before reconcile, at every trigger: delta is the fast path (new/updated
             // items visible in seconds); reconcile is the backstop for what delta can't see
@@ -391,15 +394,16 @@ async fn sync_resume(state: &MirrorState) {
     }
 }
 
-/// Builds the deferred favorites indexes once on a populated mirror (see
-/// `schema::FAVORITE_INDEX_SQL`), then emits a `Refresh` so Home and the drawer pick
-/// favorites up. A no-op once they exist.
-pub(crate) async fn ensure_favorite_indexes(state: &MirrorState) {
-    if state.favorite_indexes_ready.load(Ordering::Acquire) {
+/// Builds a deferred [`IndexGroup`] once (docs/25 §4.8), then emits a `Refresh` so screens
+/// re-query what it gates. A no-op once built.
+pub(crate) async fn ensure_index_group(state: &MirrorState, group: IndexGroup) {
+    if state.index_group_ready(group) {
         return;
     }
-    if state.writer.build_favorite_indexes().await {
-        state.favorite_indexes_ready.store(true, Ordering::Release);
+    if state.writer.build_index_group(group).await {
+        state
+            .ready_index_groups
+            .fetch_or(group.bit(), Ordering::AcqRel);
         let _ = state.changes_tx.send(MirrorChange::Refresh);
     }
 }
@@ -1898,7 +1902,7 @@ async fn reconcile_timer(state: Weak<MirrorState>) {
         delta_sync(&state).await;
         reconcile_all(&state).await;
         // Retries a startup build that failed.
-        ensure_favorite_indexes(&state).await;
+        ensure_index_group(&state, IndexGroup::Favorites).await;
         sync_favorites(&state).await;
     }
 }
@@ -4141,18 +4145,18 @@ mod tests {
     /// The deferred favorites indexes build once, flip the gate, and signal one `Refresh` so
     /// Home and the drawer re-query; a second call is a silent no-op.
     #[tokio::test]
-    async fn ensure_favorite_indexes_builds_once_and_signals_a_refresh() {
+    async fn ensure_index_group_builds_once_and_signals_a_refresh() {
         let server = MockServer::start().await;
         let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
         let mirror = TestMirror::new(client);
         let mut changes = mirror.state.changes_tx.subscribe();
-        assert!(!mirror.state.favorite_indexes_ready.load(Ordering::Acquire));
+        assert!(!mirror.state.index_group_ready(IndexGroup::Favorites));
 
-        ensure_favorite_indexes(&mirror.state).await;
-        assert!(mirror.state.favorite_indexes_ready.load(Ordering::Acquire));
+        ensure_index_group(&mirror.state, IndexGroup::Favorites).await;
+        assert!(mirror.state.index_group_ready(IndexGroup::Favorites));
         assert!(matches!(changes.try_recv(), Ok(MirrorChange::Refresh)));
 
-        ensure_favorite_indexes(&mirror.state).await;
+        ensure_index_group(&mirror.state, IndexGroup::Favorites).await;
         assert!(
             changes.try_recv().is_err(),
             "an already-built mirror signals nothing"

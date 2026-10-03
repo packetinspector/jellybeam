@@ -13,10 +13,11 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.LanguageSettings
 import uniffi.jellybeam_core.OsdDetailSetting
-import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.PlaybackQuality
+import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.Settings
 import uniffi.jellybeam_core.StillWatchingMode
@@ -168,6 +169,7 @@ fun defaultSettings(): Settings = Settings(
     // docs/21 §6: mirrors Settings::default() -- logging off, crash capture on.
     diagnosticLoggingEnabled = false,
     crashReportsEnabled = true,
+    homeLayout = HomeLayout.CLASSIC,
 )
 
 /** Which entry of [options] is [current], or `-1` if none is (e.g. a stale `startupScreenViewId`

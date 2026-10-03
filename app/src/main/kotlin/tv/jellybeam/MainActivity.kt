@@ -93,7 +93,8 @@ import tv.jellybeam.ui.discover.DiscoverRequestsScreen
 import tv.jellybeam.ui.discover.DiscoverScreen
 import tv.jellybeam.ui.discover.DiscoverSearchScreen
 import tv.jellybeam.ui.discover.resolveLibraryCard
-import tv.jellybeam.ui.home.HomeScreen
+import tv.jellybeam.ui.home.HomeHost
+import tv.jellybeam.ui.home.HomeHostArgs
 import tv.jellybeam.ui.launch.LaunchScreen
 import tv.jellybeam.ui.library.LibraryScreen
 import tv.jellybeam.ui.nav.NavDrawerHost
@@ -114,6 +115,7 @@ import kotlinx.coroutines.launch
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.CoreException
+import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.SeerrBrowseKind
 import uniffi.jellybeam_core.SeerrMediaType
 import uniffi.jellybeam_core.ViewSnapshot
@@ -563,6 +565,8 @@ private fun JellybeamRoot(
     var libraryViews by remember { mutableStateOf<List<ViewSnapshot>>(emptyList()) }
     // docs/07 §5: the drawer's Favorites entry sits first among the views, only while any exist.
     var hasFavorites by remember { mutableStateOf(false) }
+    // docs/25 §6.1: the session's committed Home layout, seeded once per session from settings.
+    var homeLayout by remember { mutableStateOf(HomeLayout.CLASSIC) }
     val favoritesLabel = androidx.compose.ui.res.stringResource(R.string.drawer_favorites)
     val drawerViews = remember(libraryViews, hasFavorites, favoritesLabel) {
         if (hasFavorites) listOf(favoritesView(favoritesLabel)) + libraryViews else libraryViews
@@ -838,6 +842,11 @@ private fun JellybeamRoot(
                         .isFailure
                 }
 
+                // docs/25 §6.1: a cold start already read it alongside the prefetch.
+                homeLayout = warm?.homeLayout
+                    ?: settingsDeferred.await().getOrNull()?.homeLayout
+                    ?: HomeLayout.CLASSIC
+
                 // Startup screen (docs/07 §5 / docs/09 GOAL item 4): pushed
                 // onto Home rather than replacing it, so Back always returns
                 // to Home regardless of whether a startup library was
@@ -947,8 +956,8 @@ private fun JellybeamRoot(
     }
 
     // Side-drawer's library list and the Servers-section's account list share one fetch/refresh
-    // loop, its own rather than reusing HomeViewModel's state (which would construct
-    // HomeViewModel and fire its expensive homeSnapshot() call prematurely). Gated on
+    // loop, its own rather than reusing Home's feed state (which would construct
+    // Home's ViewModel and fire its expensive homeSnapshot() call prematurely). Gated on
     // `stack != null` so the first fetch can't race openMirror() above; keyed on [sessionEpoch]
     // too, so a server switch doesn't leave this showing the old server's data.
     suspend fun refreshDrawerViews() {
@@ -1109,10 +1118,13 @@ private fun JellybeamRoot(
                                     discoverConfigured = discoverConfigured,
                                     onOpenDiscover = { navigateFromDrawer(Screen.Discover) },
                                 ) {
-                                    HomeScreen(
-                                        onOpenDetail = { card -> navigate(stack.pushDetail(card)) },
-                                        isTop = isTop,
-                                        focusGate = focusGate,
+                                    HomeHost(
+                                        layout = homeLayout,
+                                        args = HomeHostArgs(
+                                            onOpenDetail = { card -> navigate(stack.pushDetail(card)) },
+                                            isTop = isTop,
+                                            focusGate = focusGate,
+                                        ),
                                     )
                                 }
 

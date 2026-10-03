@@ -9,6 +9,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import uniffi.jellybeam_core.AccountInfo
+import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.HomeSnapshot
 
 /**
@@ -21,8 +22,10 @@ class LaunchWarmup(
     private val gateway: CoreGateway,
     private val scope: CoroutineScope,
 ) {
-    /** [account] is `null` for a signed-out launch. */
-    class Session(val account: AccountInfo?)
+    /** [account] is `null` for a signed-out launch; [homeLayout] seeds the session's committed
+     * Home layout (docs/25 §6.1).
+     */
+    class Session(val account: AccountInfo?, val homeLayout: HomeLayout)
 
     /** [stale]: the mirror changed after [snapshot] was read, so the taker owes one refresh. */
     class Home(val snapshot: HomeSnapshot, val stale: Boolean)
@@ -36,14 +39,17 @@ class LaunchWarmup(
         val account = gateway.restoreSession()
         // Fail open (docs/05): a mirror that won't open still lands on Home's empty state.
         if (account != null) runCatching { gateway.openMirror() }
-        Session(account)
+        // In-memory settings read, no network; a failure leaves the default layout.
+        val layout = runCatching { gateway.getSettings().homeLayout }.getOrDefault(HomeLayout.CLASSIC)
+        Session(account, layout)
     }
 
     @Volatile
     private var watcher: Job? = null
 
     private val home: Deferred<HomeSnapshot?> = scope.async {
-        if (session.await().account == null) return@async null
+        val restored = session.await()
+        if (restored.account == null) return@async null
         // Subscribed before the snapshot is read and until it is taken, so no write falls between
         // this read and the taker's own subscription. Never before openMirror: the core wires its
         // change listener to the mirror that is open when it registers. On [scope], not this
@@ -52,7 +58,7 @@ class LaunchWarmup(
             gateway.changeEvents().collect { changed.set(true) }
         }
         if (released.get()) watcher?.cancel()
-        runCatching { gateway.homeSnapshot() }.getOrNull()
+        runCatching { gateway.homeSnapshot(restored.homeLayout) }.getOrNull()
     }
 
     private val sessionSlot = AtomicReference<Deferred<Session>?>(session)

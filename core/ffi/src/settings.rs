@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::home::HomeLayout;
+
 use playback_policy::prefs::{AutoplayPrefs, LanguagePrefs, SkipLengthPrefs, SubtitleMode};
 use playback_policy::still_watching::{
     StillWatchingMode as PolicyStillWatchingMode, StillWatchingPrefs,
@@ -459,6 +461,10 @@ pub struct Settings {
     /// [`default_crash_reports_enabled`].
     #[serde(default = "default_crash_reports_enabled")]
     pub crash_reports_enabled: bool,
+    /// docs/25 §6.1: the persisted Home layout, read once per session to seed the committed
+    /// choice; an unknown stored value loads as the default.
+    #[serde(default, deserialize_with = "crate::home::deserialize_layout")]
+    pub home_layout: HomeLayout,
 }
 
 impl Default for Settings {
@@ -505,6 +511,7 @@ impl Default for Settings {
             playback_quality: PlaybackQuality::default(),
             diagnostic_logging_enabled: false,
             crash_reports_enabled: default_crash_reports_enabled(),
+            home_layout: HomeLayout::default(),
         }
     }
 }
@@ -645,7 +652,22 @@ mod tests {
             playback_quality: PlaybackQuality::Cap { max_bps: 8_000_000 },
             diagnostic_logging_enabled: true,
             crash_reports_enabled: false,
+            home_layout: HomeLayout::Classic,
         }
+    }
+
+    /// docs/25 §4.2: a stored layout this build doesn't know loads as the default, and the
+    /// rest of the file still loads.
+    #[test]
+    fn an_unknown_home_layout_falls_back_without_losing_other_settings() {
+        let mut raw = serde_json::to_value(sample()).expect("to value");
+        raw["home_layout"] = serde_json::json!("layout-from-a-newer-build");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(path(dir.path()), serde_json::to_vec(&raw).expect("json")).expect("write");
+        let loaded = load(dir.path());
+        assert_eq!(loaded.home_layout, HomeLayout::Classic);
+        assert_eq!(loaded.home_shelf_size, 30);
+        assert_eq!(loaded.crash_reports_enabled, sample().crash_reports_enabled);
     }
 
     #[test]
