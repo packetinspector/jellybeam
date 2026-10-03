@@ -8,6 +8,9 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// One flag drives the BuildConfig field, signing and the cargo feature (docs/26 §7).
+val updateFixtureBuild = providers.gradleProperty("jellybeam.updateFixture").orNull == "true"
+
 android {
     namespace = "tv.jellybeam"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
@@ -19,8 +22,9 @@ android {
         applicationId = "tv.jellybeam"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 6
-        versionName = "0.1.5"
+        versionCode = providers.gradleProperty("jellybeam.updateVersionCode").orNull?.toInt() ?: 6
+        versionName = providers.gradleProperty("jellybeam.updateVersionName").orNull ?: "0.1.5"
+        buildConfigField("boolean", "UPDATE_FIXTURE", if (updateFixtureBuild) "true" else "false")
         // Only the ABIs the Rust core is built for. JNA's AAR also ships x86, mips and armeabi
         // slices; packaging them lets such a device install an APK with no core to load.
         // `-Pjellybeam.abi=armeabi-v7a` narrows a one-off build to a single slice.
@@ -53,7 +57,8 @@ android {
             // docs/06 "Signing releases": a gitignored keystore.properties at the repo root
             // signs releases with a real key; without it the debug keystore signs, which keeps
             // one install identity across debug and release builds on a development device.
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            signingConfig = if (updateFixtureBuild) signingConfigs.getByName("debug")
+                else signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             // The R8 map id in internal/mappings identifies a build; a git revision stamped into
             // META-INF would name commits that are not in the public history.
             vcsInfo { include = false }
@@ -71,6 +76,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     lint {
@@ -114,6 +120,7 @@ composeCompiler {
 }
 
 dependencies {
+    implementation(libs.apksig)
     implementation(libs.androidx.core)
     // System splash screen (docs/brand.md §6.3): installSplashScreen() in MainActivity.
     implementation(libs.androidx.core.splashscreen)
@@ -201,6 +208,13 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
         "-p", "jellybeam-ffi",
     )
 
+    if (updateFixtureBuild) {
+        args("--features", "update-test-fixture")
+        environment("JELLYBEAM_UPDATE_TEST_CA", rootProject.file("internal/updates/ca.pem").absolutePath)
+    }
+    inputs.property("updateFixture", updateFixtureBuild)
+    inputs.dir(coreDir.dir("app-updates/src"))
+    inputs.file(coreDir.file("app-updates/Cargo.toml"))
     inputs.dir(coreDir.dir("ffi/src"))
     inputs.dir(coreDir.dir("media-cache/src"))
     inputs.dir(coreDir.dir("jellyfin-core/src"))
@@ -209,6 +223,9 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
     inputs.dir(coreDir.dir("playback-policy/src"))
     inputs.file(coreDir.file("Cargo.toml"))
     inputs.file(coreDir.file("Cargo.lock"))
+    inputs.file(coreDir.file("ffi/Cargo.toml"))
+    // The fixture CA is embedded at compile time, so rotating it must rebuild the core.
+    if (updateFixtureBuild) inputs.file(rootProject.file("internal/updates/ca.pem")).optional()
     outputs.dir(jniLibsDir)
     // Captured as a plain File local: referencing the script-level
     // `jniLibsDir` val from inside this predicate would capture the build

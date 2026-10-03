@@ -39,6 +39,8 @@ why, not how a change came to be.
   folder children from the server are handled
 - `25-home-layouts.md` — selectable Home layouts: how each stays
   self-contained and costs nothing when inactive (proposed)
+- `26-app-updates.md` — in-app release discovery, download, and Android
+  installation; signing, lifecycle, delivery and acceptance gates
 - `jellybeam-osd-handoff/` — the OSD specification files that `12-osd-ux-spec.md`
   summarizes; code cites them by section, so they stay as they are
 - `brand.md` — name, colour tokens, wordmark, mascot usage, and the acceptance bar
@@ -70,6 +72,7 @@ why, not how a change came to be.
 | Library mirror, sync, queries | `core/media-cache/` | 01, 07 |
 | The Rust/Kotlin boundary | `core/ffi/`, `data/` | 01 |
 | Diagnostics and bug reports | `diag/`, `ui/report/` | 21 |
+| App updates | updater core, Android installer, Settings | 26 |
 | Performance logging | `perf/` | 10 |
 
 Kotlin paths are relative to `app/src/main/kotlin/tv/jellybeam/`; a bare

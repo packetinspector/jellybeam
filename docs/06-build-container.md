@@ -81,7 +81,9 @@ Fastest to slowest, by scope:
 - `./build.sh check-fast [package]` — offline Kotlin unit tests only, no lint; pass a
   dotted package prefix (e.g. `tv.jellybeam.player`) to narrow the run.
 - `./build.sh check` — the pre-commit gate: `testReleaseUnitTest` + `lintDebug`, no APK.
-- `./build.sh test` — `cargo test --workspace` inside the container (host arch), then
+- `./build.sh test` — `cargo test --workspace` inside the container (host arch; set
+  `JELLYBEAM_TEST_JOBS` to change cargo's parallel jobs, default 2, which keeps the
+  memory-limited container from being exhausted), then
   the full Gradle `testReleaseUnitTest` run.
 
 One Kotlin test class: `./build.sh shell`, then inside the container
@@ -111,7 +113,9 @@ The last one also has a negative-control variant gated behind
 
 ## Signing releases
 
-Release builds sign with the debug keystore by default. To sign with a real key,
+`./build.sh release` signs with `keystore.properties` when present and otherwise
+with the debug key; a debug-signed APK is for local installs only and
+`tools/releases/prepare.py` rejects it as not publishable. To sign with a real key,
 drop a gitignored `keystore.properties` at the repo root with four keys:
 
 ```
@@ -123,7 +127,7 @@ keyPassword=...
 
 `storeFile` resolves relative to the repository root. `app/build.gradle.kts` picks
 this up automatically when the file is present and falls back to the debug keystore
-when it isn't.
+when it isn't (`build.sh release` prints a warning in that case).
 
 ## Releases
 
@@ -197,3 +201,13 @@ The whole repo root is mounted at `/app`. Named volumes persist across runs:
 
 `core/target/` itself is *not* a named volume — it's part of the bind-mounted
 repo root, so build output is visible on the host (and already gitignored).
+
+### Unpublished update assets
+
+`./build.sh release` builds the signed production candidate. Prepare its
+APK, SDK-matched Baseline Profiles and GitHub metadata with
+[tools/releases/prepare.py](../tools/releases/README.md); preparation never
+publishes. `./build.sh update-fixture <code>` builds an isolated, minified
+HTTPS emulator fixture after generating its local test CA. Production release
+validation rejects fixture transport and debug signing. See
+[the emulator flow](../tools/updates/README.md) and [docs/26](26-app-updates.md).

@@ -42,6 +42,8 @@ object JellybeamTheme {
     /** OSD `TRANSCODE` reading (docs/18 §1/§3) -- the palette's one amber accent. */
     val Ambra = Color(0xFFE0B45C)
 
+    val UpdateError = Color(0xFFEB7C64)
+
     /** One step up from [Surface] -- its own token so call sites name the role, not the value. */
     val SurfaceRaised = Surface
 

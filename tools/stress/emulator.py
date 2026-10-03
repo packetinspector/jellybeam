@@ -105,7 +105,9 @@ def cycle_state_on_home(tree):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["snapshot", "keys", "metrics", "measure", "playback", "focus-cycles", "launch", "provision"])
+    parser.add_argument("action", choices=["snapshot", "keys", "metrics", "measure", "playback", "focus-cycles", "launch", "provision", "updates"])
+    # tools/updates/runner.py owns the scenario list and rejects unknown names.
+    parser.add_argument("--update-scenario", default="install")
     parser.add_argument("--keys", default="")
     parser.add_argument("--interval", type=float, default=0.15)
     parser.add_argument("--rounds", type=int, default=1)
@@ -115,7 +117,9 @@ def main():
     if not 1 <= args.rounds <= 1000 or not 0 < args.seconds <= 300 or args.interval < 0:
         parser.error("Use 1–1000 rounds, 0–300 seconds, and a nonnegative interval.")
     emulator = Emulator()
-    if args.action == "focus-cycles":
+    if args.action == "updates":
+        subprocess.run(["python3", str(Path(__file__).resolve().parents[1] / "updates/runner.py"), "--scenario", args.update_scenario], check=True)
+    elif args.action == "focus-cycles":
         emulator.require_synthetic()
         for index in range(args.rounds):
             emulator.adb("shell", "am", "start", "-a", "tv.jellybeam.action.OPEN_DETAIL", "-n", "tv.jellybeam/.MainActivity",

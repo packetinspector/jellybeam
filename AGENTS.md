@@ -26,10 +26,12 @@ list):
 
 ## Hard rules
 
+- Use plain descriptive local branch names without tool or agent prefixes.
 - **Subagents never run git.** The primary session reviews diffs and
   commits.
-- **Never add AI-attribution trailers** to commits, PR descriptions, or
-  release notes.
+- **Never add coauthor statements or AI-attribution trailers** to commits,
+  PR descriptions, or release notes, including `Co-authored-by:` for any
+  person or tool. Never bypass or disable attribution hooks.
 - **Never push** without an explicit ask in the current conversation.
 - **Never commit identifying or environment-specific info**: real names or
   usernames, account/item ids, server/device/host names, IP/MAC addresses,

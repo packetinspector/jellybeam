@@ -141,6 +141,11 @@ fn default_autoplay_enabled() -> bool {
     AutoplayPrefs::default().enabled
 }
 
+/// docs/26 §5: update checks are on unless the viewer turned them off.
+fn default_automatic_update_checks() -> bool {
+    true
+}
+
 fn default_autoplay_delay_secs() -> u32 {
     AutoplayPrefs::default().delay_secs
 }
@@ -310,6 +315,9 @@ impl From<StillWatchingPrefs> for StillWatchingSettings {
 /// *feature's* default, not a zeroed one.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
+    #[serde(default = "default_automatic_update_checks")]
+    #[uniffi(default = true)]
+    pub automatic_update_checks: bool,
     /// `Some(days)` -- see `NextUpOptions::cutoff_days`; `None` ("Off") is
     /// the default, today's unfiltered behavior.
     #[serde(default)]
@@ -474,6 +482,7 @@ impl Default for Settings {
     /// behavior.
     fn default() -> Self {
         Settings {
+            automatic_update_checks: true,
             next_up_cutoff_days: None,
             next_up_rewatching: false,
             hidden_library_ids: Vec::new(),
@@ -605,6 +614,7 @@ mod tests {
 
     fn sample() -> Settings {
         Settings {
+            automatic_update_checks: true,
             next_up_cutoff_days: Some(30),
             next_up_rewatching: true,
             hidden_library_ids: vec!["lib-1".to_string()],

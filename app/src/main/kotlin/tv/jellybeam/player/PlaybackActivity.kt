@@ -38,6 +38,8 @@ import tv.jellybeam.perf.PerfLog
 internal class PlaybackActivityTracker {
     private val activeCount = MutableStateFlow(0)
 
+    val isActive: Boolean get() = activeCount.value > 0
+
     fun onCreated() = activeCount.update { it + 1 }
     fun onDestroyed() = activeCount.update { (it - 1).coerceAtLeast(0) }
     suspend fun awaitIdle() = activeCount.first { it == 0 }
@@ -168,6 +170,7 @@ class PlaybackActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         playbackActivityTracker.onCreated()
+        AppGraph.updateOwnerIfStarted()?.playbackChanged(true)
         // Isolates the cold-Activity-launch phase from ffi.preparePlayback that follows (docs/10).
         PerfLog.markStartup("playback.activityCreate")
         PerfLog.markPlayback("activity.create")
@@ -398,6 +401,7 @@ class PlaybackActivity : ComponentActivity() {
         pipController.onActivityDestroyed()
         // Last: a replacement waiting in MainActivity may launch the instant this reaches zero.
         playbackActivityTracker.onDestroyed()
+        AppGraph.updateOwnerIfStarted()?.playbackChanged(playbackActivityTracker.isActive)
     }
 
     companion object {
@@ -409,6 +413,10 @@ class PlaybackActivity : ComponentActivity() {
         /** docs/17 §2: marks an Intent as "bring this Activity forward"; [onNewIntent] never
          * restarts the item when `true`. */
         private const val EXTRA_RESUME_SESSION = "tv.jellybeam.player.EXTRA_RESUME_SESSION"
+
+        fun launch(context: Context, itemId: String, startFromBeginning: Boolean = false) {
+            AppGraph.beforePlayback { context.startActivity(intent(context, itemId, startFromBeginning)) }
+        }
 
         fun intent(context: Context, itemId: String, startFromBeginning: Boolean = false): Intent =
             Intent(context, PlaybackActivity::class.java)

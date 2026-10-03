@@ -73,6 +73,9 @@ import uniffi.jellybeam_core.ViewSnapshot
  * is the synchronous exception (pure string format, `null` on failure fails open).
  */
 interface CoreGateway {
+    suspend fun updater(facts: uniffi.jellybeam_core.InstalledUpdateFacts): uniffi.jellybeam_core.AppUpdater =
+        error("Updater unavailable in this gateway")
+
     suspend fun restoreSession(): AccountInfo?
 
     @Throws(CoreException::class)
@@ -593,6 +596,9 @@ class RealCoreGateway(
     /** Completed after the one-time decoder probe has either landed or failed open. */
     private val deviceCapsReady: Deferred<Unit>? = null,
 ) : CoreGateway {
+    override suspend fun updater(facts: uniffi.jellybeam_core.InstalledUpdateFacts): uniffi.jellybeam_core.AppUpdater =
+        ffi("updater") { updater(facts) }
+
     /**
      * The one seam every ordinary FFI wrapper goes through: hop to [Dispatchers.IO], await
      * [core], and time the call under [section] (`ffi.<methodName>`, never derived from an

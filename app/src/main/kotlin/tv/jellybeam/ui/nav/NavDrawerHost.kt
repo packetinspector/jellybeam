@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
@@ -197,7 +198,9 @@ fun NavDrawerHost(
     val homeLabel = stringResource(R.string.drawer_home)
     val discoverLabel = stringResource(R.string.drawer_discover)
     val searchLabel = stringResource(R.string.search_chip)
-    val settingsLabel = stringResource(R.string.settings_chip)
+    val updateAvailable by tv.jellybeam.AppGraph.updateAvailable.collectAsState()
+    val settingsChip = stringResource(R.string.settings_chip)
+    val settingsLabel = if (updateAvailable) stringResource(R.string.settings_chip_with_update, settingsChip) else settingsChip
     val serversSectionLabel = stringResource(R.string.drawer_servers_section)
     val addServerLabel = stringResource(R.string.drawer_add_server)
     val manageServersLabel = stringResource(R.string.drawer_manage_servers)

@@ -194,8 +194,8 @@ fun SettingsScreen(
                             }
                         }
                         .focusGroup()
-                        .verticalScroll(rememberScrollState())
-                        .padding(vertical = contentPadding),
+                        .then(if (activeSection == SettingsSection.UPDATES) Modifier else Modifier.verticalScroll(rememberScrollState()))
+                        .padding(vertical = if (activeSection == SettingsSection.UPDATES) 0.dp else contentPadding),
                 ) {
                     CompositionLocalProvider(
                         LocalSettingsPaneEntryKey provides paneEntry,
@@ -209,6 +209,10 @@ fun SettingsScreen(
                             SettingsSection.SUBTITLES -> SubtitlesSectionContent(state, viewModel)
                             SettingsSection.DISCOVER -> DiscoverSectionContent(onSeerrConfigChanged = onSeerrConfigChanged)
                             SettingsSection.TROUBLESHOOTING -> TroubleshootingSectionContent(state, viewModel, onReportProblem)
+                            SettingsSection.UPDATES -> UpdatesSectionContent(isTop, viewModel::setAutomaticUpdateChecks) {
+                                activeSection = SettingsSection.HOME
+                                railFocusRequesters.getValue(SettingsSection.HOME).requestFocus()
+                            }
                             SettingsSection.ABOUT -> AboutSectionContent()
                         }
                     }
@@ -239,6 +243,7 @@ fun SettingsScreen(
                             .width(RAIL_WIDTH)
                             .fillMaxHeight()
                             .background(JellybeamTheme.Surface, RoundedCornerShape(12.dp))
+                            .verticalScroll(rememberScrollState())
                             .padding(8.dp),
                         verticalArrangement = Arrangement.spacedBy(ROW_GAP),
                     ) {

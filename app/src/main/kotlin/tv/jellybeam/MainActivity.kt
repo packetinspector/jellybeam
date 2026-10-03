@@ -208,6 +208,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         activityResumed = true
+        AppGraph.updateOwnerIfStarted()?.resume(this)
         externalIntentAwaitingResume?.let(::acceptExternalPlaybackIntent)
         externalIntentAwaitingResume = null
         PerfLog.refresh()
@@ -271,6 +272,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        AppGraph.updateOwnerIfStarted()?.pause()
         AppForeground.browsing.value = false
         activityResumed = false
         stopFrameMetrics()
@@ -884,7 +886,7 @@ private fun JellybeamRoot(
                     // docs/17 §3: a PiP'd player never reaches idle, so startActivity below
                     // must instead be delivered straight to it via onNewIntent.
                     if (!pipController.isInPip.value) playbackActivityTracker.awaitIdle()
-                    context.startActivity(PlaybackActivity.intent(context, request.itemId))
+                    PlaybackActivity.launch(context, request.itemId)
                     // Keep the request as this effect's key while awaitIdle is suspended;
                     // consuming it earlier would cancel the coroutine before it can launch.
                     onExternalPlaybackConsumed(request)
@@ -1410,6 +1412,18 @@ private fun JellybeamRoot(
                     else -> Unit // unreachable: see NavBackStack's own construction sites
                 }
             }
+            }
+        }
+
+        LaunchedEffect(stack != null, AppForeground.browsing.value) {
+            if (stack != null && AppForeground.browsing.value) {
+                androidx.compose.runtime.withFrameNanos { }
+                kotlinx.coroutines.delay(10_000)
+                val host = context as MainActivity
+                if (AppForeground.browsing.value && host.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                    AppGraph.updates.resume(host)
+                    AppGraph.updates.browsingReady(0)
+                }
             }
         }
 

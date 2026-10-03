@@ -1152,7 +1152,7 @@ private fun HeroBanner(
                 HeroButton(
                     label = primaryLabel,
                     isPrimary = true,
-                    onClick = { context.startActivity(PlaybackActivity.intent(context, card.id)) },
+                    onClick = { PlaybackActivity.launch(context, card.id) },
                     // docs/15-focus-and-selection.md §5: the key doubles as §2 rule 3's fallback
                     // via the
                     // plain [primaryFocusRequester] -- FocusRestorer needs a direct requester since

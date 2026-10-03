@@ -25,6 +25,9 @@ mod signin;
 mod still_watching;
 mod track_prefs;
 mod types;
+mod updates;
+
+pub use updates::{AppUpdater, InstalledUpdateFacts, UpdateSnapshot, VerifiedUpdateFacts};
 
 pub use diag::{install_diag_sink, DiagLevel, DiagSink};
 pub use discovery::DiscoveredServer;

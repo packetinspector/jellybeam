@@ -1,0 +1,24 @@
+[package]
+name = "app-updates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+update-test-fixture = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+sha2 = "0.10"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["net", "io-util"] }
+
+[lints]
+workspace = true

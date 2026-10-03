@@ -348,6 +348,7 @@ pub struct JellybeamCore {
     library_grid_prefs_save: crate::persistence::RevisionWriter,
     track_prefs_save: crate::persistence::RevisionWriter,
     seerr_config: crate::seerr::SeerrConfigStore,
+    updater: Mutex<Option<Arc<crate::updates::AppUpdater>>>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -419,8 +420,25 @@ impl JellybeamCore {
             library_grid_prefs_save: crate::persistence::RevisionWriter::default(),
             track_prefs_save: crate::persistence::RevisionWriter::default(),
             seerr_config: crate::seerr::SeerrConfigStore::default(),
+            updater: Mutex::new(None),
             runtime,
         })
+    }
+
+    pub fn updater(
+        &self,
+        facts: crate::updates::InstalledUpdateFacts,
+    ) -> Result<Arc<crate::updates::AppUpdater>, CoreError> {
+        let mut slot = self
+            .updater
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(updater) = slot.as_ref() {
+            return Ok(updater.clone());
+        }
+        let updater = crate::updates::AppUpdater::create(self.data_dir.join("updates"), facts)?;
+        *slot = Some(updater.clone());
+        Ok(updater)
     }
 
     pub fn sign_in(

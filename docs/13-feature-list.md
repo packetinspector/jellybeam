@@ -355,6 +355,15 @@ one-line description that fades in for the focused row (fixed row heights --
 last focused row per section; Troubleshooting section (Diagnostic logging
 toggle with status, Crash reports toggle, Report a problem, Clear log).
 
+**App updates** — docs/26: Settings > Updates checks GitHub Releases for a
+newer build (automatic checks on by default, with a switch; a quiet Settings
+indicator, never a dialog), shows the release notes as readable native text,
+and downloads and verifies the APK with its matching performance profile
+before Android's own install confirmation. Cancel keeps the verified
+download; Later hides the indicator until tomorrow. Installation always
+needs Android's confirmation, and playback defers checks and installs.
+<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/settings/UpdatesSection.kt; app/src/main/kotlin/tv/jellybeam/updates/UpdateCoordinator.kt; app/src/main/kotlin/tv/jellybeam/updates/AndroidUpdateInstaller.kt; app/src/main/kotlin/tv/jellybeam/updates/ReleaseNotes.kt; core/app-updates/src/policy.rs; core/ffi/src/updates.rs -->
+
 **User reporting** — docs/21: a redacted diagnostic log (off by default;
 Settings > Troubleshooting) recorded as a 2000-line / 256 KB ring off the
 hot path with per-process aliases in place of item and server ids, Rust
@@ -515,9 +524,9 @@ public display.)*
   server sent.
   <!-- verified: app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt "server-configured libraries, names shown verbatim (CLAUDE.md hard rule)"; app/src/main/kotlin/tv/jellybeam/ui/home/HomeViewModel.kt; app/src/main/kotlin/tv/jellybeam/ui/nav/NavDrawerHost.kt -->
 - No analytics, no crash-reporting SDK, no telemetry of any kind — the
-  app only ever talks to the internet for the Jellyfin server itself
-  (`INTERNET`/`ACCESS_NETWORK_STATE` are its only network permissions).
-  <!-- verified: gradle/libs.versions.toml and app/build.gradle.kts contain no analytics/crash-reporting dependency; app/src/main/AndroidManifest.xml declares only android.permission.INTERNET and ACCESS_NETWORK_STATE -->
+  app contacts configured services and, when enabled, GitHub Releases for
+  update discovery. Installation always requires Android confirmation.
+  <!-- verified: gradle/libs.versions.toml and app/build.gradle.kts contain no analytics/crash-reporting dependency; app/src/main/AndroidManifest.xml declares INTERNET, ACCESS_NETWORK_STATE and REQUEST_INSTALL_PACKAGES; core/app-updates/src/policy.rs pins the GitHub repository -->
 - Audio and subtitle track choices are remembered per series, not per
   episode, so a show's dub/subtitle preference sticks across every episode
   without re-selecting it.
@@ -590,10 +599,6 @@ public display.)*
   what's on screen.
   <!-- verified: app/src/main/kotlin/tv/jellybeam/player/MediaSessionHolder.kt; gradle/libs.versions.toml androidx-media3-session comment -->
 
-## In progress / known gaps
-
-- None currently tracked — see Planned.
-
 ## Planned
 
 - External subtitle sidecar loading (.srt/.ass files next to the media —
@@ -623,5 +628,5 @@ public display.)*
 
 ## Explicitly not planned
 
-Transcoding-by-default, Sparkle-style updates (sideload
-distribution only), About-window physics.
+Transcoding-by-default, silent/unattended app installation,
+About-window physics.

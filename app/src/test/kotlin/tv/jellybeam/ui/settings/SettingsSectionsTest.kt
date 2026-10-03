@@ -20,6 +20,7 @@ class SettingsSectionsTest {
                 SettingsSection.SUBTITLES,
                 SettingsSection.DISCOVER,
                 SettingsSection.TROUBLESHOOTING,
+                SettingsSection.UPDATES,
                 SettingsSection.ABOUT,
             ),
             settingsSectionOrder(),

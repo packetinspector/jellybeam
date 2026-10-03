@@ -268,6 +268,11 @@ class SettingsViewModel(
         _state.update { it.copy(isLoading = false, settings = settings, views = views) }
     }
 
+    fun setAutomaticUpdateChecks(value: Boolean) {
+        AppGraph.updates.setAutomatic(value)
+        updateSettings { it.copy(automaticUpdateChecks = value) }
+    }
+
     private fun updateSettings(transform: (Settings) -> Settings) {
         val updated = transform(_state.value.settings)
         _state.update { it.copy(settings = updated) }

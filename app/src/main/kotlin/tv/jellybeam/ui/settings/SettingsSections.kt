@@ -79,6 +79,7 @@ internal enum class SettingsSection(val labelRes: Int) {
     DISCOVER(R.string.settings_section_discover),
     // docs/21-user-reporting.md §6: diagnostic logging, crash reports, and the LAN report page.
     TROUBLESHOOTING(R.string.settings_section_troubleshooting),
+    UPDATES(R.string.settings_section_updates),
     ABOUT(R.string.settings_section_about),
 }
 

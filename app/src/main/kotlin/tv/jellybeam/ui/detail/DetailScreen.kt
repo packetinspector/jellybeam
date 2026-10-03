@@ -279,7 +279,7 @@ fun DetailScreen(
         state.pendingPlayback?.let { pending ->
             dropPanelForNavigation()
             PerfLog.markStartup("playback.click")
-            context.startActivity(PlaybackActivity.intent(context, pending.targetId, startFromBeginning = pending.startFromBeginning))
+            PlaybackActivity.launch(context, pending.targetId, startFromBeginning = pending.startFromBeginning)
             viewModel.consumePendingPlayback()
         }
     }
@@ -751,7 +751,7 @@ private fun EpisodeActionRow(
                 onClick = {
                     if (action is DetailFormatting.PrimaryAction.Playable) {
                         PerfLog.markStartup("playback.click")
-                        context.startActivity(PlaybackActivity.intent(context, action.targetId))
+                        PlaybackActivity.launch(context, action.targetId)
                     }
                 },
                 memory = memory,
@@ -1263,7 +1263,7 @@ private fun SeriesActionRow(
                 onClick = {
                     if (action is DetailFormatting.PrimaryAction.Playable) {
                         PerfLog.markStartup("playback.click")
-                        context.startActivity(PlaybackActivity.intent(context, action.targetId))
+                        PlaybackActivity.launch(context, action.targetId)
                     }
                 },
                 memory = memory,
@@ -1899,7 +1899,7 @@ private fun MovieActionRow(
                 onClick = {
                     if (action is DetailFormatting.PrimaryAction.Playable) {
                         PerfLog.markStartup("playback.click")
-                        context.startActivity(PlaybackActivity.intent(context, action.targetId))
+                        PlaybackActivity.launch(context, action.targetId)
                     }
                 },
                 memory = memory,

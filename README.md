@@ -23,7 +23,7 @@ Want more Rust? [Try out Jellybeam on your Mac.](https://github.com/packetinspec
 - **Glide Seek with trickplay.** Hold Left or Right and the file glides at 6x, 30x, then 120x, with the server's own thumbnails on screen the whole way. Release and it seeks once, exactly where you stopped.
 - **Picture-in-picture.** Back or Home during playback tucks the video into a corner and keeps it playing while you browse.
 - **Fast enough to measure in milliseconds.** First frame around 80 ms. Press Play to player-prepare around 50 ms.
-- **Nothing phones home.** No analytics, no crash SDK, no telemetry. Two permissions: internet and network state.
+- **No tracking.** No analytics, crash SDK, or telemetry. Optional update checks contact GitHub Releases. Android asks before installing an update; no storage permission is needed.
 
 <br>
 

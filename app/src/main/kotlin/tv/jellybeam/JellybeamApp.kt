@@ -57,6 +57,15 @@ import uniffi.jellybeam_core.installDiagSink
  * everything else reads [AppGraph.gateway].
  */
 object AppGraph {
+    val updateAvailable = kotlinx.coroutines.flow.MutableStateFlow(false)
+    private val updateOwner = lazy { tv.jellybeam.updates.UpdateCoordinator(appContext) }
+    val updates: tv.jellybeam.updates.UpdateCoordinator get() = updateOwner.value
+    fun updateOwnerIfStarted(): tv.jellybeam.updates.UpdateCoordinator? = if (updateOwner.isInitialized()) updateOwner.value else null
+    fun beforePlayback(launch: () -> Unit) {
+        val owner = updateOwnerIfStarted()
+        if (owner == null) launch() else owner.launchPlayback(launch)
+    }
+
     private lateinit var appContext: Context
 
     lateinit var gateway: CoreGateway

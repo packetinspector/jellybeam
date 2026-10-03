@@ -35,8 +35,10 @@ cli = ["uniffi/cli"]
 # in a normal build -- not part of the default feature set, and nothing in
 # `src/` reads the env var unless this feature is on.
 live-test-knobs = []
+update-test-fixture = ["app-updates/update-test-fixture"]
 
 [dependencies]
+app-updates = { path = "../app-updates" }
 # 0.29.x (the version this crate's spec was written against) is no longer
 # the latest stable release on crates.io; 0.32.0 is, and it still ships the
 # same proc-macro surface (`uniffi::setup_scaffolding!()`, `#[uniffi::export]`,

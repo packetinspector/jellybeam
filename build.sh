@@ -48,7 +48,8 @@ case "${1:-shell}" in
         echo "APK: app/build/outputs/apk/debug/app-debug.apk"
         ;;
     release)
-        echo "Building Jellybeam TV release APK (R8 minified, debug-keystore signed)..."
+        echo "Building Jellybeam TV release APK (R8 minified; signed with keystore.properties, else the debug key -- not publishable, docs/06)..."
+        test -f keystore.properties || echo "WARNING: no keystore.properties -- this APK is debug-signed and tools/releases/prepare.py will reject it."
         run_cmd ./gradlew assembleRelease
         # Keep every release's R8 mapping under its pg_map_id (gitignored internal/):
         # a crash report names the map id of the build it came from, and the next
@@ -68,9 +69,19 @@ case "${1:-shell}" in
         echo ""
         echo "Install with: ./build.sh install"
         ;;
+    update-fixture)
+        fixture_code="${2:?Pass a synthetic fixture version code}"
+        case "$fixture_code" in *[!0-9]*|'') echo "Fixture version code must be numeric."; exit 1;; esac
+        test -f internal/updates/ca.pem || { echo "Generate the local fixture CA first (tools/updates/README.md)."; exit 1; }
+        # Overwrites app/build/outputs/apk/release/app-release.apk: prepare/copy each fixture
+        # build before building the next (tools/updates/README.md).
+        run_cmd ./gradlew assembleRelease -Pjellybeam.updateFixture=true "-Pjellybeam.updateVersionCode=$fixture_code" "-Pjellybeam.updateVersionName=${3:-0.1.6}"
+        ;;
     test)
         echo "Running Rust workspace tests (host arch, proves the container toolchain)..."
-        run_cmd bash -c 'cd /app/core && cargo test --workspace'
+        # JELLYBEAM_TEST_JOBS caps cargo's parallel compiles (default 2) so the
+        # memory-limited build container is not exhausted (docs/06).
+        run_cmd env "CARGO_BUILD_JOBS=${JELLYBEAM_TEST_JOBS:-2}" bash -c 'cd /app/core && cargo test --workspace'
         echo ""
         echo "Running Gradle JVM unit tests..."
         run_cmd ./gradlew testReleaseUnitTest
@@ -188,7 +199,7 @@ PY
         run_cmd bash
         ;;
     *)
-        echo "Usage: $0 {image|core|build|release|install|test|check|check-fast [package]|stop|shell}"
+        echo "Usage: $0 {image|core|build|release|install|test|check|check-fast [package]|update-fixture <code>|stop|shell}"
         echo ""
         echo "Commands:"
         echo "  image    - Build the Docker image (Android SDK + NDK + Rust + cargo-ndk)"
@@ -198,6 +209,7 @@ PY
         echo "  install  - Install the release APK + matching Baseline Profile (.dm) via host adb"
         echo "  test     - Run cargo test --workspace inside the container, then the Gradle unit tests"
         echo "  check    - Pre-commit gate: Gradle unit tests (release variant) + lint"
+        echo "  update-fixture <code> - Local HTTPS emulator fixture; rejected by production release validation"
         echo "  check-fast [package] - Iteration gate: unit tests only, offline; optional dotted package prefix, e.g. tv.jellybeam.ui.settings"
         echo "  shell    - Open an interactive bash shell in the container"
         exit 1
