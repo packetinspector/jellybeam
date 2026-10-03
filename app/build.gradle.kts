@@ -22,8 +22,8 @@ android {
         applicationId = "tv.jellybeam"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = providers.gradleProperty("jellybeam.updateVersionCode").orNull?.toInt() ?: 6
-        versionName = providers.gradleProperty("jellybeam.updateVersionName").orNull ?: "0.1.5"
+        versionCode = providers.gradleProperty("jellybeam.updateVersionCode").orNull?.toInt() ?: 7
+        versionName = providers.gradleProperty("jellybeam.updateVersionName").orNull ?: "0.1.6"
         buildConfigField("boolean", "UPDATE_FIXTURE", if (updateFixtureBuild) "true" else "false")
         // Only the ABIs the Rust core is built for. JNA's AAR also ships x86, mips and armeabi
         // slices; packaging them lets such a device install an APK with no core to load.
