@@ -230,7 +230,7 @@ pub(crate) fn spawn(
             with_upgraded!(startup_weak, |s| sync_resume(&s).await);
 
             with_upgraded!(startup_weak, |s| {
-                refresh_next_up(&s).await;
+                s.request_next_up_refresh();
                 // One-time-per-launch heal for rows an older delta sync left under their
                 // physical folder id (see `WriteCmd::FlattenRootParents`); idempotent,
                 // index-served.
@@ -261,8 +261,45 @@ pub(crate) fn spawn(
         }
     });
 
+    tokio::spawn(next_up_refresher(
+        Arc::downgrade(&state),
+        state.next_up_requested.clone(),
+    ));
     tokio::spawn(bus_listener(Arc::downgrade(&state), bus));
     tokio::spawn(reconcile_timer(Arc::downgrade(&state)));
+}
+
+/// docs/07 §1: after a Next Up fetch, further requests wait this long and collapse into one,
+/// so a stop's own echo, launch's overlapping passes or a bulk mark cost one extra fetch at most.
+const NEXT_UP_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// The only caller of [`refresh_next_up`] outside tests: the first request fetches at once
+/// (returning Home shows the change), later ones within [`NEXT_UP_COOLDOWN`] fetch once at its
+/// end. Wakes each minute to notice a dropped `Mirror`.
+async fn next_up_refresher(state: Weak<MirrorState>, requested: Arc<tokio::sync::Notify>) {
+    loop {
+        if tokio::time::timeout(std::time::Duration::from_secs(60), requested.notified())
+            .await
+            .is_err()
+        {
+            if state.strong_count() == 0 {
+                break;
+            }
+            continue;
+        }
+        let Some(s) = state.upgrade() else { break };
+        refresh_next_up(&s).await;
+        drop(s);
+        tokio::time::sleep(NEXT_UP_COOLDOWN).await;
+    }
+}
+
+/// Whether any of `ids` is an Episode row, the only kind whose watch state moves Next Up.
+async fn any_episode(state: &MirrorState, ids: Vec<String>) -> bool {
+    let pool = state.read_pool.clone();
+    tokio::task::spawn_blocking(move || crate::query::any_episode(&pool.acquire(), &ids))
+        .await
+        .unwrap_or(false)
 }
 
 /// "Resume + NextUp + Latest first, then breadth" -- Home is renderable as soon
@@ -320,7 +357,7 @@ pub(crate) async fn initial_sync(state: &Weak<MirrorState>) {
 
     with_upgraded!(state, |s| sync_resume(&s).await);
 
-    with_upgraded!(state, |s| refresh_next_up(&s).await);
+    with_upgraded!(state, |s| s.request_next_up_refresh());
 
     // `sync_views`'s replace was fire-and-forget; wait for it to commit before reading views
     // back, or the read pool can observe zero views and skip the breadth phase.
@@ -884,6 +921,9 @@ async fn apply_bus_event(state: &MirrorState, event: BusEvent) {
         // covers what delta can't (a UserData-only change this session's own WS never saw).
         BusEvent::NeedsReconcile => {
             sync_resume(state).await;
+            // A `UserDataChanged` sent while disconnected is lost, and delta/reconcile only
+            // see library items, so Next Up is asked for on every (re)connect.
+            state.request_next_up_refresh();
             // The first post-launch connect's delta+reconcile would duplicate the startup
             // pass already covering the same ground while it's still running; every later
             // (re)connect always runs in full. See `MirrorState::startup_pass_active`.
@@ -941,11 +981,16 @@ pub(crate) async fn apply_server_event(state: &MirrorState, event: ServerEvent) 
                 // Next Up shifts whenever library contents change; cheap to refresh
                 // opportunistically. Wait for the upserts above to commit first.
                 state.writer.barrier().await;
-                refresh_next_up(state).await;
+                state.request_next_up_refresh();
             }
         }
         ServerEvent::UserDataChanged { item_userdata } => {
+            let ids: Vec<String> = item_userdata.iter().map(|(id, _)| id.clone()).collect();
             state.writer.apply_user_data(item_userdata).await;
+            // A watch on another device moves Next Up; a movie's never does.
+            if any_episode(state, ids).await {
+                state.request_next_up_refresh();
+            }
         }
         ServerEvent::ForceKeepAlive | ServerEvent::Ignored(_) => {}
     }
@@ -1293,7 +1338,7 @@ async fn delta_pass(state: &MirrorState) {
         // re-save, nothing a user would see move) must not re-fetch and re-broadcast Next Up
         // for no visible reason. Barrier first so its upsert can't race a still-in-flight page.
         state.writer.barrier().await;
-        refresh_next_up(state).await;
+        state.request_next_up_refresh();
     }
 
     if !state.writer.barrier().await {
@@ -2769,6 +2814,76 @@ mod tests {
         .await;
 
         assert_eq!(mirror.item_count().await, 0);
+    }
+
+    /// docs/07 §1: a watch-state change on an episode, from any device, asks for Next Up;
+    /// one on a movie never does.
+    #[tokio::test]
+    async fn user_data_changed_on_an_episode_requests_next_up_and_a_movie_does_not() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        let mirror = TestMirror::new(client);
+        let movie = "22222222-2222-2222-2222-222222222222";
+        let episode = "33333333-3333-3333-3333-333333333333";
+        let dtos: Vec<BaseItemDto> = [
+            movie_json(movie, "Movie"),
+            json!({ "Id": episode, "Name": "Episode", "Type": "Episode" }),
+        ]
+        .into_iter()
+        .map(|v| serde_json::from_value(v).expect("dto"))
+        .collect();
+        mirror.state.writer.upsert_items(dtos).await;
+        mirror.state.writer.barrier().await;
+
+        for (id, expected) in [(movie, false), (episode, true)] {
+            let user_data: jellyfin_api::models::UserItemDataDto =
+                serde_json::from_value(json!({ "Key": "k", "Played": true })).expect("user data");
+            apply_server_event(
+                &mirror.state,
+                ServerEvent::UserDataChanged {
+                    item_userdata: vec![(id.to_string(), user_data)],
+                },
+            )
+            .await;
+            assert_eq!(next_up_was_requested(&mirror.state).await, expected, "{id}");
+        }
+    }
+
+    /// docs/07 §1: the first Next Up request fetches at once; a burst right after waits
+    /// out the cooldown and costs exactly one more fetch.
+    #[tokio::test]
+    async fn next_up_refresher_fetches_at_once_then_coalesces_a_burst_into_one() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        server.route("/Shows/NextUp", &[], json!({ "Items": [] }));
+        let mirror = TestMirror::new(client);
+        tokio::spawn(next_up_refresher(
+            Arc::downgrade(&mirror.state),
+            mirror.state.next_up_requested.clone(),
+        ));
+        let fetches = || server.request_count("/Shows/NextUp");
+        let wait_for = |n: usize| async move {
+            for _ in 0..100 {
+                if fetches() >= n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+
+        mirror.state.request_next_up_refresh();
+        wait_for(1).await;
+        assert_eq!(fetches(), 1, "the first request fetches without waiting");
+
+        for _ in 0..5 {
+            mirror.state.request_next_up_refresh();
+        }
+        tokio::time::sleep(NEXT_UP_COOLDOWN / 2).await;
+        assert_eq!(fetches(), 1, "a burst inside the cooldown waits");
+        tokio::time::sleep(NEXT_UP_COOLDOWN).await;
+        wait_for(2).await;
+        tokio::time::sleep(NEXT_UP_COOLDOWN + std::time::Duration::from_millis(300)).await;
+        assert_eq!(fetches(), 2, "the whole burst cost one fetch");
     }
 
     #[tokio::test]
@@ -4527,6 +4642,20 @@ mod tests {
             "delta+reconcile must be skipped: the startup pass already covers the first connect"
         );
         assert!(mirror.state.first_reconcile_handled.load(Ordering::Acquire));
+        assert!(
+            next_up_was_requested(&mirror.state).await,
+            "Next Up is still asked for: an offline window's UserDataChanged is lost"
+        );
+    }
+
+    /// Whether a Next Up request is pending, consuming it.
+    async fn next_up_was_requested(state: &MirrorState) -> bool {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            state.next_up_requested.notified(),
+        )
+        .await
+        .is_ok()
     }
 
     /// (a): a second connect arriving while the startup pass is still active is not exempt --
@@ -4545,7 +4674,12 @@ mod tests {
             .store(true, Ordering::Release);
 
         apply_bus_event(&mirror.state, BusEvent::NeedsReconcile).await; // first: skipped
+        assert!(next_up_was_requested(&mirror.state).await);
         apply_bus_event(&mirror.state, BusEvent::NeedsReconcile).await; // second: full
+        assert!(
+            next_up_was_requested(&mirror.state).await,
+            "a full reconnect asks for Next Up too"
+        );
 
         assert_eq!(
             server.request_count("/UserViews"),

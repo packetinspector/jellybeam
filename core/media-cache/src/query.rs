@@ -735,6 +735,19 @@ pub(crate) fn resume(conn: &Connection, limit: u32) -> Vec<CardRow> {
     })
 }
 
+/// Whether any of `ids` names an Episode row (primary-key lookups; an error reads as no).
+pub(crate) fn any_episode(conn: &Connection, ids: &[String]) -> bool {
+    if ids.is_empty() {
+        return false;
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!(
+        "SELECT EXISTS(SELECT 1 FROM items WHERE item_type = 'Episode' AND id IN ({placeholders}))"
+    );
+    conn.query_row(&sql, rusqlite::params_from_iter(ids), |row| row.get(0))
+        .unwrap_or(false)
+}
+
 /// "Next Up" isn't derivable from indexed columns alone; the sync engine mirrors
 /// `/Shows/NextUp`'s ordered id list into `meta.next_up_ids`, and this resolves those ids
 /// back to rows (primary-key lookup, not a scan), preserving server order.
@@ -1744,6 +1757,17 @@ mod tests {
     }
 
     #[test]
+    fn any_episode_is_true_only_when_an_id_names_an_episode() {
+        let (_dir, mut conn) = open_test_db();
+        let movie = item_dto(&uuid_n(1), "Movie", None, BaseItemKind::Movie);
+        let episode = item_dto(&uuid_n(2), "Episode", None, BaseItemKind::Episode);
+        apply_upsert_items(&mut conn, &[movie, episode]).expect("insert");
+        assert!(!any_episode(&conn, &[]));
+        assert!(!any_episode(&conn, &[uuid_n(1), uuid_n(9)]));
+        assert!(any_episode(&conn, &[uuid_n(1), uuid_n(2)]));
+    }
+
+    #[test]
     fn resume_only_returns_items_with_progress() {
         let (_dir, mut conn) = open_test_db();
         let mut watched = item_dto(&uuid_n(1), "Watched", None, BaseItemKind::Movie);
@@ -1856,7 +1880,7 @@ mod tests {
         a.user_data = Some(user_data_with_progress(10 * MIN, Some(older)));
         let mut b = item_dto(&uuid_n(2), "B", None, BaseItemKind::Movie);
         b.user_data = Some(user_data_with_progress(20 * MIN, Some(newer)));
-        apply_upsert_items(&mut conn, &[a.clone(), b.clone()]).expect("insert");
+        apply_upsert_items(&mut conn, &[a.clone(), b]).expect("insert");
 
         let before = resume(&conn, 10)
             .iter()

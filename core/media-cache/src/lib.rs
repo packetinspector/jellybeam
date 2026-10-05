@@ -133,6 +133,9 @@ pub(crate) struct MirrorState {
     /// skips its own delta+reconcile for the first post-launch connect while this holds, since
     /// the startup pass already covers the same ground.
     pub(crate) startup_pass_active: std::sync::atomic::AtomicBool,
+    /// docs/07 §1: wakes `sync::next_up_refresher`, the one place Next Up is fetched from;
+    /// `Notify` keeps at most one pending wake, which is what coalesces a burst of triggers.
+    pub(crate) next_up_requested: std::sync::Arc<tokio::sync::Notify>,
     /// One-shot gate: only the very first post-launch `NeedsReconcile` may be skipped under
     /// `startup_pass_active`; every later (re)connect runs `apply_bus_event`'s handler in full.
     pub(crate) first_reconcile_handled: std::sync::atomic::AtomicBool,
@@ -202,6 +205,7 @@ impl MirrorState {
             changes_tx,
             initial_sync_in_progress: std::sync::atomic::AtomicBool::new(false),
             startup_pass_active: std::sync::atomic::AtomicBool::new(false),
+            next_up_requested: std::sync::Arc::new(tokio::sync::Notify::new()),
             first_reconcile_handled: std::sync::atomic::AtomicBool::new(false),
             breadth_syncs_in_flight: std::sync::atomic::AtomicUsize::new(0),
             reconcile_in_progress: std::sync::atomic::AtomicBool::new(false),
@@ -216,6 +220,11 @@ impl MirrorState {
             next_up_options: std::sync::Mutex::new(NextUpOptions::default()),
             ready_index_groups: std::sync::atomic::AtomicU8::new(0),
         }
+    }
+
+    /// Asks for a Next Up re-fetch; see `sync::next_up_refresher` for the cooldown.
+    pub(crate) fn request_next_up_refresh(&self) {
+        self.next_up_requested.notify_one();
     }
 
     /// Whether deferred index `group` exists (docs/25 §4.8).
@@ -732,6 +741,12 @@ impl Mirror {
     /// session).
     pub async fn apply_user_data(&self, updates: Vec<(String, UserItemDataDto)>) {
         self.inner.writer.apply_user_data(updates).await;
+    }
+
+    /// docs/07 §1: Next Up after a watch-state change this client made (a stop, a mark); the
+    /// refresher fetches at once unless one just ran, so returning Home shows the next episode.
+    pub fn request_next_up_refresh(&self) {
+        self.inner.request_next_up_refresh();
     }
 
     /// docs/19-detail-action-menu.md §2.2: authoritative re-read of items by id, in batches

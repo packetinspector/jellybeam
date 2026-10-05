@@ -2378,7 +2378,7 @@ impl JellybeamCore {
 
         let refresh_ids = episode_scope_ids(&mirror, &item_id);
         if !refresh_ids.is_empty() {
-            let mirror = mirror.clone();
+            mirror.request_next_up_refresh();
             self.runtime.spawn(async move {
                 mirror.refresh_items(refresh_ids).await;
             });
@@ -2451,6 +2451,8 @@ impl JellybeamCore {
 
         let last_id = episode_ids.last().cloned();
         let mirror = mirror.clone();
+        // A season or series mark moves Next Up (docs/07 §1).
+        mirror.request_next_up_refresh();
         self.runtime.spawn(async move {
             if let Some(last_id) = last_id {
                 mirror
@@ -2852,7 +2854,9 @@ impl JellybeamCore {
                     Err(e) => tracing::warn!(error = %e, "end-grace mark played failed"),
                 }
             }
+            // An episode's scope is non-empty; its stop moves Next Up (docs/07 §1).
             if let Some(mirror) = scope_mirror.filter(|_| !scope_ids.is_empty()) {
+                mirror.request_next_up_refresh();
                 mirror.refresh_items(scope_ids).await;
             }
         });
@@ -8067,8 +8071,15 @@ mod tests {
             .prepare_playback(EP1_ID.to_string(), false)
             .expect("Direct Play negotiation");
         let scope_fetches_before = mock.hit_count_containing("GET", SERIES_ID);
+        let next_up_before = mock.hit_count("GET", "/Shows/NextUp");
 
         core.stop_playback(plan.play_session_id, 5_000_000);
+
+        // docs/07 §1: the stop also re-fetches Next Up, so Home shows the following episode.
+        wait_until(
+            || mock.hit_count("GET", "/Shows/NextUp") > next_up_before,
+            "the Next Up re-fetch after an episode stop",
+        );
 
         wait_until(
             || mock.hit_count_containing("GET", SERIES_ID) > scope_fetches_before,
