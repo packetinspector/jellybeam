@@ -137,7 +137,7 @@ object CardFormatting {
     fun watchIndicator(card: Card, progress: Float?): WatchIndicator {
         if (card.itemType in COUNTABLE_TYPES) {
             val count = card.unplayedCount
-            return if (count != null && count > 0) WatchIndicator.UnplayedCount(count) else WatchIndicator.None
+            return if (count != null && count > 0) WatchIndicator.Count(count) else WatchIndicator.None
         }
         return if (card.played && progress == null) WatchIndicator.WatchedCheck else WatchIndicator.None
     }
@@ -304,7 +304,8 @@ sealed interface ArtSource {
 
 /** What (if anything) a card's watch-state badge should show. */
 sealed interface WatchIndicator {
-    data class UnplayedCount(val count: Long) : WatchIndicator
+    /** Unplayed count on a Series/Season; item count on a collection card. */
+    data class Count(val count: Long) : WatchIndicator
     data object WatchedCheck : WatchIndicator
     data object None : WatchIndicator
 }

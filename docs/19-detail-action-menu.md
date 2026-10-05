@@ -72,6 +72,11 @@ fetch on open):
 | Add to collection | movie, series, episode; the session collections list is non-empty. Absent in season scope and while the list is unknown or empty. |
 | Refresh metadata | the signed-in user is an administrator (`isAdministrator()`, cached per session). |
 
+A collection (BoxSet) page (docs/11 §Collection) uses the same table with
+only two rows present: Add to / Remove from favorites, and Refresh metadata
+for administrators. It has no mark, play or Add to collection rows (it plays
+from its page's Play pill), and focus lands on the first row.
+
 Scope: on the Series page, "scope" is the whole series until the viewer
 **selects** a season chip with Select; then it is that season. The chip
 the page highlights on its own on a fresh entry (the resume season, docs/15

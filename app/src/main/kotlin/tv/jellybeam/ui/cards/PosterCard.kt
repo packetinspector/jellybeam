@@ -14,6 +14,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
 import uniffi.jellybeam_core.Card
@@ -37,14 +38,21 @@ fun PosterCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     width: Dp = POSTER_CELL_WIDTH,
+    /** Replaces the meta line under the title (a collection member's own caption). */
+    metaOverride: String? = null,
+    /** Replaces the watch badge; `null` keeps [CardFormatting.watchIndicator]. */
+    indicatorOverride: WatchIndicator? = null,
+    /** A mono tag docked top-start (the collection page's "UP NEXT"). */
+    topStartTag: String? = null,
 ) {
     val height = width * 1.5f
     // Computed inline, not remembered: a refreshed Card with the same id must recompute
     // rather than show the first composition's stale value (docs/07-home-browse-behavior.md §1).
     val artSource = CardFormatting.posterArtSource(card)
     val progress = CardFormatting.watchProgress(card)
-    val indicator = CardFormatting.watchIndicator(card, progress)
-    val (title, meta) = CardFormatting.posterLines(card)
+    val indicator = indicatorOverride ?: CardFormatting.watchIndicator(card, progress)
+    val (title, defaultMeta) = CardFormatting.posterLines(card)
+    val meta = metaOverride ?: defaultMeta
     val episodeTag = CardFormatting.posterEpisodeTag(card)
 
     Column(
@@ -63,6 +71,7 @@ fun PosterCard(
             progress?.let { WatchProgressBar(it) }
             WatchBadge(indicator)
             episodeTag?.let { TimingPill(it, Alignment.BottomStart) }
+            topStartTag?.let { TimingPill(it, Alignment.TopStart) }
         }
         PosterTitleBlock(width = width, title = title, meta = meta, isFocused = isFocused)
     }
@@ -74,7 +83,7 @@ fun PosterCard(
  * [PosterCard] (shared with Library/Search) follows it too.
  */
 @Composable
-private fun PosterTitleBlock(width: Dp, title: String, meta: String?, isFocused: Boolean) {
+internal fun PosterTitleBlock(width: Dp, title: String, meta: String?, isFocused: Boolean, monoMeta: Boolean = false) {
     val titleColor = if (isFocused) JellybeamTheme.Panna else JellybeamTheme.Panna2
     val metaColor = if (isFocused) JellybeamTheme.Panna2 else JellybeamTheme.Grigio
 
@@ -85,11 +94,11 @@ private fun PosterTitleBlock(width: Dp, title: String, meta: String?, isFocused:
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.height(16.dp),
-            style = TextStyle(
-                fontFamily = JellybeamTheme.Archivo,
-                color = metaColor,
-                fontSize = 11.sp,
-            ),
+            style = if (monoMeta) {
+                TextStyle(fontFamily = JellybeamTheme.MartianMono, color = metaColor, fontSize = 9.sp, letterSpacing = (-0.02).em)
+            } else {
+                TextStyle(fontFamily = JellybeamTheme.Archivo, color = metaColor, fontSize = 11.sp)
+            },
         )
     }
 }

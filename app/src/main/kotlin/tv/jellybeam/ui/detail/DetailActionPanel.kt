@@ -114,16 +114,18 @@ internal fun MenuDoorPill(
     memory: FocusMemory,
     modifier: Modifier = Modifier,
     focusRequester: FocusRequester? = null,
+    /** Matches a taller primary pill beside it (the collection page's two-line Play). */
+    size: Dp = ACTION_BUTTON_HEIGHT,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
 
-    Box(modifier = modifier.focusRing(isFocused = isFocused, cornerRadius = ACTION_BUTTON_HEIGHT / 2, color = JellybeamTheme.Sheen)) {
+    Box(modifier = modifier.focusRing(isFocused = isFocused, cornerRadius = size / 2, color = JellybeamTheme.Sheen)) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
                 .focusKey(memory, MENU_DOOR_KEY)
-                .size(ACTION_BUTTON_HEIGHT)
+                .size(size)
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .clip(CircleShape)
                 .background(JellybeamTheme.Pistacchio)

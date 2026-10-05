@@ -278,7 +278,7 @@ class CardFormattingTest {
     @Test
     fun `watch indicator is unplayed count for a series with unplayed items`() {
         val card = testCard(itemType = "Series", unplayedCount = 4)
-        assertEquals(WatchIndicator.UnplayedCount(4), CardFormatting.watchIndicator(card, null))
+        assertEquals(WatchIndicator.Count(4), CardFormatting.watchIndicator(card, null))
     }
 
     @Test

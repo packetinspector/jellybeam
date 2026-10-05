@@ -51,6 +51,9 @@
     <string name="detail_cast">Cast</string>
     <string name="detail_similar_titles">Similar Titles</string>
 
+    <!-- Collection (BoxSet) detail page's eyebrow (docs/11 §Collection). -->
+    <string name="detail_collection_eyebrow">COLLECTION</string>
+
     <!-- Episode detail page's "UP NEXT" panel label (docs/11). -->
     <string name="detail_up_next">UP NEXT</string>
 

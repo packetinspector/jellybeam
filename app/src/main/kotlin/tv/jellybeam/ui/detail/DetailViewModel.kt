@@ -10,6 +10,9 @@ import tv.jellybeam.ui.common.ChangeRefreshScheduler
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,6 +30,7 @@ import uniffi.jellybeam_core.SortOrder
 
 private const val SERIES_ITEM_TYPE = "Series"
 private const val EPISODE_ITEM_TYPE = "Episode"
+private const val BOXSET_ITEM_TYPE = CollectionFormatting.BOXSET_ITEM_TYPE
 
 /** docs/11-detail-ux-spec.md tier 2 item 13: "up to [limit]... from a live GetSimilar call." */
 private const val SIMILAR_LIMIT = 16u
@@ -115,6 +119,17 @@ data class DetailUiState(
      * rows ([buildCollectionRows]). Fails open to an empty set.
      */
     val memberOfCollections: Set<String> = emptySet(),
+    /**
+     * BoxSet only: members in server order, via [CoreGateway.children] (docs/11 §Collection);
+     * empty until [membersSettled].
+     */
+    val members: List<Card> = emptyList(),
+    /** True once the first member load has settled (success or failure); gates the focus seed. */
+    val membersSettled: Boolean = false,
+    /** BoxSet only: seasons per Series member id, for the poster caption. */
+    val memberSeasonCounts: Map<String, Int> = emptyMap(),
+    /** BoxSet only: what the Play pill does; `null` for an empty collection. */
+    val collectionPlay: CollectionFormatting.CollectionPlay? = null,
     /** Non-null while the action panel is open. */
     val menu: MenuUiState? = null,
     /** Non-null while the bulk-mark confirm block is expanded over [menu] (which stays open). */
@@ -150,6 +165,9 @@ class DetailViewModel(
      */
     private var userSelectedSeason = false
 
+    /** The in-flight [loadCollection]; declared above `init` so its first write isn't clobbered. */
+    private var collectionJob: Job? = null
+
     /**
      * docs/15 §0.2/§5: the resume season resolves once, after the per-episode signal settles.
      * Set `true` in [loadAllEpisodes]; [updateResumeSeasonIfNeeded] no-ops until then.
@@ -177,7 +195,7 @@ class DetailViewModel(
         active = _active.asStateFlow(),
         refresh = {
             refreshCard()
-            if (card.itemType == SERIES_ITEM_TYPE) refreshQuietly(card.id)
+            refreshChildren()
         },
     )
 
@@ -186,7 +204,7 @@ class DetailViewModel(
         // never re-queried on a mirror change.
         viewModelScope.launch { loadItemDetail(card.id) }
         // docs/11 tier 2 item 13: skipped entirely for an Episode page.
-        if (card.itemType != EPISODE_ITEM_TYPE) {
+        if (card.itemType != EPISODE_ITEM_TYPE && card.itemType != BOXSET_ITEM_TYPE) {
             viewModelScope.launch { loadSimilar(card.id) }
         }
         // §2 item 5: Episode page's UP NEXT panel, from OSD's credits-aware next-up picker.
@@ -194,9 +212,10 @@ class DetailViewModel(
             viewModelScope.launch { loadNextEpisode(card.id) }
         }
         // §3 item 4 / §4 item 3: Series/Movie eyebrow needs the library NAME, not just the id.
-        if (card.itemType != EPISODE_ITEM_TYPE) {
+        if (card.itemType != EPISODE_ITEM_TYPE && card.itemType != BOXSET_ITEM_TYPE) {
             viewModelScope.launch { loadLibraryName(card.libraryId) }
         }
+        if (card.itemType == BOXSET_ITEM_TYPE) loadCollection()
         if (card.itemType == SERIES_ITEM_TYPE) {
             viewModelScope.launch { loadSeasons(card.id) }
             // docs/11 item 11's cross-season fix, independent of loadSeasons/selectSeason.
@@ -218,7 +237,7 @@ class DetailViewModel(
         viewModelScope.launch {
             stopEpoch.drop(1).collect {
                 refreshCard()
-                if (card.itemType == SERIES_ITEM_TYPE) refreshQuietly(card.id)
+                refreshChildren()
             }
         }
     }
@@ -228,6 +247,51 @@ class DetailViewModel(
         runCatchingCancellable { gateway.cardById(card.id) }.getOrNull()?.let { fresh ->
             _state.update { it.copy(card = fresh) }
         }
+    }
+
+    /** The Series season/episode re-query or the BoxSet member re-load; nothing for other types. */
+    private suspend fun refreshChildren() {
+        when (card.itemType) {
+            SERIES_ITEM_TYPE -> refreshQuietly(card.id)
+            // Awaited, as the Series re-query is: the scheduler's next run must not cancel this one.
+            BOXSET_ITEM_TYPE -> loadCollection().join()
+        }
+    }
+
+    /**
+     * docs/11 §Collection: loads members, Series season counts and the Play target in one state
+     * write so the pill never shows before its subtext resolves; a newer load cancels an older.
+     * Fails open: on a throw [DetailUiState.membersSettled] flips with whatever was loaded before.
+     */
+    private fun loadCollection(): Job {
+        collectionJob?.cancel()
+        return viewModelScope.launch {
+            val members = runCatchingCancellable { gateway.children(card.id, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE) }
+                .getOrNull()?.let { DetailFormatting.dedupeById(it) { member -> member.id } }
+            if (members == null) {
+                _state.update { it.copy(membersSettled = true) }
+                return@launch
+            }
+            val seasonCounts = coroutineScope {
+                members.filter { it.itemType == SERIES_ITEM_TYPE }.map { series ->
+                    async {
+                        val seasons = runCatchingCancellable { gateway.children(series.id, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE) }
+                            .getOrNull()
+                        seasons?.let { series.id to CollectionFormatting.seasonCount(it) }
+                    }
+                }.awaitAll().filterNotNull().toMap()
+            }
+            val play = CollectionFormatting.resolvePlay(members, previous = _state.value.collectionPlay) { series ->
+                runCatchingCancellable { gateway.seriesEpisodes(series.id) }.getOrNull()
+            }
+            _state.update { it.copy(members = members, membersSettled = true, memberSeasonCounts = seasonCounts, collectionPlay = play) }
+        }.also { collectionJob = it }
+    }
+
+    /** The Play pill: starts [DetailUiState.collectionPlay] through the shared playback hand-off. */
+    fun playCollection() {
+        val play = _state.value.collectionPlay ?: return
+        startPlayback(play.targetId, play.fromStart)
     }
 
     /** Fails open (docs/11 item 1): a throw leaves [DetailUiState.itemDetail] `null` forever. */
@@ -277,7 +341,7 @@ class DetailViewModel(
      * containment check against known ids, falling open (refetches) when nothing is known yet.
      */
     private fun affectsThisDetail(event: ChangeEvent): Boolean {
-        if (card.itemType != SERIES_ITEM_TYPE) {
+        if (card.itemType != SERIES_ITEM_TYPE && card.itemType != BOXSET_ITEM_TYPE) {
             return when (event) {
                 is ChangeEvent.Upserted -> card.id in event.ids
                 ChangeEvent.Refresh -> true
@@ -300,6 +364,9 @@ class DetailViewModel(
         state.seasons.mapTo(ids) { it.id }
         state.episodes.mapTo(ids) { it.id }
         state.allEpisodes.mapTo(ids) { it.id }
+        state.members.mapTo(ids) { it.id }
+        // A Series member's target episode: watched elsewhere, it must move the pill on.
+        state.collectionPlay?.episode?.let { ids += it.id }
         return ids
     }
 

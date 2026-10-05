@@ -4,12 +4,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.ui.common.ChangeRefreshScheduler
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -24,6 +29,7 @@ import uniffi.jellybeam_core.GridSort
 import uniffi.jellybeam_core.GridSortField
 import uniffi.jellybeam_core.LibraryGridPrefs
 import uniffi.jellybeam_core.LiveSort
+import uniffi.jellybeam_core.SortOrder
 import uniffi.jellybeam_core.StatusFilter
 import uniffi.jellybeam_core.ViewKind
 import uniffi.jellybeam_core.ViewSnapshot
@@ -101,6 +107,73 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
         const val PAGE_SIZE = 200
     }
 
+    /**
+     * Members per BoxSet id, loaded lazily per visible card (docs/07 §Collection card): the stack
+     * draws the first three, the badge counts all of them as the collection page does.
+     */
+    private val collectionPreviews = MutableStateFlow<Map<String, List<Card>>>(emptyMap())
+
+    /** Ids already asked for, so a recycled cell never re-queries; main-thread only. */
+    private val previewRequested = mutableSetOf<String>()
+
+    /** Previews a change event touched since the last refresh; main-thread only. */
+    private val dirtyPreviews = mutableSetOf<String>()
+    private var allPreviewsDirty = false
+
+    /** `null` until [loadCollectionPreview] lands for [collectionId]. */
+    fun collectionPreview(collectionId: String): Flow<List<Card>?> =
+        collectionPreviews.map { it[collectionId] }.distinctUntilChanged()
+
+    /** Fire-and-forget mirror read of a collection's members, in server display order. */
+    fun loadCollectionPreview(collectionId: String) {
+        if (!previewRequested.add(collectionId)) return
+        viewModelScope.launch { readCollectionPreview(collectionId) }
+    }
+
+    private suspend fun readCollectionPreview(collectionId: String) {
+        val members = runCatchingCancellable {
+            gateway.children(collectionId, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE)
+        }.getOrNull()
+        if (members == null) {
+            previewRequested.remove(collectionId)
+        } else {
+            collectionPreviews.update { it + (collectionId to members) }
+        }
+    }
+
+    /** Marks the previews [event] can change: its ids name the collection or one of its members. */
+    private fun markPreviewsDirty(event: ChangeEvent) {
+        val ids = when (event) {
+            is ChangeEvent.Upserted -> event.ids
+            is ChangeEvent.Removed -> event.ids
+            ChangeEvent.Refresh, ChangeEvent.ViewsChanged -> {
+                allPreviewsDirty = true
+                return
+            }
+        }.toSet()
+        collectionPreviews.value.forEach { (collectionId, members) ->
+            if (collectionId in ids || members.any { it.id in ids }) dirtyPreviews += collectionId
+        }
+    }
+
+    /**
+     * Re-reads the previews a change touched, and drops those whose collection left the grid so
+     * the cache never outgrows what the grid holds.
+     */
+    private suspend fun refreshCollectionPreviews() {
+        val onGrid = _state.value.items.mapTo(mutableSetOf()) { it.id }
+        val held = collectionPreviews.value.keys
+        val gone = held - onGrid
+        if (gone.isNotEmpty()) {
+            collectionPreviews.update { it - gone }
+            previewRequested -= gone
+        }
+        val stale = (if (allPreviewsDirty) held else dirtyPreviews.toSet()) - gone
+        allPreviewsDirty = false
+        dirtyPreviews.clear()
+        stale.forEach { readCollectionPreview(it) }
+    }
+
     private val _state = MutableStateFlow(LibraryUiState())
     val state: StateFlow<LibraryUiState> = _state.asStateFlow()
 
@@ -141,9 +214,12 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
         } else {
             ChangeRefreshScheduler(
                 scope = viewModelScope,
-                events = gateway.changeEvents().filter(::affectsThisLibrary),
+                events = gateway.changeEvents().onEach(::markPreviewsDirty).filter(::affectsThisLibrary),
                 active = _active.asStateFlow(),
-                refresh = { refresh(reloadGenres = true) },
+                refresh = {
+                    refresh(reloadGenres = true)
+                    refreshCollectionPreviews()
+                },
             )
         }
 
@@ -177,7 +253,10 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
         }
     }
 
-    private fun currentItemIds(): Set<String> = _state.value.items.mapTo(mutableSetOf()) { it.id }
+    /** A collection grid also watches its cards' members, whose watched state the stacks show. */
+    private fun currentItemIds(): Set<String> = _state.value.items.mapTo(mutableSetOf()) { it.id }.apply {
+        collectionPreviews.value.values.forEach { members -> members.mapTo(this) { it.id } }
+    }
 
     /**
      * Result of one three-query library read ([CoreGateway.libraryGrid], [libraryGridCounts],

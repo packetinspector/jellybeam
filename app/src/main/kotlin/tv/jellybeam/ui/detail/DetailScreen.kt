@@ -148,7 +148,7 @@ private const val EPISODE_ITEM_TYPE = "Episode"
 private const val SPECIALS_SEASON_NAME = "Specials"
 
 /** §0's shared safe area, matching Home's own updated `PAGE_MARGIN`. */
-private val PAGE_MARGIN = 40.dp
+internal val PAGE_MARGIN = 40.dp
 
 private val EPISODE_BACKDROP_HEIGHT = 350.dp
 private val SERIES_BACKDROP_HEIGHT = 330.dp
@@ -161,7 +161,7 @@ private val HERO_POSTER_RADIUS = 4.dp
 private val HERO_POSTER_GAP = 26.dp
 
 // docs/23-detail-layout-rules.md Rule 2: one title clamp shared by all three screens.
-private val DETAIL_TITLE_STYLE = TextStyle(
+internal val DETAIL_TITLE_STYLE = TextStyle(
     fontFamily = JellybeamTheme.Archivo,
     fontWeight = FontWeight.ExtraBold,
     color = JellybeamTheme.Panna,
@@ -345,6 +345,7 @@ fun DetailScreen(
         when (card.itemType) {
             EPISODE_ITEM_TYPE -> EpisodeDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
             SERIES_ITEM_TYPE -> SeriesDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
+            CollectionFormatting.BOXSET_ITEM_TYPE -> CollectionDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
             else -> MovieDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
         }
 
@@ -1416,7 +1417,7 @@ private fun SeasonChip(
 // docs/19 §1.5 FIX D: "slice before render", not clipping -- while the panel is open, a below-fold
 // LazyRow must show only whole cards. [CardWindow] is the sliced view a shelf renders;
 // [rememberCardWindow] is how each shelf builds one.
-private class CardWindow<T>(val items: List<T>, val startIndex: Int)
+internal class CardWindow<T>(val items: List<T>, val startIndex: Int)
 
 /**
  * [active] false: the identity window, no slicing. [active] true: [startIndex] is latched once at
@@ -1426,7 +1427,7 @@ private class CardWindow<T>(val items: List<T>, val startIndex: Int)
  * since [contentWidth] itself is what's animating.
  */
 @Composable
-private fun <T> rememberCardWindow(
+internal fun <T> rememberCardWindow(
     items: List<T>,
     listState: LazyListState,
     contentWidth: Dp,
@@ -1447,8 +1448,10 @@ private fun <T> rememberCardWindow(
         cardWidthDp = cardWidth.value,
         gapDp = gap.value,
     )
-    val endIndex = (startIndex + visibleCount).coerceAtMost(items.size)
-    return CardWindow(items.subList(startIndex, endIndex), startIndex)
+    // The latch outlives a refresh, so a list that shrank mid-open clamps it rather than invert the slice.
+    val start = startIndex.coerceAtMost(items.size)
+    val endIndex = (start + visibleCount).coerceAtMost(items.size)
+    return CardWindow(items.subList(start, endIndex), start)
 }
 
 /** §3 item 7's season episode shelf: a horizontal, per-season row of [EpisodeGridCard]s (not a
@@ -2113,7 +2116,7 @@ private fun SynopsisPanel(
  * flat panel with no text instead, same special-case [HeroPoster] uses.
  */
 @Composable
-private fun DetailBackdropImage(card: Card, artSource: ArtSource, height: Dp, modifier: Modifier = Modifier) {
+internal fun DetailBackdropImage(card: Card, artSource: ArtSource, height: Dp, modifier: Modifier = Modifier) {
     val density = LocalDensity.current
     BoxWithConstraints(modifier = modifier.fillMaxWidth().height(height)) {
         // Captured into a local val before use inside the nested remember{} lambda:
@@ -2191,7 +2194,7 @@ private fun HeroPoster(card: Card, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun EyebrowText(text: String, modifier: Modifier = Modifier) {
+internal fun EyebrowText(text: String, modifier: Modifier = Modifier) {
     BasicText(
         text = text,
         maxLines = 1,
@@ -2480,7 +2483,7 @@ private fun CastPortrait(person: PersonInfo, memory: FocusMemory, key: String, s
 private val SIMILAR_ROW_FADE_HEIGHT = POSTER_CELL_WIDTH * 1.5f + 40.dp
 
 // docs/19 §1.5 FIX D: this row's own card width + gap, for [rememberCardWindow].
-private val SIMILAR_CARD_GAP = 16.dp
+internal val SIMILAR_CARD_GAP = 16.dp
 
 /** The "Similar Titles" rail (Series and Movie only -- an Episode page never fetches it, see
  * [DetailViewModel]).
@@ -2525,7 +2528,7 @@ private fun SimilarRow(
 }
 
 /** docs/10 `detail.focus`: one mark per push, on the first focus gain. */
-private fun markDetailFocusOnce(marked: BooleanArray, state: FocusState) {
+internal fun markDetailFocusOnce(marked: BooleanArray, state: FocusState) {
     if (state.hasFocus && !marked[0]) {
         marked[0] = true
         PerfLog.markDetailPhase("detail.focus")

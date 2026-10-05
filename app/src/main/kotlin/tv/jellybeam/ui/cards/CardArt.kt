@@ -554,7 +554,7 @@ fun BoxScope.WatchProgressBar(fraction: Float) {
 @Composable
 fun BoxScope.WatchBadge(indicator: WatchIndicator) {
     when (indicator) {
-        is WatchIndicator.UnplayedCount -> Box(
+        is WatchIndicator.Count -> Box(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(4.dp)

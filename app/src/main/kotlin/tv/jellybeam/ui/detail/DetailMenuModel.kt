@@ -15,6 +15,7 @@ import uniffi.jellybeam_core.CollectionInfo
 
 private const val SERIES_ITEM_TYPE = "Series"
 private const val EPISODE_ITEM_TYPE = "Episode"
+private const val BOXSET_ITEM_TYPE = "BoxSet"
 
 enum class MenuGroup { THIS_TITLE, PLAYBACK, LIBRARY }
 
@@ -106,6 +107,8 @@ fun buildMenu(input: MenuInput): MenuModel {
             firstRowMatching { it is MenuAction.MarkScopeWatched }
         }
         EPISODE_ITEM_TYPE -> firstRowMatching { it is MenuAction.PlayFromBeginning }
+        // docs/19 §Collection: no mark/play rows, so the first row (favorite) takes focus.
+        BOXSET_ITEM_TYPE -> null
         else -> when {
             hasProgress -> firstRowMatching { it is MenuAction.PlayFromBeginning }
             !input.card.played -> MenuAction.MarkWatched
@@ -137,7 +140,7 @@ private fun buildThisTitleRows(input: MenuInput): List<MenuRow> {
                 subtext = countLabel(watchedCount, "EPISODE", "EPISODES"),
             )
         }
-    } else {
+    } else if (input.itemType != BOXSET_ITEM_TYPE) {
         rows += if (input.card.played) {
             MenuRow(MenuAction.MarkUnwatched, "Mark as unwatched", null)
         } else {
@@ -159,6 +162,8 @@ private fun buildThisTitleRows(input: MenuInput): List<MenuRow> {
 
 private fun buildPlaybackRows(input: MenuInput): List<MenuRow> {
     val rows = mutableListOf<MenuRow>()
+    // docs/19 §Collection: a collection plays from its page's pill, never from the menu.
+    if (input.itemType == BOXSET_ITEM_TYPE) return rows
     if (input.itemType == SERIES_ITEM_TYPE) {
         val isSeason = input.scopeSeason != null
         val scopeEpisodes = (if (isSeason) input.scopeEpisodes else input.allEpisodes).filterNot { it.isVirtual }
@@ -213,7 +218,8 @@ private fun buildLibraryRows(input: MenuInput): List<MenuRow> {
         rows += MenuRow(MenuAction.GoToSeries(input.seriesCard), "Go to series", input.seriesCard.name)
     }
     val isSeasonScope = input.itemType == SERIES_ITEM_TYPE && input.scopeSeason != null
-    if (!isSeasonScope && input.hasCollections) {
+    // docs/19 §Collection: adding a collection to a collection is not offered.
+    if (!isSeasonScope && input.hasCollections && input.itemType != BOXSET_ITEM_TYPE) {
         rows += MenuRow(MenuAction.AddToCollection, "Add to collection", null)
     }
     if (input.isAdministrator) {

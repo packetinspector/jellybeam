@@ -8,7 +8,10 @@ import tv.jellybeam.ui.cards.testCard
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -1008,5 +1011,83 @@ class LibraryViewModelTest {
         val viewModel = LibraryViewModel(gateway, view)
 
         assertFalse(viewModel.state.value.prefsLoaded)
+    }
+
+    // -- docs/07 §Collection card: lazy member previews --------------------
+
+    @Test
+    fun `a collection preview loads every member once and caches them by id`() = runTest {
+        val view = ViewSnapshot(id = "boxsets", name = "Collections", kind = ViewKind.LIBRARY)
+        val members = listOf("a", "b", "c", "d").map { testCard(id = it) }
+        val gateway = FakeCoreGateway(libraryGridByView = mapOf("boxsets" to emptyList()), childrenByParent = mapOf("box" to members))
+
+        withLibraryViewModel(gateway, view) { viewModel ->
+            viewModel.loadCollectionPreview("box")
+            viewModel.loadCollectionPreview("box")
+            runCurrent()
+
+            assertEquals(listOf("a", "b", "c", "d"), viewModel.collectionPreview("box").first()?.map { it.id })
+            assertNull(viewModel.collectionPreview("other").first())
+            assertEquals(1, gateway.childrenCalls.count { it.parentId == "box" })
+        }
+    }
+
+    @Test
+    fun `a change to a held member re-reads that collection's preview`() = runTest {
+        val view = ViewSnapshot(id = "boxsets", name = "Collections", kind = ViewKind.LIBRARY)
+        val fake = FakeCoreGateway(
+            libraryGridByView = mapOf("boxsets" to listOf(testCard(id = "box", itemType = "BoxSet"))),
+            childrenByParent = mapOf("box" to listOf(testCard(id = "member"))),
+        )
+        val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = changes
+        }
+
+        withLibraryViewModel(gateway, view) { viewModel ->
+            viewModel.loadCollectionPreview("box")
+            runCurrent()
+            assertEquals(1, fake.childrenCalls.count { it.parentId == "box" })
+
+            // The member lives in another library, so only its preview membership ties it here.
+            changes.tryEmit(ChangeEvent.Upserted(ids = listOf("member"), libraryId = "films"))
+            runCurrent()
+
+            assertEquals(2, fake.childrenCalls.count { it.parentId == "box" })
+        }
+    }
+
+    @Test
+    fun `a change re-reads only the stacks it touches and drops stacks that left the grid`() = runTest {
+        val view = ViewSnapshot(id = "boxsets", name = "Collections", kind = ViewKind.LIBRARY)
+        val grid = mutableListOf(testCard(id = "boxA", itemType = "BoxSet"), testCard(id = "boxB", itemType = "BoxSet"))
+        val fake = FakeCoreGateway(
+            libraryGridByView = mapOf("boxsets" to grid),
+            childrenByParent = mapOf("boxA" to listOf(testCard(id = "a1")), "boxB" to listOf(testCard(id = "b1"))),
+        )
+        val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = changes
+        }
+
+        withLibraryViewModel(gateway, view) { viewModel ->
+            viewModel.loadCollectionPreview("boxA")
+            viewModel.loadCollectionPreview("boxB")
+            runCurrent()
+
+            changes.tryEmit(ChangeEvent.Upserted(ids = listOf("a1"), libraryId = "films"))
+            runCurrent()
+            assertEquals(2, fake.childrenCalls.count { it.parentId == "boxA" })
+            assertEquals(1, fake.childrenCalls.count { it.parentId == "boxB" })
+
+            // boxB leaves the grid: a full refresh re-reads boxA and evicts boxB's members.
+            fake.libraryGridByView = mapOf("boxsets" to grid.take(1))
+            advanceTimeBy(1_000)
+            changes.tryEmit(ChangeEvent.Refresh)
+            advanceUntilIdle()
+            assertEquals(3, fake.childrenCalls.count { it.parentId == "boxA" })
+            assertEquals(1, fake.childrenCalls.count { it.parentId == "boxB" })
+            assertNull(viewModel.collectionPreview("boxB").first())
+        }
     }
 }

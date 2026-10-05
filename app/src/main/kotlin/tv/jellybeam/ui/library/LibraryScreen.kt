@@ -67,7 +67,9 @@ import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
 import tv.jellybeam.ui.cards.CardFormatting
+import tv.jellybeam.ui.cards.CollectionStackCard
 import tv.jellybeam.ui.cards.PosterCard
+import tv.jellybeam.ui.detail.CollectionFormatting
 import tv.jellybeam.ui.cards.PreloadOnDwell
 import tv.jellybeam.ui.focus.FocusRestorer
 import tv.jellybeam.ui.focus.RefreshRestoreOwner
@@ -508,14 +510,29 @@ fun LibraryScreen(
                         cellModifier = cellModifier.focusRequester(initialFocusRequester)
                     }
 
-                    PosterCard(
-                        card = card,
-                        isFocused = isFocused,
-                        imageUrl = { itemId, kind, tag -> AppGraph.gateway.imageUrl(itemId, kind, tag, cellImageWidth) },
-                        onClick = { onOpenDetail(card) },
-                        modifier = cellModifier,
-                        width = cellWidth,
-                    )
+                    if (card.itemType == CollectionFormatting.BOXSET_ITEM_TYPE) {
+                        // docs/07 §Collection card: members load per visible cell, never blocking.
+                        val members by remember(card.id) { viewModel.collectionPreview(card.id) }.collectAsState(initial = null)
+                        LaunchedEffect(card.id) { viewModel.loadCollectionPreview(card.id) }
+                        CollectionStackCard(
+                            card = card,
+                            members = members,
+                            isFocused = isFocused,
+                            imageUrl = { itemId, kind, tag -> AppGraph.gateway.imageUrl(itemId, kind, tag, cellImageWidth) },
+                            onClick = { onOpenDetail(card) },
+                            modifier = cellModifier,
+                            width = cellWidth,
+                        )
+                    } else {
+                        PosterCard(
+                            card = card,
+                            isFocused = isFocused,
+                            imageUrl = { itemId, kind, tag -> AppGraph.gateway.imageUrl(itemId, kind, tag, cellImageWidth) },
+                            onClick = { onOpenDetail(card) },
+                            modifier = cellModifier,
+                            width = cellWidth,
+                        )
+                    }
                 }
             }
         }

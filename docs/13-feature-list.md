@@ -51,6 +51,16 @@ DTS:X suffix in the accent tier when the default track is object-based, read
 from the server's spatial-format field or, on servers that only say so in the
 stream profile, from there -- and a fixed-width cast row --
 nothing overlaps however long the title, synopsis, or a cast name runs);
+collections are first-class: in the Collections library each collection is a
+stacked card (its poster, or the first member's, with the next two fanned
+behind it, an item-count badge, `N UNPLAYED` / `ALL WATCHED`
+caption), and opens a collection page -- full-bleed backdrop (the collection's
+or the first member's), `COLLECTION` eyebrow, name, `N ITEMS | N WATCHED |
+years` line, a Play pill that continues with the first unwatched member (a
+series continues at its next episode; `Play again` once everything is watched)
+with the target and runtime or S·E underneath, and one row of member posters
+in server order with watched checks, an `UP NEXT` tag and `Series · N seasons`
+or `year · runtime` captions (docs/11 §Collection, docs/07 §2);
 a `···` action panel at position two of every detail page's button row
 (a 330dp side panel that pushes the page column over rather than covering
 it; This title / Playback / Library groups under heading bands, never

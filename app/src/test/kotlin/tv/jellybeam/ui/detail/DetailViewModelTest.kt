@@ -1096,4 +1096,61 @@ class DetailViewModelTest {
             assertEquals("series-1", viewModel.state.value.pendingSeriesNavigation?.id)
         }
     }
+
+    // -- docs/11 §Collection: BoxSet members, play target ------------------
+
+    @Test
+    fun `a collection loads its members in order with series season counts and a play target`() = runTest {
+        val box = testCard(id = "box", itemType = "BoxSet")
+        val show = testCard(id = "show", itemType = "Series", name = "Show", unplayedCount = 2)
+        val film = testCard(id = "film", itemType = "Movie")
+        val gateway = FakeCoreGateway(
+            childrenByParent = mapOf(
+                "box" to listOf(show, film),
+                "show" to listOf(
+                    testCard(id = "s1", itemType = "Season", indexNumber = 1),
+                    testCard(id = "s2", itemType = "Season", indexNumber = 2),
+                ),
+            ),
+            seriesEpisodesBySeriesId = mapOf(
+                "show" to listOf(
+                    testCard(id = "e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true),
+                    testCard(id = "e2", itemType = "Episode", parentIndexNumber = 1, indexNumber = 2),
+                ),
+            ),
+        )
+
+        withDetailViewModel(DetailViewModel(gateway, box)) { viewModel ->
+            val state = viewModel.state.value
+            assertEquals(listOf("show", "film"), state.members.map { it.id })
+            assertTrue(state.membersSettled)
+            assertEquals(mapOf("show" to 2), state.memberSeasonCounts)
+            val play = state.collectionPlay!!
+            assertEquals("show", play.member.id)
+            assertEquals("e2", play.targetId)
+        }
+    }
+
+    @Test
+    fun `playing a collection hands the target to the shared playback hand-off`() = runTest {
+        val box = testCard(id = "box", itemType = "BoxSet")
+        val gateway = FakeCoreGateway(
+            childrenByParent = mapOf("box" to listOf(testCard(id = "a", played = true), testCard(id = "b", played = true))),
+        )
+
+        withDetailViewModel(DetailViewModel(gateway, box)) { viewModel ->
+            viewModel.playCollection()
+            assertEquals(PendingPlayback("a", startFromBeginning = true), viewModel.state.value.pendingPlayback)
+        }
+    }
+
+    @Test
+    fun `an empty collection settles with no play target`() = runTest {
+        val box = testCard(id = "box", itemType = "BoxSet")
+
+        withDetailViewModel(DetailViewModel(FakeCoreGateway(), box)) { viewModel ->
+            assertTrue(viewModel.state.value.membersSettled)
+            assertNull(viewModel.state.value.collectionPlay)
+        }
+    }
 }

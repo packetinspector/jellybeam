@@ -450,4 +450,42 @@ class DetailMenuModelTest {
         val other = buildMenu(seriesInput(allEpisodes = allEpisodes, highlightedSeasonNumber = 3))
         assertEquals("S1 E2", other.rowsOf(MenuGroup.PLAYBACK).first { it.action is MenuAction.PlayNextUnwatched }.subtext)
     }
+
+    // -- docs/19 §Collection: the BoxSet scope -----------------------------
+
+    private fun boxSetInput(isFavorite: Boolean = false, hasCollections: Boolean = true, isAdministrator: Boolean = false): MenuInput {
+        val card = testCard(id = "box-1", itemType = "BoxSet")
+        return MenuInput(
+            card = card,
+            itemType = "BoxSet",
+            scopeSeason = null,
+            scopeEpisodes = emptyList(),
+            allEpisodes = emptyList(),
+            primaryAction = DetailFormatting.resolvePrimaryAction(card, emptyList()),
+            isFavorite = isFavorite,
+            hasCollections = hasCollections,
+            isAdministrator = isAdministrator,
+            seriesCard = null,
+        )
+    }
+
+    @Test
+    fun `a collection offers only the favorite toggle for a regular user`() {
+        val menu = buildMenu(boxSetInput())
+        assertEquals(listOf(MenuAction.AddFavorite), menu.groups.flatMap { it.rows }.map { it.action })
+        assertNull(menu.focusOn)
+    }
+
+    @Test
+    fun `a collection flips to Remove from favorites and never offers watched marks, play rows or Add to collection`() {
+        val actions = buildMenu(boxSetInput(isFavorite = true, hasCollections = true)).groups.flatMap { it.rows }.map { it.action }
+        assertEquals(listOf(MenuAction.RemoveFavorite), actions)
+    }
+
+    @Test
+    fun `a collection adds Refresh metadata for an administrator only`() {
+        val admin = buildMenu(boxSetInput(isAdministrator = true)).groups.flatMap { it.rows }.map { it.action }
+        assertEquals(listOf(MenuAction.AddFavorite, MenuAction.RefreshMetadata), admin)
+        assertFalse(buildMenu(boxSetInput(isAdministrator = false)).has(MenuGroup.LIBRARY))
+    }
 }

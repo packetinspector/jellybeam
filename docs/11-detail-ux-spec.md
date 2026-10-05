@@ -156,6 +156,41 @@ it, ranked by contribution to "feels like Jellybeam".
   feature with no place in a fixed 1080p layout; pick one layout.
 - Keep fixed per-zone text budgets (~68-char measures) so rows always align.
 
+## Collection (BoxSet) page
+
+A Jellyfin collection opens its own page (`CollectionDetailScreen`), not the
+movie layout. Members come from the mirror in the server's display order
+(`children(boxSetId, ...)`); every rule below is a pure function in
+`CollectionFormatting`.
+
+- Full-bleed backdrop under the standard detail scrim: the collection's own,
+  else the first member that has a backdrop (a Series member's own backdrop).
+- Mono-caps eyebrow `COLLECTION`; title is the server name, verbatim; meta line
+  `N ITEMS | N WATCHED | min–max year` over the members (one year when equal,
+  segment omitted when no member has one; the collection's own year is ignored).
+- Primary pill `Play` with a subtext line, then the `···` door. Target, in the
+  series page's order: the first member part-way through, else the first not
+  fully watched (Movie/Episode: not played or resuming; Series: unplayed
+  episodes left). Only real (non-virtual) movies, episodes, videos, music videos
+  and series qualify; a nested collection, album or book never does. A Series
+  with no episode yields to the next candidate, and one whose episodes fail to
+  load keeps the pill's previous target only if that was the same series. A Series target plays
+  the series page's own next episode (first with progress, else first unplayed)
+  and reads `<series> · S2 E6`; a movie reads `<name> · <runtime>`. A target with a
+  saved position reads `Resume` (a movie's line shows `<name> · 53m left`). Everything
+  watched: the pill reads `Play again` and starts member 0 from the beginning.
+  An empty collection has no pill.
+- One horizontal row of member posters in server order: watched check on
+  watched members, an `UP NEXT` tag on the Play target, caption
+  `Series · N seasons` (Specials not counted) or `YEAR · 1h 42m`. Select opens
+  the member's own page.
+- Focus: lands on Play (the door when there is no pill); Up from the row
+  returns to Play, never the nearer door; Down reaches the row,
+  which remembers its last card like the other detail rows; Back restores it
+  (docs/15).
+- The `···` menu holds only the favorite toggle and, for administrators,
+  Refresh metadata (docs/19 §1.1).
+
 ## Deliberate NON-features (do not "fix" these)
 
 ~~Favorite toggle, Played toggle~~ (both are features on TV now: the
