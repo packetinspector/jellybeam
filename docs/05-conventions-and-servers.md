@@ -77,7 +77,9 @@ adb shell am start -a android.intent.action.VIEW \
   -p tv.jellybeam -d 'jellybeam://play/<item-id>'
 ```
 
-The exported entry point accepts only path-safe Jellyfin item identifiers. It
+The exported entry point accepts only path-safe Jellyfin item identifiers; a
+UUID in any spelling (undashed, upper case) is canonicalized to the dashed
+lowercase form, so it plays exactly as the same item started from the UI. It
 does not accept a server URL, token, account selector, transcode option, or media
 URL. Jellybeam restores the active session and opens its mirror before a cold-start
 request is dispatched; when signed out, it stays on Sign In and reports that an

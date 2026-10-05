@@ -181,22 +181,29 @@ impl TryFrom<&jellyfin_api::models::BaseItemDto> for Card {
                 .and_then(|hashes| hashes.primary.get(tag).cloned())
         });
         let user_data = dto.user_data.as_ref();
+        let item_type = dto
+            .type_
+            .map_or_else(|| "Unknown".to_string(), |t| t.to_string());
+        // docs/07 §1: the same grace windows mirror-backed cards get.
+        let (position_ticks, played) = media_cache::watch_grace::displayed_watch_state(
+            &item_type,
+            user_data
+                .and_then(|u| u.playback_position_ticks)
+                .unwrap_or(0),
+            dto.run_time_ticks,
+            user_data.and_then(|u| u.played).unwrap_or(false),
+        );
 
         Ok(Card {
             id,
-            item_type: dto
-                .type_
-                .map(|t| t.to_string())
-                .unwrap_or_else(|| "Unknown".to_string()),
+            item_type,
             name: dto.name.clone().unwrap_or_default(),
             primary_tag,
             backdrop_tag,
             thumb_tag,
             blurhash,
-            played: user_data.and_then(|u| u.played).unwrap_or(false),
-            position_ticks: user_data
-                .and_then(|u| u.playback_position_ticks)
-                .unwrap_or(0),
+            played,
+            position_ticks,
             runtime_ticks: dto.run_time_ticks,
             unplayed_count: user_data.and_then(|u| u.unplayed_item_count).map(i64::from),
             production_year: dto.production_year,
@@ -2440,11 +2447,11 @@ mod tests {
             type_: Some(jellyfin_api::models::BaseItemKind::Movie),
             image_tags,
             backdrop_image_tags: vec!["backdrop-tag".to_string()],
-            run_time_ticks: Some(6_000_000_000),
+            run_time_ticks: Some(72_000_000_000),
             production_year: Some(2020),
             user_data: Some(jellyfin_api::models::UserItemDataDto {
                 played: Some(true),
-                playback_position_ticks: Some(1234),
+                playback_position_ticks: Some(36_000_000_000),
                 key: Some("k".to_string()),
                 item_id: None,
                 last_played_date: None,
@@ -2463,10 +2470,10 @@ mod tests {
         assert_eq!(card.name, "Sample Movie");
         assert_eq!(card.primary_tag.as_deref(), Some("primary-tag"));
         assert_eq!(card.backdrop_tag.as_deref(), Some("backdrop-tag"));
-        assert_eq!(card.runtime_ticks, Some(6_000_000_000));
+        assert_eq!(card.runtime_ticks, Some(72_000_000_000));
         assert_eq!(card.production_year, Some(2020));
         assert!(card.played);
-        assert_eq!(card.position_ticks, 1234);
+        assert_eq!(card.position_ticks, 36_000_000_000);
         assert_eq!(card.library_id, None);
     }
 

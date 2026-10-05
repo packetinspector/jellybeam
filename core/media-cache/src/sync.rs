@@ -246,6 +246,7 @@ pub(crate) fn spawn(
             // After everything Home's first frames need, before the long delta/reconcile work.
             with_upgraded!(startup_weak, |s| {
                 ensure_index_group(&s, IndexGroup::Favorites).await;
+                ensure_index_group(&s, IndexGroup::Resume).await;
             });
 
             // Delta before reconcile, at every trigger: delta is the fast path (new/updated
@@ -1903,6 +1904,7 @@ async fn reconcile_timer(state: Weak<MirrorState>) {
         reconcile_all(&state).await;
         // Retries a startup build that failed.
         ensure_index_group(&state, IndexGroup::Favorites).await;
+        ensure_index_group(&state, IndexGroup::Resume).await;
         sync_favorites(&state).await;
     }
 }

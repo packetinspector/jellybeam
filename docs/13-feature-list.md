@@ -21,7 +21,9 @@ session resolves.
 **Browsing & library** — mirror-backed instant browse everywhere (local SQLite
 mirror, no server round-trip for navigation); Home shelves (resume, next-up,
 favorites, latest, per-library visibility; a user-set shelf size caps every row,
-and Next Up never repeats a Continue Watching title; an opt-in setting draws
+and Next Up never repeats a Continue Watching title; grace windows keep a
+2-minute sample out of Continue Watching and count a stop in the credits (last
+10 min of a movie, last 2 min of anything else) as watched, Next Up included; an opt-in setting draws
 Continue Watching and Next Up as spoiler-free posters instead of thumbnails); Favorites (docs/16 §2.7):
 a Home row of your favorite movies, shows, seasons, episodes and collections,
 most recently played first, and a Favorites page under Home in the drawer while
@@ -197,6 +199,7 @@ available, genres, director/writer, studio, and runtime); one unified track-sele
 audio/subtitle picker;
 external playback orchestration through an exported PLAY intent or
 `jellybeam://play/&lt;item-id&gt;` deep link (active server/account, resume semantics,
+any UUID spelling treated as the same item the UI plays,
 with an on-demand server lookup when the mirror has not cached the item yet);
 focus-dwell preload: sustained focus on a playable Home/hero/library-grid/episode
 card—or reaching its high-intent Play/Resume action—prefetches the playback

@@ -56,11 +56,24 @@ object ExternalPlaybackContract {
     ): ExternalPlaybackIntentResult {
         val itemId = rawItemId?.trim().orEmpty()
         return if (ITEM_ID.matches(itemId)) {
-            build(itemId)
+            build(canonicalItemId(itemId))
         } else {
             ExternalPlaybackIntentResult.Invalid
         }
     }
+
+    /** A UUID in any spelling Jellyfin hands out becomes the mirror's dashed lowercase form, so an
+     * external start is the same item the UI would play; any other id passes through.
+     */
+    internal fun canonicalItemId(itemId: String): String {
+        if (!UUID_HEX.matches(itemId) && !DASHED_UUID.matches(itemId)) return itemId
+        val lower = itemId.replace("-", "").lowercase()
+        return "${lower.substring(0, 8)}-${lower.substring(8, 12)}-${lower.substring(12, 16)}-" +
+            "${lower.substring(16, 20)}-${lower.substring(20)}"
+    }
+
+    private val UUID_HEX = Regex("[0-9A-Fa-f]{32}")
+    private val DASHED_UUID = Regex("[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 
     // Jellyfin BaseItemIds are UUID-like; restricting to path-safe characters also rejects
     // accidental URLs, shell quoting mistakes, controls, and encoded path separators.

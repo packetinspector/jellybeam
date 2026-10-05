@@ -10,6 +10,7 @@ mod query;
 mod rows;
 mod schema;
 mod sync;
+pub mod watch_grace;
 mod writer;
 
 /// Maps a view's `collection_type` to the root `item_type`(s) whose `date_created` reflects

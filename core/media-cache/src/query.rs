@@ -23,16 +23,25 @@ const CARD_COLUMNS: &str = "id, item_type, name, primary_tag, primary_blurhash, 
      premiere_date, is_virtual, series_name, library_id, backdrop_tag, thumb_tag, \
      is_favorite";
 
+/// Watch state leaves the mirror already graced (docs/07 §1), so every browse surface agrees.
 fn row_to_card(row: &Row<'_>) -> rusqlite::Result<CardRow> {
+    let item_type: String = row.get(1)?;
+    let runtime_ticks = row.get(7)?;
+    let (position_ticks, played) = crate::watch_grace::displayed_watch_state(
+        &item_type,
+        row.get(6)?,
+        runtime_ticks,
+        row.get(5)?,
+    );
     Ok(CardRow {
         id: row.get(0)?,
-        item_type: row.get(1)?,
+        item_type,
         name: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
         primary_tag: row.get(3)?,
         blurhash: row.get(4)?,
-        played: row.get(5)?,
-        position_ticks: row.get(6)?,
-        runtime_ticks: row.get(7)?,
+        played,
+        position_ticks,
+        runtime_ticks,
         unplayed_count: row.get(8)?,
         production_year: row.get(9)?,
         index_number: row.get(10)?,
@@ -705,14 +714,15 @@ pub(crate) fn favorite_item_types(conn: &Connection) -> Vec<String> {
     })
 }
 
+/// Sorts by server-authoritative `last_played_date`, not the local `updated_at` write clock
+/// (see schema.rs); `updated_at DESC, id` are deterministic tiebreakers. Only rows inside the
+/// grace windows (docs/07 §1) match, read straight off `idx_items_in_progress` once
+/// [`IndexGroup::Resume`](crate::schema::IndexGroup::Resume) is built.
 pub(crate) fn resume(conn: &Connection, limit: u32) -> Vec<CardRow> {
-    // Sorts by server-authoritative `last_played_date`, not the local `updated_at` write
-    // clock (see schema.rs). `NULLS LAST` so a row with no date sorts last. `updated_at
-    // DESC, id` are deterministic tiebreakers matching `idx_items_resume_by_last_played`'s
-    // column order, so this stays index-served.
     let sql = format!(
-        "SELECT {CARD_COLUMNS} FROM items WHERE playback_position_ticks > 0 \
-         ORDER BY last_played_date DESC NULLS LAST, updated_at DESC, id ASC LIMIT ?1"
+        "SELECT {CARD_COLUMNS} FROM items WHERE {} \
+         ORDER BY last_played_date DESC NULLS LAST, updated_at DESC, id ASC LIMIT ?1",
+        crate::watch_grace::in_progress_sql!()
     );
     let result = (|| -> rusqlite::Result<Vec<CardRow>> {
         let mut stmt = conn.prepare_cached(&sql)?;
@@ -1157,26 +1167,27 @@ mod tests {
     #[test]
     fn resume_query_uses_partial_index_not_scan() {
         let (_dir, conn) = open_test_db();
-        // Pins that `resume()`'s `last_played_date DESC, updated_at DESC, id ASC` order
-        // (see its doc comment) is fully served by `idx_items_resume_by_last_played`: a
-        // full walk of that small partial index ("SCAN ... USING INDEX", not "SEARCH")
-        // with no separate sort step, and no full `items` scan.
-        let plan = explain(
-            &conn,
-            "SELECT id FROM items WHERE playback_position_ticks > 0 \
+        // docs/07 §1: once its index group is built, `resume()` reads only Continue Watching's
+        // rows, already in order; before that it walks `idx_items_resume_by_last_played` and
+        // filters. Neither needs a sort step or an `items` scan.
+        let sql = format!(
+            "SELECT id FROM items WHERE {} \
              ORDER BY last_played_date DESC NULLS LAST, updated_at DESC, id ASC LIMIT ?1",
-            params![10u32],
+            crate::watch_grace::in_progress_sql!()
         );
-        assert!(
-            plan.iter()
-                .any(|l| l.contains("idx_items_resume_by_last_played")),
-            "plan: {plan:?}"
-        );
-        assert!(
-            !plan.iter().any(|l| l.contains("TEMP B-TREE")),
-            "must not need a separate sort step -- the index is already in \
-             last_played_date order: plan: {plan:?}"
-        );
+        for index in ["idx_items_in_progress", "idx_items_resume_by_last_played"] {
+            let plan = explain(&conn, &sql, params![10u32]);
+            assert!(
+                plan.iter().any(|l| l.contains(index)),
+                "{index}: plan: {plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|l| l.contains("TEMP B-TREE")),
+                "{index}: plan: {plan:?}"
+            );
+            conn.execute_batch("DROP INDEX IF EXISTS idx_items_in_progress")
+                .expect("drop");
+        }
     }
 
     #[test]
@@ -1738,7 +1749,7 @@ mod tests {
         let mut watched = item_dto(&uuid_n(1), "Watched", None, BaseItemKind::Movie);
         watched.user_data = Some(jellyfin_api::models::UserItemDataDto {
             played: Some(false),
-            playback_position_ticks: Some(1000),
+            playback_position_ticks: Some(10 * MIN),
             play_count: Some(0),
             is_favorite: None,
             unplayed_item_count: None,
@@ -1756,6 +1767,41 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "Watched");
     }
+
+    /// docs/07 §1: rows inside either grace window never reach the shelf, and skipping them
+    /// doesn't shorten it.
+    #[test]
+    fn resume_skips_rows_inside_the_grace_windows_and_still_fills_the_limit() {
+        let (_dir, mut conn) = open_test_db();
+        let dated = |day: u32| Some(format!("2024-01-{day:02}T00:00:00Z").parse().expect("date"));
+        let movie = |n: u8, name: &str, position: i64, day: u32| {
+            let mut dto = item_dto(&uuid_n(n), name, None, BaseItemKind::Movie);
+            dto.run_time_ticks = Some(120 * MIN);
+            dto.user_data = Some(user_data_with_progress(position, dated(day)));
+            dto
+        };
+        apply_upsert_items(
+            &mut conn,
+            &[
+                movie(1, "Barely started", MIN, 9),
+                movie(2, "In the credits", 115 * MIN, 8),
+                movie(3, "Halfway", 60 * MIN, 7),
+                movie(4, "Early", 5 * MIN, 6),
+            ],
+        )
+        .expect("insert");
+
+        let names: Vec<_> = resume(&conn, 2).into_iter().map(|r| r.name).collect();
+        assert_eq!(names, ["Halfway", "Early"]);
+        // Same answer from the fallback walk a not-yet-indexed mirror takes.
+        conn.execute_batch("DROP INDEX idx_items_in_progress")
+            .expect("drop");
+        let names: Vec<_> = resume(&conn, 2).into_iter().map(|r| r.name).collect();
+        assert_eq!(names, ["Halfway", "Early"]);
+    }
+
+    // Resume fixtures sit past the 2-minute start grace (docs/07 §1).
+    use crate::watch_grace::TICKS_PER_MINUTE as MIN;
 
     fn user_data_with_progress(
         position_ticks: i64,
@@ -1785,9 +1831,9 @@ mod tests {
         let newer = "2024-06-01T00:00:00Z".parse().expect("date");
 
         let mut a = item_dto(&uuid_n(1), "A", None, BaseItemKind::Movie);
-        a.user_data = Some(user_data_with_progress(1000, Some(older)));
+        a.user_data = Some(user_data_with_progress(10 * MIN, Some(older)));
         let mut b = item_dto(&uuid_n(2), "B", None, BaseItemKind::Movie);
-        b.user_data = Some(user_data_with_progress(2000, Some(newer)));
+        b.user_data = Some(user_data_with_progress(20 * MIN, Some(newer)));
         apply_upsert_items(&mut conn, &[a.clone(), b.clone()]).expect("insert");
 
         let rows = resume(&conn, 10);
@@ -1807,9 +1853,9 @@ mod tests {
         let newer = "2024-06-01T00:00:00Z".parse().expect("date");
 
         let mut a = item_dto(&uuid_n(1), "A", None, BaseItemKind::Movie);
-        a.user_data = Some(user_data_with_progress(1000, Some(older)));
+        a.user_data = Some(user_data_with_progress(10 * MIN, Some(older)));
         let mut b = item_dto(&uuid_n(2), "B", None, BaseItemKind::Movie);
-        b.user_data = Some(user_data_with_progress(2000, Some(newer)));
+        b.user_data = Some(user_data_with_progress(20 * MIN, Some(newer)));
         apply_upsert_items(&mut conn, &[a.clone(), b.clone()]).expect("insert");
 
         let before = resume(&conn, 10)
@@ -1843,13 +1889,13 @@ mod tests {
         let same = "2024-01-01T00:00:00Z".parse().expect("date");
 
         let mut a = item_dto(&uuid_n(1), "A", None, BaseItemKind::Movie);
-        a.user_data = Some(user_data_with_progress(1000, Some(same)));
+        a.user_data = Some(user_data_with_progress(10 * MIN, Some(same)));
         apply_upsert_items(&mut conn, &[a.clone()]).expect("insert a");
 
         // A short sleep guarantees b's updated_at is strictly later than a's.
         std::thread::sleep(std::time::Duration::from_millis(2));
         let mut b = item_dto(&uuid_n(2), "B", None, BaseItemKind::Movie);
-        b.user_data = Some(user_data_with_progress(2000, Some(same)));
+        b.user_data = Some(user_data_with_progress(20 * MIN, Some(same)));
         apply_upsert_items(&mut conn, &[b.clone()]).expect("insert b");
 
         let rows = resume(&conn, 10);
@@ -1869,15 +1915,15 @@ mod tests {
         let dated = "2024-01-01T00:00:00Z".parse().expect("date");
 
         let mut has_date = item_dto(&uuid_n(1), "Dated", None, BaseItemKind::Movie);
-        has_date.user_data = Some(user_data_with_progress(1000, Some(dated)));
+        has_date.user_data = Some(user_data_with_progress(10 * MIN, Some(dated)));
         let mut null_a = item_dto(&uuid_n(2), "NullA", None, BaseItemKind::Movie);
-        null_a.user_data = Some(user_data_with_progress(500, None));
+        null_a.user_data = Some(user_data_with_progress(5 * MIN, None));
         apply_upsert_items(&mut conn, &[has_date.clone(), null_a.clone()])
             .expect("insert first two");
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         let mut null_b = item_dto(&uuid_n(3), "NullB", None, BaseItemKind::Movie);
-        null_b.user_data = Some(user_data_with_progress(700, None));
+        null_b.user_data = Some(user_data_with_progress(7 * MIN, None));
         apply_upsert_items(&mut conn, &[null_b.clone()]).expect("insert null_b later");
 
         let rows = resume(&conn, 10);

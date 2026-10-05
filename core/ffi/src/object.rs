@@ -1740,12 +1740,7 @@ impl JellybeamCore {
         let series_name = dto.series_name.clone();
         let parent_index_number = dto.parent_index_number;
         let index_number = dto.index_number;
-        let start_ticks = resolved_start_ticks(
-            start_from_beginning,
-            dto.user_data
-                .as_ref()
-                .and_then(|u| u.playback_position_ticks),
-        );
+        let start_ticks = resolved_start_ticks(start_from_beginning, &dto);
 
         let profile =
             build_android_profile_for_quality(&caps, tolerate_mislabeled_levels, &quality);
@@ -2700,12 +2695,7 @@ impl JellybeamCore {
             .ok()?;
         refuse_if_virtual(&request.item_id, &dto).ok()?;
 
-        let start_ticks = resolved_start_ticks(
-            false,
-            dto.user_data
-                .as_ref()
-                .and_then(|u| u.playback_position_ticks),
-        );
+        let start_ticks = resolved_start_ticks(false, &dto);
         let profile = build_android_profile_for_quality(
             &request.caps,
             request.tolerate_mislabeled_levels,
@@ -2840,10 +2830,28 @@ impl JellybeamCore {
             .as_ref()
             .map(|mirror| episode_scope_ids(mirror, &item_id))
             .unwrap_or_default();
+        let finished = mirror.as_ref().is_some_and(|mirror| {
+            stopped_in_end_grace(mirror.card_by_id(&item_id).as_ref(), position_ticks)
+        });
+        // docs/07 §1: stopping in the credits is a finished watch, so the
+        // server marks it played (after Stopped, which would otherwise keep
+        // the position) and Next Up moves on.
+        let mark_client = finished.then(|| self.lock_state().client.clone()).flatten();
         let stop = session.stop(position_ticks);
         let scope_mirror = mirror.clone();
+        let mark_id = item_id.clone();
         self.runtime.spawn(async move {
             stop.await;
+            if let Some(client) = mark_client {
+                match client.mark_played(&mark_id).await {
+                    Ok(data) => {
+                        if let Some(mirror) = &scope_mirror {
+                            mirror.apply_user_data(vec![(mark_id, data)]).await;
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "end-grace mark played failed"),
+                }
+            }
             if let Some(mirror) = scope_mirror.filter(|_| !scope_ids.is_empty()) {
                 mirror.refresh_items(scope_ids).await;
             }
@@ -2857,7 +2865,7 @@ impl JellybeamCore {
             let committed = self.runtime.block_on(mirror.apply_local_user_data_and_wait(
                 &item_id,
                 position_ticks,
-                None,
+                finished.then_some(true),
             ));
             if !committed {
                 tracing::error!(item_id, "final playback state did not commit to the mirror");
@@ -3884,20 +3892,35 @@ fn filter_all_virtual_seasons(
         .collect()
 }
 
+/// docs/07 §1: whether a stop at `position_ticks` falls in the item's end
+/// grace window; an item the mirror doesn't know is never finished early.
+fn stopped_in_end_grace(row: Option<&media_cache::CardRow>, position_ticks: i64) -> bool {
+    row.is_some_and(|row| {
+        media_cache::watch_grace::watch_state(&row.item_type, position_ticks, row.runtime_ticks)
+            == media_cache::watch_grace::WatchState::Watched
+    })
+}
+
 /// The pure half of [`JellybeamCore::prepare_playback`]'s start-ticks decision
-/// (docs/11 item 11, "Start from beginning"): `true` always discards
-/// `saved_position_ticks` in favor of tick 0; `false` passes it through
-/// unchanged. Split out so this one-line decision is unit-testable without
-/// the live server `prepare_playback` needs for everything else.
+/// (docs/11 item 11, "Start from beginning"): `true` always starts at tick 0;
+/// `false` resumes only an in-progress position, so playback agrees with the
+/// Play/Resume label (docs/07 §1 grace windows).
 fn resolved_start_ticks(
     start_from_beginning: bool,
-    saved_position_ticks: Option<i64>,
+    dto: &jellyfin_api::models::BaseItemDto,
 ) -> Option<i64> {
     if start_from_beginning {
-        None
-    } else {
-        saved_position_ticks
+        return None;
     }
+    let saved = dto.user_data.as_ref()?.playback_position_ticks?;
+    let item_type = dto.type_.map(|t| t.to_string()).unwrap_or_default();
+    let (position, _) = media_cache::watch_grace::displayed_watch_state(
+        &item_type,
+        saved,
+        dto.run_time_ticks,
+        false,
+    );
+    (position > 0).then_some(position)
 }
 
 /// Builds Jellybeam TV's device profile from stored
@@ -4538,16 +4561,39 @@ mod tests {
         assert!(matches!(err, CoreError::MirrorNotOpen));
     }
 
-    #[test]
-    fn resolved_start_ticks_true_always_ignores_the_saved_position() {
-        assert_eq!(resolved_start_ticks(true, Some(500)), None);
-        assert_eq!(resolved_start_ticks(true, None), None);
+    use media_cache::watch_grace::TICKS_PER_MINUTE as MIN;
+
+    fn movie_at(position_ticks: Option<i64>) -> jellyfin_api::models::BaseItemDto {
+        jellyfin_api::models::BaseItemDto {
+            type_: Some(jellyfin_api::models::BaseItemKind::Movie),
+            run_time_ticks: Some(120 * MIN),
+            user_data: Some(jellyfin_api::models::UserItemDataDto {
+                playback_position_ticks: position_ticks,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn resolved_start_ticks_false_passes_the_saved_position_through_unchanged() {
-        assert_eq!(resolved_start_ticks(false, Some(500)), Some(500));
-        assert_eq!(resolved_start_ticks(false, None), None);
+    fn resolved_start_ticks_true_always_ignores_the_saved_position() {
+        assert_eq!(resolved_start_ticks(true, &movie_at(Some(60 * MIN))), None);
+        assert_eq!(resolved_start_ticks(true, &movie_at(None)), None);
+    }
+
+    #[test]
+    fn resolved_start_ticks_false_resumes_only_an_in_progress_position() {
+        assert_eq!(
+            resolved_start_ticks(false, &movie_at(Some(60 * MIN))),
+            Some(60 * MIN)
+        );
+        assert_eq!(resolved_start_ticks(false, &movie_at(None)), None);
+        // docs/07 §1: inside either grace window, playback starts over like the Play label says.
+        assert_eq!(resolved_start_ticks(false, &movie_at(Some(MIN))), None);
+        assert_eq!(
+            resolved_start_ticks(false, &movie_at(Some(115 * MIN))),
+            None
+        );
     }
 
     #[test]
@@ -8042,6 +8088,87 @@ mod tests {
             }),
             "one by-id fetch covers both the season and the series"
         );
+    }
+
+    /// docs/07 §1: stopping a movie in its last 10 minutes marks it played on
+    /// the server after the Stopped report; stopping mid-film doesn't.
+    #[test]
+    fn stopping_in_the_end_grace_marks_the_item_played_after_the_stopped_report() {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000030";
+
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        mock.route("GET", "/UserViews", 200, user_views_json(VIEW_ID, "movies"));
+        mock.route(
+            "GET",
+            "/Items",
+            200,
+            serde_json::json!({
+                "Items": [{
+                    "Id": MOVIE_ID, "Name": "Sample Movie", "Type": "Movie",
+                    "RunTimeTicks": 120 * MIN,
+                    "UserData": {"Key": "k", "Played": false}
+                }],
+                "TotalRecordCount": 1
+            }),
+        );
+        mock.route(
+            "POST",
+            &format!("/UserPlayedItems/{MOVIE_ID}"),
+            200,
+            user_item_data_json(Some(true), None),
+        );
+        let (_, playback_info_json) = direct_play_fixture();
+        mock.route_script(
+            "POST",
+            "/PlaybackInfo",
+            vec![playback_info_json.clone(), playback_info_json],
+            vec![Duration::ZERO, Duration::ZERO],
+        );
+        let played_path = format!("/UserPlayedItems/{MOVIE_ID}");
+
+        core.open_mirror()
+            .expect("open_mirror against a loopback server");
+        wait_until(
+            || {
+                core.card_by_id(MOVIE_ID.to_string())
+                    .ok()
+                    .flatten()
+                    .is_some()
+            },
+            "initial sync to seed the movie",
+        );
+
+        let plan = core
+            .prepare_playback(MOVIE_ID.to_string(), false)
+            .expect("Direct Play negotiation");
+        core.stop_playback(plan.play_session_id, 60 * MIN);
+        wait_until(
+            || mock.hit_count("POST", "/Sessions/Playing/Stopped") == 1,
+            "the mid-film Stopped report",
+        );
+        assert_eq!(mock.hit_count("POST", &played_path), 0);
+
+        let plan = core
+            .prepare_playback(MOVIE_ID.to_string(), false)
+            .expect("Direct Play negotiation");
+        core.stop_playback(plan.play_session_id, 115 * MIN);
+        wait_until(
+            || mock.hit_count("POST", &played_path) == 1,
+            "the end-grace mark played",
+        );
+        assert_eq!(mock.hit_count("POST", "/Sessions/Playing/Stopped"), 2);
+        let card = core
+            .card_by_id(MOVIE_ID.to_string())
+            .expect("card_by_id")
+            .expect("movie row");
+        assert!(card.played);
+        assert_eq!(card.position_ticks, 0);
+    }
+
+    #[test]
+    fn an_item_the_mirror_does_not_know_is_never_finished_early() {
+        assert!(!stopped_in_end_grace(None, i64::MAX));
     }
 
     /// docs/19 §2.3: `set_played_recursive` marks every non-virtual episode

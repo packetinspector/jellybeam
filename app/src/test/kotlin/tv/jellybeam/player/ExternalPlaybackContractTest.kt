@@ -30,6 +30,28 @@ class ExternalPlaybackContractTest {
     }
 
     @Test
+    fun `a deep link with an undashed UUID plays the same item id the UI uses`() {
+        assertEquals(
+            ExternalPlaybackIntentResult.Play("0123abcd-4567-89ef-0123-456789abcdef"),
+            ExternalPlaybackContract.parse(
+                action = Intent.ACTION_VIEW,
+                itemIdExtra = null,
+                dataUri = "jellybeam://play/0123ABCD456789EF0123456789ABCDEF",
+            ),
+        )
+    }
+
+    @Test
+    fun `canonical item ids lowercase any UUID spelling and pass other ids through`() {
+        val canonical = "0123abcd-4567-89ef-0123-456789abcdef"
+        assertEquals(canonical, ExternalPlaybackContract.canonicalItemId("0123abcd456789ef0123456789abcdef"))
+        assertEquals(canonical, ExternalPlaybackContract.canonicalItemId("0123ABCD-4567-89EF-0123-456789ABCDEF"))
+        assertEquals(canonical, ExternalPlaybackContract.canonicalItemId(canonical))
+        assertEquals("0123-abcd456789ef0123456789abcdef", ExternalPlaybackContract.canonicalItemId("0123-abcd456789ef0123456789abcdef"))
+        assertEquals("0123456789abcdef", ExternalPlaybackContract.canonicalItemId("0123456789abcdef"))
+    }
+
+    @Test
     fun `OPEN_DETAIL action accepts a path-safe item id from the public extra`() {
         assertEquals(
             ExternalPlaybackIntentResult.OpenDetail("01234567-89ab-cdef_ABC"),

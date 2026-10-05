@@ -278,10 +278,13 @@ pub(crate) fn read_meta(conn: &Connection, key: &str) -> Option<String> {
 pub(crate) enum IndexGroup {
     /// docs/16 §2.7: the favorites scope and its "last played" ordering.
     Favorites,
+    /// docs/07 §1: Continue Watching's rows only, in its order. SQLite picks it for `resume()`
+    /// on its own once built; until then that query walks `idx_items_resume_by_last_played`.
+    Resume,
 }
 
 impl IndexGroup {
-    pub(crate) const ALL: [Self; 1] = [Self::Favorites];
+    pub(crate) const ALL: [Self; 2] = [Self::Favorites, Self::Resume];
 
     /// `(name, CREATE INDEX IF NOT EXISTS ...)` for every index in the group.
     const fn indexes(self) -> &'static [(&'static str, &'static str)] {
@@ -305,6 +308,14 @@ impl IndexGroup {
                      ON items(parent_id, last_played_date) WHERE last_played_date IS NOT NULL",
                 ),
             ],
+            Self::Resume => &[(
+                "idx_items_in_progress",
+                concat!(
+                    "CREATE INDEX IF NOT EXISTS idx_items_in_progress \
+                     ON items(last_played_date DESC, updated_at DESC, id ASC) WHERE ",
+                    crate::watch_grace::in_progress_sql!()
+                ),
+            )],
         }
     }
 
@@ -312,7 +323,7 @@ impl IndexGroup {
     /// waits for that layout's first use, so an unused layout never taxes sync writes.
     pub(crate) const fn app_wide(self) -> bool {
         match self {
-            Self::Favorites => true,
+            Self::Favorites | Self::Resume => true,
         }
     }
 
@@ -375,7 +386,10 @@ mod tests {
             IndexGroup::Favorites.is_built(&conn),
             "a fresh mirror gets them at open"
         );
-        assert_eq!(built_index_groups(&conn), IndexGroup::Favorites.bit());
+        assert_eq!(
+            built_index_groups(&conn),
+            IndexGroup::Favorites.bit() | IndexGroup::Resume.bit()
+        );
 
         conn.execute(
             "INSERT INTO items (id, item_type, dto, updated_at) VALUES ('a', 'Movie', '{}', 0)",
@@ -384,7 +398,7 @@ mod tests {
         .expect("insert");
         conn.execute_batch(
             "DROP INDEX idx_items_favorite; DROP INDEX idx_items_series_played; \
-             DROP INDEX idx_items_parent_played;",
+             DROP INDEX idx_items_parent_played; DROP INDEX idx_items_in_progress;",
         )
         .expect("drop");
         drop(conn);
