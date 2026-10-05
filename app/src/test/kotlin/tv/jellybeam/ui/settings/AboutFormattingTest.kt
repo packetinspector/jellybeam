@@ -1,5 +1,7 @@
 package tv.jellybeam.ui.settings
 
+import tv.jellybeam.i18n.UsLocaleRule
+import org.junit.Rule
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -9,29 +11,36 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tv.jellybeam.i18n.ResourceUiStrings
 
 class AboutFormattingTest {
+
+    private val strings = ResourceUiStrings.default
+
+    /** The units format numbers with the JVM locale, as the app does with the device's. */
+    @get:Rule
+    val usLocale = UsLocaleRule()
 
     // ---- formatBytes -------------------------------------------------------
 
     @Test
     fun `formatBytes stays plain bytes below 1024`() {
-        assertEquals("0 B", AboutFormatting.formatBytes(0))
-        assertEquals("512 B", AboutFormatting.formatBytes(512))
-        assertEquals("1023 B", AboutFormatting.formatBytes(1023))
+        assertEquals("0 B", AboutFormatting.formatBytes(0, strings))
+        assertEquals("512 B", AboutFormatting.formatBytes(512, strings))
+        assertEquals("1023 B", AboutFormatting.formatBytes(1023, strings))
     }
 
     @Test
     fun `formatBytes switches to one decimal at 1024`() {
-        assertEquals("1.0 KB", AboutFormatting.formatBytes(1024))
-        assertEquals("1.5 KB", AboutFormatting.formatBytes(1536))
+        assertEquals("1.0 KB", AboutFormatting.formatBytes(1024, strings))
+        assertEquals("1.5 KB", AboutFormatting.formatBytes(1536, strings))
     }
 
     @Test
     fun `formatBytes steps through MB and GB`() {
-        assertEquals("1.0 MB", AboutFormatting.formatBytes(1024L * 1024))
-        assertEquals("1.2 MB", AboutFormatting.formatBytes((1024L * 1024 * 1.2).toLong()))
-        assertEquals("1.0 GB", AboutFormatting.formatBytes(1024L * 1024 * 1024))
+        assertEquals("1.0 MB", AboutFormatting.formatBytes(1024L * 1024, strings))
+        assertEquals("1.2 MB", AboutFormatting.formatBytes((1024L * 1024 * 1.2).toLong(), strings))
+        assertEquals("1.0 GB", AboutFormatting.formatBytes(1024L * 1024 * 1024, strings))
     }
 
     // ---- formatSyncInstant ---------------------------------------------------
@@ -40,20 +49,20 @@ class AboutFormattingTest {
 
     @Test
     fun `formatSyncInstant is Just now under one minute`() {
-        assertEquals("Just now", AboutFormatting.formatSyncInstant(now - 5_000, now))
-        assertEquals("Just now", AboutFormatting.formatSyncInstant(now - 59_000, now))
+        assertEquals("Just now", AboutFormatting.formatSyncInstant(now - 5_000, now, strings, Locale.US))
+        assertEquals("Just now", AboutFormatting.formatSyncInstant(now - 59_000, now, strings, Locale.US))
     }
 
     @Test
     fun `formatSyncInstant counts minutes under one hour`() {
-        assertEquals("1 min ago", AboutFormatting.formatSyncInstant(now - 60_000, now))
-        assertEquals("59 min ago", AboutFormatting.formatSyncInstant(now - 3_599_000, now))
+        assertEquals("1 min ago", AboutFormatting.formatSyncInstant(now - 60_000, now, strings, Locale.US))
+        assertEquals("59 min ago", AboutFormatting.formatSyncInstant(now - 3_599_000, now, strings, Locale.US))
     }
 
     @Test
     fun `formatSyncInstant counts hours under one day`() {
-        assertEquals("1 h ago", AboutFormatting.formatSyncInstant(now - 3_600_000, now))
-        assertEquals("23 h ago", AboutFormatting.formatSyncInstant(now - 86_399_000, now))
+        assertEquals("1 h ago", AboutFormatting.formatSyncInstant(now - 3_600_000, now, strings, Locale.US))
+        assertEquals("23 h ago", AboutFormatting.formatSyncInstant(now - 86_399_000, now, strings, Locale.US))
     }
 
     @Test
@@ -62,7 +71,7 @@ class AboutFormattingTest {
         val expected = Instant.ofEpochMilli(epochMs)
             .atZone(ZoneId.systemDefault())
             .format(DateTimeFormatter.ofPattern("MMM d, HH:mm", Locale.US))
-        assertEquals(expected, AboutFormatting.formatSyncInstant(epochMs, now))
+        assertEquals(expected, AboutFormatting.formatSyncInstant(epochMs, now, strings, Locale.US))
     }
 
     // ---- parseRfc3339Millis --------------------------------------------------

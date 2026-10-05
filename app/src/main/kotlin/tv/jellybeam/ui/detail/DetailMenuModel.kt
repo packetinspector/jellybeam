@@ -1,7 +1,8 @@
 package tv.jellybeam.ui.detail
 
 import kotlin.random.Random
-import tv.jellybeam.ui.common.countLabel
+import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.CollectionInfo
 
@@ -9,8 +10,8 @@ import uniffi.jellybeam_core.CollectionInfo
  * Pure, plain-Kotlin content model for the detail-page action panel (docs/19-detail-action-menu.md
  * §1/§3.2), same discipline as [DetailFormatting]. [buildMenu] evaluates every presence rule in
  * §1.1; the Compose layer ([DetailActionPanel]) only renders [MenuModel] and dispatches
- * [MenuAction] to [DetailViewModel.runAction]. Labels are plain literal text (no `stringResource`
- * in pure Kotlin); fixed chrome lives in `strings.xml` instead.
+ * [MenuAction] to [DetailViewModel.runAction]. Labels come from [UiStrings] (docs/27 §3), keeping
+ * this JVM-testable.
  */
 
 private const val SERIES_ITEM_TYPE = "Series"
@@ -73,10 +74,10 @@ data class MenuInput(
 )
 
 /** docs/19 §1.1/§1.2: builds every group/row this input warrants, and which row focuses first. */
-fun buildMenu(input: MenuInput): MenuModel {
-    val thisTitleRows = buildThisTitleRows(input)
-    val playbackRows = buildPlaybackRows(input)
-    val libraryRows = buildLibraryRows(input)
+fun buildMenu(strings: UiStrings, input: MenuInput): MenuModel {
+    val thisTitleRows = buildThisTitleRows(strings, input)
+    val playbackRows = buildPlaybackRows(strings, input)
+    val libraryRows = buildLibraryRows(strings, input)
 
     val groups = listOfNotNull(
         thisTitleRows.takeIf { it.isNotEmpty() }?.let { MenuGroupModel(MenuGroup.THIS_TITLE, it) },
@@ -119,7 +120,7 @@ fun buildMenu(input: MenuInput): MenuModel {
     return MenuModel(groups, focusOn)
 }
 
-private fun buildThisTitleRows(input: MenuInput): List<MenuRow> {
+private fun buildThisTitleRows(strings: UiStrings, input: MenuInput): List<MenuRow> {
     val rows = mutableListOf<MenuRow>()
     if (input.itemType == SERIES_ITEM_TYPE) {
         val isSeason = input.scopeSeason != null
@@ -129,38 +130,43 @@ private fun buildThisTitleRows(input: MenuInput): List<MenuRow> {
         if (unwatchedCount > 0) {
             rows += MenuRow(
                 action = MenuAction.MarkScopeWatched(unwatchedCount, isSeason),
-                label = if (isSeason) "Mark season as watched" else "Mark series as watched",
-                subtext = countLabel(unwatchedCount, "EPISODE", "EPISODES"),
+                label = strings.get(if (isSeason) R.string.detail_menu_mark_season_watched else R.string.detail_menu_mark_series_watched),
+                subtext = strings.plural(R.plurals.detail_episode_count_caps, unwatchedCount, unwatchedCount),
             )
         }
         if (watchedCount > 0) {
             rows += MenuRow(
                 action = MenuAction.MarkScopeUnwatched(watchedCount, isSeason),
-                label = if (isSeason) "Mark season as unwatched" else "Mark series as unwatched",
-                subtext = countLabel(watchedCount, "EPISODE", "EPISODES"),
+                label = strings.get(if (isSeason) R.string.detail_menu_mark_season_unwatched else R.string.detail_menu_mark_series_unwatched),
+                subtext = strings.plural(R.plurals.detail_episode_count_caps, watchedCount, watchedCount),
             )
         }
     } else if (input.itemType != BOXSET_ITEM_TYPE) {
         rows += if (input.card.played) {
-            MenuRow(MenuAction.MarkUnwatched, "Mark as unwatched", null)
+            MenuRow(MenuAction.MarkUnwatched, strings.get(R.string.detail_menu_mark_unwatched), null)
         } else {
             // §1.1: `NEVER PLAYED` when there's also no saved position.
             val neverPlayed = input.card.positionTicks <= 0
-            MenuRow(MenuAction.MarkWatched, "Mark as watched", if (neverPlayed) "NEVER PLAYED" else null)
+            MenuRow(
+                MenuAction.MarkWatched,
+                strings.get(R.string.detail_menu_mark_watched),
+                if (neverPlayed) strings.get(R.string.detail_menu_never_played) else null,
+            )
         }
     }
     // §1.1: this row reads/writes the series flag even in season scope; `SERIES` marks that in the
     // state column.
     val isSeasonScope = input.itemType == SERIES_ITEM_TYPE && input.scopeSeason != null
+    val seriesState = if (isSeasonScope) strings.get(R.string.detail_menu_state_series) else null
     rows += if (input.isFavorite) {
-        MenuRow(MenuAction.RemoveFavorite, "Remove from favorites", if (isSeasonScope) "SERIES" else null)
+        MenuRow(MenuAction.RemoveFavorite, strings.get(R.string.detail_menu_remove_favorite), seriesState)
     } else {
-        MenuRow(MenuAction.AddFavorite, "Add to favorites", if (isSeasonScope) "SERIES" else null)
+        MenuRow(MenuAction.AddFavorite, strings.get(R.string.detail_menu_add_favorite), seriesState)
     }
     return rows
 }
 
-private fun buildPlaybackRows(input: MenuInput): List<MenuRow> {
+private fun buildPlaybackRows(strings: UiStrings, input: MenuInput): List<MenuRow> {
     val rows = mutableListOf<MenuRow>()
     // docs/19 §Collection: a collection plays from its page's pill, never from the menu.
     if (input.itemType == BOXSET_ITEM_TYPE) return rows
@@ -170,31 +176,31 @@ private fun buildPlaybackRows(input: MenuInput): List<MenuRow> {
         if (isSeason) {
             val target = scopeEpisodes.firstOrNull { it.positionTicks > 0 } ?: scopeEpisodes.firstOrNull { !it.played }
             if (target != null) {
-                val subtext = playNextUnwatchedSubtext(target, input.scopeSeason?.indexNumber)
-                rows += MenuRow(MenuAction.PlayNextUnwatched(target.id, subtext), "Play next unwatched", subtext)
+                val subtext = playNextUnwatchedSubtext(strings, target, input.scopeSeason?.indexNumber)
+                rows += MenuRow(MenuAction.PlayNextUnwatched(target.id, subtext), strings.get(R.string.detail_menu_play_next_unwatched), subtext)
             }
         } else {
             val action = input.primaryAction
             if (action is DetailFormatting.PrimaryAction.Playable) {
                 val target = input.allEpisodes.firstOrNull { it.id == action.targetId }
-                val subtext = target?.let { playNextUnwatchedSubtext(it, input.highlightedSeasonNumber) }
-                rows += MenuRow(MenuAction.PlayNextUnwatched(action.targetId, subtext), "Play next unwatched", subtext)
+                val subtext = target?.let { playNextUnwatchedSubtext(strings, it, input.highlightedSeasonNumber) }
+                rows += MenuRow(MenuAction.PlayNextUnwatched(action.targetId, subtext), strings.get(R.string.detail_menu_play_next_unwatched), subtext)
                 if (action.hasProgress) {
-                    rows += MenuRow(MenuAction.PlayFromBeginning(action.targetId), "Play from the beginning", null)
+                    rows += MenuRow(MenuAction.PlayFromBeginning(action.targetId), strings.get(R.string.detail_menu_play_from_beginning), null)
                 }
             }
         }
         if (scopeEpisodes.isNotEmpty()) {
             rows += MenuRow(
                 action = MenuAction.PlayRandom(scopeEpisodes.size),
-                label = "Play something random",
-                subtext = "FROM ${scopeEpisodes.size}",
+                label = strings.get(R.string.detail_menu_play_random),
+                subtext = strings.get(R.string.detail_menu_play_random_from, scopeEpisodes.size),
             )
         }
     } else {
         val action = input.primaryAction
         if (action is DetailFormatting.PrimaryAction.Playable && action.hasProgress) {
-            rows += MenuRow(MenuAction.PlayFromBeginning(action.targetId), "Play from the beginning", null)
+            rows += MenuRow(MenuAction.PlayFromBeginning(action.targetId), strings.get(R.string.detail_menu_play_from_beginning), null)
         }
     }
     return rows
@@ -204,27 +210,33 @@ private fun buildPlaybackRows(input: MenuInput): List<MenuRow> {
  * §1.1: `E{n}` in the highlighted season, else `S{s} E{n}`; `null` if a number is missing, never
  * a partial `S? E?` (same rule as [DetailFormatting]'s `strictSeasonEpisode`).
  */
-private fun playNextUnwatchedSubtext(target: Card, highlightedSeasonNumber: Int?): String? {
+private fun playNextUnwatchedSubtext(strings: UiStrings, target: Card, highlightedSeasonNumber: Int?): String? {
     val episodeNumber = target.indexNumber ?: return null
-    if (highlightedSeasonNumber != null && target.parentIndexNumber == highlightedSeasonNumber) return "E$episodeNumber"
+    if (highlightedSeasonNumber != null && target.parentIndexNumber == highlightedSeasonNumber) {
+        return strings.get(R.string.detail_episode_number, episodeNumber)
+    }
     val seasonNumber = target.parentIndexNumber ?: return null
-    return "S$seasonNumber E$episodeNumber"
+    return strings.get(R.string.detail_season_episode, seasonNumber, episodeNumber)
 }
 
-private fun buildLibraryRows(input: MenuInput): List<MenuRow> {
+private fun buildLibraryRows(strings: UiStrings, input: MenuInput): List<MenuRow> {
     val rows = mutableListOf<MenuRow>()
     if (input.itemType == EPISODE_ITEM_TYPE && input.seriesCard != null) {
         // Verbatim server name, never re-cased (CLAUDE.md hard rule).
-        rows += MenuRow(MenuAction.GoToSeries(input.seriesCard), "Go to series", input.seriesCard.name)
+        rows += MenuRow(MenuAction.GoToSeries(input.seriesCard), strings.get(R.string.detail_menu_go_to_series), input.seriesCard.name)
     }
     val isSeasonScope = input.itemType == SERIES_ITEM_TYPE && input.scopeSeason != null
     // docs/19 §Collection: adding a collection to a collection is not offered.
     if (!isSeasonScope && input.hasCollections && input.itemType != BOXSET_ITEM_TYPE) {
-        rows += MenuRow(MenuAction.AddToCollection, "Add to collection", null)
+        rows += MenuRow(MenuAction.AddToCollection, strings.get(R.string.detail_menu_add_to_collection), null)
     }
     if (input.isAdministrator) {
         // §1.1: always acts on the whole series, so season scope marks it `SERIES` too.
-        rows += MenuRow(MenuAction.RefreshMetadata, "Refresh metadata", if (isSeasonScope) "SERIES" else null)
+        rows += MenuRow(
+            MenuAction.RefreshMetadata,
+            strings.get(R.string.detail_menu_refresh_metadata),
+            if (isSeasonScope) strings.get(R.string.detail_menu_state_series) else null,
+        )
     }
     return rows
 }

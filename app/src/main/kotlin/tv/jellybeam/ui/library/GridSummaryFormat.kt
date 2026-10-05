@@ -1,7 +1,8 @@
 package tv.jellybeam.ui.library
 
-import java.util.Locale
-import tv.jellybeam.ui.common.countLabel
+import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
+import tv.jellybeam.i18n.uppercaseUi
 import uniffi.jellybeam_core.Decade
 import uniffi.jellybeam_core.GridCounts
 import uniffi.jellybeam_core.GridFilters
@@ -26,7 +27,7 @@ object GridSummaryFormat {
      * filter
      * segment is present only when it departs from its default (`Any`/`null`).
      */
-    fun segments(counts: GridCounts, sort: GridSort, filters: GridFilters, noun: GridNoun): List<String> {
+    fun segments(strings: UiStrings, counts: GridCounts, sort: GridSort, filters: GridFilters, noun: GridNoun): List<String> {
         val segments = mutableListOf<String>()
 
         val isFiltered = filters.watched != WatchedFilter.ANY ||
@@ -35,86 +36,88 @@ object GridSummaryFormat {
             filters.status != StatusFilter.ANY ||
             filters.itemType != null
         segments += if (isFiltered) {
-            "${counts.filtered} OF ${counts.total}"
+            strings.get(R.string.library_summary_filtered, counts.filtered.toLong(), counts.total.toLong())
         } else {
-            when (noun) {
-                GridNoun.MOVIES -> countLabel(counts.total, "MOVIE", "MOVIES")
-                GridNoun.SHOWS -> countLabel(counts.total, "SHOW", "SHOWS")
-                GridNoun.FAVORITES -> countLabel(counts.total, "FAVORITE", "FAVORITES")
+            val total = counts.total
+            val plural = when (noun) {
+                GridNoun.MOVIES -> R.plurals.library_summary_movies
+                GridNoun.SHOWS -> R.plurals.library_summary_shows
+                GridNoun.FAVORITES -> R.plurals.library_summary_favorites
             }
+            strings.plural(plural, total.coerceAtMost(Int.MAX_VALUE.toULong()).toInt(), total.toLong())
         }
 
-        segments += "${sortFieldSummaryLabel(sort.field)} ${arrow(sort.descending)}"
+        segments += "${sortFieldSummaryLabel(strings, sort.field)} ${arrow(sort.descending)}"
 
         when (filters.watched) {
-            WatchedFilter.UNWATCHED -> segments += "UNWATCHED"
-            WatchedFilter.HAS_UNWATCHED -> segments += "HAS UNWATCHED"
-            WatchedFilter.WATCHED -> segments += "WATCHED"
+            WatchedFilter.UNWATCHED -> segments += strings.get(R.string.library_watched_unwatched).uppercaseUi()
+            WatchedFilter.HAS_UNWATCHED -> segments += strings.get(R.string.library_has_unwatched).uppercaseUi()
+            WatchedFilter.WATCHED -> segments += strings.get(R.string.library_watched_watched).uppercaseUi()
             WatchedFilter.ANY -> Unit
         }
-        filters.genre?.let { segments += it.uppercase(Locale.US) }
-        filters.decade?.let { segments += decadeSummarySegment(it) }
+        filters.genre?.let { segments += it.uppercaseUi() }
+        filters.decade?.let { segments += decadeSummarySegment(strings, it) }
         when (filters.status) {
-            StatusFilter.CONTINUING -> segments += "CONTINUING"
-            StatusFilter.ENDED -> segments += "ENDED"
+            StatusFilter.CONTINUING -> segments += strings.get(R.string.library_status_continuing).uppercaseUi()
+            StatusFilter.ENDED -> segments += strings.get(R.string.library_status_ended).uppercaseUi()
             StatusFilter.ANY -> Unit
         }
-        filters.itemType?.let { segments += itemTypeLabel(it).uppercase(Locale.US) }
+        filters.itemType?.let { segments += itemTypeLabel(strings, it).uppercaseUi() }
 
         return segments
     }
 
     /** docs/16 §2.7: a Type panel chip's label, plural; an unknown type shows verbatim. */
-    fun itemTypeLabel(itemType: String): String = when (itemType) {
-        "Movie" -> "Movies"
-        "Series" -> "Shows"
-        "Season" -> "Seasons"
-        "Episode" -> "Episodes"
-        "BoxSet" -> "Collections"
+    fun itemTypeLabel(strings: UiStrings, itemType: String): String = when (itemType) {
+        "Movie" -> strings.get(R.string.library_type_movies)
+        "Series" -> strings.get(R.string.library_type_shows)
+        "Season" -> strings.get(R.string.library_type_seasons)
+        "Episode" -> strings.get(R.string.library_type_episodes)
+        "BoxSet" -> strings.get(R.string.library_type_collections)
         else -> itemType
     }
 
     /** A sort chip's label: the field name, with the direction arrow appended only when [field] is
      * the currently active [sort]'s field.
      */
-    fun sortChipLabel(field: GridSortField, sort: GridSort): String {
-        val base = sortFieldChipLabel(field)
+    fun sortChipLabel(strings: UiStrings, field: GridSortField, sort: GridSort): String {
+        val base = sortFieldChipLabel(strings, field)
         return if (field == sort.field) "$base ${arrow(sort.descending)}" else base
     }
 
     /** A decade's chip/panel label -- `"2020s"` … `"1980s"`, `"Older"`. */
-    fun decadeLabel(decade: Decade): String = when (decade) {
-        Decade.D2020S -> "2020s"
-        Decade.D2010S -> "2010s"
-        Decade.D2000S -> "2000s"
-        Decade.D1990S -> "1990s"
-        Decade.D1980S -> "1980s"
-        Decade.OLDER -> "Older"
-    }
+    fun decadeLabel(strings: UiStrings, decade: Decade): String = strings.get(
+        when (decade) {
+            Decade.D2020S -> R.string.library_decade_2020s
+            Decade.D2010S -> R.string.library_decade_2010s
+            Decade.D2000S -> R.string.library_decade_2000s
+            Decade.D1990S -> R.string.library_decade_1990s
+            Decade.D1980S -> R.string.library_decade_1980s
+            Decade.OLDER -> R.string.library_decade_older
+        },
+    )
 
     /** Whether [field]'s natural (reset) direction is descending -- only Name is naturally
      * ascending.
      */
     fun naturalDescending(field: GridSortField): Boolean = field != GridSortField.NAME
 
-    private fun sortFieldSummaryLabel(field: GridSortField): String = when (field) {
-        GridSortField.NAME -> "NAME"
-        GridSortField.DATE_ADDED -> "DATE ADDED"
-        GridSortField.YEAR -> "YEAR"
-        GridSortField.RUNTIME -> "RUNTIME"
-    }
+    private fun sortFieldSummaryLabel(strings: UiStrings, field: GridSortField): String =
+        sortFieldChipLabel(strings, field).uppercaseUi()
 
-    private fun sortFieldChipLabel(field: GridSortField): String = when (field) {
-        GridSortField.NAME -> "Name"
-        GridSortField.DATE_ADDED -> "Date added"
-        GridSortField.YEAR -> "Year"
-        GridSortField.RUNTIME -> "Runtime"
-    }
+    private fun sortFieldChipLabel(strings: UiStrings, field: GridSortField): String = strings.get(
+        when (field) {
+            GridSortField.NAME -> R.string.library_sort_name
+            GridSortField.DATE_ADDED -> R.string.library_sort_date_added
+            GridSortField.YEAR -> R.string.library_sort_year
+            GridSortField.RUNTIME -> R.string.library_sort_runtime
+        },
+    )
 
     /** The summary line's decade segment -- same as [decadeLabel] except `Older` reads `OLDER`. */
-    private fun decadeSummarySegment(decade: Decade): String {
-        val label = decadeLabel(decade)
-        return if (decade == Decade.OLDER) label.uppercase(Locale.US) else label
+    private fun decadeSummarySegment(strings: UiStrings, decade: Decade): String {
+        val label = decadeLabel(strings, decade)
+        return if (decade == Decade.OLDER) label.uppercaseUi() else label
     }
 
     private fun arrow(descending: Boolean): String = if (descending) "↓" else "↑"

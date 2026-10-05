@@ -12,10 +12,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import tv.jellybeam.R
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.LaunchWarmup
+import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.ui.common.ChangeRefreshScheduler
-import tv.jellybeam.ui.common.countLabel
 import tv.jellybeam.ui.common.serverHostLabel
 import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.HomeSnapshot
@@ -45,9 +46,9 @@ data class HomeChrome(
     /** Server order, names shown verbatim; drives the empty-library state. */
     val views: List<ViewSnapshot> = emptyList(),
     /** Cold-start status line for the loading skeleton (see [loadingStatusText]); meaningful only
-     * while [isLoading] is true.
+     * while [isLoading] is true. [HomeFeed] seeds it with the localized "Loading…".
      */
-    val loadingStatusText: String = "Loading…",
+    val loadingStatusText: String = "",
     /** [syncProgressText] for a background sync after the skeleton; `null` while [isSyncing] is
      * false or no progress is known.
      */
@@ -70,21 +71,23 @@ data class HomeFeedState<U>(val chrome: HomeChrome, val content: U)
 /** [HomeChrome.loadingStatusText]'s pure mapping. Library names pass through verbatim, never
  * prettified. [tickCount] is [HomeFeed.pollSyncStatus]'s poll-loop counter, not a wall-clock read.
  */
-fun loadingStatusText(status: SyncStatus, tickCount: Int): String = when (status) {
-    is SyncStatus.Idle -> if (tickCount >= STILL_LOADING_AFTER_TICKS) "Still loading…" else "Loading…"
-    is SyncStatus.Syncing -> syncProgressText(status)
+fun loadingStatusText(strings: UiStrings, status: SyncStatus, tickCount: Int): String = when (status) {
+    is SyncStatus.Idle ->
+        strings.get(if (tickCount >= STILL_LOADING_AFTER_TICKS) R.string.home_still_loading else R.string.home_loading)
+    is SyncStatus.Syncing -> syncProgressText(strings, status)
 }
 
 /** One sync pass as a status line. The library's name is the server's own, verbatim; a pass whose
  * library the mirror can't name yet reads "library", never an id.
  */
-fun syncProgressText(status: SyncStatus.Syncing): String {
-    val library = status.libraryName ?: "library"
+fun syncProgressText(strings: UiStrings, status: SyncStatus.Syncing): String {
+    val library = status.libraryName ?: strings.get(R.string.home_sync_library_fallback)
     val total = status.totalItems
+    val done = status.itemsDone
     return if (total != null) {
-        "Syncing $library — ${status.itemsDone} of $total…"
+        strings.get(R.string.home_syncing_progress, library, done.toLong(), total.toLong())
     } else {
-        "Syncing $library — ${countLabel(status.itemsDone.toULong(), "item", "items")}…"
+        strings.plural(R.plurals.home_syncing_items, done.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt(), library, done.toLong())
     }
 }
 
@@ -118,10 +121,13 @@ class HomeFeed<T : Any, U>(
     stopEpoch: Flow<Long>,
     /** The cold-start prefetch; the first load takes it instead of marshalling its own. */
     private val launchWarmup: LaunchWarmup?,
+    private val strings: UiStrings,
     private val extract: (HomeSnapshot) -> T?,
     private val reduce: (current: U, incoming: T) -> U,
 ) {
-    private val _state = MutableStateFlow(HomeFeedState(HomeChrome(), initialContent))
+    private val _state = MutableStateFlow(
+        HomeFeedState(HomeChrome(loadingStatusText = strings.get(R.string.home_loading)), initialContent),
+    )
     val state: StateFlow<HomeFeedState<U>> = _state.asStateFlow()
 
     /** docs/17-mini-player.md §6: true while Home is top of its stack and the host Activity is
@@ -243,7 +249,7 @@ class HomeFeed<T : Any, U>(
         while (true) {
             if (active.value) {
                 val syncing = gateway.isSyncing()
-                val progress = if (syncing) (gateway.syncStatus() as? SyncStatus.Syncing)?.let(::syncProgressText) else null
+                val progress = if (syncing) (gateway.syncStatus() as? SyncStatus.Syncing)?.let { syncProgressText(strings, it) } else null
                 _state.update { it.copy(chrome = it.chrome.copy(isSyncing = syncing, syncProgressText = progress)) }
             }
             delay(SYNC_POLL_INTERVAL_MS)
@@ -263,7 +269,7 @@ class HomeFeed<T : Any, U>(
         while (_state.value.chrome.isLoading) {
             if (active.value) {
                 val status = gateway.syncStatus()
-                _state.update { it.copy(chrome = it.chrome.copy(loadingStatusText = loadingStatusText(status, tick))) }
+                _state.update { it.copy(chrome = it.chrome.copy(loadingStatusText = loadingStatusText(strings, status, tick))) }
                 tick++
             }
             delay(SYNC_STATUS_POLL_INTERVAL_MS)

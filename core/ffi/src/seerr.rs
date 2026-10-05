@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 
-use crate::error::CoreError;
+use crate::error::{CoreError, UnreachableReason};
 use crate::object::JellybeamCore;
 use crate::seerr_types::*;
 
@@ -432,10 +432,7 @@ fn build_season_statuses(
             let request_status = season_request_status(media_info, season_number);
             Some(SeerrSeasonStatus {
                 season_number,
-                name: season
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("Season {season_number}")),
+                name: season.name.clone(),
                 episode_count: season.episode_count.unwrap_or(0),
                 availability,
                 requestable: season_requestable(availability, request_status),
@@ -982,8 +979,8 @@ impl JellybeamCore {
             }
         }
         let (client, user, seerr_url) = connected.ok_or_else(|| {
-            last_error.unwrap_or(CoreError::Api {
-                detail: "could not connect to Seerr".to_string(),
+            last_error.unwrap_or(CoreError::SeerrUnreachable {
+                reason: UnreachableReason::Other,
             })
         })?;
 

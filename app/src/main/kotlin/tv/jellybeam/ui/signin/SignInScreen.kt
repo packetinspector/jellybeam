@@ -72,7 +72,7 @@ fun SignInScreen(
     reauthorizationTarget: ReauthorizationTarget? = null,
     viewModel: SignInViewModel = viewModel(
         key = reauthorizationTarget?.let { "reauthorize-${it.index}-${it.userId}" } ?: "sign-in-add",
-        factory = SignInViewModelFactory(AppGraph.gateway, reauthorizationTarget),
+        factory = SignInViewModelFactory(AppGraph.gateway, AppGraph.strings, reauthorizationTarget),
     ),
 ) {
     val state by viewModel.state.collectAsState()

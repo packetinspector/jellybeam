@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,7 +24,7 @@ data class DiscoverPersonUiState(
 )
 
 /** Backs [DiscoverPersonScreen]: fetches `seerr_person(personId)` on init, fails open into inline error/retry same as every other Discover fetch. */
-class DiscoverPersonViewModel(private val gateway: CoreGateway, private val personId: Long) : ViewModel() {
+class DiscoverPersonViewModel(private val gateway: CoreGateway, private val strings: UiStrings, private val personId: Long) : ViewModel() {
     private val _state = MutableStateFlow(DiscoverPersonUiState())
     val state: StateFlow<DiscoverPersonUiState> = _state.asStateFlow()
 
@@ -41,7 +42,7 @@ class DiscoverPersonViewModel(private val gateway: CoreGateway, private val pers
                 }
             } catch (e: CoreException) {
                 _state.update {
-                    it.copy(isLoading = false, notConfigured = e is CoreException.SeerrNotConfigured, error = e.displayMessage())
+                    it.copy(isLoading = false, notConfigured = e is CoreException.SeerrNotConfigured, error = e.displayMessage(strings))
                 }
             }
         }
@@ -50,10 +51,10 @@ class DiscoverPersonViewModel(private val gateway: CoreGateway, private val pers
     fun retry() = refresh()
 }
 
-class DiscoverPersonViewModelFactory(private val gateway: CoreGateway, private val personId: Long) : ViewModelProvider.Factory {
+class DiscoverPersonViewModelFactory(private val gateway: CoreGateway, private val strings: UiStrings, private val personId: Long) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(DiscoverPersonViewModel::class.java))
-        return DiscoverPersonViewModel(gateway, personId) as T
+        return DiscoverPersonViewModel(gateway, strings, personId) as T
     }
 }

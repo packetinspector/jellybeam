@@ -29,7 +29,6 @@ object EndsClock {
      */
     fun formatWallClock(millis: Long, is24h: Boolean, zone: ZoneId): String {
         val time = Instant.ofEpochMilli(millis).atZone(zone).toLocalTime()
-        val formatter = if (is24h) FORMAT_24H else FORMAT_12H
-        return formatter.format(time)
+        return (if (is24h) FORMAT_24H else FORMAT_12H).format(time)
     }
 }

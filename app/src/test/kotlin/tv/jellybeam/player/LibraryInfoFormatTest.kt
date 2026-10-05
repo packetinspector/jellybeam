@@ -1,5 +1,8 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.i18n.UsLocaleRule
+import org.junit.Rule
+import tv.jellybeam.i18n.ResourceUiStrings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -8,6 +11,11 @@ import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.PersonInfo
 
 class LibraryInfoFormatTest {
+    private val strings = ResourceUiStrings.default
+
+    @get:Rule
+    val usLocale = UsLocaleRule()
+
     private fun detail() = ItemDetail(
         id = "episode-1",
         name = "The One With Metadata",
@@ -46,7 +54,7 @@ class LibraryInfoFormatTest {
 
     @Test
     fun `buildSheet for a full episode joins every meta segment and includes all four fields`() {
-        val sheet = LibraryInfoFormat.buildSheet(detail())
+        val sheet = LibraryInfoFormat.buildSheet(strings, detail())
 
         assertEquals(
             listOf(
@@ -75,7 +83,7 @@ class LibraryInfoFormatTest {
     @Test
     fun `buildSheet for a movie uses the production year instead of a season-episode segment`() {
         val movie = detail().copy(itemType = "Movie", parentIndexNumber = null, indexNumber = null)
-        val sheet = LibraryInfoFormat.buildSheet(movie)
+        val sheet = LibraryInfoFormat.buildSheet(strings, movie)
         assertEquals(StatsSpan("2024"), sheet.metaSegments.first())
     }
 
@@ -112,7 +120,7 @@ class LibraryInfoFormatTest {
             directors = emptyList(),
             writers = emptyList(),
         )
-        val sheet = LibraryInfoFormat.buildSheet(sparse)
+        val sheet = LibraryInfoFormat.buildSheet(strings, sparse)
 
         assertTrue("no metadata at all resolves to an empty segment list", sheet.metaSegments.isEmpty())
         assertNull(sheet.synopsis)
@@ -125,23 +133,23 @@ class LibraryInfoFormatTest {
     @Test
     fun `buildSheet writers collapses more than two into first-two-plus-count`() {
         val many = detail().copy(writers = listOf("A", "B", "C", "D", "E", "F"))
-        val sheet = LibraryInfoFormat.buildSheet(many)
+        val sheet = LibraryInfoFormat.buildSheet(strings, many)
         assertEquals("A, B + 4", sheet.fields.single { it.label == "Writers" }.value)
     }
 
     @Test
     fun `buildSheet writers joins exactly two with no plus-count`() {
         val two = detail().copy(writers = listOf("A", "B"))
-        val sheet = LibraryInfoFormat.buildSheet(two)
+        val sheet = LibraryInfoFormat.buildSheet(strings, two)
         assertEquals("A, B", sheet.fields.single { it.label == "Writers" }.value)
     }
 
     @Test
     fun `buildSheet Watched reads Never for zero and singular for exactly one`() {
-        val never = LibraryInfoFormat.buildSheet(detail().copy(playCount = 0))
+        val never = LibraryInfoFormat.buildSheet(strings, detail().copy(playCount = 0))
         assertEquals("Never", never.fields.single { it.label == "Watched" }.value)
 
-        val once = LibraryInfoFormat.buildSheet(detail().copy(playCount = 1))
+        val once = LibraryInfoFormat.buildSheet(strings, detail().copy(playCount = 1))
         assertEquals("1 time · last Apr 7, 2025", once.fields.single { it.label == "Watched" }.value)
     }
 }

@@ -1,5 +1,6 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.i18n.ResourceUiStrings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -13,6 +14,8 @@ import uniffi.jellybeam_core.PlaybackOsdDetail
  * [formatSpeedLabel].
  */
 class PlaybackScreenControlsTest {
+    private val strings = ResourceUiStrings.default
+
 
     @Test
     fun `direct play chip classifies a 1920 by 960 crop as 1080p`() {
@@ -42,7 +45,7 @@ class PlaybackScreenControlsTest {
             path = null,
         )
 
-        assertEquals("1080p · HEVC", directPlayCodecSummary(detail))
+        assertEquals("1080p · HEVC", directPlayCodecSummary(strings, detail))
     }
 
     // -- visibleControls ---------------------------------------------------

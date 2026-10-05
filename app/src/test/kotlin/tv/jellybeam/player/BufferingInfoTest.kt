@@ -1,5 +1,8 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.i18n.UsLocaleRule
+import org.junit.Rule
+import tv.jellybeam.i18n.ResourceUiStrings
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -9,6 +12,11 @@ import org.junit.Test
  * coverage through [PlaybackViewModelTest].
  */
 class BufferingInfoTest {
+    private val strings = ResourceUiStrings.default
+
+    @get:Rule
+    val usLocale = UsLocaleRule()
+
 
     @Test
     fun `zero buffered ahead is zero percent`() {
@@ -50,28 +58,28 @@ class BufferingInfoTest {
 
     @Test
     fun `formats a whole-number megabyte rate with one decimal`() {
-        assertEquals("12.0 MB/s", BufferingInfo.formatThroughput(12_000_000L))
+        assertEquals("12.0 MB/s", BufferingInfo.formatThroughput(strings, 12_000_000L))
     }
 
     @Test
     fun `formats a fractional megabyte rate rounded to one decimal`() {
-        assertEquals("12.4 MB/s", BufferingInfo.formatThroughput(12_400_000L))
+        assertEquals("12.4 MB/s", BufferingInfo.formatThroughput(strings, 12_400_000L))
     }
 
     @Test
     fun `zero bytes per second formats as zero point zero, not n slash a`() {
         // 0 is a real, measured reading; "nothing measured yet" is a separate
         // case the caller handles by omitting this segment entirely.
-        assertEquals("0.0 MB/s", BufferingInfo.formatThroughput(0L))
+        assertEquals("0.0 MB/s", BufferingInfo.formatThroughput(strings, 0L))
     }
 
     @Test
     fun `a negative rate clamps to zero rather than showing a sign`() {
-        assertEquals("0.0 MB/s", BufferingInfo.formatThroughput(-5_000_000L))
+        assertEquals("0.0 MB/s", BufferingInfo.formatThroughput(strings, -5_000_000L))
     }
 
     @Test
     fun `rounds up at the decimal boundary`() {
-        assertEquals("1.0 MB/s", BufferingInfo.formatThroughput(999_950L))
+        assertEquals("1.0 MB/s", BufferingInfo.formatThroughput(strings, 999_950L))
     }
 }

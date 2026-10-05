@@ -358,7 +358,7 @@
          facts pill sets its last entry in the accent colour. -->
     <string name="settings_about_version_build">Version %1$s · Build %2$s</string>
     <string name="settings_about_descriptor">A Jellyfin client for Android TV.</string>
-    <string-array name="settings_about_facts">
+    <string-array name="settings_about_facts" translatable="false">
         <item>Kotlin</item>
         <item>Rust</item>
         <item>Media3</item>
@@ -651,9 +651,6 @@
     <string name="updates_stat_now">Now</string>
     <string name="updates_checked_never">Not yet</string>
     <string name="updates_checked_just_now">Just now</string>
-    <string name="updates_checked_minutes">%1$d min ago</string>
-    <string name="updates_checked_hours">%1$d h ago</string>
-    <string name="updates_checked_days">%1$d d ago</string>
     <string name="updates_automatic_title">Check automatically</string>
     <string name="updates_automatic_hint">Once a day, when the TV is idle.</string>
     <string name="updates_notes_heading_new">WHAT\'S NEW IN %1$s</string>

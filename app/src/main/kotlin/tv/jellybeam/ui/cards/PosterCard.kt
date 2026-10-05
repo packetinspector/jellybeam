@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.i18n.rememberUiStrings
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
 
@@ -51,9 +52,10 @@ fun PosterCard(
     val artSource = CardFormatting.posterArtSource(card)
     val progress = CardFormatting.watchProgress(card)
     val indicator = indicatorOverride ?: CardFormatting.watchIndicator(card, progress)
-    val (title, defaultMeta) = CardFormatting.posterLines(card)
+    val strings = rememberUiStrings()
+    val (title, defaultMeta) = CardFormatting.posterLines(strings, card)
     val meta = metaOverride ?: defaultMeta
-    val episodeTag = CardFormatting.posterEpisodeTag(card)
+    val episodeTag = CardFormatting.posterEpisodeTag(strings, card)
 
     Column(
         modifier = modifier.clickable(onClick = onClick),

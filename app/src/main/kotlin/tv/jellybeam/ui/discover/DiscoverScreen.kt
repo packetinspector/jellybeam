@@ -89,7 +89,7 @@ fun DiscoverScreen(
     /** JellybeamRoot's focus gate for this entry -- see [tv.jellybeam.ui.search.SearchScreen]'s own
      * param doc. */
     focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
-    viewModel: DiscoverViewModel = viewModel(factory = DiscoverViewModelFactory(AppGraph.gateway)),
+    viewModel: DiscoverViewModel = viewModel(factory = DiscoverViewModelFactory(AppGraph.gateway, AppGraph.strings)),
 ) {
     val state by viewModel.state.collectAsState()
     val moviesLabel = stringResource(R.string.discover_chip_movies)

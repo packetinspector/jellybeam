@@ -58,8 +58,13 @@ pub enum CoreError {
     /// docs/13 "sign-in": the request never reached a server (refused, DNS
     /// failure, timeout) -- distinct from [`Self::NotJellyfinServer`], which
     /// did get a response.
-    #[error("server unreachable: {host}: {reason}")]
-    ServerUnreachable { host: String, reason: String },
+    #[error("server unreachable: {host}: {reason:?} {detail}")]
+    ServerUnreachable {
+        host: String,
+        reason: UnreachableReason,
+        /// The transport's own text, for [`UnreachableReason::Other`] only (else empty).
+        detail: String,
+    },
     /// docs/13 "sign-in": the TLS handshake failed the way it does when
     /// `https://` is pointed at a plain-http Jellyfin server.
     #[error("https not offered by {host}")]
@@ -89,6 +94,23 @@ pub enum CoreError {
         reason: crate::seerr_types::SeerrRefusal,
         detail: String,
     },
+    /// docs/14-seerr-discover.md: a Seerr request never got an answer; Kotlin
+    /// words `reason` (docs/27 §5) rather than showing transport text.
+    #[error("seerr unreachable: {reason:?}")]
+    SeerrUnreachable { reason: UnreachableReason },
+    /// docs/26: the updater's working directory can't be created or opened.
+    #[error("update storage unavailable")]
+    UpdateStorageUnavailable,
+}
+
+/// docs/27 §5: why [`CoreError::ServerUnreachable`]'s request never got an answer; Kotlin words it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum UnreachableReason {
+    NameNotResolved,
+    ConnectionRefused,
+    TimedOut,
+    NetworkUnreachable,
+    Other,
 }
 
 impl From<jellyfin_api::ApiError> for CoreError {
@@ -110,11 +132,15 @@ impl From<media_cache::CacheError> for CoreError {
     }
 }
 
-/// Mapped through `Display` only, same as the `ApiError` impl above.
+/// Mapped through `Display` only, same as the `ApiError` impl above, except a
+/// transport failure, which becomes a typed [`CoreError::SeerrUnreachable`].
 impl From<seerr_api::SeerrError> for CoreError {
     fn from(err: seerr_api::SeerrError) -> Self {
         match err {
             seerr_api::SeerrError::Unauthorized => CoreError::Unauthorized,
+            seerr_api::SeerrError::Transport(msg) => CoreError::SeerrUnreachable {
+                reason: crate::signin::unreachable_reason(&msg),
+            },
             other => CoreError::Api {
                 detail: other.to_string(),
             },
@@ -171,6 +197,22 @@ mod tests {
             }
             other => panic!("expected CoreError::Cache, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn seerr_transport_error_maps_to_typed_unreachable_without_its_text() {
+        let core_err: CoreError = seerr_api::SeerrError::Transport(
+            "error sending request for url (http://seerr.test:5056/api/v1/auth/local): \
+             client error (Connect): tcp connect error: Connection refused (os error 111)"
+                .to_string(),
+        )
+        .into();
+        assert!(matches!(
+            core_err,
+            CoreError::SeerrUnreachable {
+                reason: UnreachableReason::ConnectionRefused
+            }
+        ));
     }
 
     #[test]

@@ -71,6 +71,9 @@ object AppGraph {
     lateinit var gateway: CoreGateway
         private set
 
+    /** docs/27 §3: [tv.jellybeam.i18n.UiStrings] for ViewModels, which outlive any one Activity. */
+    val strings: tv.jellybeam.i18n.UiStrings by lazy { tv.jellybeam.i18n.AndroidUiStrings(appContext.resources) }
+
     /** Cold-start head start; `null` until [init], so code built without it runs the plain path. */
     var launchWarmup: LaunchWarmup? = null
         private set

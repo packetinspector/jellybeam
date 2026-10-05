@@ -8498,7 +8498,7 @@ mod tests {
             .expect_err("nothing is listening on a just-dropped port");
         match err {
             CoreError::ServerUnreachable { reason, .. } => {
-                assert_eq!(reason, "connection refused");
+                assert_eq!(reason, crate::error::UnreachableReason::ConnectionRefused);
             }
             other => panic!("expected ServerUnreachable, got {other:?}"),
         }

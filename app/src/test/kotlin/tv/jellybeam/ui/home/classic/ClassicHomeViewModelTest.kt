@@ -13,6 +13,7 @@ import org.junit.Rule
 import org.junit.Test
 import tv.jellybeam.MainDispatcherRule
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.i18n.ResourceUiStrings
 import tv.jellybeam.ui.cards.testCard
 import tv.jellybeam.ui.home.FakeHomeGateway
 import tv.jellybeam.ui.home.classicSnapshot
@@ -37,7 +38,7 @@ class ClassicHomeViewModelTest {
 
     /** The feed's poll loop runs on `viewModelScope`; clear it before `runTest` ends. */
     private inline fun withViewModel(gateway: CoreGateway, block: (ClassicHomeViewModel) -> Unit) {
-        val viewModel = ClassicHomeViewModel(gateway)
+        val viewModel = ClassicHomeViewModel(gateway, ResourceUiStrings.default)
         try {
             block(viewModel)
         } finally {

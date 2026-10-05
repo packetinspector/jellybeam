@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.focus.requestFocusWithRetry
 import uniffi.jellybeam_core.Decade
@@ -186,6 +187,7 @@ internal fun LibrarySortStrip(
                 },
             verticalArrangement = Arrangement.spacedBy(STRIP_ROW_GAP),
         ) {
+            val strings = rememberUiStrings()
             // -- SORT row ---------------------------------------------------
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = PAGE_MARGIN), verticalAlignment = Alignment.CenterVertically) {
                 BasicText(text = stringResource(R.string.library_sort_label), modifier = Modifier.width(STRIP_LABEL_WIDTH), style = stripLabelStyle())
@@ -193,7 +195,7 @@ internal fun LibrarySortStrip(
                     SORT_FIELDS.forEachIndexed { index, field ->
                         val active = field == state.sort.field
                         StripChip(
-                            label = GridSummaryFormat.sortChipLabel(field, state.sort),
+                            label = GridSummaryFormat.sortChipLabel(strings, field, state.sort),
                             active = active,
                             onSelect = { viewModel.setSort(field) },
                             focusRequester = if (active) activeSortChipRequester else null,
@@ -234,7 +236,7 @@ internal fun LibrarySortStrip(
 
                     val yearsIndex = index++
                     StripChip(
-                        label = state.filters.decade?.let { GridSummaryFormat.decadeLabel(it) } ?: stringResource(R.string.library_years),
+                        label = state.filters.decade?.let { GridSummaryFormat.decadeLabel(strings, it) } ?: stringResource(R.string.library_years),
                         active = state.filters.decade != null,
                         onSelect = { openerRequester = yearsChipRequester; onPanelChange(LibraryStripPanel.YEARS) },
                         focusRequester = yearsChipRequester,
@@ -244,7 +246,7 @@ internal fun LibrarySortStrip(
                     if (view.isFavorites) {
                         val typeIndex = index++
                         StripChip(
-                            label = state.filters.itemType?.let { GridSummaryFormat.itemTypeLabel(it) } ?: stringResource(R.string.library_type),
+                            label = state.filters.itemType?.let { GridSummaryFormat.itemTypeLabel(strings, it) } ?: stringResource(R.string.library_type),
                             active = state.filters.itemType != null,
                             onSelect = { openerRequester = typeChipRequester; onPanelChange(LibraryStripPanel.TYPE) },
                             focusRequester = typeChipRequester,
@@ -317,7 +319,7 @@ internal fun LibrarySortStrip(
                                 DECADES.forEachIndexed { decadeIndex, decade ->
                                     val active = state.filters.decade == decade
                                     StripChip(
-                                        label = GridSummaryFormat.decadeLabel(decade),
+                                        label = GridSummaryFormat.decadeLabel(strings, decade),
                                         active = active,
                                         onSelect = { viewModel.setDecade(decade); closePanel(commitFocus = true) },
                                         focusRequester = if (active) panelCurrentRequester else null,
@@ -339,7 +341,7 @@ internal fun LibrarySortStrip(
                                 state.itemTypes.forEachIndexed { typeIndex, itemType ->
                                     val active = state.filters.itemType == itemType
                                     StripChip(
-                                        label = GridSummaryFormat.itemTypeLabel(itemType),
+                                        label = GridSummaryFormat.itemTypeLabel(strings, itemType),
                                         active = active,
                                         onSelect = { viewModel.setItemType(itemType); closePanel(commitFocus = true) },
                                         focusRequester = if (active) panelCurrentRequester else null,

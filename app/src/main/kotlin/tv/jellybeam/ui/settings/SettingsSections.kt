@@ -725,7 +725,7 @@ internal fun TroubleshootingSectionContent(state: SettingsUiState, viewModel: Se
 @Composable
 internal fun DiscoverSectionContent(
     onSeerrConfigChanged: () -> Unit,
-    viewModel: DiscoverSettingsViewModel = viewModel(factory = DiscoverSettingsViewModelFactory(AppGraph.gateway)),
+    viewModel: DiscoverSettingsViewModel = viewModel(factory = DiscoverSettingsViewModelFactory(AppGraph.gateway, AppGraph.strings)),
 ) {
     val state by viewModel.state.collectAsState()
     if (state.isLoading) return

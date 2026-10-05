@@ -1,6 +1,7 @@
 package tv.jellybeam.ui.discover
 
 import tv.jellybeam.MainDispatcherRule
+import tv.jellybeam.i18n.ResourceUiStrings
 import tv.jellybeam.data.FakeCoreGateway
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -26,7 +27,7 @@ class DiscoverViewModelTest {
 
         // UnconfinedTestDispatcher completes the init-launched fetch before the constructor
         // returns.
-        val viewModel = DiscoverViewModel(fake)
+        val viewModel = DiscoverViewModel(fake, ResourceUiStrings.default)
 
         advanceUntilIdle()
 
@@ -38,7 +39,7 @@ class DiscoverViewModelTest {
     fun `SeerrNotConfigured routes to the notConfigured flag, not a generic error`() = runTest {
         val fake = FakeCoreGateway(seerrHomeResult = Result.failure(CoreException.SeerrNotConfigured()))
 
-        val viewModel = DiscoverViewModel(fake)
+        val viewModel = DiscoverViewModel(fake, ResourceUiStrings.default)
         advanceUntilIdle()
 
         assertTrue(viewModel.state.value.notConfigured)
@@ -58,7 +59,7 @@ class DiscoverViewModelTest {
             }
         }
 
-        val viewModel = DiscoverViewModel(gateway)
+        val viewModel = DiscoverViewModel(gateway, ResourceUiStrings.default)
         advanceUntilIdle()
         assertEquals("server unreachable", viewModel.state.value.error)
 

@@ -70,6 +70,7 @@ import coil.compose.AsyncImage
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.PlaceholderTile
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberHeaderPageBringIntoViewSpec
@@ -157,7 +158,7 @@ fun DiscoverDetailScreen(
      * param doc. */
     focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: DiscoverDetailViewModel = viewModel(
-        factory = DiscoverDetailViewModelFactory(AppGraph.gateway, mediaType, tmdbId),
+        factory = DiscoverDetailViewModelFactory(AppGraph.gateway, AppGraph.strings, mediaType, tmdbId),
     ),
 ) {
     val state by viewModel.state.collectAsState()
@@ -519,7 +520,7 @@ private fun SeasonList(seasons: List<SeerrSeasonStatus>, modifier: Modifier = Mo
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                BasicText(text = season.name, style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 14.sp))
+                BasicText(text = season.name ?: stringResource(R.string.detail_menu_kicker_season, season.seasonNumber), style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 14.sp))
                 BasicText(text = season.availability.detailLabel(), style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 13.sp))
             }
         }
@@ -802,7 +803,7 @@ private fun RequestOptionsDialog(state: DiscoverDetailUiState, viewModel: Discov
                         ) {
                             SeasonCheckbox(checked = checked, inert = !season.requestable)
                             BasicText(
-                                text = season.name,
+                                text = season.name ?: stringResource(R.string.detail_menu_kicker_season, season.seasonNumber),
                                 modifier = Modifier,
                                 style = TextStyle(
                                     fontFamily = JellybeamTheme.Archivo,
@@ -880,7 +881,7 @@ private fun RequestOptionsDialog(state: DiscoverDetailUiState, viewModel: Discov
 @Composable
 private fun DialogKicker(text: String) {
     BasicText(
-        text = text.uppercase(java.util.Locale.US),
+        text = text.uppercaseUi(),
         style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 11.sp),
     )
 }

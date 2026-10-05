@@ -6,15 +6,18 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tv.jellybeam.i18n.ResourceUiStrings
 import tv.jellybeam.ui.cards.testCard
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.CollectionInfo
+
+private val strings = ResourceUiStrings.default
 
 /** Defaults callers don't care about, so each test's `MenuInput(...)` call shows only what matters.
  */
 private fun movieInput(
     card: Card = testCard(id = "movie-1", itemType = "Movie"),
-    primaryAction: DetailFormatting.PrimaryAction = DetailFormatting.resolvePrimaryAction(card, emptyList()),
+    primaryAction: DetailFormatting.PrimaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList()),
     isFavorite: Boolean = false,
     hasCollections: Boolean = false,
     isAdministrator: Boolean = false,
@@ -43,7 +46,7 @@ private fun episodeInput(
     scopeSeason = null,
     scopeEpisodes = emptyList(),
     allEpisodes = emptyList(),
-    primaryAction = DetailFormatting.resolvePrimaryAction(card, emptyList()),
+    primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList()),
     isFavorite = isFavorite,
     hasCollections = hasCollections,
     isAdministrator = isAdministrator,
@@ -65,7 +68,7 @@ private fun seriesInput(
     scopeSeason = scopeSeason,
     scopeEpisodes = scopeEpisodes,
     allEpisodes = allEpisodes,
-    primaryAction = DetailFormatting.resolvePrimaryAction(card, allEpisodes),
+    primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, allEpisodes),
     isFavorite = isFavorite,
     hasCollections = hasCollections,
     isAdministrator = isAdministrator,
@@ -83,7 +86,7 @@ class DetailMenuModelTest {
 
     @Test
     fun `movie never played shows Mark as watched, not unwatched`() {
-        val model = buildMenu(movieInput(card = testCard(itemType = "Movie", played = false)))
+        val model = buildMenu(strings, movieInput(card = testCard(itemType = "Movie", played = false)))
         val thisTitle = model.rowsOf(MenuGroup.THIS_TITLE)
         assertTrue(thisTitle.any { it.action == MenuAction.MarkWatched })
         assertFalse(thisTitle.any { it.action == MenuAction.MarkUnwatched })
@@ -91,21 +94,21 @@ class DetailMenuModelTest {
 
     @Test
     fun `movie never played -- no position, no played flag -- carries NEVER PLAYED subtext`() {
-        val model = buildMenu(movieInput(card = testCard(itemType = "Movie", played = false, positionTicks = 0)))
+        val model = buildMenu(strings, movieInput(card = testCard(itemType = "Movie", played = false, positionTicks = 0)))
         val row = model.rowsOf(MenuGroup.THIS_TITLE).first { it.action == MenuAction.MarkWatched }
         assertEquals("NEVER PLAYED", row.subtext)
     }
 
     @Test
     fun `movie with progress but not yet marked played carries no NEVER PLAYED subtext`() {
-        val model = buildMenu(movieInput(card = testCard(itemType = "Movie", played = false, positionTicks = 100L)))
+        val model = buildMenu(strings, movieInput(card = testCard(itemType = "Movie", played = false, positionTicks = 100L)))
         val row = model.rowsOf(MenuGroup.THIS_TITLE).first { it.action == MenuAction.MarkWatched }
         assertNull(row.subtext)
     }
 
     @Test
     fun `movie already watched shows Mark as unwatched, not watched`() {
-        val model = buildMenu(movieInput(card = testCard(itemType = "Movie", played = true)))
+        val model = buildMenu(strings, movieInput(card = testCard(itemType = "Movie", played = true)))
         val thisTitle = model.rowsOf(MenuGroup.THIS_TITLE)
         assertTrue(thisTitle.any { it.action == MenuAction.MarkUnwatched })
         assertFalse(thisTitle.any { it.action == MenuAction.MarkWatched })
@@ -113,9 +116,9 @@ class DetailMenuModelTest {
 
     @Test
     fun `favorite row shows Add when not a favorite, Remove when it is`() {
-        val notFavorite = buildMenu(movieInput(isFavorite = false)).rowsOf(MenuGroup.THIS_TITLE)
+        val notFavorite = buildMenu(strings, movieInput(isFavorite = false)).rowsOf(MenuGroup.THIS_TITLE)
         assertTrue(notFavorite.any { it.action == MenuAction.AddFavorite })
-        val favorite = buildMenu(movieInput(isFavorite = true)).rowsOf(MenuGroup.THIS_TITLE)
+        val favorite = buildMenu(strings, movieInput(isFavorite = true)).rowsOf(MenuGroup.THIS_TITLE)
         assertTrue(favorite.any { it.action == MenuAction.RemoveFavorite })
     }
 
@@ -123,13 +126,13 @@ class DetailMenuModelTest {
 
     @Test
     fun `movie never played predicts Mark as watched`() {
-        val model = buildMenu(movieInput(card = testCard(itemType = "Movie", positionTicks = 0, played = false)))
+        val model = buildMenu(strings, movieInput(card = testCard(itemType = "Movie", positionTicks = 0, played = false)))
         assertEquals(MenuAction.MarkWatched, model.focusOn)
     }
 
     @Test
     fun `movie mid-progress predicts Play from the beginning`() {
-        val model = buildMenu(movieInput(card = testCard(itemType = "Movie", positionTicks = 5_000L)))
+        val model = buildMenu(strings, movieInput(card = testCard(itemType = "Movie", positionTicks = 5_000L)))
         val predicted = model.focusOn
         assertTrue(predicted is MenuAction.PlayFromBeginning)
         assertTrue(model.rowsOf(MenuGroup.PLAYBACK).any { it.action == predicted })
@@ -140,7 +143,7 @@ class DetailMenuModelTest {
         // Virtual movie: Unavailable primary action means no Playback group, so
         // focusOn must be null (fall back to row 0), never name a row that wasn't built.
         val card = testCard(itemType = "Movie", isVirtual = true, positionTicks = 5_000L)
-        val model = buildMenu(movieInput(card = card, primaryAction = DetailFormatting.PrimaryAction.Unavailable("Coming soon")))
+        val model = buildMenu(strings, movieInput(card = card, primaryAction = DetailFormatting.PrimaryAction.Unavailable("Coming soon")))
         assertFalse(model.has(MenuGroup.PLAYBACK))
         assertNull(model.focusOn)
         assertEquals(MenuAction.MarkWatched, model.firstRow())
@@ -150,25 +153,25 @@ class DetailMenuModelTest {
 
     @Test
     fun `Add to collection is absent when the session collections list is empty`() {
-        val model = buildMenu(movieInput(hasCollections = false, isAdministrator = true))
+        val model = buildMenu(strings, movieInput(hasCollections = false, isAdministrator = true))
         assertFalse(model.rowsOf(MenuGroup.LIBRARY).any { it.action == MenuAction.AddToCollection })
     }
 
     @Test
     fun `Add to collection is present when the session collections list is non-empty`() {
-        val model = buildMenu(movieInput(hasCollections = true))
+        val model = buildMenu(strings, movieInput(hasCollections = true))
         assertTrue(model.rowsOf(MenuGroup.LIBRARY).any { it.action == MenuAction.AddToCollection })
     }
 
     @Test
     fun `Refresh metadata is absent for a non-admin, present for an admin`() {
-        assertFalse(buildMenu(movieInput(isAdministrator = false)).rowsOf(MenuGroup.LIBRARY).any { it.action == MenuAction.RefreshMetadata })
-        assertTrue(buildMenu(movieInput(isAdministrator = true)).rowsOf(MenuGroup.LIBRARY).any { it.action == MenuAction.RefreshMetadata })
+        assertFalse(buildMenu(strings, movieInput(isAdministrator = false)).rowsOf(MenuGroup.LIBRARY).any { it.action == MenuAction.RefreshMetadata })
+        assertTrue(buildMenu(strings, movieInput(isAdministrator = true)).rowsOf(MenuGroup.LIBRARY).any { it.action == MenuAction.RefreshMetadata })
     }
 
     @Test
     fun `the Library group is absent entirely when it would have no rows`() {
-        val model = buildMenu(movieInput(hasCollections = false, isAdministrator = false))
+        val model = buildMenu(strings, movieInput(hasCollections = false, isAdministrator = false))
         assertFalse(model.has(MenuGroup.LIBRARY))
     }
 
@@ -176,14 +179,14 @@ class DetailMenuModelTest {
 
     @Test
     fun `Go to series is absent when the episode has no resolvable series`() {
-        val model = buildMenu(episodeInput(seriesCard = null))
+        val model = buildMenu(strings, episodeInput(seriesCard = null))
         assertFalse(model.rowsOf(MenuGroup.LIBRARY).any { it.action is MenuAction.GoToSeries })
     }
 
     @Test
     fun `Go to series carries the series name verbatim, never re-cased`() {
         val series = testCard(id = "series-9", itemType = "Series", name = "sample series title")
-        val model = buildMenu(episodeInput(seriesCard = series))
+        val model = buildMenu(strings, episodeInput(seriesCard = series))
         val row = model.rowsOf(MenuGroup.LIBRARY).first { it.action is MenuAction.GoToSeries }
         assertEquals("sample series title", row.subtext)
         assertEquals("sample series title", (row.action as MenuAction.GoToSeries).series.name)
@@ -191,9 +194,9 @@ class DetailMenuModelTest {
 
     @Test
     fun `episode Play from the beginning is present only once positionTicks is greater than zero`() {
-        val fresh = buildMenu(episodeInput(card = testCard(itemType = "Episode", positionTicks = 0)))
+        val fresh = buildMenu(strings, episodeInput(card = testCard(itemType = "Episode", positionTicks = 0)))
         assertFalse(fresh.rowsOf(MenuGroup.PLAYBACK).any { it.action is MenuAction.PlayFromBeginning })
-        val resumed = buildMenu(episodeInput(card = testCard(itemType = "Episode", positionTicks = 500L)))
+        val resumed = buildMenu(strings, episodeInput(card = testCard(itemType = "Episode", positionTicks = 500L)))
         assertTrue(resumed.rowsOf(MenuGroup.PLAYBACK).any { it.action is MenuAction.PlayFromBeginning })
     }
 
@@ -206,7 +209,7 @@ class DetailMenuModelTest {
             testCard(id = "e2", itemType = "Episode", played = false, isVirtual = true), // excluded from every count
             testCard(id = "e3", itemType = "Episode", played = true, isVirtual = false),
         )
-        val model = buildMenu(seriesInput(allEpisodes = allEpisodes))
+        val model = buildMenu(strings, seriesInput(allEpisodes = allEpisodes))
         val thisTitle = model.rowsOf(MenuGroup.THIS_TITLE)
         val watchedRow = thisTitle.first { it.action is MenuAction.MarkScopeWatched }
         val unwatchedRow = thisTitle.first { it.action is MenuAction.MarkScopeUnwatched }
@@ -221,7 +224,7 @@ class DetailMenuModelTest {
     @Test
     fun `a fully watched series shows only the unwatched mark row`() {
         val allEpisodes = listOf(testCard(id = "e1", itemType = "Episode", played = true))
-        val thisTitle = buildMenu(seriesInput(allEpisodes = allEpisodes)).rowsOf(MenuGroup.THIS_TITLE)
+        val thisTitle = buildMenu(strings, seriesInput(allEpisodes = allEpisodes)).rowsOf(MenuGroup.THIS_TITLE)
         assertFalse(thisTitle.any { it.action is MenuAction.MarkScopeWatched })
         assertTrue(thisTitle.any { it.action is MenuAction.MarkScopeUnwatched })
     }
@@ -229,14 +232,14 @@ class DetailMenuModelTest {
     @Test
     fun `a never-played series shows only the watched mark row`() {
         val allEpisodes = listOf(testCard(id = "e1", itemType = "Episode", played = false))
-        val thisTitle = buildMenu(seriesInput(allEpisodes = allEpisodes)).rowsOf(MenuGroup.THIS_TITLE)
+        val thisTitle = buildMenu(strings, seriesInput(allEpisodes = allEpisodes)).rowsOf(MenuGroup.THIS_TITLE)
         assertTrue(thisTitle.any { it.action is MenuAction.MarkScopeWatched })
         assertFalse(thisTitle.any { it.action is MenuAction.MarkScopeUnwatched })
     }
 
     @Test
     fun `a series with zero episodes shows neither mark row, but still shows favorites`() {
-        val thisTitle = buildMenu(seriesInput(allEpisodes = emptyList())).rowsOf(MenuGroup.THIS_TITLE)
+        val thisTitle = buildMenu(strings, seriesInput(allEpisodes = emptyList())).rowsOf(MenuGroup.THIS_TITLE)
         assertFalse(thisTitle.any { it.action is MenuAction.MarkScopeWatched })
         assertFalse(thisTitle.any { it.action is MenuAction.MarkScopeUnwatched })
         assertTrue(thisTitle.any { it.action == MenuAction.AddFavorite })
@@ -253,7 +256,7 @@ class DetailMenuModelTest {
         )
         // A watched episode outside the scoped season must not leak into the count.
         val allEpisodes = scopeEpisodes + testCard(id = "s1e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
-        val model = buildMenu(seriesInput(scopeSeason = season, scopeEpisodes = scopeEpisodes, allEpisodes = allEpisodes))
+        val model = buildMenu(strings, seriesInput(scopeSeason = season, scopeEpisodes = scopeEpisodes, allEpisodes = allEpisodes))
         val thisTitle = model.rowsOf(MenuGroup.THIS_TITLE)
         val watchedRow = thisTitle.first { it.action is MenuAction.MarkScopeWatched }
         val unwatchedRow = thisTitle.first { it.action is MenuAction.MarkScopeUnwatched }
@@ -269,7 +272,7 @@ class DetailMenuModelTest {
     @Test
     fun `whole-series Play next unwatched subtext is S s E n, even crossing into a different season`() {
         val target = testCard(id = "target", itemType = "Episode", parentIndexNumber = 3, indexNumber = 7, played = false)
-        val model = buildMenu(seriesInput(allEpisodes = listOf(target)))
+        val model = buildMenu(strings, seriesInput(allEpisodes = listOf(target)))
         val row = model.rowsOf(MenuGroup.PLAYBACK).first { it.action is MenuAction.PlayNextUnwatched }
         assertEquals("S3 E7", row.subtext)
     }
@@ -278,7 +281,7 @@ class DetailMenuModelTest {
     fun `season-scope Play next unwatched subtext is E n only`() {
         val season = testCard(id = "season-2", itemType = "Season", indexNumber = 2)
         val target = testCard(id = "target", itemType = "Episode", parentIndexNumber = 2, indexNumber = 5, played = false)
-        val model = buildMenu(seriesInput(scopeSeason = season, scopeEpisodes = listOf(target), allEpisodes = listOf(target)))
+        val model = buildMenu(strings, seriesInput(scopeSeason = season, scopeEpisodes = listOf(target), allEpisodes = listOf(target)))
         val row = model.rowsOf(MenuGroup.PLAYBACK).first { it.action is MenuAction.PlayNextUnwatched }
         assertEquals("E5", row.subtext)
     }
@@ -286,7 +289,7 @@ class DetailMenuModelTest {
     @Test
     fun `Play next unwatched subtext is absent when the episode number itself is missing`() {
         val target = testCard(id = "target", itemType = "Episode", parentIndexNumber = 3, indexNumber = null, played = false)
-        val model = buildMenu(seriesInput(allEpisodes = listOf(target)))
+        val model = buildMenu(strings, seriesInput(allEpisodes = listOf(target)))
         val row = model.rowsOf(MenuGroup.PLAYBACK).first { it.action is MenuAction.PlayNextUnwatched }
         assertNull(row.subtext)
     }
@@ -297,7 +300,7 @@ class DetailMenuModelTest {
         val unplayedFirst = testCard(id = "e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = false)
         val inProgress = testCard(id = "e2", itemType = "Episode", parentIndexNumber = 1, indexNumber = 2, played = false, positionTicks = 500L)
         val scope = listOf(unplayedFirst, inProgress)
-        val model = buildMenu(seriesInput(scopeSeason = season, scopeEpisodes = scope, allEpisodes = scope))
+        val model = buildMenu(strings, seriesInput(scopeSeason = season, scopeEpisodes = scope, allEpisodes = scope))
         val row = model.rowsOf(MenuGroup.PLAYBACK).first { it.action is MenuAction.PlayNextUnwatched }
         assertEquals("e2", (row.action as MenuAction.PlayNextUnwatched).targetId)
     }
@@ -307,11 +310,11 @@ class DetailMenuModelTest {
     @Test
     fun `series Play from the beginning is present only when the primary action is a resume`() {
         val playable = testCard(id = "e1", itemType = "Episode", played = false)
-        val notResuming = buildMenu(seriesInput(allEpisodes = listOf(playable))).rowsOf(MenuGroup.PLAYBACK)
+        val notResuming = buildMenu(strings, seriesInput(allEpisodes = listOf(playable))).rowsOf(MenuGroup.PLAYBACK)
         assertFalse(notResuming.any { it.action is MenuAction.PlayFromBeginning })
 
         val resuming = testCard(id = "e1", itemType = "Episode", positionTicks = 100L)
-        val model = buildMenu(seriesInput(allEpisodes = listOf(resuming)))
+        val model = buildMenu(strings, seriesInput(allEpisodes = listOf(resuming)))
         assertTrue(model.rowsOf(MenuGroup.PLAYBACK).any { it.action is MenuAction.PlayFromBeginning })
     }
 
@@ -319,7 +322,7 @@ class DetailMenuModelTest {
     fun `season scope never shows Play from the beginning`() {
         val season = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
         val resuming = testCard(id = "e1", itemType = "Episode", parentIndexNumber = 1, positionTicks = 100L)
-        val model = buildMenu(seriesInput(scopeSeason = season, scopeEpisodes = listOf(resuming), allEpisodes = listOf(resuming)))
+        val model = buildMenu(strings, seriesInput(scopeSeason = season, scopeEpisodes = listOf(resuming), allEpisodes = listOf(resuming)))
         assertFalse(model.rowsOf(MenuGroup.PLAYBACK).any { it.action is MenuAction.PlayFromBeginning })
     }
 
@@ -330,7 +333,7 @@ class DetailMenuModelTest {
             testCard(id = "e2", itemType = "Episode", played = false),
             testCard(id = "e3", itemType = "Episode", played = false, isVirtual = true),
         )
-        val model = buildMenu(seriesInput(allEpisodes = allEpisodes))
+        val model = buildMenu(strings, seriesInput(allEpisodes = allEpisodes))
         val row = model.rowsOf(MenuGroup.PLAYBACK).first { it.action is MenuAction.PlayRandom }
         assertEquals(2, (row.action as MenuAction.PlayRandom).count)
         assertEquals("FROM 2", row.subtext)
@@ -338,7 +341,7 @@ class DetailMenuModelTest {
 
     @Test
     fun `Play something random is absent when the scope has no non-virtual episodes`() {
-        val model = buildMenu(seriesInput(allEpisodes = listOf(testCard(id = "e1", itemType = "Episode", isVirtual = true))))
+        val model = buildMenu(strings, seriesInput(allEpisodes = listOf(testCard(id = "e1", itemType = "Episode", isVirtual = true))))
         assertFalse(model.rowsOf(MenuGroup.PLAYBACK).any { it.action is MenuAction.PlayRandom })
     }
 
@@ -347,7 +350,7 @@ class DetailMenuModelTest {
     @Test
     fun `season scope never shows Add to collection, even with collections available`() {
         val season = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
-        val model = buildMenu(seriesInput(scopeSeason = season, hasCollections = true, isAdministrator = true))
+        val model = buildMenu(strings, seriesInput(scopeSeason = season, hasCollections = true, isAdministrator = true))
         val library = model.rowsOf(MenuGroup.LIBRARY)
         assertFalse(library.any { it.action == MenuAction.AddToCollection })
         assertTrue(library.any { it.action == MenuAction.RefreshMetadata })
@@ -356,7 +359,7 @@ class DetailMenuModelTest {
     @Test
     fun `season scope marks favorites and refresh metadata SERIES -- both still act on the whole series`() {
         val season = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
-        val model = buildMenu(seriesInput(scopeSeason = season, isFavorite = true, isAdministrator = true))
+        val model = buildMenu(strings, seriesInput(scopeSeason = season, isFavorite = true, isAdministrator = true))
         val favoriteRow = model.rowsOf(MenuGroup.THIS_TITLE).first { it.action == MenuAction.RemoveFavorite }
         val refreshRow = model.rowsOf(MenuGroup.LIBRARY).first { it.action == MenuAction.RefreshMetadata }
         assertEquals("SERIES", favoriteRow.subtext)
@@ -365,7 +368,7 @@ class DetailMenuModelTest {
 
     @Test
     fun `whole-series scope never carries the SERIES subtext on favorites or refresh metadata`() {
-        val model = buildMenu(seriesInput(isFavorite = true, isAdministrator = true))
+        val model = buildMenu(strings, seriesInput(isFavorite = true, isAdministrator = true))
         val favoriteRow = model.rowsOf(MenuGroup.THIS_TITLE).first { it.action == MenuAction.RemoveFavorite }
         val refreshRow = model.rowsOf(MenuGroup.LIBRARY).first { it.action == MenuAction.RefreshMetadata }
         assertNull(favoriteRow.subtext)
@@ -380,7 +383,7 @@ class DetailMenuModelTest {
         // counts the episode so Playback exists; docs/19 §1.2's predicted row is
         // absent, so focusOn is null (row 0).
         val allEpisodes = listOf(testCard(id = "e1", itemType = "Episode", played = true, positionTicks = 0))
-        val model = buildMenu(seriesInput(allEpisodes = allEpisodes))
+        val model = buildMenu(strings, seriesInput(allEpisodes = allEpisodes))
         assertTrue(model.has(MenuGroup.PLAYBACK))
         assertNull(model.focusOn)
     }
@@ -390,17 +393,17 @@ class DetailMenuModelTest {
         // Playback group exists (an unplayed episode), but nothing has progress,
         // so focusOn must not guess a Playback row.
         val allEpisodes = listOf(testCard(id = "e1", itemType = "Episode", played = false, positionTicks = 0))
-        val model = buildMenu(seriesInput(allEpisodes = allEpisodes))
+        val model = buildMenu(strings, seriesInput(allEpisodes = allEpisodes))
         assertTrue(model.has(MenuGroup.PLAYBACK))
         assertTrue(model.focusOn is MenuAction.MarkScopeWatched)
     }
 
     @Test
     fun `episode predicts Play from the beginning when it exists, else falls back to the first row`() {
-        val resuming = buildMenu(episodeInput(card = testCard(itemType = "Episode", positionTicks = 100L)))
+        val resuming = buildMenu(strings, episodeInput(card = testCard(itemType = "Episode", positionTicks = 100L)))
         assertTrue(resuming.focusOn is MenuAction.PlayFromBeginning)
 
-        val fresh = buildMenu(episodeInput(card = testCard(itemType = "Episode", positionTicks = 0, played = false)))
+        val fresh = buildMenu(strings, episodeInput(card = testCard(itemType = "Episode", positionTicks = 0, played = false)))
         assertNull(fresh.focusOn)
         assertEquals(MenuAction.MarkWatched, fresh.firstRow())
     }
@@ -445,9 +448,9 @@ class DetailMenuModelTest {
             testCard(id = "e1", itemType = "Episode", played = true, parentIndexNumber = 1, indexNumber = 1),
             testCard(id = "e2", itemType = "Episode", played = false, parentIndexNumber = 1, indexNumber = 2),
         )
-        val highlighted = buildMenu(seriesInput(allEpisodes = allEpisodes, highlightedSeasonNumber = 1))
+        val highlighted = buildMenu(strings, seriesInput(allEpisodes = allEpisodes, highlightedSeasonNumber = 1))
         assertEquals("E2", highlighted.rowsOf(MenuGroup.PLAYBACK).first { it.action is MenuAction.PlayNextUnwatched }.subtext)
-        val other = buildMenu(seriesInput(allEpisodes = allEpisodes, highlightedSeasonNumber = 3))
+        val other = buildMenu(strings, seriesInput(allEpisodes = allEpisodes, highlightedSeasonNumber = 3))
         assertEquals("S1 E2", other.rowsOf(MenuGroup.PLAYBACK).first { it.action is MenuAction.PlayNextUnwatched }.subtext)
     }
 
@@ -461,7 +464,7 @@ class DetailMenuModelTest {
             scopeSeason = null,
             scopeEpisodes = emptyList(),
             allEpisodes = emptyList(),
-            primaryAction = DetailFormatting.resolvePrimaryAction(card, emptyList()),
+            primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList()),
             isFavorite = isFavorite,
             hasCollections = hasCollections,
             isAdministrator = isAdministrator,
@@ -471,21 +474,21 @@ class DetailMenuModelTest {
 
     @Test
     fun `a collection offers only the favorite toggle for a regular user`() {
-        val menu = buildMenu(boxSetInput())
+        val menu = buildMenu(strings, boxSetInput())
         assertEquals(listOf(MenuAction.AddFavorite), menu.groups.flatMap { it.rows }.map { it.action })
         assertNull(menu.focusOn)
     }
 
     @Test
     fun `a collection flips to Remove from favorites and never offers watched marks, play rows or Add to collection`() {
-        val actions = buildMenu(boxSetInput(isFavorite = true, hasCollections = true)).groups.flatMap { it.rows }.map { it.action }
+        val actions = buildMenu(strings, boxSetInput(isFavorite = true, hasCollections = true)).groups.flatMap { it.rows }.map { it.action }
         assertEquals(listOf(MenuAction.RemoveFavorite), actions)
     }
 
     @Test
     fun `a collection adds Refresh metadata for an administrator only`() {
-        val admin = buildMenu(boxSetInput(isAdministrator = true)).groups.flatMap { it.rows }.map { it.action }
+        val admin = buildMenu(strings, boxSetInput(isAdministrator = true)).groups.flatMap { it.rows }.map { it.action }
         assertEquals(listOf(MenuAction.AddFavorite, MenuAction.RefreshMetadata), admin)
-        assertFalse(buildMenu(boxSetInput(isAdministrator = false)).has(MenuGroup.LIBRARY))
+        assertFalse(buildMenu(strings, boxSetInput(isAdministrator = false)).has(MenuGroup.LIBRARY))
     }
 }

@@ -45,6 +45,13 @@ verified on an emulator or a real Android TV before it is committed, and
 the commit message says what was checked (docs/06 "Running a debug build",
 docs/05 "Test servers").
 
+## Translations
+
+Translations are welcome. [`docs/27-translations.md`](docs/27-translations.md)
+§4 has the steps: add `res/values-xx/`, keep placeholders as they are, run
+`./build.sh check`. A merged translation ships once the maintainer adds its
+language to the shipped list.
+
 ## Commits
 
 One commit per coherent change. Write the summary in the voice the existing

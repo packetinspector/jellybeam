@@ -2,4 +2,6 @@
 <lint>
     <!-- The TV launcher banner ships at xhdpi only, the size Android TV asks for; there are no other density drawables to add. -->
     <issue id="IconMissingDensityFolder" severity="ignore" />
+    <!-- docs/27 §4: an untranslated string falls back to English, so new English strings never wait on translators. -->
+    <issue id="MissingTranslation" severity="warning" />
 </lint>

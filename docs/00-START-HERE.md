@@ -41,6 +41,8 @@ why, not how a change came to be.
   self-contained and costs nothing when inactive (proposed)
 - `26-app-updates.md` — in-app release discovery, download, and Android
   installation; signing, lifecycle, delivery and acceptance gates
+- `27-translations.md` — where UI text lives, the shipped-language gate, and
+  how to contribute a translation
 - `jellybeam-osd-handoff/` — the OSD specification files that `12-osd-ux-spec.md`
   summarizes; code cites them by section, so they stay as they are
 - `brand.md` — name, colour tokens, wordmark, mascot usage, and the acceptance bar

@@ -8,6 +8,10 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// docs/27 §2: the languages that ship. A translation in res/values-xx/ stays out of the APK
+// (and out of the system's per-app language list) until its code is added here.
+val shippedLanguages = listOf("en")
+
 // One flag drives the BuildConfig field, signing and the cargo feature (docs/26 §7).
 val updateFixtureBuild = providers.gradleProperty("jellybeam.updateFixture").orNull == "true"
 
@@ -25,6 +29,7 @@ android {
         versionCode = providers.gradleProperty("jellybeam.updateVersionCode").orNull?.toInt() ?: 7
         versionName = providers.gradleProperty("jellybeam.updateVersionName").orNull ?: "0.1.6"
         buildConfigField("boolean", "UPDATE_FIXTURE", if (updateFixtureBuild) "true" else "false")
+        buildConfigField("String", "SHIPPED_LANGUAGES", "\"${shippedLanguages.joinToString(",")}\"")
         // Only the ABIs the Rust core is built for. JNA's AAR also ships x86, mips and armeabi
         // slices; packaging them lets such a device install an APK with no core to load.
         // `-Pjellybeam.abi=armeabi-v7a` narrows a one-off build to a single slice.
@@ -77,6 +82,11 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    androidResources {
+        localeFilters += shippedLanguages
+        generateLocaleConfig = true
     }
 
     lint {
@@ -279,4 +289,9 @@ tasks.withType<KotlinCompile>().configureEach {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }
+}
+
+// docs/27 §3: string tests read res/ files directly, so a translation edit must rerun them.
+tasks.withType<Test>().configureEach {
+    inputs.dir("src/main/res").withPathSensitivity(PathSensitivity.RELATIVE)
 }

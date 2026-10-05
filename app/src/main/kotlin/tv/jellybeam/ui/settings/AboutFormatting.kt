@@ -6,39 +6,47 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import tv.jellybeam.R
+import tv.jellybeam.i18n.AppLocale
+import tv.jellybeam.i18n.UiStrings
 
 /** Pure formatting rules for docs/13 About, free of Compose/Android so they're plain-JVM-testable
  * (minSdk 23 `java.time` works via `coreLibraryDesugaring`, see app/build.gradle.kts).
  */
 object AboutFormatting {
 
-    private val BYTE_UNITS = listOf("KB", "MB", "GB", "TB")
-    private val SYNC_INSTANT_FORMAT = DateTimeFormatter.ofPattern("MMM d, HH:mm", Locale.US)
+    private val BYTE_UNITS = listOf(
+        R.string.settings_about_size_kb,
+        R.string.settings_about_size_mb,
+        R.string.settings_about_size_gb,
+        R.string.settings_about_size_tb,
+    )
 
     /** "512 B" below 1024; above that, one decimal place per [BYTE_UNITS] step ("1.0 KB", never a
      * bare "1 KB").
      */
-    fun formatBytes(bytes: Long): String {
-        if (bytes < 1024) return "$bytes B"
+    fun formatBytes(bytes: Long, strings: UiStrings): String {
+        if (bytes < 1024) return strings.get(R.string.settings_about_size_bytes, bytes)
         var value = bytes.toDouble()
         var unitIndex = -1
         while (value >= 1024 && unitIndex < BYTE_UNITS.lastIndex) {
             value /= 1024
             unitIndex++
         }
-        return String.format(Locale.US, "%.1f %s", value, BYTE_UNITS[unitIndex])
+        return strings.get(BYTE_UNITS[unitIndex], value)
     }
 
     /** "Just now" / "n min ago" / "n h ago" below a day old, else a local "MMM d, HH:mm" stamp --
      * a sync from days ago needs a date, not a relative count.
      */
-    fun formatSyncInstant(epochMs: Long, nowMs: Long): String {
+    fun formatSyncInstant(epochMs: Long, nowMs: Long, strings: UiStrings, locale: Locale = AppLocale.format): String {
         val diffSec = (nowMs - epochMs) / 1000
         return when {
-            diffSec < 60 -> "Just now"
-            diffSec < 3_600 -> "${diffSec / 60} min ago"
-            diffSec < 86_400 -> "${diffSec / 3_600} h ago"
-            else -> Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()).format(SYNC_INSTANT_FORMAT)
+            diffSec < 60 -> strings.get(R.string.updates_checked_just_now)
+            diffSec < 3_600 -> (diffSec / 60).toInt().let { strings.plural(R.plurals.updates_checked_minutes_ago, it, it) }
+            diffSec < 86_400 -> (diffSec / 3_600).toInt().let { strings.plural(R.plurals.updates_checked_hours_ago, it, it) }
+            else -> Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault())
+                .format(DateTimeFormatter.ofPattern("MMM d, HH:mm", locale))
         }
     }
 

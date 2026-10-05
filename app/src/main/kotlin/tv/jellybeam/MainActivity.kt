@@ -762,7 +762,7 @@ private fun JellybeamRoot(
                     removingServerIndex = null
                 }
             } catch (error: CoreException) {
-                serverManagementError = error.displayMessage()
+                serverManagementError = error.displayMessage(AppGraph.strings)
                 removingServerIndex = null
             }
         }

@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Player UI text (docs/27 §3). All-caps labels are stored in sentence case and cased in code with
+     uppercaseUi(); format arguments such as %1$.1f are formatted by the platform in the device locale. -->
+<resources>
+    <!-- Live player state, shown in the stats sheet's HEALTH row. -->
+    <string name="player_live_state_idle">Idle</string>
+    <string name="player_live_state_preparing">Preparing</string>
+    <string name="player_live_state_playing">Playing</string>
+    <string name="player_live_state_paused">Paused</string>
+    <string name="player_live_state_buffering">Buffering</string>
+    <string name="player_live_state_ended">Ended</string>
+
+    <!-- Stats sheet: headline and row labels (cased up in code). -->
+    <string name="player_stats_transcoding">Transcoding</string>
+    <string name="player_stats_direct_play">Direct Play</string>
+    <string name="player_stats_no_transcode">no transcode</string>
+    <string name="player_stats_label_video">Video</string>
+    <string name="player_stats_label_audio">Audio</string>
+    <string name="player_stats_label_subtitles">Subtitles</string>
+    <string name="player_stats_label_container">Container</string>
+    <string name="player_stats_label_source">Source</string>
+    <string name="player_stats_label_buffer">Buffer</string>
+    <string name="player_stats_label_network">Network</string>
+    <string name="player_stats_label_health">Health</string>
+    <string name="player_track_off">Off</string>
+    <plurals name="player_stats_subtitles_value">
+        <item quantity="one">%1$s · %2$d available</item>
+        <item quantity="other">%1$s · %2$d available</item>
+    </plurals>
+    <string name="player_stats_buffer_value">%1$.1fs ahead · %2$.1f MiB</string>
+    <string name="player_stats_network_value">%1$.2f Mbit/s</string>
+    <plurals name="player_stats_health_value">
+        <item quantity="one">%1$s · %2$d dropped</item>
+        <item quantity="other">%1$s · %2$d dropped</item>
+    </plurals>
+    <string name="player_stats_fps">%1$sfps</string>
+    <string name="player_stats_video_bitrate">%1$.1fMb/s</string>
+    <string name="player_stats_audio_bitrate">%1$dkb/s</string>
+    <string name="player_stats_sample_rate">%1$skHz</string>
+    <string name="player_channels_mono">Mono</string>
+    <string name="player_channels_stereo">Stereo</string>
+    <string name="player_channels_count">%1$d ch</string>
+
+    <!-- Sheets and OSD chrome. FILE is cased in the resource because the file name follows it. -->
+    <string name="player_sheet_stats_kicker">Playback stats</string>
+    <string name="player_sheet_library_kicker">In your library</string>
+    <string name="player_sheet_back_to_close">Back to close</string>
+    <string name="player_stats_file">FILE %1$s</string>
+    <string name="player_library_loading">Loading…</string>
+    <string name="player_library_unavailable">Library info unavailable</string>
+    <string name="player_osd_direct_play">Direct Play</string>
+    <string name="player_osd_transcode">Transcode</string>
+    <string name="player_osd_ends">Ends %1$s</string>
+    <string name="player_seek_flash_seconds">%1$ds</string>
+    <string name="player_skip_toast">%1$s · Select to undo</string>
+
+    <!-- Library info sheet. -->
+    <string name="player_library_rating_max">/10</string>
+    <string name="player_library_field_director">Director</string>
+    <string name="player_library_field_writers">Writers</string>
+    <string name="player_library_field_watched">Watched</string>
+    <string name="player_library_field_added">Added</string>
+    <string name="player_library_writers_more">%1$s + %2$d</string>
+    <string name="player_library_watched_never">Never</string>
+    <plurals name="player_library_watched_times">
+        <item quantity="one">%1$d time</item>
+        <item quantity="other">%1$d times</item>
+    </plurals>
+    <string name="player_library_watched_last">%1$s · last %2$s</string>
+
+    <!-- Skip pill and its Undo toast, per segment kind. -->
+    <string name="player_skip_intro">Skip Intro</string>
+    <string name="player_skip_credits">Skip Credits</string>
+    <string name="player_skip_recap">Skip Recap</string>
+    <string name="player_skip_preview">Skip Preview</string>
+    <string name="player_skip_commercial">Skip Commercial</string>
+    <string name="player_skip_unknown">Skip</string>
+    <string name="player_skipped_intro">Skipped intro</string>
+    <string name="player_skipped_credits">Skipped credits</string>
+    <string name="player_skipped_recap">Skipped recap</string>
+    <string name="player_skipped_preview">Skipped preview</string>
+    <string name="player_skipped_commercial">Skipped commercial</string>
+    <string name="player_skipped_unknown">Skipped segment</string>
+
+    <!-- Glide chip, countdown numeral and buffering pill. -->
+    <string name="player_glide_start">Start</string>
+    <string name="player_glide_end">End</string>
+    <string name="player_countdown_seconds">%1$dS</string>
+    <string name="player_throughput_mbps">%1$.1f MB/s</string>
+    <string name="player_buffering_pill_percent">%1$s · %2$d%%</string>
+    <string name="player_buffering_pill_throughput">%1$s · %2$d%% · %3$s</string>
+
+    <!-- Track picker. -->
+    <string name="player_picker_audio">Audio</string>
+    <string name="player_picker_subtitles">Subtitles</string>
+    <string name="player_track_default_name">Track %1$d</string>
+
+    <!-- Fatal playback errors shown as a toast. -->
+    <string name="player_error_generic">Playback error: %1$s</string>
+    <string name="player_error_lost_connection">Playback error: lost connection to the server</string>
+    <string name="player_error_direct_play_blocked">This file can\'t be Direct Played on this TV (%1$s). Server: %2$s. Set Quality to Auto in Settings › Playback to let the server transcode it.</string>
+</resources>

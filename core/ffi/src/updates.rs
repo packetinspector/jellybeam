@@ -12,12 +12,41 @@ pub struct InstalledUpdateFacts {
     pub abis: Vec<String>,
     pub signer: String,
 }
+/// docs/27 §5: [`app_updates::policy::Failure`] as a value Kotlin words, never its English `Display`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum UpdateFailure {
+    Network,
+    RateLimited,
+    UnsupportedRelease,
+    Incompatible,
+    Verification,
+    Storage,
+    Installation,
+    Withdrawn,
+}
+
+impl From<policy::Failure> for UpdateFailure {
+    fn from(failure: policy::Failure) -> Self {
+        use policy::Failure;
+        match failure {
+            Failure::Network => Self::Network,
+            Failure::RateLimited => Self::RateLimited,
+            Failure::UnsupportedRelease => Self::UnsupportedRelease,
+            Failure::Incompatible => Self::Incompatible,
+            Failure::Verification => Self::Verification,
+            Failure::Storage => Self::Storage,
+            Failure::Installation => Self::Installation,
+            Failure::Withdrawn => Self::Withdrawn,
+        }
+    }
+}
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct UpdateSnapshot {
     pub generation: u64,
     pub revision: u64,
     pub phase: String,
-    pub failure: Option<String>,
+    pub failure: Option<UpdateFailure>,
     pub version_code: u64,
     pub version_label: String,
     pub notes: String,
@@ -56,9 +85,7 @@ impl AppUpdater {
         };
         Engine::new(dir, installed)
             .map(|engine| Arc::new(Self { engine }))
-            .map_err(|_| crate::CoreError::Cache {
-                detail: "Update storage is unavailable".into(),
-            })
+            .map_err(|_| crate::CoreError::UpdateStorageUnavailable)
     }
 }
 #[uniffi::export]
@@ -70,7 +97,7 @@ impl AppUpdater {
             generation: s.generation,
             revision: s.revision,
             phase: format!("{:?}", s.phase),
-            failure: s.failure.map(|f| f.to_string()),
+            failure: s.failure.map(UpdateFailure::from),
             version_code: s.candidate.as_ref().map_or(0, |c| c.metadata.version_code),
             version_label: s.version_label,
             notes: s.notes,

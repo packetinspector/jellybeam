@@ -34,6 +34,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -44,6 +45,7 @@ import java.time.ZoneId
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.R
 import tv.jellybeam.nav.CHANNEL_FOLDER_ITEM_TYPE
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.focus.FocusRestorer
@@ -213,7 +215,7 @@ private fun ChannelFolderRow(
         Box(modifier = Modifier.width(LEADING_WIDTH)) {
             if (isFolder) {
                 BasicText(
-                    text = "FOLDER",
+                    text = stringResource(R.string.library_folder_tag),
                     style = TextStyle(
                         fontFamily = JellybeamTheme.MartianMono,
                         color = JellybeamTheme.Grigio,
@@ -279,7 +281,7 @@ private fun ChannelFolderRow(
                     style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Pistacchio, fontSize = 18.sp),
                 )
                 card.positionTicks > 0 -> BasicText(
-                    text = "RESUME",
+                    text = stringResource(R.string.library_resume_tag),
                     style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Pistacchio, fontSize = 11.sp),
                 )
             }

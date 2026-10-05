@@ -97,11 +97,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.memory.MemoryCache
-import java.util.Locale
 import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.rememberUiStrings
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.PlaybackActivity
 import tv.jellybeam.ui.cards.ArtSource
@@ -222,7 +223,7 @@ fun DetailScreen(
     focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: DetailViewModel = viewModel(
         key = "detail-${card.id}",
-        factory = DetailViewModelFactory(AppGraph.gateway, card),
+        factory = DetailViewModelFactory(AppGraph.gateway, card, AppGraph.strings),
     ),
 ) {
     val state by viewModel.state.collectAsState()
@@ -405,15 +406,16 @@ private fun EpisodeDetailScreen(
     val cardWindowActive = contentEndInset > 0.dp
     val context = LocalContext.current
     val detail = state.itemDetail
+    val strings = rememberUiStrings()
     // Computed inline, not remembered: a refreshed Card with the same id must recompute rather
     // than show the first composition's stale value (docs/07-home-browse-behavior.md §1).
-    val primaryAction = DetailFormatting.resolvePrimaryAction(card, emptyList())
+    val primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList())
     val hasResume = primaryAction is DetailFormatting.PrimaryAction.Playable && primaryAction.hasProgress
-    val eyebrow = DetailFormatting.episodeEyebrow(card.seriesName, card.parentIndexNumber, card.indexNumber)
-    val metaItems = DetailFormatting.episodeHeaderItems(card.productionYear, card.runtimeTicks, detail?.officialRating, detail?.genres.orEmpty())
+    val eyebrow = DetailFormatting.episodeEyebrow(strings, card.seriesName, card.parentIndexNumber, card.indexNumber)
+    val metaItems = DetailFormatting.episodeHeaderItems(strings, card.productionYear, card.runtimeTicks, detail?.officialRating, detail?.genres.orEmpty())
     // docs/17-mini-player.md §6: [card] is the live mirror card, so a resume/watched flip landing
     // after a PiP dismissal is reflected here; not `remember`ed at all.
-    val remainingLabel = CardFormatting.remainingLabel(card.runtimeTicks, card.positionTicks)
+    val remainingLabel = CardFormatting.remainingLabel(strings, card.runtimeTicks, card.positionTicks)
     val resumeFraction = CardFormatting.watchProgress(card)
     val castMembers = remember(detail) { DetailFormatting.castMembers(detail?.people.orEmpty()) }
     // docs/15 §5: the cast row's LazyRow is the only lazy list here, so [memory]'s scrollTo only
@@ -439,7 +441,7 @@ private fun EpisodeDetailScreen(
     // (below) needs to know up front whether the spec-strip cell will
     // actually render anything, same "no SpecStripRow means no stray gap"
     // contract [SpecStripRow] itself already enforces by returning early.
-    val specFields = remember(detail) { detail?.let(DetailFormatting::specStripFields).orEmpty() }
+    val specFields = remember(strings, detail) { detail?.let { DetailFormatting.specStripFields(strings, it) }.orEmpty() }
 
     // Both of this screen's possible seed targets resolve straight from [card], no async fetch
     // gate, so [seedTarget] is stable from the first composition. The door renders unconditionally
@@ -788,7 +790,7 @@ private fun UpNextPanel(nextEpisode: Card, onClick: () -> Unit, memory: FocusMem
     // Computed inline, not remembered, so a refreshed nextEpisode recomputes instead of staying
     // stale.
     val artSource = CardFormatting.railArtSource(nextEpisode)
-    val metaLine = DetailFormatting.runtimeAndDateLine(nextEpisode.runtimeTicks, nextEpisode.premiereDate)
+    val metaLine = DetailFormatting.runtimeAndDateLine(rememberUiStrings(), nextEpisode.runtimeTicks, nextEpisode.premiereDate)
     val panelWidth = 310.dp
     val titleColumnWidth = panelWidth - UP_NEXT_PANEL_PADDING * 2 - UP_NEXT_THUMB_WIDTH - UP_NEXT_THUMB_TITLE_GAP
     val density = LocalDensity.current
@@ -866,7 +868,8 @@ private fun SeriesDetailScreen(
     val detail = state.itemDetail
     val seasons = state.seasons // already index-number sorted; Specials (index 0) sorts first, matching the chip row.
     val selectedSeason = remember(seasons, state.selectedSeasonId) { seasons.firstOrNull { it.id == state.selectedSeasonId } }
-    val primaryAction = remember(card.id, state.allEpisodes) { DetailFormatting.resolvePrimaryAction(card, state.allEpisodes) }
+    val strings = rememberUiStrings()
+    val primaryAction = remember(card.id, state.allEpisodes) { DetailFormatting.resolvePrimaryAction(strings, card, state.allEpisodes) }
     val hasPrimaryButton = primaryAction != DetailFormatting.PrimaryAction.None
     val hasChips = seasons.size > 1
     val castMembers = remember(detail) { DetailFormatting.castMembers(detail?.people.orEmpty()) }
@@ -1097,6 +1100,7 @@ private fun SeriesDetailScreen(
                         // Computed inline, not remembered, so a refreshed card/detail field
                         // recomputes instead of staying stale.
                         val headerItems = DetailFormatting.seriesHeaderItems(
+                            strings,
                             // detail first: a View-Series synthesized Card has no year
                             productionYear = detail?.productionYear ?: card.productionYear,
                             endYear = detail?.endYear,
@@ -1305,7 +1309,8 @@ private fun SeasonSelectorSection(
     modifier: Modifier = Modifier,
 ) {
     if (seasons.size <= 1) return
-    val summaryItems = selectedSeason?.let { DetailFormatting.seasonSummaryItems(it.name, episodes) }.orEmpty()
+    val strings = rememberUiStrings()
+    val summaryItems = selectedSeason?.let { DetailFormatting.seasonSummaryItems(strings, it.name, episodes) }.orEmpty()
     val showLabel = DetailFormatting.showSeasonsLabel(seasons.size)
 
     Row(
@@ -1538,8 +1543,9 @@ private fun MovieDetailScreen(
     val cardWindowActive = contentEndInset > 0.dp
     val context = LocalContext.current
     val detail = state.itemDetail
+    val strings = rememberUiStrings()
     // Computed inline, not remembered, so a refreshed Card recomputes instead of staying stale.
-    val primaryAction = DetailFormatting.resolvePrimaryAction(card, emptyList())
+    val primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList())
     val hasPrimaryButton = primaryAction != DetailFormatting.PrimaryAction.None
     val castMembers = remember(detail) { DetailFormatting.castMembers(detail?.people.orEmpty()) }
 
@@ -1714,8 +1720,8 @@ private fun MovieDetailScreen(
                                 modifier = Modifier.weight(1f, fill = false).widthIn(max = 510.dp),
                                 verticalArrangement = Arrangement.spacedBy(11.dp),
                             ) {
-                                val eyebrow = remember(card.id, state.libraryName, detail?.dateCreated) {
-                                    DetailFormatting.movieEyebrow(state.libraryName, detail?.dateCreated)
+                                val eyebrow = remember(strings, card.id, state.libraryName, detail?.dateCreated) {
+                                    DetailFormatting.movieEyebrow(strings, state.libraryName, detail?.dateCreated)
                                 }
                                 eyebrow?.let { EyebrowText(it) }
                                 BasicText(
@@ -1841,7 +1847,7 @@ private fun frameBringIntoViewSpec(scrollState: ScrollState): BringIntoViewSpec 
 @Composable
 private fun MovieMetadataRow(card: Card, detail: ItemDetail?) {
     // Computed inline, not remembered, so a refreshed Card recomputes instead of staying stale.
-    val metaLine = DetailFormatting.movieMetaLine(card.productionYear, card.runtimeTicks)
+    val metaLine = DetailFormatting.movieMetaLine(rememberUiStrings(), card.productionYear, card.runtimeTicks)
     if (metaLine == null && detail?.officialRating.isNullOrBlank() && detail?.genres.isNullOrEmpty()) return
 
     FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1973,9 +1979,10 @@ private fun MoreStop(memory: FocusMemory, moreKey: String, onMore: () -> Unit) {
  */
 @Composable
 private fun CreditsLine(directors: List<String>?, writers: List<String>?, studios: List<String>?) {
+    val strings = rememberUiStrings()
     val directorsLine = remember(directors) { DetailFormatting.peopleLine(directors.orEmpty()) }
     val writersLine = remember(writers) { DetailFormatting.peopleLine(writers.orEmpty()) }
-    val studioLine = remember(studios) { DetailFormatting.studioSummary(studios.orEmpty())?.uppercase(Locale.US) }
+    val studioLine = remember(strings, studios) { DetailFormatting.studioSummary(strings, studios.orEmpty())?.uppercaseUi() }
     if (directorsLine == null && writersLine == null && studioLine == null) return
 
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2287,7 +2294,8 @@ private fun specWeightColor(weight: DetailFormatting.SpecWeight): Color = when (
 @Composable
 private fun SpecStripRow(itemType: String, detail: ItemDetail?, extraFields: List<DetailFormatting.SpecField>, modifier: Modifier = Modifier) {
     if (itemType == SERIES_ITEM_TYPE || detail == null) return
-    val fields = remember(detail, extraFields) { DetailFormatting.specStripFields(detail) + extraFields }
+    val strings = rememberUiStrings()
+    val fields = remember(strings, detail, extraFields) { DetailFormatting.specStripFields(strings, detail) + extraFields }
     if (fields.isEmpty()) return
 
     FlowRow(
@@ -2381,7 +2389,7 @@ private fun CastRow(
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (showHeader) {
             BasicText(
-                text = stringResource(R.string.detail_cast).uppercase(Locale.US),
+                text = stringResource(R.string.detail_cast).uppercaseUi(),
                 modifier = Modifier.padding(start = PAGE_MARGIN),
                 style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 10.sp, letterSpacing = (-0.02).em),
             )

@@ -1,6 +1,7 @@
 package tv.jellybeam.ui.discover
 
 import tv.jellybeam.MainDispatcherRule
+import tv.jellybeam.i18n.ResourceUiStrings
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.FakeCoreGateway
 import kotlinx.coroutines.CompletableDeferred
@@ -79,7 +80,7 @@ class DiscoverGridViewModelTest {
             if (p == 1) page(twoCards, page = 1, totalPages = 2) else page(listOf(card(3, "Three")), page = 2, totalPages = 2)
         }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         assertEquals(2, viewModel.state.value.cards.size)
         assertEquals(true, viewModel.state.value.hasMore)
@@ -104,7 +105,7 @@ class DiscoverGridViewModelTest {
             else page(listOf(card(2, "Two again"), card(3, "Three")), page = 2, totalPages = 2)
         }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         viewModel.loadNextPageIfNeeded(lastVisibleIndex = 1, columns = 8)
         advanceUntilIdle()
@@ -119,7 +120,7 @@ class DiscoverGridViewModelTest {
             if (p == 1) page(twoCards, page = 3, totalPages = 3) else page(listOf(card(3, "Three")), page = 2, totalPages = 3)
         }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         assertEquals(1, viewModel.state.value.page)
         assertEquals(true, viewModel.state.value.hasMore)
@@ -143,7 +144,7 @@ class DiscoverGridViewModelTest {
             }
         }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         driveLikeScreen(viewModel, lastVisibleIndex = 1)
 
@@ -162,7 +163,7 @@ class DiscoverGridViewModelTest {
             page(if (p == 6) listOf(card(6, "Six")) else twoCards, page = p.toLong(), totalPages = 6)
         }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         driveLikeScreen(viewModel, lastVisibleIndex = 1)
 
@@ -181,7 +182,7 @@ class DiscoverGridViewModelTest {
         // bounded run.
         val gateway = BrowseGateway { _, _ -> page(twoCards, page = 1, totalPages = 500) }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         driveLikeScreen(viewModel, lastVisibleIndex = 1)
 
@@ -212,7 +213,7 @@ class DiscoverGridViewModelTest {
             }
         }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         viewModel.loadNextPageIfNeeded(lastVisibleIndex = 1, columns = 8)
         advanceUntilIdle()
@@ -236,7 +237,7 @@ class DiscoverGridViewModelTest {
     fun `a sort change clears the paused paging budget`() = runTest {
         val gateway = BrowseGateway { _, _ -> page(twoCards, page = 1, totalPages = 500) }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         driveLikeScreen(viewModel, lastVisibleIndex = 1)
         val pausedCount = gateway.fetched.size
@@ -257,7 +258,7 @@ class DiscoverGridViewModelTest {
             page(if (p == 3) listOf(card(3, "Three")) else twoCards, page = 1, totalPages = 3)
         }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         driveLikeScreen(viewModel, lastVisibleIndex = 1)
 
@@ -277,7 +278,7 @@ class DiscoverGridViewModelTest {
             }
         }
 
-        val viewModel = DiscoverGridViewModel(gateway, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(gateway, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
         assertEquals(listOf("Popular"), viewModel.state.value.cards.map { it.title })
         assertEquals(true, viewModel.state.value.hasMore)
@@ -293,7 +294,7 @@ class DiscoverGridViewModelTest {
     @Test
     fun `SeerrNotConfigured routes to the notConfigured flag`() = runTest {
         val fake = FakeCoreGateway(seerrBrowseResult = Result.failure(uniffi.jellybeam_core.CoreException.SeerrNotConfigured()))
-        val viewModel = DiscoverGridViewModel(fake, SeerrBrowseKind.MOVIES)
+        val viewModel = DiscoverGridViewModel(fake, ResourceUiStrings.default, SeerrBrowseKind.MOVIES)
         advanceUntilIdle()
 
         assertEquals(true, viewModel.state.value.notConfigured)

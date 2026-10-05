@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.LaunchWarmup
+import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.player.PlaybackReports
 import tv.jellybeam.ui.home.common.HomeFeed
 import tv.jellybeam.ui.home.common.HomeFeedState
@@ -33,6 +34,7 @@ data class ClassicContent(
  */
 class ClassicHomeViewModel(
     gateway: CoreGateway,
+    strings: UiStrings,
     /** docs/17-mini-player.md §6: injected so a test can drive it instead of [PlaybackReports]. */
     stopEpoch: Flow<Long> = PlaybackReports.stopEpoch,
     launchWarmup: LaunchWarmup? = null,
@@ -45,6 +47,7 @@ class ClassicHomeViewModel(
         initialContent = ClassicContent(),
         stopEpoch = stopEpoch,
         launchWarmup = launchWarmup,
+        strings = strings,
         extract = ::classic,
         reduce = ::reduceClassic,
     )
@@ -84,11 +87,12 @@ private fun mergeShelves(current: List<HomeShelf>, incoming: List<HomeShelf>): L
 
 class ClassicHomeViewModelFactory(
     private val gateway: CoreGateway,
+    private val strings: UiStrings,
     private val launchWarmup: LaunchWarmup? = null,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(ClassicHomeViewModel::class.java))
-        return ClassicHomeViewModel(gateway, launchWarmup = launchWarmup) as T
+        return ClassicHomeViewModel(gateway, strings, launchWarmup = launchWarmup) as T
     }
 }

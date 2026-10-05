@@ -95,6 +95,8 @@ import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.rememberUiStrings
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.PlaybackActivity
 import tv.jellybeam.ui.cards.BACKDROP_PLACEHOLDER_DIM
@@ -233,7 +235,7 @@ internal fun ClassicHomeScreen(
      */
     focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: ClassicHomeViewModel = viewModel(
-        factory = ClassicHomeViewModelFactory(AppGraph.gateway, launchWarmup = AppGraph.launchWarmup),
+        factory = ClassicHomeViewModelFactory(AppGraph.gateway, AppGraph.strings, launchWarmup = AppGraph.launchWarmup),
     ),
 ) {
     val feedState by viewModel.state.collectAsState()
@@ -827,9 +829,10 @@ internal fun ClassicHomeScreen(
         // wordmark. Text comes from [tv.jellybeam.ui.home.common.HomeChrome.loadingStatusText] while loading, else the sync's
         // own progress line while a background sync is still running post-reveal; `null` once
         // neither applies.
+        val syncingLabel = stringResource(R.string.home_syncing)
         val syncStatusPillText = when {
             chrome.isLoading -> chrome.loadingStatusText
-            chrome.isSyncing -> chrome.syncProgressText ?: "Syncing…"
+            chrome.isSyncing -> chrome.syncProgressText ?: syncingLabel
             else -> null
         }
         // The clock lives in [HomeMasthead] (shares a row with the wordmark), so only the
@@ -1024,18 +1027,20 @@ private fun HeroBanner(
     // instead of
     // showing the first composition's stale value (docs/07-home-browse-behavior.md §1).
     val artSource = CardFormatting.backdropArtSource(card)
-    val metaLine = CardFormatting.heroMetaLine(card)
+    val strings = rememberUiStrings()
+    val metaLine = CardFormatting.heroMetaLine(strings, card)
     val isResumable = CardFormatting.heroIsResumable(card)
     val progress = CardFormatting.watchProgress(card)
-    val timingLabel = CardFormatting.resumeTimingLabel(card)
+    val timingLabel = CardFormatting.resumeTimingLabel(strings, card)
     val isEpisode = card.itemType == "Episode"
     val seriesName = card.seriesName
     // "CONTINUE · <SERIES NAME>" for an episode, bare "CONTINUE" otherwise -- the hero is always
     // sourced from the core's [ClassicContent.hero].
+    val continueEyebrow = stringResource(R.string.home_continue_eyebrow)
     val eyebrowText = if (isEpisode && !seriesName.isNullOrBlank()) {
-        "${CONTINUE_EYEBROW_PREFIX} · ${seriesName.uppercase()}"
+        "$continueEyebrow · ${seriesName.uppercaseUi()}"
     } else {
-        CONTINUE_EYEBROW_PREFIX
+        continueEyebrow
     }
     val primaryLabel = stringResource(if (isResumable) R.string.hero_resume else R.string.hero_play)
     val moreInfoLabel = stringResource(R.string.hero_more_info)
@@ -1173,9 +1178,6 @@ private fun HeroBanner(
         }
     }
 }
-
-/** [HeroBanner]'s eyebrow prefix -- the hero shelf is always Continue Watching's first card. */
-private const val CONTINUE_EYEBROW_PREFIX = "CONTINUE"
 
 /**
  * One hero button. `isPrimary` (Resume/Play) is pistachio-filled, swapping to [JellybeamTheme.Sheen]

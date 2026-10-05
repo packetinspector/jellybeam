@@ -17,3 +17,4 @@
 - [ ] `docs/13-feature-list.md` updated for any user-visible change
 - [ ] No real hostnames, IPs, tokens, media titles, or local paths anywhere in the diff; tests use synthetic values
 - [ ] Direct Play stays the default; server names still render verbatim
+- [ ] New UI text is a string resource, not a literal (docs/27 §3)

@@ -119,6 +119,9 @@ import kotlin.math.sqrt
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
+import tv.jellybeam.i18n.rememberUiStrings
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.CardArtImage
 import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.detail.DetailFormatting
@@ -316,7 +319,7 @@ internal fun resolveInvokerReturn(invoker: ControlButton?, visible: List<Control
  * independently when absent; `null` when all are missing. Server codec strings are bare
  * (`"h264"`), so this uppercases verbatim (same convention as [StatsSheetFormat]'s VIDEO row).
  */
-internal fun directPlayCodecSummary(detail: PlaybackOsdDetail?): String? {
+internal fun directPlayCodecSummary(strings: UiStrings, detail: PlaybackOsdDetail?): String? {
     if (detail == null) return null
     val video = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.VIDEO }
     val audio = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.AUDIO && it.isDefault }
@@ -324,13 +327,13 @@ internal fun directPlayCodecSummary(detail: PlaybackOsdDetail?): String? {
     val parts = listOfNotNull(
         chipResolutionLabel(video?.width, video?.height),
         video?.codec?.takeIf { it.isNotBlank() }?.uppercase(Locale.US),
-        chipAudioLabel(audio?.codec, audio?.channels),
+        chipAudioLabel(strings, audio?.codec, audio?.channels),
     )
     return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
 }
 
 /** `"{height}p"`, falling back to a width ladder when height is omitted. Kept in sync with
- * [StatsSheetFormat]'s own copy (see [chipChannelLabel]). */
+ * [StatsSheetFormat]'s own copy. */
 private fun chipResolutionLabel(width: Int?, height: Int?): String? {
     val classified = DetailFormatting.resolutionLabel(width, height)
     if (classified != null) return classified.lowercase(Locale.US)
@@ -350,19 +353,10 @@ private fun chipHeightFromWidth(width: Int?): Int? {
     }
 }
 
-private fun chipAudioLabel(codec: String?, channels: Int?): String? {
+private fun chipAudioLabel(strings: UiStrings, codec: String?, channels: Int?): String? {
     val name = codec?.takeIf { it.isNotBlank() }?.uppercase(Locale.US) ?: return null
-    val channelPart = channels?.let(::chipChannelLabel)
+    val channelPart = channels?.let { StatsSheetFormat.channelLabel(strings, it) }
     return if (channelPart != null) "$name $channelPart" else name
-}
-
-/** Kept in sync with [StatsSheetFormat]'s own private copy of this exact mapping. */
-private fun chipChannelLabel(channels: Int): String = when (channels) {
-    1 -> "Mono"
-    2 -> "Stereo"
-    6 -> "5.1"
-    8 -> "7.1"
-    else -> "$channels ch"
 }
 
 /**
@@ -710,6 +704,7 @@ fun PlaybackScreen(
     val state by viewModel.state.collectAsState()
     val previewTile by viewModel.previewTile.collectAsState()
     val context = LocalContext.current
+    val strings = rememberUiStrings()
     val captioningManager = remember(context) { context.getSystemService(CaptioningManager::class.java) }
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
@@ -1088,7 +1083,7 @@ fun PlaybackScreen(
                 val result = viewModel.seek(signedMs, resolveTrickplay = showFeedback)
                 if (showFeedback) {
                     val glyph = if (direction == SeekDirection.BACK) "◀◀" else "▶▶"
-                    flash(glyph, "${baseMs / 1000L}s")
+                    flash(glyph, strings.get(R.string.player_seek_flash_seconds, baseMs / 1000L))
                     if (result != null) trickplayPreview.show(result.targetPositionMs, result.tile) else trickplayPreview.clear()
                     trickplayPreviewState = trickplayPreview.preview
                 }
@@ -1514,8 +1509,9 @@ fun PlaybackScreen(
                     val subtitleSelection = remember(detail, state.nonDefaultTrackActive) {
                         viewModel.currentSubtitleSelection()
                     }
-                    val content = remember(detail, subtitleSelection, state.statsServerName, state.playMethod, state.transcodeReason) {
+                    val content = remember(strings, detail, subtitleSelection, state.statsServerName, state.playMethod, state.transcodeReason) {
                         StatsSheetFormat.build(
+                            strings,
                             detail,
                             subtitleSelection.first,
                             subtitleSelection.second,
@@ -1525,7 +1521,7 @@ fun PlaybackScreen(
                             transcodeReason = state.transcodeReason,
                         )
                     }
-                    OsdSheetContainer(kicker = "PLAYBACK STATS", scrollState = sheetScrollState, modifier = Modifier.align(Alignment.TopEnd)) {
+                    OsdSheetContainer(kicker = strings.get(R.string.player_sheet_stats_kicker).uppercaseUi(), scrollState = sheetScrollState, modifier = Modifier.align(Alignment.TopEnd)) {
                         StatsSpansText(
                             spans = content.headline,
                             style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 15.sp),
@@ -1536,14 +1532,14 @@ fun PlaybackScreen(
                             StatsGridRow(label = row.label, value = row.value)
                             Spacer(modifier = Modifier.height(6.dp))
                         }
-                        StatsSheetFormat.liveRows(live).forEach { row ->
+                        StatsSheetFormat.liveRows(strings, live).forEach { row ->
                             StatsGridRow(label = row.label, value = row.value)
                             Spacer(modifier = Modifier.height(6.dp))
                         }
                         content.fileName?.let { fileName ->
                             Spacer(modifier = Modifier.height(14.dp))
                             BasicText(
-                                text = "FILE $fileName",
+                                text = strings.get(R.string.player_stats_file, fileName),
                                 style = TextStyle(
                                     fontFamily = JellybeamTheme.MartianMono,
                                     color = Color(0xFFA69C8E),
@@ -1556,14 +1552,14 @@ fun PlaybackScreen(
             }
 
             state.libraryInfoOverlay?.let { overlay ->
-                OsdSheetContainer(kicker = "IN YOUR LIBRARY", scrollState = sheetScrollState, modifier = Modifier.align(Alignment.TopEnd)) {
+                OsdSheetContainer(kicker = strings.get(R.string.player_sheet_library_kicker).uppercaseUi(), scrollState = sheetScrollState, modifier = Modifier.align(Alignment.TopEnd)) {
                     when (overlay) {
                         LibraryInfoOverlayState.Loading -> BasicText(
-                            text = "Loading…",
+                            text = strings.get(R.string.player_library_loading),
                             style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 15.sp),
                         )
                         LibraryInfoOverlayState.Unavailable -> BasicText(
-                            text = "Library info unavailable",
+                            text = strings.get(R.string.player_library_unavailable),
                             style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 15.sp),
                         )
                         is LibraryInfoOverlayState.Content -> LibrarySheetBody(overlay.value)
@@ -1614,7 +1610,7 @@ fun PlaybackScreen(
             activeSegment?.let { segment ->
                 if (state.nextUp == null && state.stillWatching == null) {
                     SkipPill(
-                        label = SkipSegment.pillLabel(segment.segmentType),
+                        label = SkipSegment.pillLabel(strings, segment.segmentType),
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
                             .padding(end = OSD_MARGIN, bottom = controlZoneHeight(state.osdDetail) + 16.dp),
@@ -1623,7 +1619,7 @@ fun PlaybackScreen(
             }
             skipUndo?.let { undo ->
                 SkipUndoToast(
-                    label = SkipSegment.toastLabel(undo.segmentType),
+                    label = SkipSegment.toastLabel(strings, undo.segmentType),
                     modifier = Modifier.align(Alignment.TopCenter),
                 )
             }
@@ -1747,9 +1743,10 @@ private fun LiveOsdTimeAndScrubber(
  */
 @Composable
 private fun OsdTitleLine(state: PlaybackUiState, directPlayDetail: PlaybackOsdDetail?, modifier: Modifier = Modifier) {
+    val strings = rememberUiStrings()
     val isEpisode = state.itemType == "Episode"
     val title = OsdTitleFormat.displayTitle(state.itemName)
-    val seasonEpisode = if (isEpisode) CardFormatting.seasonEpisodeLabel(state.parentIndexNumber, state.indexNumber) else null
+    val seasonEpisode = if (isEpisode) CardFormatting.seasonEpisodeLabel(strings, state.parentIndexNumber, state.indexNumber) else null
 
     if (state.osdDetail == OsdDetailSetting.FULL) {
         Column(modifier = modifier) {
@@ -1814,10 +1811,11 @@ private fun OsdTitleLine(state: PlaybackUiState, directPlayDetail: PlaybackOsdDe
  */
 @Composable
 private fun DirectPlayLine(playMethod: PlayMethodFfi, detail: PlaybackOsdDetail?, modifier: Modifier = Modifier) {
+    val strings = rememberUiStrings()
     val transcoding = playMethod == PlayMethodFfi.TRANSCODE
     val text = buildString {
-        append(if (transcoding) "TRANSCODE" else "DIRECT PLAY")
-        directPlayCodecSummary(detail)?.let { summary -> append(" · "); append(summary) }
+        append(strings.get(if (transcoding) R.string.player_osd_transcode else R.string.player_osd_direct_play).uppercaseUi())
+        directPlayCodecSummary(strings, detail)?.let { summary -> append(" · "); append(summary) }
     }
     BasicText(
         text = text,
@@ -1843,6 +1841,7 @@ private fun OsdTimeAndScrubber(
     durationTicks: Long?,
     modifier: Modifier = Modifier,
 ) {
+    val strings = rememberUiStrings()
     val isFull = state.osdDetail == OsdDetailSetting.FULL
     val positionMs = PlaybackTicks.ticksToMs(positionTicks)
     val durationMs = durationTicks?.let(PlaybackTicks::ticksToMs)
@@ -1897,7 +1896,7 @@ private fun OsdTimeAndScrubber(
                     // docs/12 §0: whole right cell is Panna2 -- both readouts are secondary, unlike
                     // the left column's Panna elapsed digit.
                     BasicText(
-                        text = "${PlaybackTimeFormat.formatRemaining(positionMs, durationMs)} · ENDS $endsLabel",
+                        text = "${PlaybackTimeFormat.formatRemaining(positionMs, durationMs)} · ${strings.get(R.string.player_osd_ends, endsLabel).uppercaseUi()}",
                         maxLines = 1,
                         softWrap = false,
                         style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna2, fontSize = 13.sp),
@@ -2118,7 +2117,7 @@ private fun OsdSheetContainer(
                 // docs/12 §17: sheet kickers are muted, not accent -- the library rating figure is
                 // the sheet's one accent.
                 BasicText(text = kicker, style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 11.sp))
-                BasicText(text = "BACK TO CLOSE", style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 10.sp))
+                BasicText(text = stringResource(R.string.player_sheet_back_to_close).uppercaseUi(), style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 10.sp))
             }
             Spacer(modifier = Modifier.height(12.dp))
             // docs/12 §17: divider at 6% alpha, exactly one per sheet.
@@ -2399,6 +2398,7 @@ private fun GlideSurface(
     modifier: Modifier = Modifier,
 ) {
     val position by positionTicks.collectAsState()
+    val strings = rememberUiStrings()
     val positionMs = PlaybackTicks.ticksToMs(position)
     val durationMs = state.durationTicks?.let { PlaybackTicks.ticksToMs(it) } ?: 0L
     val fractions = remember(positionMs, surface.targetMs, durationMs) {
@@ -2407,8 +2407,8 @@ private fun GlideSurface(
     val chapterFractions = remember(state.chapters, state.durationTicks) {
         Chapters.tickFractions(state.chapters, state.durationTicks)
     }
-    val chip = remember(surface.targetMs, surface.deltaMs, surface.clamp, surface.multiplier) {
-        GlideChipFormat.line(surface.targetMs, surface.deltaMs, surface.clamp, surface.multiplier)
+    val chip = remember(strings, surface.targetMs, surface.deltaMs, surface.clamp, surface.multiplier) {
+        GlideChipFormat.line(strings, surface.targetMs, surface.deltaMs, surface.clamp, surface.multiplier)
     }
     val chapterName = remember(state.chapters, surface.chapterIndex) {
         surface.chapterIndex?.let { state.chapters.getOrNull(it)?.name }
@@ -2836,7 +2836,8 @@ private fun NextUpCard(
     modifier: Modifier = Modifier,
 ) {
     val card = nextUp.card
-    val seasonEpisode = remember(card.id) { CardFormatting.seasonEpisodeLabel(card.parentIndexNumber, card.indexNumber) }
+    val strings = rememberUiStrings()
+    val seasonEpisode = remember(strings, card.id) { CardFormatting.seasonEpisodeLabel(strings, card.parentIndexNumber, card.indexNumber) }
     val title = if (seasonEpisode != null) "$seasonEpisode · ${card.name}" else card.name
     val detail = card.runtimeTicks?.let { ticks ->
         val minutes = ceil(ticks / 10_000_000.0 / 60.0).toLong()
@@ -2878,7 +2879,7 @@ private fun NextUpCard(
         backLabel = stringResource(R.string.next_up_back_to_dismiss),
         actionLabel = stringResource(R.string.next_up_play_next),
         remainingFraction = if (nextUp.autoAdvance) remainingFraction else null,
-        numeral = if (nextUp.autoAdvance) NextUpCountdown.numeral(remainingSecs) else null,
+        numeral = if (nextUp.autoAdvance) NextUpCountdown.numeral(strings, remainingSecs) else null,
         modifier = modifier,
     )
 }
@@ -2896,7 +2897,8 @@ private fun StillWatchingCard(
     nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     val card = stillWatching.card
-    val seasonEpisode = remember(card.id) { CardFormatting.seasonEpisodeLabel(card.parentIndexNumber, card.indexNumber) }
+    val strings = rememberUiStrings()
+    val seasonEpisode = remember(strings, card.id) { CardFormatting.seasonEpisodeLabel(strings, card.parentIndexNumber, card.indexNumber) }
     val detail = if (seasonEpisode != null) "$seasonEpisode · ${card.name}" else card.name
 
     // Keyed on the deadline so a noteUserInput restart reseeds both before the first frame -- no
@@ -2926,7 +2928,7 @@ private fun StillWatchingCard(
         backLabel = stringResource(R.string.still_watching_back_to_stop),
         actionLabel = stringResource(R.string.still_watching_keep_watching),
         remainingFraction = remainingFraction,
-        numeral = NextUpCountdown.numeral(remainingSecs),
+        numeral = NextUpCountdown.numeral(strings, remainingSecs),
         modifier = modifier,
     )
 }
@@ -2936,7 +2938,7 @@ private fun StillWatchingCard(
 /** The picker's rows inside [OsdAnchoredMenu]: "Audio" then "Subtitles" in one list, one focus index. */
 @Composable
 private fun ColumnScope.TrackPickerRows(picker: TrackPickerState, focusedIndex: Int) {
-    TrackPickerSectionHeader(text = "Audio")
+    TrackPickerSectionHeader(text = stringResource(R.string.player_picker_audio))
     Spacer(modifier = Modifier.height(8.dp))
     picker.audioTracks.forEachIndexed { index, choice ->
         TrackChoiceRow(choice = choice, isFocused = index == focusedIndex, revealAbove = if (index == 0) TRACK_SECTION_HEAD_REVEAL else 0.dp)
@@ -2944,7 +2946,7 @@ private fun ColumnScope.TrackPickerRows(picker: TrackPickerState, focusedIndex: 
 
     Spacer(modifier = Modifier.height(16.dp))
 
-    TrackPickerSectionHeader(text = "Subtitles")
+    TrackPickerSectionHeader(text = stringResource(R.string.player_picker_subtitles))
     Spacer(modifier = Modifier.height(8.dp))
     val audioCount = picker.audioTracks.size
     picker.subtitleTracks.forEachIndexed { index, choice ->
@@ -3050,7 +3052,7 @@ private fun SkipUndoToast(label: String, modifier: Modifier = Modifier) {
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
         BasicText(
-            text = "$label · Select to undo",
+            text = stringResource(R.string.player_skip_toast, label),
             style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 13.sp),
         )
     }
@@ -3090,11 +3092,12 @@ internal fun PulsingDots(modifier: Modifier = Modifier) {
 
 @Composable
 private fun BufferingPill(info: BufferingInfo, modifier: Modifier = Modifier) {
-    val throughput = BufferingInfo.formatThroughput(info.bytesPerSec)
+    val strings = rememberUiStrings()
+    val label = stringResource(R.string.player_buffering_label)
     val text = if (info.bytesPerSec > 0L) {
-        "${stringResource(R.string.player_buffering_label)} · ${info.percent}% · $throughput"
+        stringResource(R.string.player_buffering_pill_throughput, label, info.percent, BufferingInfo.formatThroughput(strings, info.bytesPerSec))
     } else {
-        "${stringResource(R.string.player_buffering_label)} · ${info.percent}%"
+        stringResource(R.string.player_buffering_pill_percent, label, info.percent)
     }
     Row(
         modifier = modifier

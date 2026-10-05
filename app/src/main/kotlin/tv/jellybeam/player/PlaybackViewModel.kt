@@ -8,6 +8,8 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import tv.jellybeam.AppGraph
+import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
 import tv.jellybeam.perf.PerfLog
@@ -91,13 +93,12 @@ const val TRACK_PICKER_SUBTITLE_OFF_ID: Long = -1L
  * Direct Play rule forced it -- names that verdict and the Quality setting that
  * would unlock a transcode; every other case falls back to `"Playback error: <code>"`.
  */
-internal fun fatalPlaybackMessage(errorCodeName: String, plan: PlaybackPlan?): String {
+internal fun fatalPlaybackMessage(strings: UiStrings, errorCodeName: String, plan: PlaybackPlan?): String {
     val serverVerdict = plan?.takeIf { it.playMethod == PlayMethodFfi.DIRECT_PLAY }?.serverVerdict
     return if (serverVerdict != null) {
-        "This file can't be Direct Played on this TV ($errorCodeName). Server: $serverVerdict. " +
-            "Set Quality to Auto in Settings › Playback to let the server transcode it."
+        strings.get(R.string.player_error_direct_play_blocked, errorCodeName, serverVerdict)
     } else {
-        "Playback error: $errorCodeName"
+        strings.get(R.string.player_error_generic, errorCodeName)
     }
 }
 
@@ -397,6 +398,7 @@ class PlaybackViewModel(
     private val gateway: CoreGateway,
     private val playerHolder: PlaybackPlayer,
     itemId: String,
+    private val strings: UiStrings,
     private val reportScope: CoroutineScope = AppGraph.processScope,
     /** docs/17 §6: called after every landed final stop report
      * ([stopPlaybackOnce]/[stopPlaybackAndAwait], never [abandonPlaybackOnce]'s) so Detail/Home can
@@ -754,7 +756,7 @@ class PlaybackViewModel(
             // independent budgets and could hold a dead stream for minutes.
             if (playerHolder.hasExhaustedLoadRetryBudget()) {
                 finishAfterFatalPlaybackError("LOAD_RETRY_EXHAUSTED")
-                _events.tryEmit(PlaybackEvent.FinishWithMessage("Playback error: lost connection to the server"))
+                _events.tryEmit(PlaybackEvent.FinishWithMessage(strings.get(R.string.player_error_lost_connection)))
                 return
             }
 
@@ -767,7 +769,7 @@ class PlaybackViewModel(
                 // onTracksChanged above) -- ordinary fatal path once the fallback
                 // gate declines.
                 finishAfterFatalPlaybackError(error.errorCodeName)
-                _events.tryEmit(PlaybackEvent.FinishWithMessage(fatalPlaybackMessage(error.errorCodeName, currentPlan)))
+                _events.tryEmit(PlaybackEvent.FinishWithMessage(fatalPlaybackMessage(strings, error.errorCodeName, currentPlan)))
             }
         }
     }
@@ -794,7 +796,7 @@ class PlaybackViewModel(
                 // Preserve reconnectPositionTicks until the final stop has
                 // consumed it -- an idle-after-error player may read zero.
                 clearReconnectState()
-                _events.tryEmit(PlaybackEvent.FinishWithMessage("Playback error: lost connection to the server"))
+                _events.tryEmit(PlaybackEvent.FinishWithMessage(strings.get(R.string.player_error_lost_connection)))
             }
             is ReconnectPolicy.Decision.Retry -> {
                 _state.update { it.copy(reconnecting = ReconnectingInfo(attempt = reconnectAttempt)) }
@@ -886,7 +888,7 @@ class PlaybackViewModel(
             } catch (e: CoreException) {
                 if (generation != sessionGeneration) return@launch // see this method's own doc comment
                 finishAfterFatalPlaybackError(e::class.simpleName ?: "CoreException")
-                _events.tryEmit(PlaybackEvent.FinishWithMessage(e.displayMessage()))
+                _events.tryEmit(PlaybackEvent.FinishWithMessage(e.displayMessage(strings)))
             }
         }
         return true
@@ -976,7 +978,7 @@ class PlaybackViewModel(
                 if (e is CoreException.Unauthorized) {
                     PlaybackEvent.ReauthorizationRequired
                 } else {
-                    PlaybackEvent.FinishWithMessage(e.displayMessage())
+                    PlaybackEvent.FinishWithMessage(e.displayMessage(strings))
                 },
             )
             return
@@ -1694,7 +1696,7 @@ class PlaybackViewModel(
         val subtitleChoices = buildList {
             // "Off" is selected exactly when no real subtitle is selected -- matches
             // applyTrackDecision's OFF branch, which disables the whole text type.
-            add(TrackChoice(id = TRACK_PICKER_SUBTITLE_OFF_ID, label = "Off", selected = subtitle.none { it.isSelected }))
+            add(TrackChoice(id = TRACK_PICKER_SUBTITLE_OFF_ID, label = strings.get(R.string.player_track_off), selected = subtitle.none { it.isSelected }))
             subtitle.forEachIndexed { index, info ->
                 add(
                     TrackChoice(
@@ -1712,7 +1714,7 @@ class PlaybackViewModel(
     }
 
     private fun trackChoiceLabel(info: TrackInfo, indexInKind: Int): String =
-        info.title ?: info.lang ?: "Track ${indexInKind + 1}"
+        info.title ?: info.lang ?: strings.get(R.string.player_track_default_name, indexInKind + 1)
 
     /** [TrackChoice.meta] -- `"lang codec"`, dropping whichever half [info] doesn't have; `null` if
      * neither.
@@ -2237,7 +2239,7 @@ class PlaybackViewModel(
         libraryInfoJob?.cancel()
         libraryInfoJob = viewModelScope.launch {
             val result = try {
-                LibraryInfoOverlayState.Content(LibraryInfoFormat.buildSheet(gateway.getItemDetail(requestedItemId)))
+                LibraryInfoOverlayState.Content(LibraryInfoFormat.buildSheet(strings, gateway.getItemDetail(requestedItemId)))
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -2381,11 +2383,12 @@ class PlaybackViewModelFactory(
     private val playerHolder: PlaybackPlayer,
     private val itemId: String,
     private val startFromBeginning: Boolean = false,
+    private val strings: UiStrings,
     private val sheetFetcher: SheetFetcher? = null,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(PlaybackViewModel::class.java))
-        return PlaybackViewModel(gateway, playerHolder, itemId, startFromBeginning = startFromBeginning, sheetFetcher = sheetFetcher) as T
+        return PlaybackViewModel(gateway, playerHolder, itemId, strings, startFromBeginning = startFromBeginning, sheetFetcher = sheetFetcher) as T
     }
 }

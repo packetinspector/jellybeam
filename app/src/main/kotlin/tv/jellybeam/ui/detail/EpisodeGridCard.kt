@@ -1,5 +1,6 @@
 package tv.jellybeam.ui.detail
 
+import tv.jellybeam.i18n.rememberUiStrings
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -70,14 +71,15 @@ fun EpisodeGridCard(
     width: Dp = EPISODE_CARD_WIDTH,
 ) {
     val height = width * 9f / 16f
+    val strings = rememberUiStrings()
     // Computed inline, not remembered: a refreshed Card with the same id must recompute
     // rather than show the first composition's stale value (docs/07-home-browse-behavior.md §1).
     val artSource = CardFormatting.railArtSource(card)
-    val title = CardFormatting.episodeTitle(card.name, card.indexNumber)
+    val title = CardFormatting.episodeTitle(strings, card.name, card.indexNumber)
     val metaLine = if (card.isVirtual) {
-        CardFormatting.virtualStatusLabel(card.premiereDate)
+        CardFormatting.virtualStatusLabel(strings, card.premiereDate)
     } else {
-        DetailFormatting.runtimeAndDateLine(card.runtimeTicks, card.premiereDate).orEmpty()
+        DetailFormatting.runtimeAndDateLine(strings, card.runtimeTicks, card.premiereDate).orEmpty()
     }
     val progress = CardFormatting.watchProgress(card)
     val indicator = CardFormatting.watchIndicator(card, progress)

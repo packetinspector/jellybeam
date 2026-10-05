@@ -66,6 +66,7 @@ import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.cards.CollectionStackCard
 import tv.jellybeam.ui.cards.PosterCard
@@ -202,7 +203,10 @@ fun LibraryScreen(
     var railIndex by remember { mutableIntStateOf(0) }
     var railOriginKey by remember { mutableStateOf<String?>(null) }
     val railRequester = remember { FocusRequester() }
-    val railEntries = remember(state.sort, state.groups) { IndexRailModel.build(state.sort, state.groups, LocalDate.now()) }
+    val strings = rememberUiStrings()
+    val railEntries = remember(state.sort, state.groups, strings) {
+        IndexRailModel.build(strings, state.sort, state.groups, LocalDate.now())
+    }
 
     // Request the next page when focus/scroll enters the last three loaded rows.
     LaunchedEffect(gridState, state.items.size, state.hasMore) {
@@ -633,7 +637,8 @@ fun LibraryScreen(
  */
 @Composable
 private fun LibrarySummaryLine(counts: GridCounts, sort: GridSort, filters: GridFilters, noun: GridNoun, modifier: Modifier = Modifier) {
-    val segments = remember(counts, sort, filters, noun) { GridSummaryFormat.segments(counts, sort, filters, noun) }
+    val strings = rememberUiStrings()
+    val segments = remember(counts, sort, filters, noun, strings) { GridSummaryFormat.segments(strings, counts, sort, filters, noun) }
     Row(modifier = modifier) {
         segments.forEachIndexed { index, segment ->
             if (index > 0) {

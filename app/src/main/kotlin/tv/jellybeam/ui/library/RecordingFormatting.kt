@@ -5,6 +5,8 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import tv.jellybeam.i18n.AppLocale
+import tv.jellybeam.i18n.mediumDateFormatter
 
 /** Pure Kotlin date/time formatting for [ChannelFolderList]'s recording rows, plain-JVM-testable
  * like [tv.jellybeam.ui.cards.CardFormatting]. [Card.premiereDate] is the recording's start instant,
@@ -12,10 +14,7 @@ import java.util.Locale
  */
 object RecordingFormatting {
 
-    private val WEEKDAY_MONTH_DAY: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE, MMM d", Locale.US)
-    private val MONTH_DAY_YEAR: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.US)
-    private val TIME_12H: DateTimeFormatter = DateTimeFormatter.ofPattern("h:mm a", Locale.US)
-    private val TIME_24H: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm", Locale.US)
+    private fun formatter(pattern: String, locale: Locale): DateTimeFormatter = DateTimeFormatter.ofPattern(pattern, locale)
 
     /**
      * A recording row's date line: `"EEE, MMM d"` when [premiereDate]'s local date falls in
@@ -24,21 +23,21 @@ object RecordingFormatting {
      * a
      * missing or unparseable [premiereDate] -- never throws.
      */
-    fun dateLine(premiereDate: String?, zone: ZoneId, today: LocalDate): String? {
+    fun dateLine(premiereDate: String?, zone: ZoneId, today: LocalDate, locale: Locale = AppLocale.format): String? {
         val localDate = localDateOf(premiereDate, zone) ?: return null
         return if (localDate.year == today.year) {
-            WEEKDAY_MONTH_DAY.format(localDate)
+            formatter("EEE, MMM d", locale).format(localDate)
         } else {
-            MONTH_DAY_YEAR.format(localDate)
+            mediumDateFormatter(locale).format(localDate)
         }
     }
 
     /** A recording row's time line: `"h:mm a"`, or `"HH:mm"` when [use24h]. `null` for a missing or
      * unparseable [premiereDate] -- never throws.
      */
-    fun timeLine(premiereDate: String?, zone: ZoneId, use24h: Boolean): String? {
+    fun timeLine(premiereDate: String?, zone: ZoneId, use24h: Boolean, locale: Locale = AppLocale.format): String? {
         val local = zonedDateTimeOf(premiereDate, zone) ?: return null
-        return if (use24h) TIME_24H.format(local) else TIME_12H.format(local)
+        return formatter(if (use24h) "HH:mm" else "h:mm a", locale).format(local)
     }
 
     private fun localDateOf(premiereDate: String?, zone: ZoneId): LocalDate? =

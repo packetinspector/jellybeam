@@ -16,10 +16,12 @@ import org.junit.Test
 import tv.jellybeam.MainDispatcherRule
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.FakeCoreGateway
+import tv.jellybeam.i18n.ResourceUiStrings
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.DiscoveredServer
 import uniffi.jellybeam_core.QuickConnectSession
+import uniffi.jellybeam_core.UnreachableReason
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SignInViewModelTest {
@@ -145,7 +147,7 @@ class SignInViewModelTest {
 
     @Test
     fun `server unreachable on sign-in surfaces the host and reason`() = runTest(dispatcher) {
-        val fake = FakeCoreGateway(signInError = CoreException.ServerUnreachable("media.example.test:8096", "connection timed out"))
+        val fake = FakeCoreGateway(signInError = CoreException.ServerUnreachable("media.example.test:8096", UnreachableReason.TIMED_OUT, ""))
         withViewModel(fake) { viewModel ->
             runCurrent()
 
@@ -153,7 +155,7 @@ class SignInViewModelTest {
             runCurrent()
 
             assertEquals(
-                "Couldn't reach media.example.test:8096 (connection timed out). Check the address and port, and that the server is running.",
+                "Couldn't reach media.example.test:8096 (timed out). Check the address and port, and that the server is running.",
                 viewModel.state.value.error,
             )
             assertFalse(viewModel.state.value.isSigningIn)
@@ -335,7 +337,7 @@ class SignInViewModelTest {
         target: ReauthorizationTarget? = null,
         block: (SignInViewModel) -> Unit,
     ) {
-        val viewModel = SignInViewModel(gateway, target)
+        val viewModel = SignInViewModel(gateway, ResourceUiStrings.default, target)
         try {
             block(viewModel)
         } finally {

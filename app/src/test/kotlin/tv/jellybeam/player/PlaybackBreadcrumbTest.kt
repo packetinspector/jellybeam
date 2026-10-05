@@ -1,5 +1,6 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.i18n.ResourceUiStrings
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -10,6 +11,7 @@ class PlaybackBreadcrumbTest {
         assertEquals(
             "A Synthetic Movie",
             PlaybackBreadcrumb.format(
+                strings = ResourceUiStrings.default,
                 itemType = "Movie",
                 itemName = "A Synthetic Movie",
                 seriesName = "should be ignored",
@@ -24,6 +26,7 @@ class PlaybackBreadcrumbTest {
         assertEquals(
             "Series Alpha · S2 E4 · Episode Four",
             PlaybackBreadcrumb.format(
+                strings = ResourceUiStrings.default,
                 itemType = "Episode",
                 itemName = "Episode Four",
                 seriesName = "Series Alpha",
@@ -38,6 +41,7 @@ class PlaybackBreadcrumbTest {
         assertEquals(
             "Episode Four",
             PlaybackBreadcrumb.format(
+                strings = ResourceUiStrings.default,
                 itemType = "Episode",
                 itemName = "Episode Four",
                 seriesName = null,
@@ -52,6 +56,7 @@ class PlaybackBreadcrumbTest {
         assertEquals(
             "Series Alpha · Episode Four",
             PlaybackBreadcrumb.format(
+                strings = ResourceUiStrings.default,
                 itemType = "Episode",
                 itemName = "Episode Four",
                 seriesName = "Series Alpha",
@@ -66,6 +71,7 @@ class PlaybackBreadcrumbTest {
         assertEquals(
             "E4 · Episode Four",
             PlaybackBreadcrumb.format(
+                strings = ResourceUiStrings.default,
                 itemType = "Episode",
                 itemName = "Episode Four",
                 seriesName = null,

@@ -1,5 +1,8 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
+
 /**
  * The player OSD's one buffering pill (docs/12-osd-ux-spec.md "Transients"). [PlaybackViewModel]
  * sets [PlaybackUiState.bufferingInfo] to non-null whenever stalled while it should be playing
@@ -41,7 +44,7 @@ data class BufferingInfo(val percent: Int, val bytesPerSec: Long) {
         }
 
         /** `"12.4 MB/s"` -- decimal MB (1,000,000 bytes/sec), one decimal, clamped to `>= 0`. */
-        fun formatThroughput(bytesPerSec: Long): String =
-            "%.1f MB/s".format(bytesPerSec.coerceAtLeast(0L) / 1_000_000.0)
+        fun formatThroughput(strings: UiStrings, bytesPerSec: Long): String =
+            strings.get(R.string.player_throughput_mbps, bytesPerSec.coerceAtLeast(0L) / 1_000_000.0)
     }
 }

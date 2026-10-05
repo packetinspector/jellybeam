@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- docs/27: Browse area (home, cards, library, launch, common). Separators stay in code. -->
+
+    <!-- Home loading / sync status (server-configured library names are filled in verbatim). -->
+    <string name="home_loading">Loading…</string>
+    <string name="home_still_loading">Still loading…</string>
+    <string name="home_syncing">Syncing…</string>
+    <string name="home_sync_library_fallback">library</string>
+    <string name="home_syncing_progress">Syncing %1$s — %2$d of %3$d…</string>
+    <plurals name="home_syncing_items">
+        <item quantity="one">Syncing %1$s — %2$d item…</item>
+        <item quantity="other">Syncing %1$s — %2$d items…</item>
+    </plurals>
+    <string name="home_continue_eyebrow">CONTINUE</string>
+
+    <!-- Card text. -->
+    <string name="card_runtime_hours_minutes">%1$dh %2$dm</string>
+    <string name="card_runtime_minutes">%1$dm</string>
+    <string name="card_episode_short">E%1$d</string>
+    <string name="card_season_short">S%1$d</string>
+    <string name="card_season_episode">S%1$d E%2$d</string>
+    <string name="card_time_left">%1$s left</string>
+    <string name="card_airs">Airs %1$s</string>
+    <string name="card_missing">Missing</string>
+
+    <!-- Library grid summary, sort and filter labels. -->
+    <plurals name="library_summary_movies">
+        <item quantity="one">%1$d MOVIE</item>
+        <item quantity="other">%1$d MOVIES</item>
+    </plurals>
+    <plurals name="library_summary_shows">
+        <item quantity="one">%1$d SHOW</item>
+        <item quantity="other">%1$d SHOWS</item>
+    </plurals>
+    <plurals name="library_summary_favorites">
+        <item quantity="one">%1$d FAVORITE</item>
+        <item quantity="other">%1$d FAVORITES</item>
+    </plurals>
+    <string name="library_summary_filtered">%1$d OF %2$d</string>
+    <string name="library_sort_name">Name</string>
+    <string name="library_sort_date_added">Date added</string>
+    <string name="library_sort_year">Year</string>
+    <string name="library_sort_runtime">Runtime</string>
+    <string name="library_type_movies">Movies</string>
+    <string name="library_type_shows">Shows</string>
+    <string name="library_type_seasons">Seasons</string>
+    <string name="library_type_episodes">Episodes</string>
+    <string name="library_type_collections">Collections</string>
+    <string name="library_decade_2020s">2020s</string>
+    <string name="library_decade_2010s">2010s</string>
+    <string name="library_decade_2000s">2000s</string>
+    <string name="library_decade_1990s">1990s</string>
+    <string name="library_decade_1980s">1980s</string>
+    <string name="library_decade_older">Older</string>
+
+    <!-- Index rail jump labels. -->
+    <string name="library_rail_now">NOW</string>
+    <string name="library_rail_old">OLD</string>
+    <string name="library_rail_runtime_under_30">&lt;30m</string>
+    <string name="library_rail_runtime_30">30m</string>
+    <string name="library_rail_runtime_60">1h</string>
+    <string name="library_rail_runtime_90">1h30</string>
+    <string name="library_rail_runtime_120">2h</string>
+    <string name="library_rail_runtime_150">2h30</string>
+    <string name="library_rail_runtime_180">3h+</string>
+
+    <!-- Live TV channel folder rows. -->
+    <string name="library_folder_tag">FOLDER</string>
+    <string name="library_resume_tag">RESUME</string>
+
+    <!-- Launch screen and empty-library strip (docs/brand.md §6.2/§6.3). -->
+    <string name="launch_connecting">CONNECTING</string>
+    <string name="launch_server_unreachable">SERVER UNREACHABLE</string>
+    <plurals name="common_library_count">
+        <item quantity="one">%1$d LIBRARY</item>
+        <item quantity="other">%1$d LIBRARIES</item>
+    </plurals>
+    <plurals name="common_item_count">
+        <item quantity="one">%1$d ITEM</item>
+        <item quantity="other">%1$d ITEMS</item>
+    </plurals>
+</resources>

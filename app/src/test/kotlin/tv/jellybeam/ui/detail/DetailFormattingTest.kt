@@ -1,8 +1,10 @@
 package tv.jellybeam.ui.detail
 
+import tv.jellybeam.i18n.ResourceUiStrings
 import tv.jellybeam.ui.cards.ArtSource
 import tv.jellybeam.ui.cards.testCard
 import java.time.Instant
+import java.util.Locale
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -13,6 +15,8 @@ import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.MediaStreamInfo
 import uniffi.jellybeam_core.MediaStreamKind
 import uniffi.jellybeam_core.PersonInfo
+
+private val strings = ResourceUiStrings.default
 
 /** [MediaStreamInfo] fixture builder; every field defaults to "unknown", same fail-open shape as
  * [testCard]. */
@@ -146,54 +150,54 @@ class DetailFormattingTest {
 
     @Test
     fun `movieMetaLine joins year and runtime with the wide separator`() {
-        assertEquals("2020  ·  1h 30m", DetailFormatting.movieMetaLine(2020, 9 * 10_000_000L * 60 * 10))
+        assertEquals("2020  ·  1h 30m", DetailFormatting.movieMetaLine(strings, 2020, 9 * 10_000_000L * 60 * 10))
     }
 
     @Test
     fun `movieMetaLine drops a missing runtime instead of formatting a stray 0m -- the bug this pass fixes`() {
-        assertEquals("2020", DetailFormatting.movieMetaLine(2020, null))
+        assertEquals("2020", DetailFormatting.movieMetaLine(strings, 2020, null))
     }
 
     @Test
     fun `movieMetaLine drops a missing year`() {
-        assertEquals("45m", DetailFormatting.movieMetaLine(null, 45 * 60 * 10_000_000L))
+        assertEquals("45m", DetailFormatting.movieMetaLine(strings, null, 45 * 60 * 10_000_000L))
     }
 
     @Test
     fun `movieMetaLine is null when both halves are missing`() {
-        assertNull(DetailFormatting.movieMetaLine(null, null))
+        assertNull(DetailFormatting.movieMetaLine(strings, null, null))
     }
 
     // -- seriesMetaLine ---------------------------------------------------
 
     @Test
     fun `seriesMetaLine never shows runtime and never shows a placeholder 0 seasons`() {
-        assertEquals("2020", DetailFormatting.seriesMetaLine(2020, seasonCount = 0))
+        assertEquals("2020", DetailFormatting.seriesMetaLine(strings, 2020, seasonCount = 0))
     }
 
     @Test
     fun `seriesMetaLine joins the year range and season count for a Continuing series`() {
-        assertEquals("2020–  ·  3 seasons", DetailFormatting.seriesMetaLine(2020, seasonCount = 3, status = "Continuing"))
+        assertEquals("2020–  ·  3 seasons", DetailFormatting.seriesMetaLine(strings, 2020, seasonCount = 3, status = "Continuing"))
     }
 
     @Test
     fun `seriesMetaLine singularizes one season`() {
-        assertEquals("2020–  ·  1 season", DetailFormatting.seriesMetaLine(2020, seasonCount = 1, status = "Continuing"))
+        assertEquals("2020–  ·  1 season", DetailFormatting.seriesMetaLine(strings, 2020, seasonCount = 1, status = "Continuing"))
     }
 
     @Test
     fun `seriesMetaLine shows a real end-year range once ItemDetail resolves one`() {
-        assertEquals("2020–2023  ·  3 seasons", DetailFormatting.seriesMetaLine(2020, seasonCount = 3, endYear = 2023, status = "Ended"))
+        assertEquals("2020–2023  ·  3 seasons", DetailFormatting.seriesMetaLine(strings, 2020, seasonCount = 3, endYear = 2023, status = "Ended"))
     }
 
     @Test
     fun `seriesMetaLine with no year shows the season count alone`() {
-        assertEquals("3 seasons", DetailFormatting.seriesMetaLine(null, seasonCount = 3))
+        assertEquals("3 seasons", DetailFormatting.seriesMetaLine(strings, null, seasonCount = 3))
     }
 
     @Test
     fun `seriesMetaLine is null with neither a year nor loaded seasons`() {
-        assertNull(DetailFormatting.seriesMetaLine(null, seasonCount = 0))
+        assertNull(DetailFormatting.seriesMetaLine(strings, null, seasonCount = 0))
     }
 
     // -- yearRangeLabel ----------------------------------------------------
@@ -228,14 +232,14 @@ class DetailFormattingTest {
     @Test
     fun `an unstarted Movie resolves to plain Play`() {
         val movie = testCard(itemType = "Movie", id = "m1", positionTicks = 0)
-        val action = DetailFormatting.resolvePrimaryAction(movie, emptyList())
+        val action = DetailFormatting.resolvePrimaryAction(strings, movie, emptyList())
         assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "m1", hasProgress = false), action)
     }
 
     @Test
     fun `a Movie with progress resolves to Resume and carries hasProgress`() {
         val movie = testCard(itemType = "Movie", id = "m1", positionTicks = 500)
-        val action = DetailFormatting.resolvePrimaryAction(movie, emptyList())
+        val action = DetailFormatting.resolvePrimaryAction(strings, movie, emptyList())
         assertEquals(DetailFormatting.PrimaryAction.Playable("Resume", "m1", hasProgress = true), action)
     }
 
@@ -244,12 +248,12 @@ class DetailFormattingTest {
         val fresh = testCard(itemType = "Video", id = "v1", positionTicks = 0)
         assertEquals(
             DetailFormatting.PrimaryAction.Playable("Play", "v1", hasProgress = false),
-            DetailFormatting.resolvePrimaryAction(fresh, emptyList()),
+            DetailFormatting.resolvePrimaryAction(strings, fresh, emptyList()),
         )
         val started = testCard(itemType = "Video", id = "v1", positionTicks = 500)
         assertEquals(
             DetailFormatting.PrimaryAction.Playable("Resume", "v1", hasProgress = true),
-            DetailFormatting.resolvePrimaryAction(started, emptyList()),
+            DetailFormatting.resolvePrimaryAction(strings, started, emptyList()),
         )
     }
 
@@ -257,24 +261,24 @@ class DetailFormattingTest {
     fun `MusicVideo and Recording are playable single items, a folder is not`() {
         for (type in listOf("MusicVideo", "Recording")) {
             val card = testCard(itemType = type, id = "x1", positionTicks = 0)
-            assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "x1", hasProgress = false), DetailFormatting.resolvePrimaryAction(card, emptyList()))
+            assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "x1", hasProgress = false), DetailFormatting.resolvePrimaryAction(strings, card, emptyList()))
         }
         val folder = testCard(itemType = "ChannelFolderItem", id = "f1", positionTicks = 0)
-        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(folder, emptyList()))
+        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, folder, emptyList()))
     }
 
     @Test
     fun `a virtual Episode is Unavailable with the virtual-status label, not Playable`() {
         val now = Instant.parse("2026-01-01T00:00:00Z")
         val episode = testCard(itemType = "Episode", isVirtual = true, premiereDate = "2026-03-04T00:00:00Z")
-        val action = DetailFormatting.resolvePrimaryAction(episode, emptyList(), now)
+        val action = DetailFormatting.resolvePrimaryAction(strings, episode, emptyList(), now)
         assertEquals(DetailFormatting.PrimaryAction.Unavailable("Airs Mar 4"), action)
     }
 
     @Test
     fun `an unknown item type resolves to None`() {
         val boxSet = testCard(itemType = "BoxSet")
-        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(boxSet, emptyList()))
+        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, boxSet, emptyList()))
     }
 
     // -- resolvePrimaryAction: Series -------------------------------------
@@ -283,7 +287,7 @@ class DetailFormattingTest {
     fun `a Series resumes the first in-progress episode with a full S-E label`() {
         val series = testCard(itemType = "Series")
         val resuming = testCard(id = "ep-6", itemType = "Episode", parentIndexNumber = 2, indexNumber = 6, positionTicks = 100)
-        val action = DetailFormatting.resolvePrimaryAction(series, listOf(resuming))
+        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(resuming))
         assertEquals(DetailFormatting.PrimaryAction.Playable("Resume S2 E6", "ep-6", hasProgress = true), action)
     }
 
@@ -291,7 +295,7 @@ class DetailFormattingTest {
     fun `a Series resume target missing either S or E number degrades to plain Resume, never S question E`() {
         val series = testCard(itemType = "Series")
         val resuming = testCard(id = "ep-6", itemType = "Episode", parentIndexNumber = null, indexNumber = 6, positionTicks = 100)
-        val action = DetailFormatting.resolvePrimaryAction(series, listOf(resuming))
+        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(resuming))
         assertEquals(DetailFormatting.PrimaryAction.Playable("Resume", "ep-6", hasProgress = true), action)
     }
 
@@ -300,7 +304,7 @@ class DetailFormattingTest {
         val series = testCard(itemType = "Series")
         val watched = testCard(id = "ep-1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
         val unplayed = testCard(id = "ep-2", itemType = "Episode", parentIndexNumber = 1, indexNumber = 2, played = false)
-        val action = DetailFormatting.resolvePrimaryAction(series, listOf(watched, unplayed))
+        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(watched, unplayed))
         assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "ep-2", hasProgress = false), action)
     }
 
@@ -309,7 +313,7 @@ class DetailFormattingTest {
         val series = testCard(itemType = "Series")
         val special = testCard(id = "sp-1", itemType = "Episode", parentIndexNumber = 0, indexNumber = 1, played = false)
         val normal = testCard(id = "ep-1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = false)
-        val action = DetailFormatting.resolvePrimaryAction(series, listOf(special, normal))
+        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(special, normal))
         assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "ep-1", hasProgress = false), action)
     }
 
@@ -325,7 +329,7 @@ class DetailFormattingTest {
             isVirtual = true,
         )
         val unplayed = testCard(id = "ep-2", itemType = "Episode", parentIndexNumber = 1, indexNumber = 2, played = false)
-        val action = DetailFormatting.resolvePrimaryAction(series, listOf(virtualResuming, unplayed))
+        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(virtualResuming, unplayed))
         assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "ep-2", hasProgress = false), action)
     }
 
@@ -333,13 +337,13 @@ class DetailFormattingTest {
     fun `a Series with every loaded episode already played and none in progress resolves to None`() {
         val series = testCard(itemType = "Series")
         val watched = testCard(id = "ep-1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
-        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(series, listOf(watched)))
+        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, series, listOf(watched)))
     }
 
     @Test
     fun `a Series with no loaded episodes resolves to None`() {
         val series = testCard(itemType = "Series")
-        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(series, emptyList()))
+        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, series, emptyList()))
     }
 
     @Test
@@ -347,7 +351,7 @@ class DetailFormattingTest {
         val series = testCard(itemType = "Series")
         val season1Watched = testCard(id = "s1e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
         val season2Resuming = testCard(id = "s2e3", itemType = "Episode", parentIndexNumber = 2, indexNumber = 3, positionTicks = 100)
-        val action = DetailFormatting.resolvePrimaryAction(series, listOf(season1Watched, season2Resuming))
+        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(season1Watched, season2Resuming))
         assertEquals(DetailFormatting.PrimaryAction.Playable("Resume S2 E3", "s2e3", hasProgress = true), action)
     }
 
@@ -356,7 +360,7 @@ class DetailFormattingTest {
         val series = testCard(itemType = "Series")
         val season1Watched = testCard(id = "s1e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
         val season2Unplayed = testCard(id = "s2e1", itemType = "Episode", parentIndexNumber = 2, indexNumber = 1, played = false)
-        val action = DetailFormatting.resolvePrimaryAction(series, listOf(season1Watched, season2Unplayed))
+        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(season1Watched, season2Unplayed))
         assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "s2e1", hasProgress = false), action)
     }
 
@@ -568,33 +572,33 @@ class DetailFormattingTest {
 
     @Test
     fun `channelLabel names common layouts, else falls back to a bare count`() {
-        assertEquals("STEREO", DetailFormatting.channelLabel(2))
-        assertEquals("5.1", DetailFormatting.channelLabel(6))
-        assertEquals("7.1", DetailFormatting.channelLabel(8))
-        assertEquals("3 CH", DetailFormatting.channelLabel(3))
-        assertNull(DetailFormatting.channelLabel(null))
+        assertEquals("STEREO", DetailFormatting.channelLabel(strings, 2))
+        assertEquals("5.1", DetailFormatting.channelLabel(strings, 6))
+        assertEquals("7.1", DetailFormatting.channelLabel(strings, 8))
+        assertEquals("3 CH", DetailFormatting.channelLabel(strings, 3))
+        assertNull(DetailFormatting.channelLabel(strings, null))
     }
 
     @Test
     fun `audioLabel appends the channel layout to the codec name`() {
-        assertEquals("AAC 5.1", DetailFormatting.audioLabel("aac", 6))
+        assertEquals("AAC 5.1", DetailFormatting.audioLabel(strings, "aac", 6))
     }
 
     @Test
     fun `audioLabel is bare codec when the channel count is unknown`() {
-        assertEquals("TRUEHD", DetailFormatting.audioLabel("truehd", null))
+        assertEquals("TRUEHD", DetailFormatting.audioLabel(strings, "truehd", null))
     }
 
     @Test
     fun `audioLabel is null with no codec`() {
-        assertNull(DetailFormatting.audioLabel(null, 2))
+        assertNull(DetailFormatting.audioLabel(strings, null, 2))
     }
 
     @Test
     fun `audioLabel appends the object-based format after the channels`() {
-        assertEquals("TRUEHD 7.1 ATMOS", DetailFormatting.audioLabel("truehd", 8, AudioSpatialKind.DOLBY_ATMOS))
-        assertEquals("EAC3 5.1 ATMOS", DetailFormatting.audioLabel("eac3", 6, AudioSpatialKind.DOLBY_ATMOS))
-        assertEquals("DTS 7.1 DTS:X", DetailFormatting.audioLabel("dts", 8, AudioSpatialKind.DTS_X))
+        assertEquals("TRUEHD 7.1 ATMOS", DetailFormatting.audioLabel(strings, "truehd", 8, AudioSpatialKind.DOLBY_ATMOS))
+        assertEquals("EAC3 5.1 ATMOS", DetailFormatting.audioLabel(strings, "eac3", 6, AudioSpatialKind.DOLBY_ATMOS))
+        assertEquals("DTS 7.1 DTS:X", DetailFormatting.audioLabel(strings, "dts", 8, AudioSpatialKind.DTS_X))
     }
 
     @Test
@@ -605,7 +609,7 @@ class DetailFormattingTest {
             ),
         )
 
-        val audio = DetailFormatting.specStripFields(detail).single()
+        val audio = DetailFormatting.specStripFields(strings, detail, locale = Locale.US).single()
 
         assertEquals("EAC3 5.1 ATMOS", audio.value)
         assertEquals(DetailFormatting.SpecWeight.BEST_IN_CLASS, audio.weight)
@@ -625,7 +629,7 @@ class DetailFormattingTest {
                 testStream(MediaStreamKind.AUDIO, codec = "aac", channels = 6, isDefault = true),
             ),
         )
-        val values = DetailFormatting.specStripFields(detail).map { it.value }
+        val values = DetailFormatting.specStripFields(strings, detail, locale = Locale.US).map { it.value }
         assertEquals(listOf("1080P", "HEVC", "10-BIT", "HDR10", "AAC 5.1", "8.5 MBPS", "MKV"), values)
     }
 
@@ -634,12 +638,12 @@ class DetailFormattingTest {
         val detail = testItemDetail(
             mediaStreams = listOf(testStream(MediaStreamKind.VIDEO, codec = "h264")),
         )
-        assertEquals(listOf("H264"), DetailFormatting.specStripFields(detail).map { it.value })
+        assertEquals(listOf("H264"), DetailFormatting.specStripFields(strings, detail, locale = Locale.US).map { it.value })
     }
 
     @Test
     fun `specStripFields is empty for a Series -- no MediaStreams to read`() {
-        assertTrue(DetailFormatting.specStripFields(testItemDetail()).isEmpty())
+        assertTrue(DetailFormatting.specStripFields(strings, testItemDetail(), locale = Locale.US).isEmpty())
     }
 
     @Test
@@ -650,7 +654,7 @@ class DetailFormattingTest {
                 testStream(MediaStreamKind.AUDIO, codec = "dts", channels = 6, isDefault = true),
             ),
         )
-        assertEquals(listOf("DTS 5.1"), DetailFormatting.specStripFields(detail).map { it.value })
+        assertEquals(listOf("DTS 5.1"), DetailFormatting.specStripFields(strings, detail, locale = Locale.US).map { it.value })
     }
 
     @Test
@@ -658,7 +662,7 @@ class DetailFormattingTest {
         val detail = testItemDetail(
             mediaStreams = listOf(testStream(MediaStreamKind.VIDEO, width = 3840, height = 2160)),
         )
-        val fields = DetailFormatting.specStripFields(detail)
+        val fields = DetailFormatting.specStripFields(strings, detail, locale = Locale.US)
         assertEquals(DetailFormatting.SpecWeight.NOTABLE, fields.single().weight)
     }
 
@@ -894,72 +898,72 @@ class DetailFormattingTest {
 
     @Test
     fun `shortDate formats an RFC3339 timestamp as a short US date`() {
-        assertEquals("Mar 6, 2014", DetailFormatting.shortDate("2014-03-06T00:00:00Z"))
+        assertEquals("Mar 6, 2014", DetailFormatting.shortDate("2014-03-06T00:00:00Z", locale = Locale.US))
     }
 
     @Test
     fun `shortDate is null for an absent or unparseable timestamp`() {
-        assertNull(DetailFormatting.shortDate(null))
-        assertNull(DetailFormatting.shortDate("not a date"))
+        assertNull(DetailFormatting.shortDate(null, locale = Locale.US))
+        assertNull(DetailFormatting.shortDate("not a date", locale = Locale.US))
     }
 
     @Test
     fun `runtimeAndDateLine joins runtime and air date with the thin separator`() {
-        assertEquals("20m · Mar 6, 2014", DetailFormatting.runtimeAndDateLine(20 * 60 * 10_000_000L, "2014-03-06T00:00:00Z"))
+        assertEquals("20m · Mar 6, 2014", DetailFormatting.runtimeAndDateLine(strings, 20 * 60 * 10_000_000L, "2014-03-06T00:00:00Z", locale = Locale.US))
     }
 
     @Test
     fun `runtimeAndDateLine drops a missing date`() {
-        assertEquals("20m", DetailFormatting.runtimeAndDateLine(20 * 60 * 10_000_000L, null))
+        assertEquals("20m", DetailFormatting.runtimeAndDateLine(strings, 20 * 60 * 10_000_000L, null, locale = Locale.US))
     }
 
     @Test
     fun `runtimeAndDateLine drops a missing runtime`() {
-        assertEquals("Mar 6, 2014", DetailFormatting.runtimeAndDateLine(null, "2014-03-06T00:00:00Z"))
+        assertEquals("Mar 6, 2014", DetailFormatting.runtimeAndDateLine(strings, null, "2014-03-06T00:00:00Z", locale = Locale.US))
     }
 
     @Test
     fun `runtimeAndDateLine is null when both halves are missing`() {
-        assertNull(DetailFormatting.runtimeAndDateLine(null, null))
+        assertNull(DetailFormatting.runtimeAndDateLine(strings, null, null, locale = Locale.US))
     }
 
     // -- episodeEyebrow / episodeHeaderLine -----------------------------------
 
     @Test
     fun `episodeEyebrow joins series name and season-episode label`() {
-        assertEquals("Series Alpha · S7 E17", DetailFormatting.episodeEyebrow("Series Alpha", 7, 17))
+        assertEquals("Series Alpha · S7 E17", DetailFormatting.episodeEyebrow(strings, "Series Alpha", 7, 17))
     }
 
     @Test
     fun `episodeEyebrow drops a missing series name`() {
-        assertEquals("S7 E17", DetailFormatting.episodeEyebrow(null, 7, 17))
+        assertEquals("S7 E17", DetailFormatting.episodeEyebrow(strings, null, 7, 17))
     }
 
     @Test
     fun `episodeEyebrow is null when both halves are missing`() {
-        assertNull(DetailFormatting.episodeEyebrow(null, null, null))
+        assertNull(DetailFormatting.episodeEyebrow(strings, null, null, null))
     }
 
     @Test
     fun `episodeHeaderLine joins year, runtime, rating and genres`() {
         assertEquals(
             "2014  ·  20m  ·  TV-PG  ·  Comedy, Romance",
-            DetailFormatting.episodeHeaderLine(2014, 20 * 60 * 10_000_000L, "TV-PG", listOf("Comedy", "Romance")),
+            DetailFormatting.episodeHeaderLine(strings, 2014, 20 * 60 * 10_000_000L, "TV-PG", listOf("Comedy", "Romance")),
         )
     }
 
     @Test
     fun `episodeHeaderLine omits every absent part rather than placeholdering it`() {
-        assertNull(DetailFormatting.episodeHeaderLine(null, null, null, emptyList()))
+        assertNull(DetailFormatting.episodeHeaderLine(strings, null, null, null, emptyList()))
     }
 
     @Test
     fun `episodeHeaderItems is the same parts episodeHeaderLine joins, unjoined`() {
         assertEquals(
             listOf("2014", "20m", "TV-PG", "Comedy, Romance"),
-            DetailFormatting.episodeHeaderItems(2014, 20 * 60 * 10_000_000L, "TV-PG", listOf("Comedy", "Romance")),
+            DetailFormatting.episodeHeaderItems(strings, 2014, 20 * 60 * 10_000_000L, "TV-PG", listOf("Comedy", "Romance")),
         )
-        assertEquals(emptyList<String>(), DetailFormatting.episodeHeaderItems(null, null, null, emptyList()))
+        assertEquals(emptyList<String>(), DetailFormatting.episodeHeaderItems(strings, null, null, null, emptyList()))
     }
 
     // -- seriesHeaderLine ------------------------------------------------------
@@ -968,7 +972,7 @@ class DetailFormattingTest {
     fun `seriesHeaderLine joins year range, season and episode counts, rating and up to two genres`() {
         assertEquals(
             "2007–2019  ·  13 seasons  ·  279 episodes  ·  TV-PG  ·  Comedy, Drama",
-            DetailFormatting.seriesHeaderLine(
+            DetailFormatting.seriesHeaderLine(strings, 
                 productionYear = 2007,
                 endYear = 2019,
                 status = "Ended",
@@ -984,25 +988,25 @@ class DetailFormattingTest {
     fun `seriesHeaderLine singularizes a single season and episode`() {
         assertEquals(
             "2020  ·  1 season  ·  1 episode",
-            DetailFormatting.seriesHeaderLine(2020, null, null, 1, 1, null, emptyList()),
+            DetailFormatting.seriesHeaderLine(strings, 2020, null, null, 1, 1, null, emptyList()),
         )
     }
 
     @Test
     fun `seriesHeaderLine omits season and episode counts before ItemDetail resolves them`() {
-        assertEquals("2020", DetailFormatting.seriesHeaderLine(2020, null, null, null, null, null, emptyList()))
+        assertEquals("2020", DetailFormatting.seriesHeaderLine(strings, 2020, null, null, null, null, null, emptyList()))
     }
 
     @Test
     fun `seriesHeaderLine is null when every part is absent`() {
-        assertNull(DetailFormatting.seriesHeaderLine(null, null, null, null, null, null, emptyList()))
+        assertNull(DetailFormatting.seriesHeaderLine(strings, null, null, null, null, null, null, emptyList()))
     }
 
     @Test
     fun `seriesHeaderItems is the same parts seriesHeaderLine joins, unjoined`() {
         assertEquals(
             listOf("2007–2019", "13 seasons", "279 episodes", "TV-PG", "Comedy, Drama"),
-            DetailFormatting.seriesHeaderItems(
+            DetailFormatting.seriesHeaderItems(strings, 
                 productionYear = 2007,
                 endYear = 2019,
                 status = "Ended",
@@ -1012,7 +1016,7 @@ class DetailFormattingTest {
                 genres = listOf("Comedy", "Drama", "Family"),
             ),
         )
-        assertEquals(emptyList<String>(), DetailFormatting.seriesHeaderItems(null, null, null, null, null, null, emptyList()))
+        assertEquals(emptyList<String>(), DetailFormatting.seriesHeaderItems(strings, null, null, null, null, null, null, emptyList()))
     }
 
     // -- seasonSummaryLine -------------------------------------------------
@@ -1024,14 +1028,14 @@ class DetailFormattingTest {
         val unwatched = testCard(id = "e3", itemType = "Episode", played = false)
         assertEquals(
             "SEASON 1 · 3 EPISODES · 2 WATCHED",
-            DetailFormatting.seasonSummaryLine("Season 1", listOf(watched1, watched2, unwatched)),
+            DetailFormatting.seasonSummaryLine(strings, "Season 1", listOf(watched1, watched2, unwatched)),
         )
     }
 
     @Test
     fun `seasonSummaryLine handles zero watched episodes`() {
         val unwatched = testCard(id = "e1", itemType = "Episode", played = false)
-        assertEquals("SPECIALS · 1 EPISODE · 0 WATCHED", DetailFormatting.seasonSummaryLine("Specials", listOf(unwatched)))
+        assertEquals("SPECIALS · 1 EPISODE · 0 WATCHED", DetailFormatting.seasonSummaryLine(strings, "Specials", listOf(unwatched)))
     }
 
     @Test
@@ -1040,7 +1044,7 @@ class DetailFormattingTest {
         val unwatched = testCard(id = "e2", itemType = "Episode", played = false)
         assertEquals(
             listOf("SEASON 1", "2 EPISODES", "1 WATCHED"),
-            DetailFormatting.seasonSummaryItems("Season 1", listOf(watched, unwatched)),
+            DetailFormatting.seasonSummaryItems(strings, "Season 1", listOf(watched, unwatched)),
         )
     }
 
@@ -1062,19 +1066,19 @@ class DetailFormattingTest {
 
     @Test
     fun `formatFileSize renders one decimal GB above the 1024MB threshold`() {
-        assertEquals("7.2 GB", DetailFormatting.formatFileSize((7.2 * 1024 * 1024 * 1024).toLong()))
+        assertEquals("7.2 GB", DetailFormatting.formatFileSize((7.2 * 1024 * 1024 * 1024).toLong(), locale = Locale.US))
     }
 
     @Test
     fun `formatFileSize renders a whole-number MB count below the GB threshold`() {
-        assertEquals("512 MB", DetailFormatting.formatFileSize(512L * 1024 * 1024))
+        assertEquals("512 MB", DetailFormatting.formatFileSize(512L * 1024 * 1024, locale = Locale.US))
     }
 
     @Test
     fun `formatFileSize is null for an absent or non-positive size`() {
-        assertNull(DetailFormatting.formatFileSize(null))
-        assertNull(DetailFormatting.formatFileSize(0L))
-        assertNull(DetailFormatting.formatFileSize(-5L))
+        assertNull(DetailFormatting.formatFileSize(null, locale = Locale.US))
+        assertNull(DetailFormatting.formatFileSize(0L, locale = Locale.US))
+        assertNull(DetailFormatting.formatFileSize(-5L, locale = Locale.US))
     }
 
     // -- relativeAddedClause / movieEyebrow -------------------------------------
@@ -1082,59 +1086,59 @@ class DetailFormattingTest {
     @Test
     fun `relativeAddedClause reports Today for a same-day timestamp`() {
         val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("Today", DetailFormatting.relativeAddedClause("2026-08-29T02:00:00Z", now))
+        assertEquals("Today", DetailFormatting.relativeAddedClause(strings, "2026-08-29T02:00:00Z", now, locale = Locale.US))
     }
 
     @Test
     fun `relativeAddedClause reports Yesterday for a one-day-old timestamp`() {
         val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("Yesterday", DetailFormatting.relativeAddedClause("2026-08-28T23:00:00Z", now))
+        assertEquals("Yesterday", DetailFormatting.relativeAddedClause(strings, "2026-08-28T23:00:00Z", now, locale = Locale.US))
     }
 
     @Test
     fun `relativeAddedClause counts days for anything under a month old`() {
         val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("5 days ago", DetailFormatting.relativeAddedClause("2026-08-24T12:00:00Z", now))
+        assertEquals("5 days ago", DetailFormatting.relativeAddedClause(strings, "2026-08-24T12:00:00Z", now, locale = Locale.US))
     }
 
     @Test
     fun `relativeAddedClause falls back to a bare date once it's more than a month old`() {
         val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("Jul 1, 2026", DetailFormatting.relativeAddedClause("2026-07-01T12:00:00Z", now))
+        assertEquals("Jul 1, 2026", DetailFormatting.relativeAddedClause(strings, "2026-07-01T12:00:00Z", now, locale = Locale.US))
     }
 
     @Test
     fun `relativeAddedClause is null for an absent or unparseable timestamp`() {
-        assertNull(DetailFormatting.relativeAddedClause(null))
-        assertNull(DetailFormatting.relativeAddedClause("not a date"))
+        assertNull(DetailFormatting.relativeAddedClause(strings, null, locale = Locale.US))
+        assertNull(DetailFormatting.relativeAddedClause(strings, "not a date", locale = Locale.US))
     }
 
     @Test
     fun `movieEyebrow joins the verbatim library name with the uppercased added clause`() {
         val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("My Movies · ADDED 2 DAYS AGO", DetailFormatting.movieEyebrow("My Movies", "2026-08-27T12:00:00Z", now))
+        assertEquals("My Movies · ADDED 2 DAYS AGO", DetailFormatting.movieEyebrow(strings, "My Movies", "2026-08-27T12:00:00Z", now, locale = Locale.US))
     }
 
     @Test
     fun `movieEyebrow never alters the library name's own casing`() {
         val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("my movies · ADDED TODAY", DetailFormatting.movieEyebrow("my movies", "2026-08-29T00:00:00Z", now))
+        assertEquals("my movies · ADDED TODAY", DetailFormatting.movieEyebrow(strings, "my movies", "2026-08-29T00:00:00Z", now, locale = Locale.US))
     }
 
     @Test
     fun `movieEyebrow drops a missing added clause`() {
-        assertEquals("My Movies", DetailFormatting.movieEyebrow("My Movies", null))
+        assertEquals("My Movies", DetailFormatting.movieEyebrow(strings, "My Movies", null, locale = Locale.US))
     }
 
     @Test
     fun `movieEyebrow drops a missing library name`() {
         val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("ADDED TODAY", DetailFormatting.movieEyebrow(null, "2026-08-29T00:00:00Z", now))
+        assertEquals("ADDED TODAY", DetailFormatting.movieEyebrow(strings, null, "2026-08-29T00:00:00Z", now, locale = Locale.US))
     }
 
     @Test
     fun `movieEyebrow is null when both halves are absent`() {
-        assertNull(DetailFormatting.movieEyebrow(null, null))
+        assertNull(DetailFormatting.movieEyebrow(strings, null, null, locale = Locale.US))
     }
 
     // -- peopleLine / studioSummary ----------------------------------------
@@ -1151,17 +1155,17 @@ class DetailFormattingTest {
 
     @Test
     fun `studioSummary is the bare name for a single studio`() {
-        assertEquals("Studio One", DetailFormatting.studioSummary(listOf("Studio One")))
+        assertEquals("Studio One", DetailFormatting.studioSummary(strings, listOf("Studio One")))
     }
 
     @Test
     fun `studioSummary appends a plus-N-more count for additional studios`() {
-        assertEquals("Studio One +2 more", DetailFormatting.studioSummary(listOf("Studio One", "Studio Two", "Studio Three")))
+        assertEquals("Studio One +2 more", DetailFormatting.studioSummary(strings, listOf("Studio One", "Studio Two", "Studio Three")))
     }
 
     @Test
     fun `studioSummary is null for an empty list`() {
-        assertNull(DetailFormatting.studioSummary(emptyList()))
+        assertNull(DetailFormatting.studioSummary(strings, emptyList()))
     }
 
     @Test

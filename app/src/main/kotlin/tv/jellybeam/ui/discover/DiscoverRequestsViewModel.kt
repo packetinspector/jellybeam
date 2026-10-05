@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,7 +22,7 @@ data class DiscoverRequestsUiState(
 )
 
 /** Backs [DiscoverRequestsScreen] ("My Requests"): fetches `seerr_my_requests()` on init, fails open into inline error/retry same as every other Discover fetch. */
-class DiscoverRequestsViewModel(private val gateway: CoreGateway) : ViewModel() {
+class DiscoverRequestsViewModel(private val gateway: CoreGateway, private val strings: UiStrings) : ViewModel() {
     private val _state = MutableStateFlow(DiscoverRequestsUiState())
     val state: StateFlow<DiscoverRequestsUiState> = _state.asStateFlow()
 
@@ -38,7 +39,7 @@ class DiscoverRequestsViewModel(private val gateway: CoreGateway) : ViewModel() 
                 _state.update { it.copy(isLoading = false, requests = requests.distinctBy { r -> r.requestId }) }
             } catch (e: CoreException) {
                 _state.update {
-                    it.copy(isLoading = false, notConfigured = e is CoreException.SeerrNotConfigured, error = e.displayMessage())
+                    it.copy(isLoading = false, notConfigured = e is CoreException.SeerrNotConfigured, error = e.displayMessage(strings))
                 }
             }
         }
@@ -47,10 +48,10 @@ class DiscoverRequestsViewModel(private val gateway: CoreGateway) : ViewModel() 
     fun retry() = refresh()
 }
 
-class DiscoverRequestsViewModelFactory(private val gateway: CoreGateway) : ViewModelProvider.Factory {
+class DiscoverRequestsViewModelFactory(private val gateway: CoreGateway, private val strings: UiStrings) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(DiscoverRequestsViewModel::class.java))
-        return DiscoverRequestsViewModel(gateway) as T
+        return DiscoverRequestsViewModel(gateway, strings) as T
     }
 }

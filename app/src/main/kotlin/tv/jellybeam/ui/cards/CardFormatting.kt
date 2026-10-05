@@ -4,6 +4,9 @@ import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import tv.jellybeam.R
+import tv.jellybeam.i18n.AppLocale
+import tv.jellybeam.i18n.UiStrings
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
 
@@ -18,24 +21,29 @@ object CardFormatting {
     /** "1h 30m" / "45m", never seconds. Sub-minute (non-zero) durations round up to "1m" -- a
      * literal "0m" reads as broken metadata.
      */
-    fun formatRuntime(ticks: Long): String {
+    fun formatRuntime(strings: UiStrings, ticks: Long): String {
         val totalSeconds = ticks / TICKS_PER_SECOND
         val totalMinutes = (totalSeconds + 59) / 60
         val hours = totalMinutes / 60
         val minutes = totalMinutes % 60
-        return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
+        return if (hours > 0) {
+            strings.get(R.string.card_runtime_hours_minutes, hours, minutes)
+        } else {
+            strings.get(R.string.card_runtime_minutes, minutes)
+        }
     }
 
     /** §2: `"E{n} · {name}"`, not "{n}. {name}"; bare name if there's no index number. */
-    fun episodeTitle(name: String, indexNumber: Int?): String =
-        if (indexNumber != null) "E$indexNumber · $name" else name
+    fun episodeTitle(strings: UiStrings, name: String, indexNumber: Int?): String =
+        if (indexNumber != null) "${strings.get(R.string.card_episode_short, indexNumber)} · $name" else name
 
     /** `season_episode_label`: drops whichever half is missing, never "S? E?". */
-    fun seasonEpisodeLabel(parentIndexNumber: Int?, indexNumber: Int?): String? =
+    fun seasonEpisodeLabel(strings: UiStrings, parentIndexNumber: Int?, indexNumber: Int?): String? =
         when {
-            parentIndexNumber != null && indexNumber != null -> "S$parentIndexNumber E$indexNumber"
-            parentIndexNumber == null && indexNumber != null -> "E$indexNumber"
-            parentIndexNumber != null && indexNumber == null -> "S$parentIndexNumber"
+            parentIndexNumber != null && indexNumber != null ->
+                strings.get(R.string.card_season_episode, parentIndexNumber, indexNumber)
+            parentIndexNumber == null && indexNumber != null -> strings.get(R.string.card_episode_short, indexNumber)
+            parentIndexNumber != null && indexNumber == null -> strings.get(R.string.card_season_short, parentIndexNumber)
             else -> null
         }
 
@@ -44,40 +52,42 @@ object CardFormatting {
      * runtime to compute from. An unstarted item (`positionTicks == 0`) shows plain runtime with
      * no " left" suffix -- there's nothing in progress to be left of.
      */
-    fun remainingLabel(runtimeTicks: Long?, positionTicks: Long): String? {
+    fun remainingLabel(strings: UiStrings, runtimeTicks: Long?, positionTicks: Long): String? {
         val runtime = runtimeTicks ?: return null
         if (runtime <= 0) return null
-        if (positionTicks <= 0) return formatRuntime(runtime)
+        if (positionTicks <= 0) return formatRuntime(strings, runtime)
         val remaining = (runtime - positionTicks).coerceAtLeast(0)
-        return "${formatRuntime(remaining)} left"
+        return strings.get(R.string.card_time_left, formatRuntime(strings, remaining))
     }
 
     /** "Airs {abbrev date}" for a parseable, future `premiereDate` (RFC3339); "Missing" otherwise
      * (absent, unparseable, or past).
      */
-    fun virtualStatusLabel(premiereDate: String?, now: Instant = Instant.now()): String {
+    fun virtualStatusLabel(
+        strings: UiStrings,
+        premiereDate: String?,
+        now: Instant = Instant.now(),
+        locale: Locale = AppLocale.format,
+    ): String {
         val airsInFuture = premiereDate
             ?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }
             ?.takeIf { it.toInstant().isAfter(now) }
         return if (airsInFuture != null) {
-            "Airs ${AIRS_DATE_FORMAT.format(airsInFuture)}"
+            strings.get(R.string.card_airs, DateTimeFormatter.ofPattern("MMM d", locale).format(airsInFuture))
         } else {
-            "Missing"
+            strings.get(R.string.card_missing)
         }
     }
-
-    private val AIRS_DATE_FORMAT: DateTimeFormatter =
-        DateTimeFormatter.ofPattern("MMM d", Locale.US)
 
     /** Resume/next-up card's third line: season/episode + (remaining time, or virtual-status for a
      * virtual episode), joined with " · "; `null` when neither applies.
      */
-    fun resumeMetaLine(card: Card): String? {
-        val se = seasonEpisodeLabel(card.parentIndexNumber, card.indexNumber)
+    fun resumeMetaLine(strings: UiStrings, card: Card, locale: Locale = AppLocale.format): String? {
+        val se = seasonEpisodeLabel(strings, card.parentIndexNumber, card.indexNumber)
         val timePart = if (card.isVirtual) {
-            virtualStatusLabel(card.premiereDate)
+            virtualStatusLabel(strings, card.premiereDate, locale = locale)
         } else {
-            remainingLabel(card.runtimeTicks, card.positionTicks)
+            remainingLabel(strings, card.runtimeTicks, card.positionTicks)
         }
         return when {
             se != null && timePart != null -> "$se · $timePart"
@@ -90,15 +100,19 @@ object CardFormatting {
     /** §7: the timing half of [resumeMetaLine], shown on the card's art ([TimingPill]) rather than
      * the text block below it.
      */
-    fun resumeTimingLabel(card: Card): String? =
-        if (card.isVirtual) virtualStatusLabel(card.premiereDate) else remainingLabel(card.runtimeTicks, card.positionTicks)
+    fun resumeTimingLabel(strings: UiStrings, card: Card, locale: Locale = AppLocale.format): String? =
+        if (card.isVirtual) {
+            virtualStatusLabel(strings, card.premiereDate, locale = locale)
+        } else {
+            remainingLabel(strings, card.runtimeTicks, card.positionTicks)
+        }
 
     /** §7's resume-shelf second line: `"{seriesName} · S{season}"` for an episode, dropping
      * whichever half is missing; `null` for a non-episode card.
      */
-    fun resumeSeriesSeasonLine(card: Card): String? {
+    fun resumeSeriesSeasonLine(strings: UiStrings, card: Card): String? {
         if (card.itemType != "Episode") return null
-        val season = card.parentIndexNumber?.let { "S$it" }
+        val season = card.parentIndexNumber?.let { strings.get(R.string.card_season_short, it) }
         val seriesName = card.seriesName?.takeIf { it.isNotBlank() }
         return when {
             seriesName != null && season != null -> "$seriesName · $season"
@@ -112,15 +126,15 @@ object CardFormatting {
      * so its lines name what it is (`"E5 · Title"` / `"Series · S1"`, `"Season 2"` / `"Series"`);
      * everything else is title / year.
      */
-    fun posterLines(card: Card): Pair<String, String?> = when (card.itemType) {
-        "Episode" -> episodeTitle(card.name, card.indexNumber) to resumeSeriesSeasonLine(card)
+    fun posterLines(strings: UiStrings, card: Card): Pair<String, String?> = when (card.itemType) {
+        "Episode" -> episodeTitle(strings, card.name, card.indexNumber) to resumeSeriesSeasonLine(strings, card)
         "Season" -> card.name to card.seriesName?.takeIf { it.isNotBlank() }
         else -> card.name to card.productionYear?.toString()
     }
 
     /** docs/07 §2: the art tag that tells a favorited episode apart from its series' poster. */
-    fun posterEpisodeTag(card: Card): String? =
-        if (card.itemType == "Episode") seasonEpisodeLabel(card.parentIndexNumber, card.indexNumber) else null
+    fun posterEpisodeTag(strings: UiStrings, card: Card): String? =
+        if (card.itemType == "Episode") seasonEpisodeLabel(strings, card.parentIndexNumber, card.indexNumber) else null
 
     /** Fraction clamped 0..1, only when runtime is present and position > 0. */
     fun watchProgress(card: Card): Float? {
@@ -236,9 +250,9 @@ object CardFormatting {
         (IMAGE_WIDTH_BUCKETS.firstOrNull { requestedPx <= it } ?: IMAGE_WIDTH_BUCKETS.last()).toUInt()
 
     /** Detail header metadata line: `"{year} · {runtime}"`, dropping whichever half is missing. */
-    fun detailMetaLine(productionYear: Int?, runtimeTicks: Long?): String? {
+    fun detailMetaLine(strings: UiStrings, productionYear: Int?, runtimeTicks: Long?): String? {
         val yearPart = productionYear?.toString()
-        val runtimePart = runtimeTicks?.let { formatRuntime(it) }
+        val runtimePart = runtimeTicks?.let { formatRuntime(strings, it) }
         return when {
             yearPart != null && runtimePart != null -> "$yearPart · $runtimePart"
             yearPart != null -> yearPart
@@ -250,13 +264,13 @@ object CardFormatting {
     /** Hero banner metadata line (docs/07 §1): `"S{s} E{e} · {runtime} · {year}"` for an episode,
      * dropping missing parts; bare `"{year}"` otherwise.
      */
-    fun heroMetaLine(card: Card): String? {
+    fun heroMetaLine(strings: UiStrings, card: Card): String? {
         if (card.itemType != "Episode") {
             return card.productionYear?.toString()
         }
         val parts = listOfNotNull(
-            seasonEpisodeLabel(card.parentIndexNumber, card.indexNumber),
-            card.runtimeTicks?.let { formatRuntime(it) },
+            seasonEpisodeLabel(strings, card.parentIndexNumber, card.indexNumber),
+            card.runtimeTicks?.let { formatRuntime(strings, it) },
             card.productionYear?.toString(),
         )
         return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
@@ -270,9 +284,14 @@ object CardFormatting {
     /** Detail Play button state: disabled with [virtualStatusLabel] for a virtual item, otherwise
      * playable.
      */
-    fun playButtonState(card: Card, now: Instant = Instant.now()): PlayButtonState =
+    fun playButtonState(
+        strings: UiStrings,
+        card: Card,
+        now: Instant = Instant.now(),
+        locale: Locale = AppLocale.format,
+    ): PlayButtonState =
         if (card.isVirtual) {
-            PlayButtonState.Unavailable(virtualStatusLabel(card.premiereDate, now))
+            PlayButtonState.Unavailable(virtualStatusLabel(strings, card.premiereDate, now, locale))
         } else {
             PlayButtonState.Playable
         }

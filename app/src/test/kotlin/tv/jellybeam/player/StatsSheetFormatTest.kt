@@ -1,5 +1,8 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.i18n.UsLocaleRule
+import org.junit.Rule
+import tv.jellybeam.i18n.ResourceUiStrings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -11,6 +14,11 @@ import uniffi.jellybeam_core.PlayMethodFfi
 
 /** [StatsSheetFormat] is pure Kotlin (docs/jellybeam-osd-handoff §8b) -- exercised directly, no Compose/ViewModel needed. */
 class StatsSheetFormatTest {
+    private val strings = ResourceUiStrings.default
+
+    @get:Rule
+    val usLocale = UsLocaleRule()
+
 
     private fun stream(
         streamType: MediaStreamKind,
@@ -72,7 +80,7 @@ class StatsSheetFormatTest {
 
     @Test
     fun `headline defaults to Direct Play with an accented no-transcode span`() {
-        val content = StatsSheetFormat.build(detail(), selectedSubtitleTitle = null, subtitleCount = 0, serverName = null, live = null)
+        val content = StatsSheetFormat.build(strings, detail(), selectedSubtitleTitle = null, subtitleCount = 0, serverName = null, live = null)
         assertEquals(listOf(StatsSpan("Direct Play · "), StatsSpan("no transcode", accent = true)), content.headline)
     }
 
@@ -80,6 +88,7 @@ class StatsSheetFormatTest {
     @Test
     fun `headline reads Transcoding with the reason accented once playMethod is TRANSCODE`() {
         val content = StatsSheetFormat.build(
+            strings,
             detail(),
             selectedSubtitleTitle = null,
             subtitleCount = 0,
@@ -119,6 +128,7 @@ class StatsSheetFormatTest {
         )
 
         val content = StatsSheetFormat.build(
+            strings,
             detail = d,
             selectedSubtitleTitle = "English SDH",
             subtitleCount = 3,
@@ -150,6 +160,7 @@ class StatsSheetFormatTest {
     @Test
     fun `a sparse detail with no streams, container, server, or live stats only shows Subtitles`() {
         val content = StatsSheetFormat.build(
+            strings,
             detail = detail(),
             selectedSubtitleTitle = null,
             subtitleCount = 0,
@@ -162,7 +173,7 @@ class StatsSheetFormatTest {
 
     @Test
     fun `a null path never produces a file name`() {
-        val content = StatsSheetFormat.build(detail(path = null), null, 0, null, null)
+        val content = StatsSheetFormat.build(strings, detail(path = null), null, 0, null, null)
         assertNull(content.fileName)
     }
 
@@ -170,46 +181,46 @@ class StatsSheetFormatTest {
     fun `fileName strips the directory using either slash convention`() {
         assertEquals(
             "Movie.mkv",
-            StatsSheetFormat.build(detail(path = "/mnt/media/Movie.mkv"), null, 0, null, null).fileName,
+            StatsSheetFormat.build(strings, detail(path = "/mnt/media/Movie.mkv"), null, 0, null, null).fileName,
         )
         assertEquals(
             "Movie.mkv",
-            StatsSheetFormat.build(detail(path = "C:\\media\\Movie.mkv"), null, 0, null, null).fileName,
+            StatsSheetFormat.build(strings, detail(path = "C:\\media\\Movie.mkv"), null, 0, null, null).fileName,
         )
     }
 
     @Test
     fun `video row drops missing pieces but keeps the ones that resolve`() {
         val video = stream(MediaStreamKind.VIDEO, codec = "h264", width = 1280, height = 720)
-        val content = StatsSheetFormat.build(detail(mediaStreams = listOf(video)), null, 0, null, null)
+        val content = StatsSheetFormat.build(strings, detail(mediaStreams = listOf(video)), null, 0, null, null)
         assertEquals("H264 · 1280×720", content.rows.first { it.label == "VIDEO" }.value)
     }
 
     @Test
     fun `video row preserves exact cropped dimensions`() {
         val video = stream(MediaStreamKind.VIDEO, codec = "hevc", width = 1920, height = 960)
-        val content = StatsSheetFormat.build(detail(mediaStreams = listOf(video)), null, 0, null, null)
+        val content = StatsSheetFormat.build(strings, detail(mediaStreams = listOf(video)), null, 0, null, null)
         assertEquals("HEVC · 1920×960", content.rows.first { it.label == "VIDEO" }.value)
     }
 
     @Test
     fun `video row falls back to a width-derived resolution when height is absent`() {
         val video = stream(MediaStreamKind.VIDEO, codec = "av1", width = 3840, height = null)
-        val content = StatsSheetFormat.build(detail(mediaStreams = listOf(video)), null, 0, null, null)
+        val content = StatsSheetFormat.build(strings, detail(mediaStreams = listOf(video)), null, 0, null, null)
         assertEquals("AV1 · 2160p", content.rows.first { it.label == "VIDEO" }.value)
     }
 
     @Test
     fun `no video stream at all omits the VIDEO row entirely`() {
         val audio = stream(MediaStreamKind.AUDIO, codec = "aac")
-        val content = StatsSheetFormat.build(detail(mediaStreams = listOf(audio)), null, 0, null, null)
+        val content = StatsSheetFormat.build(strings, detail(mediaStreams = listOf(audio)), null, 0, null, null)
         assertTrue(content.rows.none { it.label == "VIDEO" })
     }
 
     @Test
     fun `no audio stream at all omits the AUDIO row entirely`() {
         val video = stream(MediaStreamKind.VIDEO, codec = "hevc")
-        val content = StatsSheetFormat.build(detail(mediaStreams = listOf(video)), null, 0, null, null)
+        val content = StatsSheetFormat.build(strings, detail(mediaStreams = listOf(video)), null, 0, null, null)
         assertTrue(content.rows.none { it.label == "AUDIO" })
     }
 
@@ -217,7 +228,7 @@ class StatsSheetFormatTest {
     fun `the default audio stream is preferred over the first stream when both exist`() {
         val nonDefault = stream(MediaStreamKind.AUDIO, codec = "ac3", isDefault = false)
         val default = stream(MediaStreamKind.AUDIO, codec = "truehd", isDefault = true)
-        val content = StatsSheetFormat.build(detail(mediaStreams = listOf(nonDefault, default)), null, 0, null, null)
+        val content = StatsSheetFormat.build(strings, detail(mediaStreams = listOf(nonDefault, default)), null, 0, null, null)
         assertTrue(content.rows.first { it.label == "AUDIO" }.value.startsWith("TRUEHD"))
     }
 
@@ -227,11 +238,11 @@ class StatsSheetFormatTest {
         val fractional = stream(MediaStreamKind.VIDEO, codec = "h264", avgFrameRate = 29.97f)
         assertEquals(
             "H264 · 24fps",
-            StatsSheetFormat.build(detail(mediaStreams = listOf(whole)), null, 0, null, null).rows.first { it.label == "VIDEO" }.value,
+            StatsSheetFormat.build(strings, detail(mediaStreams = listOf(whole)), null, 0, null, null).rows.first { it.label == "VIDEO" }.value,
         )
         assertEquals(
             "H264 · 29.97fps",
-            StatsSheetFormat.build(detail(mediaStreams = listOf(fractional)), null, 0, null, null).rows.first { it.label == "VIDEO" }.value,
+            StatsSheetFormat.build(strings, detail(mediaStreams = listOf(fractional)), null, 0, null, null).rows.first { it.label == "VIDEO" }.value,
         )
     }
 
@@ -241,11 +252,11 @@ class StatsSheetFormatTest {
         val fractional = stream(MediaStreamKind.AUDIO, codec = "flac", sampleRate = 44_100)
         assertEquals(
             "AAC · 48kHz",
-            StatsSheetFormat.build(detail(mediaStreams = listOf(integral)), null, 0, null, null).rows.first { it.label == "AUDIO" }.value,
+            StatsSheetFormat.build(strings, detail(mediaStreams = listOf(integral)), null, 0, null, null).rows.first { it.label == "AUDIO" }.value,
         )
         assertEquals(
             "FLAC · 44.1kHz",
-            StatsSheetFormat.build(detail(mediaStreams = listOf(fractional)), null, 0, null, null).rows.first { it.label == "AUDIO" }.value,
+            StatsSheetFormat.build(strings, detail(mediaStreams = listOf(fractional)), null, 0, null, null).rows.first { it.label == "AUDIO" }.value,
         )
     }
 
@@ -254,24 +265,25 @@ class StatsSheetFormatTest {
         val withExtOnly = detail(container = "mp4")
         assertEquals(
             "MP4",
-            StatsSheetFormat.build(withExtOnly, null, 0, null, null).rows.first { it.label == "CONTAINER" }.value,
+            StatsSheetFormat.build(strings, withExtOnly, null, 0, null, null).rows.first { it.label == "CONTAINER" }.value,
         )
         val withNeither = detail()
-        assertTrue(StatsSheetFormat.build(withNeither, null, 0, null, null).rows.none { it.label == "CONTAINER" })
+        assertTrue(StatsSheetFormat.build(strings, withNeither, null, 0, null, null).rows.none { it.label == "CONTAINER" })
     }
 
     @Test
     fun `SOURCE row is omitted when serverName is null`() {
-        val content = StatsSheetFormat.build(detail(), null, 0, serverName = null, live = null)
+        val content = StatsSheetFormat.build(strings, detail(), null, 0, serverName = null, live = null)
         assertTrue(content.rows.none { it.label == "SOURCE" })
     }
 
     @Test
     fun `live rows are omitted while live is null and preserve every available metric`() {
-        val staticRows = StatsSheetFormat.build(detail(), null, 0, null, live = null).rows
+        val staticRows = StatsSheetFormat.build(strings, detail(), null, 0, null, live = null).rows
         assertTrue(staticRows.none { it.label in setOf("BUFFER", "NETWORK", "HEALTH") })
 
         val content = StatsSheetFormat.build(
+            strings,
             detail(),
             null,
             0,
@@ -291,7 +303,7 @@ class StatsSheetFormatTest {
 
     @Test
     fun `unknown network estimate remains visible as unavailable`() {
-        val content = StatsSheetFormat.build(detail(), null, 0, null, live = liveStats(0L, 0L))
+        val content = StatsSheetFormat.build(strings, detail(), null, 0, null, live = liveStats(0L, 0L))
         assertEquals("—", content.rows.first { it.label == "NETWORK" }.value)
     }
 }

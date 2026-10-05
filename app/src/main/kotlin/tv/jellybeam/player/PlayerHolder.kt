@@ -26,6 +26,7 @@ import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.ui.PlayerView
 import tv.jellybeam.AppGraph
+import tv.jellybeam.i18n.AndroidUiStrings
 import tv.jellybeam.perf.PerfLog
 import java.util.concurrent.atomic.AtomicLong
 import okhttp3.Call
@@ -551,6 +552,7 @@ class PlayerHolder(
         // MediaSession title: the same breadcrumb formatter the OSD's top bar uses. No artworkUri:
         // PlaybackPlan carries no image URL.
         val breadcrumbTitle = PlaybackBreadcrumb.format(
+            strings = AndroidUiStrings(appContext.resources),
             itemType = plan.itemType,
             itemName = plan.itemName,
             seriesName = plan.seriesName,

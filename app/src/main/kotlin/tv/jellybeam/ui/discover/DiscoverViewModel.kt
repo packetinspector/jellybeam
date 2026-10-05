@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,7 +27,7 @@ data class DiscoverUiState(
 /** Backs [DiscoverScreen] (docs/14-seerr-discover.md): fetches `seerr_home()` on init, not app
  * startup. Fails open into this screen's inline error text plus Retry.
  */
-class DiscoverViewModel(private val gateway: CoreGateway) : ViewModel() {
+class DiscoverViewModel(private val gateway: CoreGateway, private val strings: UiStrings) : ViewModel() {
     private val _state = MutableStateFlow(DiscoverUiState())
     val state: StateFlow<DiscoverUiState> = _state.asStateFlow()
 
@@ -45,7 +46,7 @@ class DiscoverViewModel(private val gateway: CoreGateway) : ViewModel() {
                     it.copy(
                         isLoading = false,
                         notConfigured = e is CoreException.SeerrNotConfigured,
-                        error = e.displayMessage(),
+                        error = e.displayMessage(strings),
                     )
                 }
             }
@@ -55,10 +56,10 @@ class DiscoverViewModel(private val gateway: CoreGateway) : ViewModel() {
     fun retry() = refresh()
 }
 
-class DiscoverViewModelFactory(private val gateway: CoreGateway) : ViewModelProvider.Factory {
+class DiscoverViewModelFactory(private val gateway: CoreGateway, private val strings: UiStrings) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(DiscoverViewModel::class.java))
-        return DiscoverViewModel(gateway) as T
+        return DiscoverViewModel(gateway, strings) as T
     }
 }

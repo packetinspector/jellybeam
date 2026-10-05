@@ -1,6 +1,10 @@
 package tv.jellybeam.player
 
 import java.util.Locale
+import tv.jellybeam.R
+import tv.jellybeam.i18n.AppLocale
+import tv.jellybeam.i18n.UiStrings
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.detail.DetailFormatting
 import uniffi.jellybeam_core.MediaStreamInfo
 import uniffi.jellybeam_core.MediaStreamKind
@@ -35,6 +39,7 @@ object StatsSheetFormat {
      * default to Direct Play; [PlaybackScreen] passes live values once a fallback transcodes.
      */
     fun build(
+        strings: UiStrings,
         detail: PlaybackOsdDetail,
         selectedSubtitleTitle: String?,
         subtitleCount: Int,
@@ -42,6 +47,7 @@ object StatsSheetFormat {
         live: PlaybackLiveStats?,
         playMethod: PlayMethodFfi = PlayMethodFfi.DIRECT_PLAY,
         transcodeReason: String? = null,
+        locale: Locale = AppLocale.format,
     ): StatsSheetContent {
         val video = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.VIDEO }
         val audio = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.AUDIO && it.isDefault }
@@ -49,18 +55,18 @@ object StatsSheetFormat {
 
         // docs/18 §3: "Transcoding · <reason>" once playMethod flips; reason is the accented run.
         val headline = if (playMethod == PlayMethodFfi.TRANSCODE) {
-            listOf(StatsSpan("Transcoding · "), StatsSpan(transcodeReason ?: "", accent = true))
+            listOf(StatsSpan(strings.get(R.string.player_stats_transcoding) + " · "), StatsSpan(transcodeReason ?: "", accent = true))
         } else {
-            listOf(StatsSpan("Direct Play · "), StatsSpan("no transcode", accent = true))
+            listOf(StatsSpan(strings.get(R.string.player_stats_direct_play) + " · "), StatsSpan(strings.get(R.string.player_stats_no_transcode), accent = true))
         }
 
         val rows = buildList {
-            videoValue(video)?.let { add(StatsRow("VIDEO", it)) }
-            audioValue(audio)?.let { add(StatsRow("AUDIO", it)) }
-            add(StatsRow("SUBTITLES", subtitlesValue(selectedSubtitleTitle, subtitleCount)))
-            containerValue(detail)?.let { add(StatsRow("CONTAINER", it)) }
-            serverName?.let { add(StatsRow("SOURCE", it)) }
-            live?.let { addAll(liveRows(it)) }
+            videoValue(strings, video, locale)?.let { add(StatsRow(label(strings, R.string.player_stats_label_video), it)) }
+            audioValue(strings, audio, locale)?.let { add(StatsRow(label(strings, R.string.player_stats_label_audio), it)) }
+            add(StatsRow(label(strings, R.string.player_stats_label_subtitles), subtitlesValue(strings, selectedSubtitleTitle, subtitleCount)))
+            containerValue(detail)?.let { add(StatsRow(label(strings, R.string.player_stats_label_container), it)) }
+            serverName?.let { add(StatsRow(label(strings, R.string.player_stats_label_source), it)) }
+            live?.let { addAll(liveRows(strings, it)) }
         }
 
         val fileName = detail.path?.substringAfterLast('/')?.substringAfterLast('\\')
@@ -68,36 +74,39 @@ object StatsSheetFormat {
         return StatsSheetContent(headline = headline, rows = rows, fileName = fileName)
     }
 
+    /** Row labels are all-caps in the sheet, cased by the language they are written in. */
+    private fun label(strings: UiStrings, id: Int): String = strings.get(id).uppercaseUi()
+
     /** `"HEVC · Main 10 · 1920×1080 · 23.976fps · 12.3Mb/s"`; missing pieces drop, `null` if no
      * video stream. */
-    private fun videoValue(video: MediaStreamInfo?): String? {
+    private fun videoValue(strings: UiStrings, video: MediaStreamInfo?, locale: Locale): String? {
         if (video == null) return null
         val parts = listOfNotNull(
             video.codec?.takeIf { it.isNotBlank() }?.uppercase(Locale.US),
             video.profile?.takeIf { it.isNotBlank() },
             resolutionDimensions(video.width, video.height),
-            fpsLabel(video.avgFrameRate),
-            bitrateLabel(video.bitRate),
+            fpsLabel(strings, video.avgFrameRate, locale),
+            bitrateLabel(strings, video.bitRate),
         )
         return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
     }
 
     /** `"EAC3 5.1 · 448kb/s · 48kHz · EN"` -- missing pieces drop; `null` if no audio stream. */
-    private fun audioValue(audio: MediaStreamInfo?): String? {
+    private fun audioValue(strings: UiStrings, audio: MediaStreamInfo?, locale: Locale): String? {
         if (audio == null) return null
         val parts = listOfNotNull(
-            codecChannelLabel(audio.codec, audio.channels),
-            kbpsLabel(audio.bitRate),
-            khzLabel(audio.sampleRate),
+            codecChannelLabel(strings, audio.codec, audio.channels),
+            kbpsLabel(strings, audio.bitRate),
+            khzLabel(strings, audio.sampleRate, locale),
             langLabel(audio.language),
         )
         return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
     }
 
     /** Always present -- "Off · N available" or "<title> · N available"; never dropped. */
-    private fun subtitlesValue(selectedSubtitleTitle: String?, subtitleCount: Int): String {
-        val label = selectedSubtitleTitle?.takeIf { it.isNotBlank() } ?: "Off"
-        return "$label · $subtitleCount available"
+    private fun subtitlesValue(strings: UiStrings, selectedSubtitleTitle: String?, subtitleCount: Int): String {
+        val label = selectedSubtitleTitle?.takeIf { it.isNotBlank() } ?: strings.get(R.string.player_track_off)
+        return strings.plural(R.plurals.player_stats_subtitles_value, subtitleCount, label, subtitleCount)
     }
 
     /** `"MKV · 1.4 GB"` -- either half may drop; `null` when both absent. Reuses
@@ -111,26 +120,27 @@ object StatsSheetFormat {
     }
 
     /** Split so buffer allocation and network estimate don't collapse into one HEALTH summary. */
-    internal fun liveRows(live: PlaybackLiveStats): List<StatsRow> = listOf(
-        StatsRow("BUFFER", bufferValue(live)),
-        StatsRow("NETWORK", networkValue(live)),
-        StatsRow("HEALTH", healthValue(live)),
+    internal fun liveRows(strings: UiStrings, live: PlaybackLiveStats): List<StatsRow> = listOf(
+        StatsRow(label(strings, R.string.player_stats_label_buffer), bufferValue(strings, live)),
+        StatsRow(label(strings, R.string.player_stats_label_network), networkValue(strings, live)),
+        StatsRow(label(strings, R.string.player_stats_label_health), healthValue(strings, live)),
     )
 
-    internal fun bufferValue(live: PlaybackLiveStats): String = String.format(
-        Locale.US,
-        "%.1fs ahead · %.1f MiB",
+    internal fun bufferValue(strings: UiStrings, live: PlaybackLiveStats): String = strings.get(
+        R.string.player_stats_buffer_value,
         live.bufferedAheadMs.coerceAtLeast(0L) / 1_000.0,
         live.allocatedBufferBytes.coerceAtLeast(0L) / (1024.0 * 1024.0),
     )
 
-    internal fun networkValue(live: PlaybackLiveStats): String =
+    internal fun networkValue(strings: UiStrings, live: PlaybackLiveStats): String =
         live.bandwidthBytesPerSecond.takeIf { it > 0L }?.let {
-            String.format(Locale.US, "%.2f Mbit/s", it * 8.0 / 1_000_000.0)
+            strings.get(R.string.player_stats_network_value, it * 8.0 / 1_000_000.0)
         } ?: "—"
 
-    internal fun healthValue(live: PlaybackLiveStats): String =
-        "${live.state.displayName} · ${live.droppedFrames.coerceAtLeast(0L)} dropped"
+    internal fun healthValue(strings: UiStrings, live: PlaybackLiveStats): String =
+        live.droppedFrames.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt().let { dropped ->
+            strings.plural(R.plurals.player_stats_health_value, dropped, strings.get(live.state.labelRes), dropped)
+        }
 
     /** `"{height}p"` from [height], falling back to a width-based ladder estimate when absent;
      * `null` when neither resolves. */
@@ -157,53 +167,52 @@ object StatsSheetFormat {
 
     /** `"%.3f"` with trailing zeros/dot trimmed, then `"fps"` appended -- `"23.976fps"`, `"24fps"`.
      * `null` for a non-positive/absent rate. */
-    private fun fpsLabel(fps: Float?): String? {
+    private fun fpsLabel(strings: UiStrings, fps: Float?, locale: Locale): String? {
         val value = fps?.takeIf { it > 0f } ?: return null
-        val formatted = String.format(Locale.US, "%.3f", value).trimEnd('0').trimEnd('.')
-        return "${formatted}fps"
+        val formatted = String.format(locale, "%.3f", value).trimEnd('0').trimEnd('.', ',')
+        return strings.get(R.string.player_stats_fps, formatted)
     }
 
     /** `"%.1fMb/s"` from a bits/sec rate. `null` for a non-positive/absent rate. */
-    private fun bitrateLabel(bitsPerSecond: Int?): String? {
+    private fun bitrateLabel(strings: UiStrings, bitsPerSecond: Int?): String? {
         val value = bitsPerSecond?.takeIf { it > 0 } ?: return null
-        return String.format(Locale.US, "%.1fMb/s", value / 1_000_000.0)
+        return strings.get(R.string.player_stats_video_bitrate, value / 1_000_000.0)
     }
 
     /** `"AC3 5.1"` -- codec uppercased plus a channel-count label; `null` if there's no codec. */
-    private fun codecChannelLabel(codec: String?, channels: Int?): String? {
+    private fun codecChannelLabel(strings: UiStrings, codec: String?, channels: Int?): String? {
         val name = codec?.takeIf { it.isNotBlank() }?.uppercase(Locale.US) ?: return null
-        val channelPart = channels?.let(::channelLabel)
+        val channelPart = channels?.let { channelLabel(strings, it) }
         return if (channelPart != null) "$name $channelPart" else name
     }
 
-    /** `"5.1"`/`"7.1"`/`"Stereo"`/`"Mono"`, else `"N ch"`; duplicated in [InfoOverlayFormat] --
-     * keep both in sync. */
-    private fun channelLabel(channels: Int): String = when (channels) {
-        1 -> "Mono"
-        2 -> "Stereo"
+    /** `"5.1"`/`"7.1"`/`"Stereo"`/`"Mono"`, else `"N ch"`; also the OSD chip's mapping. */
+    internal fun channelLabel(strings: UiStrings, channels: Int): String = when (channels) {
+        1 -> strings.get(R.string.player_channels_mono)
+        2 -> strings.get(R.string.player_channels_stereo)
         6 -> "5.1"
         8 -> "7.1"
-        else -> "$channels ch"
+        else -> strings.get(R.string.player_channels_count, channels)
     }
 
     /** `"448kb/s"` from a bits/sec rate. `null` for a non-positive/absent rate. */
-    private fun kbpsLabel(bitsPerSecond: Int?): String? {
+    private fun kbpsLabel(strings: UiStrings, bitsPerSecond: Int?): String? {
         val value = bitsPerSecond?.takeIf { it > 0 } ?: return null
-        return "${Math.round(value / 1_000.0)}kb/s"
+        return strings.get(R.string.player_stats_audio_bitrate, Math.round(value / 1_000.0))
     }
 
     /** `"48kHz"`, or `"44.1kHz"` (one decimal, only when non-integral), from a sample rate in Hz.
      * `null` for a non-positive/absent rate. */
-    private fun khzLabel(sampleRateHz: Int?): String? {
+    private fun khzLabel(strings: UiStrings, sampleRateHz: Int?, locale: Locale): String? {
         val hz = sampleRateHz?.takeIf { it > 0 } ?: return null
         val khz = hz / 1_000.0
         val rounded = Math.round(khz)
         val formatted = if (khz == rounded.toDouble()) {
             rounded.toString()
         } else {
-            String.format(Locale.US, "%.1f", khz)
+            String.format(locale, "%.1f", khz)
         }
-        return "${formatted}kHz"
+        return strings.get(R.string.player_stats_sample_rate, formatted)
     }
 
     /** Language code, uppercased and capped to 3 chars -- `"EN"`, `"SPA"`; `null` if absent. */

@@ -189,7 +189,8 @@ pub struct SeerrActiveRequest {
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct SeerrSeasonStatus {
     pub season_number: i32,
-    pub name: String,
+    /// Seerr's own name; `None` lets Kotlin word "Season N" (docs/27 §5).
+    pub name: Option<String>,
     pub episode_count: i32,
     pub availability: SeerrAvailability,
     pub requestable: bool,

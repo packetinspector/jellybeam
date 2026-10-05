@@ -2,6 +2,7 @@ package tv.jellybeam.ui.settings
 
 import android.app.Activity
 import android.graphics.BitmapFactory
+import androidx.annotation.StringRes
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,8 +35,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
-import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
@@ -45,8 +44,13 @@ import tv.jellybeam.AppGraph
 import tv.jellybeam.BuildConfig
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.AppLocale
+import tv.jellybeam.i18n.mediumDateFormatter
+import tv.jellybeam.i18n.rememberUiStrings
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.updates.noteBlocks
+import uniffi.jellybeam_core.UpdateFailure
 import uniffi.jellybeam_core.UpdateSnapshot
 
 private val updateCardShape = RoundedCornerShape(4.dp)
@@ -94,7 +98,7 @@ fun UpdatesSectionContent(visible: Boolean = true, onAutomaticChange: (Boolean) 
     })
     val accent = if (failed) updateError else if (checking) updateAmber else JellybeamTheme.Pistacchio
     val headline = when {
-        failed && snapshot?.failure?.startsWith("Connection failed") == true -> stringResource(R.string.updates_headline_server_down)
+        failed && snapshot?.failure == UpdateFailure.NETWORK -> stringResource(R.string.updates_headline_server_down)
         failed -> stringResource(R.string.updates_headline_failed)
         checking -> stringResource(R.string.updates_headline_checking)
         phase == "Downloading" -> stringResource(R.string.updates_headline_downloading, target)
@@ -107,7 +111,8 @@ fun UpdatesSectionContent(visible: Boolean = true, onAutomaticChange: (Boolean) 
     }
     val lastChecked = relativeCheck(snapshot?.lastChecked ?: 0u, now)
     val detail = when {
-        failed -> snapshot?.failure ?: stringResource(R.string.updates_detail_try_again)
+        failed && unavailable -> stringResource(R.string.updates_unavailable)
+        failed -> snapshot?.failure?.let { stringResource(updateFailureText(it)) } ?: stringResource(R.string.updates_detail_try_again)
         checking -> stringResource(R.string.updates_detail_checking)
         phase == "Downloading" -> stringResource(R.string.updates_detail_downloading)
         phase in setOf("Verifying", "Preparing") -> stringResource(R.string.updates_detail_verifying)
@@ -216,13 +221,30 @@ private fun UpdateMascot(resource: Int) {
     bitmap?.let { Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
 }
 
+/** docs/27 §3: the core reports the failure kind, the UI words it. */
+@StringRes
+internal fun updateFailureText(failure: UpdateFailure): Int = when (failure) {
+    UpdateFailure.NETWORK -> R.string.updates_failure_network
+    UpdateFailure.RATE_LIMITED -> R.string.updates_failure_rate_limited
+    UpdateFailure.UNSUPPORTED_RELEASE -> R.string.updates_failure_unsupported_release
+    UpdateFailure.INCOMPATIBLE -> R.string.updates_failure_incompatible
+    UpdateFailure.VERIFICATION -> R.string.updates_failure_verification
+    UpdateFailure.STORAGE -> R.string.updates_failure_storage
+    UpdateFailure.INSTALLATION -> R.string.updates_failure_installation
+    UpdateFailure.WITHDRAWN -> R.string.updates_failure_withdrawn
+}
+
 @Composable
-private fun relativeCheck(time: ULong, now: Long): String = when {
-    time == 0uL -> stringResource(R.string.updates_checked_never)
-    now - time.toLong() < 60 -> stringResource(R.string.updates_checked_just_now)
-    now - time.toLong() < 3600 -> stringResource(R.string.updates_checked_minutes, ((now - time.toLong()) / 60).toInt())
-    now - time.toLong() < 86400 -> stringResource(R.string.updates_checked_hours, ((now - time.toLong()) / 3600).toInt())
-    else -> stringResource(R.string.updates_checked_days, ((now - time.toLong()) / 86400).toInt())
+private fun relativeCheck(time: ULong, now: Long): String {
+    val strings = rememberUiStrings()
+    val age = now - time.toLong()
+    return when {
+        time == 0uL -> strings.get(R.string.updates_checked_never)
+        age < 60 -> strings.get(R.string.updates_checked_just_now)
+        age < 3600 -> strings.plural(R.plurals.updates_checked_minutes_ago, (age / 60).toInt(), (age / 60).toInt())
+        age < 86400 -> strings.plural(R.plurals.updates_checked_hours_ago, (age / 3600).toInt(), (age / 3600).toInt())
+        else -> strings.plural(R.plurals.updates_checked_days_ago, (age / 86400).toInt(), (age / 86400).toInt())
+    }
 }
 
 @Composable
@@ -276,7 +298,7 @@ private fun UpdateAutomatic(value: Boolean, onToggle: () -> Unit) {
 private fun ReleaseNotesCard(snapshot: UpdateSnapshot?, available: Boolean, modifier: Modifier) {
     val blocks = remember(snapshot?.notes) { noteBlocks(snapshot?.notes.orEmpty()) }
     val date = remember(snapshot?.publishedAt) {
-        runCatching { LocalDate.parse(snapshot?.publishedAt.orEmpty().take(10)).format(DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.US)).uppercase(Locale.ROOT) }.getOrDefault("")
+        runCatching { LocalDate.parse(snapshot?.publishedAt.orEmpty().take(10)).format(mediumDateFormatter(AppLocale.format)).uppercaseUi() }.getOrDefault("")
     }
     val scroll = rememberScrollState()
     val scope = rememberCoroutineScope()
@@ -307,7 +329,7 @@ private fun ReleaseNotesCard(snapshot: UpdateSnapshot?, available: Boolean, modi
             blocks.forEachIndexed { index, block ->
                 if (block.heading) {
                     if (index > 0) { Spacer(Modifier.height(5.dp)); Box(Modifier.fillMaxWidth().height(1.dp).background(JellybeamTheme.Hairline)); Spacer(Modifier.height(3.dp)) }
-                    BasicText(block.text.text.uppercase(Locale.ROOT), style = updateMono(9, if (index == 0) JellybeamTheme.Pistacchio else JellybeamTheme.Grigio))
+                    BasicText(block.text.text.uppercaseUi(), style = updateMono(9, if (index == 0) JellybeamTheme.Pistacchio else JellybeamTheme.Grigio))
                 } else if (block.text.text.startsWith("• ")) {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         BasicText("•", style = updateText(12, JellybeamTheme.Grigio))

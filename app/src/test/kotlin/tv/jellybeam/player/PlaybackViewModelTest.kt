@@ -1,5 +1,6 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.i18n.ResourceUiStrings
 import androidx.lifecycle.ViewModelStore
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -182,6 +183,7 @@ class PlaybackViewModelTest {
             gateway,
             player,
             itemId,
+            strings = ResourceUiStrings.default,
             reportScope = reportScope,
             onStopReported = onStopReported,
             startFromBeginning = startFromBeginning,
@@ -446,7 +448,7 @@ class PlaybackViewModelTest {
         val player = FakePlaybackPlayer().apply { positionTicks = 99_000_000L }
         // Built directly: this test triggers onCleared() itself, so tearDown()'s clear is
         // redundant.
-        val viewModel = PlaybackViewModel(gateway, player, plan.itemId, testReportScope())
+        val viewModel = PlaybackViewModel(gateway, player, plan.itemId, ResourceUiStrings.default, testReportScope())
         withSession(viewModel) {
             assertTrue("listener must be registered once the session starts", player.hasActiveListener)
 
@@ -3306,7 +3308,7 @@ class PlaybackViewModelTest {
                 assertTrue(gateway.prepareTranscodeFallbackCalls.isEmpty())
                 assertEquals(1, gateway.abandonPlaybackCallCount)
                 assertEquals(
-                    PlaybackEvent.FinishWithMessage(fatalPlaybackMessage(error.errorCodeName, plan)),
+                    PlaybackEvent.FinishWithMessage(fatalPlaybackMessage(ResourceUiStrings.default, error.errorCodeName, plan)),
                     viewModel.events.replayCache.firstOrNull(),
                 )
             }
@@ -3519,19 +3521,19 @@ class PlaybackViewModelTest {
 
     @Test
     fun `fatalPlaybackMessage is the bare error code when there is no plan at all`() {
-        assertEquals("Playback error: DECODING_FAILED", fatalPlaybackMessage("DECODING_FAILED", null))
+        assertEquals("Playback error: DECODING_FAILED", fatalPlaybackMessage(ResourceUiStrings.default, "DECODING_FAILED", null))
     }
 
     @Test
     fun `fatalPlaybackMessage is the bare error code for a DirectPlay plan the server never objected to`() {
         val plan = samplePlan(transcodeFallbackAllowed = false)
-        assertEquals("Playback error: DECODING_FAILED", fatalPlaybackMessage("DECODING_FAILED", plan))
+        assertEquals("Playback error: DECODING_FAILED", fatalPlaybackMessage(ResourceUiStrings.default, "DECODING_FAILED", plan))
     }
 
     @Test
     fun `fatalPlaybackMessage is the bare error code for a Transcode plan even if serverVerdict were somehow set`() {
         val plan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, transcodeReason = "bitrate above cap")
-        assertEquals("Playback error: DECODING_FAILED", fatalPlaybackMessage("DECODING_FAILED", plan))
+        assertEquals("Playback error: DECODING_FAILED", fatalPlaybackMessage(ResourceUiStrings.default, "DECODING_FAILED", plan))
     }
 
     @Test
@@ -3540,7 +3542,7 @@ class PlaybackViewModelTest {
         assertEquals(
             "This file can't be Direct Played on this TV (DECODING_FAILED). Server: codec not supported. " +
                 "Set Quality to Auto in Settings › Playback to let the server transcode it.",
-            fatalPlaybackMessage("DECODING_FAILED", plan),
+            fatalPlaybackMessage(ResourceUiStrings.default, "DECODING_FAILED", plan),
         )
     }
 

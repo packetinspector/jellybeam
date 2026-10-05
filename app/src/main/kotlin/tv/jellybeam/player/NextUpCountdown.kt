@@ -1,6 +1,8 @@
 package tv.jellybeam.player
 
 import java.util.Locale
+import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
 import kotlin.math.ceil
 
 /**
@@ -39,9 +41,9 @@ object NextUpCountdown {
     /** The card's countdown numeral (docs/12 §13): under a minute as `"8S"`, a minute or more as
      * `"m:ss"` (`"1:30"`); clamps to `>= 0` so a stale caller past zero still reads `"0S"`.
      */
-    fun numeral(remainingWholeSecs: Long): String {
+    fun numeral(strings: UiStrings, remainingWholeSecs: Long): String {
         val clamped = remainingWholeSecs.coerceAtLeast(0L)
-        if (clamped < 60L) return "${clamped}S"
+        if (clamped < 60L) return strings.get(R.string.player_countdown_seconds, clamped)
         val minutes = clamped / 60
         val seconds = clamped % 60
         return "%d:%02d".format(Locale.ROOT, minutes, seconds)

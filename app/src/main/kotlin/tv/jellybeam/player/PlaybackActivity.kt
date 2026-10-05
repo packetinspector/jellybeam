@@ -182,7 +182,7 @@ class PlaybackActivity : ComponentActivity() {
         // Obtained here, not in the Composable, so onStop/onDestroy reach the same instance.
         viewModel = ViewModelProvider(
             this,
-            PlaybackViewModelFactory(AppGraph.gateway, AppGraph.playerHolder, itemId, startFromBeginning, AppGraph.trickplayFetcher),
+            PlaybackViewModelFactory(AppGraph.gateway, AppGraph.playerHolder, itemId, startFromBeginning, AppGraph.strings, AppGraph.trickplayFetcher),
         )[PlaybackViewModel::class.java]
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

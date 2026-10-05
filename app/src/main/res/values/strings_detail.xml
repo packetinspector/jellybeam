@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- docs/27 §3: Detail-area text built outside Compose (formatters, action menu, ViewModel toasts).
+     Server-provided names are always substituted verbatim, never cased or reworded here. -->
+<resources>
+    <!-- Primary action pill (docs/11 item 11). -->
+    <string name="detail_play">Play</string>
+    <string name="detail_resume">Resume</string>
+    <string name="detail_play_again">Play again</string>
+    <string name="detail_resume_episode">Resume %1$s</string>
+    <string name="detail_season_episode">S%1$d E%2$d</string>
+    <string name="detail_episode_number">E%d</string>
+
+    <!-- Header meta lines. -->
+    <plurals name="detail_season_count">
+        <item quantity="one">%d season</item>
+        <item quantity="other">%d seasons</item>
+    </plurals>
+    <plurals name="detail_episode_count">
+        <item quantity="one">%d episode</item>
+        <item quantity="other">%d episodes</item>
+    </plurals>
+    <plurals name="detail_episode_count_caps">
+        <item quantity="one">%d EPISODE</item>
+        <item quantity="other">%d EPISODES</item>
+    </plurals>
+    <plurals name="detail_item_count_caps">
+        <item quantity="one">%d ITEM</item>
+        <item quantity="other">%d ITEMS</item>
+    </plurals>
+    <string name="detail_watched_count">%d WATCHED</string>
+
+    <!-- Spec strip audio channel words (docs/11 item 1). -->
+    <string name="detail_channels_mono">MONO</string>
+    <string name="detail_channels_stereo">STEREO</string>
+    <string name="detail_channels_count">%d CH</string>
+
+    <!-- Movie eyebrow's ADDED clause (docs/11 §4 item 3). -->
+    <string name="detail_added_today">Today</string>
+    <string name="detail_added_yesterday">Yesterday</string>
+    <plurals name="detail_added_days_ago">
+        <item quantity="one">%d day ago</item>
+        <item quantity="other">%d days ago</item>
+    </plurals>
+    <string name="detail_added_clause">ADDED %1$s</string>
+
+    <!-- STUDIO row: %1$s is the first studio verbatim, %2$d the rest. -->
+    <plurals name="detail_studio_more">
+        <item quantity="one">%1$s +%2$d more</item>
+        <item quantity="other">%1$s +%2$d more</item>
+    </plurals>
+
+    <!-- Action menu rows (docs/19 §1.1). -->
+    <string name="detail_menu_mark_season_watched">Mark season as watched</string>
+    <string name="detail_menu_mark_series_watched">Mark series as watched</string>
+    <string name="detail_menu_mark_season_unwatched">Mark season as unwatched</string>
+    <string name="detail_menu_mark_series_unwatched">Mark series as unwatched</string>
+    <string name="detail_menu_mark_watched">Mark as watched</string>
+    <string name="detail_menu_mark_unwatched">Mark as unwatched</string>
+    <string name="detail_menu_never_played">NEVER PLAYED</string>
+    <string name="detail_menu_add_favorite">Add to favorites</string>
+    <string name="detail_menu_remove_favorite">Remove from favorites</string>
+    <string name="detail_menu_state_series">SERIES</string>
+    <string name="detail_menu_play_next_unwatched">Play next unwatched</string>
+    <string name="detail_menu_play_from_beginning">Play from the beginning</string>
+    <string name="detail_menu_play_random">Play something random</string>
+    <string name="detail_menu_play_random_from">FROM %d</string>
+    <string name="detail_menu_go_to_series">Go to series</string>
+    <string name="detail_menu_add_to_collection">Add to collection</string>
+    <string name="detail_menu_refresh_metadata">Refresh metadata</string>
+
+    <!-- Collection page and stacked card (docs/11 §Collection, docs/07). -->
+    <string name="detail_collection_series">Series</string>
+    <string name="detail_collection_series_with_seasons">Series · %1$s</string>
+    <string name="detail_collection_unplayed">%d UNPLAYED</string>
+    <string name="detail_collection_all_watched">ALL WATCHED</string>
+
+    <!-- Detail toasts. -->
+    <string name="detail_toast_marked_watched">Marked as watched</string>
+    <string name="detail_toast_marked_unwatched">Marked as unwatched</string>
+    <string name="detail_toast_added_favorite">Added to favorites</string>
+    <string name="detail_toast_removed_favorite">Removed from favorites</string>
+    <string name="detail_toast_refreshing_metadata">Refreshing metadata</string>
+    <string name="detail_toast_server_unreachable">Couldn\'t reach the server</string>
+    <string name="detail_toast_added_to_collection">Added to %1$s</string>
+</resources>

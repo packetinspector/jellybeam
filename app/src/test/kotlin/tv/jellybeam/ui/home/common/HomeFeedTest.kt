@@ -18,6 +18,7 @@ import org.junit.Test
 import tv.jellybeam.MainDispatcherRule
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.LaunchWarmup
+import tv.jellybeam.i18n.ResourceUiStrings
 import tv.jellybeam.player.PlaybackReports
 import tv.jellybeam.ui.cards.testCard
 import tv.jellybeam.ui.home.FakeHomeGateway
@@ -43,6 +44,7 @@ private class TestFeed(gateway: CoreGateway, stopEpoch: Flow<Long>, launchWarmup
         initialContent = null,
         stopEpoch = stopEpoch,
         launchWarmup = launchWarmup,
+        strings = ResourceUiStrings.default,
         extract = { (it as? HomeSnapshot.Classic)?.home },
         reduce = { _, incoming -> incoming },
     )
@@ -61,6 +63,7 @@ private class TestFeed(gateway: CoreGateway, stopEpoch: Flow<Long>, launchWarmup
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class HomeFeedTest {
+    private val strings = ResourceUiStrings.default
 
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
@@ -340,35 +343,35 @@ class HomeFeedTest {
 
     @Test
     fun `idle status reads Loading before the still-loading escalation`() {
-        assertEquals("Loading…", loadingStatusText(SyncStatus.Idle, tickCount = 0))
-        assertEquals("Loading…", loadingStatusText(SyncStatus.Idle, tickCount = 1))
+        assertEquals("Loading…", loadingStatusText(strings, SyncStatus.Idle, tickCount = 0))
+        assertEquals("Loading…", loadingStatusText(strings, SyncStatus.Idle, tickCount = 1))
     }
 
     @Test
     fun `idle status escalates to Still loading after the threshold`() {
-        assertEquals("Still loading…", loadingStatusText(SyncStatus.Idle, tickCount = 2))
-        assertEquals("Still loading…", loadingStatusText(SyncStatus.Idle, tickCount = 5))
+        assertEquals("Still loading…", loadingStatusText(strings, SyncStatus.Idle, tickCount = 2))
+        assertEquals("Still loading…", loadingStatusText(strings, SyncStatus.Idle, tickCount = 5))
     }
 
     @Test
     fun `syncing status with a known total shows progress out of that total`() {
         val status = SyncStatus.Syncing(libraryName = "Movies (4K)", pagesDone = 1u, itemsDone = 40u, totalItems = 120u)
 
-        assertEquals("Syncing Movies (4K) — 40 of 120…", loadingStatusText(status, tickCount = 0))
+        assertEquals("Syncing Movies (4K) — 40 of 120…", loadingStatusText(strings, status, tickCount = 0))
     }
 
     @Test
     fun `syncing status without a known total shows a plain item count`() {
         val status = SyncStatus.Syncing(libraryName = "TV Shows", pagesDone = 1u, itemsDone = 7u, totalItems = null)
 
-        assertEquals("Syncing TV Shows — 7 items…", loadingStatusText(status, tickCount = 0))
+        assertEquals("Syncing TV Shows — 7 items…", loadingStatusText(strings, status, tickCount = 0))
     }
 
     @Test
     fun `syncing status counts a single item in the singular`() {
         val status = SyncStatus.Syncing(libraryName = "TV Shows", pagesDone = 1u, itemsDone = 1u, totalItems = null)
 
-        assertEquals("Syncing TV Shows — 1 item…", loadingStatusText(status, tickCount = 0))
+        assertEquals("Syncing TV Shows — 1 item…", loadingStatusText(strings, status, tickCount = 0))
     }
 
     @Test
@@ -377,14 +380,14 @@ class HomeFeedTest {
         // nothing reformats it.
         val status = SyncStatus.Syncing(libraryName = "weird_library-ID 42", pagesDone = 0u, itemsDone = 0u, totalItems = null)
 
-        assertEquals("Syncing weird_library-ID 42 — 0 items…", loadingStatusText(status, tickCount = 0))
+        assertEquals("Syncing weird_library-ID 42 — 0 items…", loadingStatusText(strings, status, tickCount = 0))
     }
 
     @Test
     fun `a sync whose library has no name yet never shows an id`() {
         val status = SyncStatus.Syncing(libraryName = null, pagesDone = 0u, itemsDone = 12u, totalItems = 300u)
 
-        assertEquals("Syncing library — 12 of 300…", loadingStatusText(status, tickCount = 0))
+        assertEquals("Syncing library — 12 of 300…", loadingStatusText(strings, status, tickCount = 0))
     }
 
     /** [FakeHomeGateway]'s `homeSnapshot` resolves synchronously, flipping `isLoading` false

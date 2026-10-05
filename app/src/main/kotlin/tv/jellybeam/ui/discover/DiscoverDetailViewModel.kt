@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -69,6 +70,7 @@ data class DiscoverDetailUiState(
  */
 class DiscoverDetailViewModel(
     private val gateway: CoreGateway,
+    private val strings: UiStrings,
     private val mediaType: SeerrMediaType,
     private val tmdbId: Long,
 ) : ViewModel() {
@@ -135,7 +137,7 @@ class DiscoverDetailViewModel(
                 it.copy(
                     isLoading = false,
                     notConfigured = e is CoreException.SeerrNotConfigured,
-                    error = e.displayMessage(),
+                    error = e.displayMessage(strings),
                 )
             }
         }
@@ -237,7 +239,7 @@ class DiscoverDetailViewModel(
                 loadDetail()
                 _state.update { it.copy(transientEvent = DiscoverDetailTransientEvent.REQUEST_SUBMITTED) }
             } catch (e: CoreException) {
-                _state.update { it.copy(isSubmittingRequest = false, requestError = e.displayMessage()) }
+                _state.update { it.copy(isSubmittingRequest = false, requestError = e.displayMessage(strings)) }
             }
         }
     }
@@ -258,7 +260,7 @@ class DiscoverDetailViewModel(
                 loadDetail()
                 _state.update { it.copy(transientEvent = DiscoverDetailTransientEvent.REQUEST_CANCELLED) }
             } catch (e: CoreException) {
-                _state.update { it.copy(isCancelling = false, cancelDialogVisible = false, error = e.displayMessage()) }
+                _state.update { it.copy(isCancelling = false, cancelDialogVisible = false, error = e.displayMessage(strings)) }
             }
         }
     }
@@ -266,12 +268,13 @@ class DiscoverDetailViewModel(
 
 class DiscoverDetailViewModelFactory(
     private val gateway: CoreGateway,
+    private val strings: UiStrings,
     private val mediaType: SeerrMediaType,
     private val tmdbId: Long,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(DiscoverDetailViewModel::class.java))
-        return DiscoverDetailViewModel(gateway, mediaType, tmdbId) as T
+        return DiscoverDetailViewModel(gateway, strings, mediaType, tmdbId) as T
     }
 }

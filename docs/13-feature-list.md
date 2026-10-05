@@ -378,6 +378,12 @@ download; Later hides the indicator until tomorrow. Installation always
 needs Android's confirmation, and playback defers checks and installs.
 <!-- verified: app/src/main/kotlin/tv/jellybeam/ui/settings/UpdatesSection.kt; app/src/main/kotlin/tv/jellybeam/updates/UpdateCoordinator.kt; app/src/main/kotlin/tv/jellybeam/updates/AndroidUpdateInstaller.kt; app/src/main/kotlin/tv/jellybeam/updates/ReleaseNotes.kt; core/app-updates/src/policy.rs; core/ffi/src/updates.rs -->
 
+**Language** — docs/27: US English text with no language setting; every
+user-visible string is a resource, so a contributed translation ships by
+adding its code to one list, after which the TV's system language picks it.
+Dates, times and numbers already follow the TV's locale.
+<!-- verified: app/build.gradle.kts shippedLanguages; app/src/main/kotlin/tv/jellybeam/i18n/AppLocale.kt; app/src/main/kotlin/tv/jellybeam/i18n/UiStrings.kt; app/src/test/kotlin/tv/jellybeam/i18n/I18nTest.kt -->
+
 **User reporting** — docs/21: a redacted diagnostic log (off by default;
 Settings > Troubleshooting) recorded as a 2000-line / 256 KB ring off the
 hot path with per-process aliases in place of item and server ids, Rust

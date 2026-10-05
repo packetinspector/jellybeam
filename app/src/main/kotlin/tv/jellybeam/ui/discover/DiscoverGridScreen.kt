@@ -92,6 +92,7 @@ fun DiscoverGridScreen(
     viewModel: DiscoverGridViewModel = viewModel(
         factory = DiscoverGridViewModelFactory(
             gateway = AppGraph.gateway,
+            strings = AppGraph.strings,
             kind = kind,
             initialGenre = genreId?.let { SeerrGenre(id = it, name = genreName.orEmpty()) },
         ),

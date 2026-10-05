@@ -66,7 +66,7 @@ fun DiscoverRequestsScreen(
     isTop: Boolean = true,
     /** JellybeamRoot's focus gate for this entry (see [tv.jellybeam.ui.library.LibraryScreen]). */
     focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
-    viewModel: DiscoverRequestsViewModel = viewModel(factory = DiscoverRequestsViewModelFactory(AppGraph.gateway)),
+    viewModel: DiscoverRequestsViewModel = viewModel(factory = DiscoverRequestsViewModelFactory(AppGraph.gateway, AppGraph.strings)),
 ) {
     val state by viewModel.state.collectAsState()
     var focusedIndex by remember { mutableStateOf<Int?>(null) }

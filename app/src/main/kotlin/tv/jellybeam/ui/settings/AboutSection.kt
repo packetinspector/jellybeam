@@ -48,6 +48,8 @@ import java.text.NumberFormat
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.rememberUiStrings
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.theme.JellybeamWordmark
 import uniffi.jellybeam_core.MirrorItemCounts
@@ -129,7 +131,7 @@ private fun AboutBrandHeader(modifier: Modifier = Modifier) {
         )
         if (versionLine != null) {
             BasicText(
-                text = versionLine.uppercase(),
+                text = versionLine.uppercaseUi(),
                 modifier = Modifier.padding(top = 4.dp),
                 style = kickerStyle(JellybeamTheme.Grigio),
             )
@@ -147,7 +149,7 @@ private fun AboutBrandHeader(modifier: Modifier = Modifier) {
                     Box(Modifier.width(1.dp).height(8.dp).background(JellybeamTheme.Hairline))
                 }
                 BasicText(
-                    text = fact.uppercase(),
+                    text = fact.uppercaseUi(),
                     modifier = Modifier.padding(horizontal = 8.dp),
                     style = kickerStyle(if (index == facts.lastIndex) JellybeamTheme.Pistacchio else JellybeamTheme.Panna2),
                 )
@@ -169,6 +171,7 @@ private fun ServerAboutContent(snapshot: ServerInfoSnapshot, state: AboutUiState
     val serverUrl = snapshot.serverUrl.orEmpty()
     val unknown = stringResource(R.string.settings_about_unknown)
     val numberFormat = remember { NumberFormat.getIntegerInstance() }
+    val strings = rememberUiStrings()
 
     Row(horizontalArrangement = Arrangement.spacedBy(CARD_GAP), verticalAlignment = Alignment.Top) {
         AboutCard(
@@ -229,16 +232,16 @@ private fun ServerAboutContent(snapshot: ServerInfoSnapshot, state: AboutUiState
                     },
                 ) {
                     StatRow(stringResource(R.string.settings_about_row_items_mirrored), numberFormat.format(mirror.itemCount), emphasized = true)
-                    StatRow(stringResource(R.string.settings_about_row_database), AboutFormatting.formatBytes(mirror.dbBytes.toLong()))
+                    StatRow(stringResource(R.string.settings_about_row_database), AboutFormatting.formatBytes(mirror.dbBytes.toLong(), strings))
                     StatRow(
                         stringResource(R.string.settings_about_row_last_full_sync),
-                        mirror.lastFullSyncMs?.let { AboutFormatting.formatSyncInstant(it, state.nowMs) } ?: neverValue,
+                        mirror.lastFullSyncMs?.let { AboutFormatting.formatSyncInstant(it, state.nowMs, strings) } ?: neverValue,
                     )
                     StatRow(
                         stringResource(R.string.settings_about_row_last_change_check),
                         mirror.lastDeltaSync
                             ?.let(AboutFormatting::parseRfc3339Millis)
-                            ?.let { AboutFormatting.formatSyncInstant(it, state.nowMs) }
+                            ?.let { AboutFormatting.formatSyncInstant(it, state.nowMs, strings) }
                             ?: neverValue,
                         emphasized = true,
                     )
@@ -247,7 +250,7 @@ private fun ServerAboutContent(snapshot: ServerInfoSnapshot, state: AboutUiState
             }
 
             AboutCard(key = "about/device", title = stringResource(R.string.settings_about_device_group)) {
-                StatRow(stringResource(R.string.settings_about_row_android), "${Build.VERSION.RELEASE} · API ${Build.VERSION.SDK_INT}")
+                StatRow(stringResource(R.string.settings_about_row_android), stringResource(R.string.settings_about_android_value, Build.VERSION.RELEASE, Build.VERSION.SDK_INT))
                 StatRow(stringResource(R.string.settings_about_row_media3), MediaLibraryInfo.VERSION)
                 // A UUID outgrows the value column, so it sits under its label at full width.
                 Hairline()
@@ -289,7 +292,7 @@ private fun LibraryTiles(counts: MirrorItemCounts, numberFormat: NumberFormat) {
     Spacer(Modifier.height(11.dp))
     Hairline()
     Box(modifier = Modifier.height(28.dp), contentAlignment = Alignment.CenterStart) {
-        BasicText(text = stringResource(R.string.settings_about_library_group).uppercase(), style = kickerStyle(JellybeamTheme.Grigio))
+        BasicText(text = stringResource(R.string.settings_about_library_group).uppercaseUi(), style = kickerStyle(JellybeamTheme.Grigio))
     }
     if (tiles.isEmpty()) {
         BasicText(text = stringResource(R.string.settings_about_media_none), style = statLabelStyle())
@@ -330,7 +333,7 @@ private fun LibraryTileRows(tiles: List<Pair<String, Int>>, numberSp: Float) {
                             style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna, fontSize = numberSp.sp),
                         )
                         BasicText(
-                            text = stringResource(unitRes).uppercase(),
+                            text = stringResource(unitRes).uppercaseUi(),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(top = 3.dp),
@@ -379,7 +382,7 @@ private fun AboutCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            BasicText(text = title.uppercase(), style = kickerStyle(JellybeamTheme.Grigio))
+            BasicText(text = title.uppercaseUi(), style = kickerStyle(JellybeamTheme.Grigio))
             status()
         }
         content()
@@ -391,7 +394,7 @@ private fun AboutCard(
 private fun CardStatus(text: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
         Box(Modifier.size(4.dp).background(color, CircleShape))
-        BasicText(text = text.uppercase(), style = kickerStyle(color))
+        BasicText(text = text.uppercaseUi(), style = kickerStyle(color))
     }
 }
 

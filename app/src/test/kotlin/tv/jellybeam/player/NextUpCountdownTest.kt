@@ -1,11 +1,14 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.i18n.ResourceUiStrings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NextUpCountdownTest {
+    private val strings = ResourceUiStrings.default
+
 
     @Test
     fun `elapsedSecs derives from how far position has advanced past the countdown start`() {
@@ -79,37 +82,37 @@ class NextUpCountdownTest {
 
     @Test
     fun `numeral reads zero as 0S`() {
-        assertEquals("0S", NextUpCountdown.numeral(0L))
+        assertEquals("0S", NextUpCountdown.numeral(strings, 0L))
     }
 
     @Test
     fun `numeral reads a single-digit second count as NS`() {
-        assertEquals("8S", NextUpCountdown.numeral(8L))
+        assertEquals("8S", NextUpCountdown.numeral(strings, 8L))
     }
 
     @Test
     fun `numeral reads the last second below a minute as 59S`() {
-        assertEquals("59S", NextUpCountdown.numeral(59L))
+        assertEquals("59S", NextUpCountdown.numeral(strings, 59L))
     }
 
     @Test
     fun `numeral switches to m colon ss exactly at one minute`() {
-        assertEquals("1:00", NextUpCountdown.numeral(60L))
+        assertEquals("1:00", NextUpCountdown.numeral(strings, 60L))
     }
 
     @Test
     fun `numeral formats a minute plus seconds`() {
-        assertEquals("1:30", NextUpCountdown.numeral(90L))
+        assertEquals("1:30", NextUpCountdown.numeral(strings, 90L))
     }
 
     @Test
     fun `numeral formats an hour-plus total as raw minutes, never switching format`() {
-        assertEquals("60:00", NextUpCountdown.numeral(3_600L))
+        assertEquals("60:00", NextUpCountdown.numeral(strings, 3_600L))
     }
 
     @Test
     fun `numeral clamps a negative count to 0S rather than going negative`() {
-        assertEquals("0S", NextUpCountdown.numeral(-5L))
+        assertEquals("0S", NextUpCountdown.numeral(strings, -5L))
     }
 
     // -- countdownOutcome (outro-auto-skip + still-watching bug fix) -------

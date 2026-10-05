@@ -58,7 +58,7 @@ fun DiscoverPersonScreen(
     isTop: Boolean = true,
     /** JellybeamRoot's focus gate for this entry (see [tv.jellybeam.ui.library.LibraryScreen]). */
     focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
-    viewModel: DiscoverPersonViewModel = viewModel(factory = DiscoverPersonViewModelFactory(AppGraph.gateway, personId)),
+    viewModel: DiscoverPersonViewModel = viewModel(factory = DiscoverPersonViewModelFactory(AppGraph.gateway, AppGraph.strings, personId)),
 ) {
     val state by viewModel.state.collectAsState()
     var focusedIndex by remember { mutableStateOf<Int?>(null) }

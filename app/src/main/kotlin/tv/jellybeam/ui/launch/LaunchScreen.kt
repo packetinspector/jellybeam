@@ -21,6 +21,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
+import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.theme.JellybeamWordmark
 
 /**
@@ -47,7 +49,7 @@ fun LaunchScreen(host: String?, unreachable: Boolean, modifier: Modifier = Modif
             Box(Modifier.size(6.dp).background(JellybeamTheme.Pistacchio, CircleShape))
             Spacer(Modifier.width(6.dp))
             BasicText(
-                text = launchStatusText(host, unreachable),
+                text = launchStatusText(rememberUiStrings(), host, unreachable),
                 style = TextStyle(
                     fontFamily = JellybeamTheme.MartianMono,
                     color = JellybeamTheme.Grigio,
@@ -60,7 +62,7 @@ fun LaunchScreen(host: String?, unreachable: Boolean, modifier: Modifier = Modif
 
 /** §6.3 status text: `CONNECTING · HOST`, or `SERVER UNREACHABLE · HOST` once [unreachable]; the
  * bare word with no host when [host] isn't known yet (no saved server, or not resolved yet). */
-fun launchStatusText(host: String?, unreachable: Boolean): String {
-    val prefix = if (unreachable) "SERVER UNREACHABLE" else "CONNECTING"
+fun launchStatusText(strings: UiStrings, host: String?, unreachable: Boolean): String {
+    val prefix = strings.get(if (unreachable) R.string.launch_server_unreachable else R.string.launch_connecting)
     return if (host != null) "$prefix · $host" else prefix
 }

@@ -131,8 +131,10 @@ Records/enums (`seerr_types.rs`):
 `seerr_tv(tmdb_id)`, `seerr_person(person_id)`, `seerr_request_options(media_type, is_4k)`,
 `seerr_submit_request(input)`, `seerr_cancel_request(request_id)`, `seerr_my_requests`.
 
-Errors: new `CoreError::SeerrNotConfigured`; otherwise map to the existing
-`Unauthorized`/`Api{detail}` shapes. Never leak secrets through `Display`.
+Errors: new `CoreError::SeerrNotConfigured`; a request that never got an answer is
+`CoreError::SeerrUnreachable{reason}` (an `UnreachableReason`, worded by the app as "Couldn't
+reach Seerr (connection refused)…", never the URL or transport text); otherwise map to the
+existing `Unauthorized`/`Api{detail}` shapes. Never leak secrets through `Display`.
 
 ### Request semantics (in Rust, tested)
 

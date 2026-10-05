@@ -1,61 +1,73 @@
 package tv.jellybeam.data
 
+import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SeerrRefusal
+import uniffi.jellybeam_core.UnreachableReason
 
 /**
- * A message fit to show a user in the sign-in error card. `Api`/`Cache` carry the underlying
- * error's `Display` text verbatim in `detail` (not `message`, which `CoreException` overrides).
+ * A message fit to show a user in the sign-in error card, worded per docs/27 §3. `Api`/`Cache`
+ * carry the underlying error's `Display` text verbatim in `detail` (not `message`, which
+ * `CoreException` overrides).
  */
-fun CoreException.displayMessage(): String = when (this) {
-    is CoreException.NotSignedIn -> "Not signed in."
-    is CoreException.MirrorNotOpen -> "Library isn't ready yet."
-    is CoreException.Unauthorized -> "Authorization expired."
+fun CoreException.displayMessage(strings: UiStrings): String = when (this) {
+    is CoreException.NotSignedIn -> strings.get(R.string.error_not_signed_in)
+    is CoreException.MirrorNotOpen -> strings.get(R.string.error_library_not_ready)
+    is CoreException.Unauthorized -> strings.get(R.string.error_authorization_expired)
     is CoreException.Api -> detail
     is CoreException.Cache -> detail
+    is CoreException.UpdateStorageUnavailable -> strings.get(R.string.error_update_storage_unavailable)
     // Direct Play is default, transcoding opt-in (CLAUDE.md); prepare_playback refuses rather
     // than transcode silently (docs/18-playback-quality.md §1/§3).
-    is CoreException.WouldTranscode ->
-        "Direct Play isn't possible for this file on this TV: $reasons. " +
-            "Set Quality to Auto in Settings › Playback to let the server transcode it."
+    is CoreException.WouldTranscode -> strings.get(R.string.error_would_transcode, reasons)
     // Only reachable via a stale drawer row racing a concurrent account removal.
-    is CoreException.InvalidSessionIndex -> "That server is no longer available."
+    is CoreException.InvalidSessionIndex -> strings.get(R.string.error_server_removed)
     // docs/14-seerr-discover.md: a seerr_* call ran before the account had a saved Seerr
     // connection; routes Discover's error toward Settings.
-    is CoreException.SeerrNotConfigured -> "Discover isn't set up yet. Connect it from Settings."
+    is CoreException.SeerrNotConfigured -> strings.get(R.string.error_discover_not_set_up)
     // docs/18-playback-quality.md §2 staleness guard; PlaybackViewModel catches this before
     // displayMessage() -- kept here only for exhaustiveness.
-    is CoreException.StalePlaybackSession -> "Playback session is no longer current."
+    is CoreException.StalePlaybackSession -> strings.get(R.string.error_playback_session_stale)
     // docs/13-feature-list.md "sign-in": plain-English copy for signIn/reauthorizeSession/
     // quick-connect failures, no jargon or URLs of the user's own.
-    is CoreException.InvalidServerAddress ->
-        "That doesn't look like a server address. Enter it the way your browser shows it, like http://192.0.2.10:8096."
-    is CoreException.ServerUnreachable ->
-        "Couldn't reach $host ($reason). Check the address and port, and that the server is running."
-    is CoreException.HttpsNotOffered -> "$host isn't answering over HTTPS. Try the same address with http:// instead."
-    is CoreException.NotJellyfinServer ->
-        "$host answered, but it isn't a Jellyfin server (HTTP $status). Check the port; Jellyfin's default is 8096."
-    is CoreException.InvalidCredentials -> "Wrong username or password."
+    is CoreException.InvalidServerAddress -> strings.get(R.string.error_invalid_server_address)
+    is CoreException.ServerUnreachable -> strings.get(R.string.error_server_unreachable, host, unreachableReason(strings, reason, detail))
+    is CoreException.HttpsNotOffered -> strings.get(R.string.error_https_not_offered, host)
+    is CoreException.NotJellyfinServer -> strings.get(R.string.error_not_jellyfin_server, host, status.toInt())
+    is CoreException.InvalidCredentials -> strings.get(R.string.error_invalid_credentials)
     // docs/14-seerr-discover.md: the Seerr server was reached and refused the sign-in; a Seerr
     // local account signs in with its email address, which the field label also says.
     is CoreException.SeerrInvalidCredentials -> when (method) {
-        SeerrAuthMethod.LOCAL -> "Wrong email or password. A Seerr account signs in with its email address."
-        SeerrAuthMethod.JELLYFIN -> "Wrong username or password."
-        SeerrAuthMethod.API_KEY -> "The server rejected that API key."
+        SeerrAuthMethod.LOCAL -> strings.get(R.string.error_seerr_wrong_email_or_password)
+        SeerrAuthMethod.JELLYFIN -> strings.get(R.string.error_invalid_credentials)
+        SeerrAuthMethod.API_KEY -> strings.get(R.string.error_seerr_api_key_rejected)
     }
     // docs/14-seerr-discover.md "Auth": Seerr answered with its own error, so the address is
     // right and the fix is on the Seerr side; say which.
-    is CoreException.SeerrSignInRefused -> when (reason) {
-        SeerrRefusal.MEDIA_SERVER_SIGN_IN ->
-            "Seerr couldn't sign in to its own Jellyfin server, so it can't check this account. " +
-                "Jellyfin 12 needs Seerr 3.0 or newer; otherwise check Seerr's Jellyfin settings."
-        SeerrRefusal.NEW_USERS_BLOCKED ->
-            "Seerr doesn't have this Jellyfin user yet and new sign-ins are turned off there. " +
-                "Sign in to Seerr in a browser once, or allow new Jellyfin sign-ins in Seerr."
-        SeerrRefusal.METHOD_DISABLED -> "Seerr has this sign-in method turned off. Try another method."
-        SeerrRefusal.OTHER -> "Seerr refused the sign-in" + if (detail.isBlank()) "." else ": $detail"
+    // docs/14-seerr-discover.md: Seerr never answered; name why when known, never the URL or
+    // transport text.
+    is CoreException.SeerrUnreachable -> when (reason) {
+        UnreachableReason.OTHER -> strings.get(R.string.error_seerr_unreachable)
+        else -> strings.get(R.string.error_seerr_unreachable_reason, unreachableReason(strings, reason, ""))
     }
+    is CoreException.SeerrSignInRefused -> when (reason) {
+        SeerrRefusal.MEDIA_SERVER_SIGN_IN -> strings.get(R.string.error_seerr_media_server_sign_in)
+        SeerrRefusal.NEW_USERS_BLOCKED -> strings.get(R.string.error_seerr_new_users_blocked)
+        SeerrRefusal.METHOD_DISABLED -> strings.get(R.string.error_seerr_method_disabled)
+        SeerrRefusal.OTHER ->
+            if (detail.isBlank()) strings.get(R.string.error_seerr_refused) else strings.get(R.string.error_seerr_refused_detail, detail)
+    }
+}
+
+/** `OTHER` shows the transport's own text verbatim, like server text (docs/27 §3). */
+private fun unreachableReason(strings: UiStrings, reason: UnreachableReason, detail: String): String = when (reason) {
+    UnreachableReason.NAME_NOT_RESOLVED -> strings.get(R.string.error_unreachable_name_not_resolved)
+    UnreachableReason.CONNECTION_REFUSED -> strings.get(R.string.error_unreachable_connection_refused)
+    UnreachableReason.TIMED_OUT -> strings.get(R.string.error_unreachable_timed_out)
+    UnreachableReason.NETWORK_UNREACHABLE -> strings.get(R.string.error_unreachable_network_unreachable)
+    UnreachableReason.OTHER -> detail
 }
 
 /** docs/21-user-reporting.md: the variant as a fixed word for the diagnostic log -- never its
@@ -67,6 +79,7 @@ fun CoreException.diagLabel(): String = when (this) {
     is CoreException.Unauthorized -> "unauthorized"
     is CoreException.Api -> "api"
     is CoreException.Cache -> "cache"
+    is CoreException.UpdateStorageUnavailable -> "update_storage_unavailable"
     is CoreException.WouldTranscode -> "would_transcode"
     is CoreException.InvalidSessionIndex -> "invalid_session_index"
     is CoreException.SeerrNotConfigured -> "seerr_not_configured"
@@ -78,6 +91,7 @@ fun CoreException.diagLabel(): String = when (this) {
     is CoreException.InvalidCredentials -> "invalid_credentials"
     is CoreException.SeerrInvalidCredentials -> "seerr_invalid_credentials"
     is CoreException.SeerrSignInRefused -> "seerr_sign_in_refused"
+    is CoreException.SeerrUnreachable -> "seerr_unreachable"
 }
 
 /**

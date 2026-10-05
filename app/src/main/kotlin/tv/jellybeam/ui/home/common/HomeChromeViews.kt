@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.common.emptyLibrarySpecLine
 
 /**
@@ -104,7 +105,7 @@ internal fun EmptyLibraryState(host: String?, libraries: Int, modifier: Modifier
             ),
         )
         BasicText(
-            text = emptyLibrarySpecLine(host, libraries, items = 0),
+            text = emptyLibrarySpecLine(rememberUiStrings(), host, libraries, items = 0),
             modifier = Modifier.padding(top = 18.dp),
             style = TextStyle(
                 fontFamily = JellybeamTheme.MartianMono,

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModelStore
 import tv.jellybeam.MainDispatcherRule
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.FakeCoreGateway
+import tv.jellybeam.i18n.ResourceUiStrings
 import tv.jellybeam.ui.cards.testCard
 import kotlin.random.Random
 import kotlinx.coroutines.CompletableDeferred
@@ -100,7 +101,7 @@ class DetailViewModelTest {
             override fun changeEvents(): Flow<ChangeEvent> = changes
         }
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             val callsBefore = fake.childrenCalls.size
             assertEquals("season-1", viewModel.state.value.selectedSeasonId)
 
@@ -130,7 +131,7 @@ class DetailViewModelTest {
             override fun changeEvents(): Flow<ChangeEvent> = changes
         }
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             val callsBefore = fake.childrenCalls.size
 
             changes.tryEmit(ChangeEvent.Upserted(ids = listOf("some-other-series-item"), libraryId = null))
@@ -145,7 +146,7 @@ class DetailViewModelTest {
         val movie = testCard(id = "movie-1", itemType = "Movie")
         val gateway = FakeCoreGateway()
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertTrue(viewModel.state.value.seasons.isEmpty())
             assertTrue(viewModel.state.value.episodes.isEmpty())
@@ -171,7 +172,7 @@ class DetailViewModelTest {
             seriesEpisodesBySeriesId = mapOf("series-1" to listOf(s1Ep, s2Ep)),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             // [allEpisodes] spans both seasons regardless of season tab.
             assertEquals(listOf("s1-ep", "s2-ep"), viewModel.state.value.allEpisodes.map { it.id })
@@ -210,7 +211,7 @@ class DetailViewModelTest {
             override suspend fun seriesEpisodes(seriesId: String): List<Card> = allEpisodesGate.await()
         }
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             // Seasons loaded but allEpisodes hasn't settled: unresolved, not a provisional guess.
             assertEquals(null, viewModel.state.value.selectedSeasonId)
 
@@ -245,7 +246,7 @@ class DetailViewModelTest {
                 if (parentId == "series-1") seasonsGate.await() else fake.children(parentId, sort, startIndex, limit)
         }
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             // allEpisodes has settled but seasons haven't loaded -- unresolved.
             assertEquals(null, viewModel.state.value.selectedSeasonId)
 
@@ -273,7 +274,7 @@ class DetailViewModelTest {
             override suspend fun seriesEpisodes(seriesId: String): List<Card> = throw IllegalStateException("boom")
         }
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             // allEpisodes fails but still resolves the flag, falling back to unplayedCount.
             assertTrue(viewModel.state.value.allEpisodes.isEmpty())
@@ -301,7 +302,7 @@ class DetailViewModelTest {
             override suspend fun seriesEpisodes(seriesId: String): List<Card> = allEpisodesGate.await()
         }
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             // Unresolved: seasons loaded, allEpisodes hasn't -- no provisional guess to tap over.
             assertEquals(null, viewModel.state.value.selectedSeasonId)
 
@@ -322,7 +323,7 @@ class DetailViewModelTest {
         val movie = testCard(id = "movie-1", itemType = "Movie")
         val gateway = FakeCoreGateway()
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertTrue(viewModel.state.value.allEpisodes.isEmpty())
             assertTrue(gateway.seriesEpisodesCalls.isEmpty())
@@ -352,7 +353,7 @@ class DetailViewModelTest {
                 fake.seriesEpisodes(seriesId).map { if (serveUpdated && it.id == "s1-ep") updatedEp else it }
         }
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             assertEquals(false, viewModel.state.value.allEpisodes.single().played)
 
             serveUpdated = true
@@ -375,7 +376,7 @@ class DetailViewModelTest {
             ),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(listOf("season-1", "season-2"), viewModel.state.value.seasons.map { it.id })
 
@@ -397,7 +398,7 @@ class DetailViewModelTest {
             ),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals("season-1", viewModel.state.value.selectedSeasonId)
             assertEquals(listOf("ep-1", "ep-2"), viewModel.state.value.episodes.map { it.id })
@@ -416,7 +417,7 @@ class DetailViewModelTest {
                 "season-2" to listOf(testCard(id = "s2-ep", itemType = "Episode")),
             ),
         )
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             assertEquals(listOf("s1-ep"), viewModel.state.value.episodes.map { it.id })
 
             viewModel.selectSeason("season-2")
@@ -439,7 +440,7 @@ class DetailViewModelTest {
             ),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals("season-1", viewModel.state.value.selectedSeasonId)
         }
@@ -456,7 +457,7 @@ class DetailViewModelTest {
             ),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals("season-0", viewModel.state.value.selectedSeasonId)
         }
@@ -467,7 +468,7 @@ class DetailViewModelTest {
         val series = testCard(id = "series-1", itemType = "Series")
         val gateway = FakeCoreGateway()
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertTrue(viewModel.state.value.seasons.isEmpty())
             assertEquals(null, viewModel.state.value.selectedSeasonId)
@@ -483,7 +484,7 @@ class DetailViewModelTest {
         val detail = testItemDetail(id = "movie-1")
         val gateway = FakeCoreGateway(itemDetailResultsByItemId = mapOf("movie-1" to Result.success(detail)))
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(detail, viewModel.state.value.itemDetail)
         }
@@ -495,7 +496,7 @@ class DetailViewModelTest {
         val detail = testItemDetail(id = "series-1")
         val gateway = FakeCoreGateway(itemDetailResultsByItemId = mapOf("series-1" to Result.success(detail)))
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(detail, viewModel.state.value.itemDetail)
         }
@@ -509,7 +510,7 @@ class DetailViewModelTest {
         val detail = testItemDetail(id = "movie-1")
         val gateway = FakeCoreGateway(itemDetailResultsByItemId = mapOf("movie-1" to Result.success(detail)))
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertTrue(viewModel.state.value.itemDetailLoaded)
         }
@@ -522,7 +523,7 @@ class DetailViewModelTest {
         val movie = testCard(id = "movie-1", itemType = "Movie")
         val gateway = FakeCoreGateway() // no entry configured -- fetch throws
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertNull(viewModel.state.value.itemDetail)
             assertTrue(viewModel.state.value.itemDetailLoaded)
@@ -534,7 +535,7 @@ class DetailViewModelTest {
         val movie = testCard(id = "movie-1", itemType = "Movie")
         val gateway = FakeCoreGateway(similarResultsByItemId = mapOf("movie-1" to emptyList()))
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertTrue(viewModel.state.value.similar.isEmpty())
             assertTrue(viewModel.state.value.similarLoaded)
@@ -546,7 +547,7 @@ class DetailViewModelTest {
         val episode = testCard(id = "ep-1", itemType = "Episode")
         val gateway = FakeCoreGateway()
 
-        withDetailViewModel(DetailViewModel(gateway, episode)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(false, viewModel.state.value.similarLoaded)
         }
@@ -559,7 +560,7 @@ class DetailViewModelTest {
         val movie = testCard(id = "movie-1", itemType = "Movie")
         val gateway = FakeCoreGateway()
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertNull(viewModel.state.value.itemDetail)
         }
@@ -571,7 +572,7 @@ class DetailViewModelTest {
         val similar = listOf(testCard(id = "similar-1"))
         val gateway = FakeCoreGateway(similarResultsByItemId = mapOf("movie-1" to similar))
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(similar, viewModel.state.value.similar)
             assertEquals(listOf(FakeCoreGateway.GetSimilarCall("movie-1", 16u)), gateway.getSimilarCalls)
@@ -584,7 +585,7 @@ class DetailViewModelTest {
         val similar = listOf(testCard(id = "similar-1"))
         val gateway = FakeCoreGateway(similarResultsByItemId = mapOf("series-1" to similar))
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(similar, viewModel.state.value.similar)
         }
@@ -596,7 +597,7 @@ class DetailViewModelTest {
         // Configured on purpose: state alone can't prove the fetch was skipped; the call log does.
         val gateway = FakeCoreGateway(similarResultsByItemId = mapOf("ep-1" to listOf(testCard(id = "similar-1"))))
 
-        withDetailViewModel(DetailViewModel(gateway, episode)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
 
             assertTrue(viewModel.state.value.similar.isEmpty())
             assertTrue(gateway.getSimilarCalls.isEmpty())
@@ -611,7 +612,7 @@ class DetailViewModelTest {
         val next = testCard(id = "ep-2", itemType = "Episode", indexNumber = 2)
         val gateway = FakeCoreGateway(nextEpisodeByItemId = mapOf("ep-1" to next))
 
-        withDetailViewModel(DetailViewModel(gateway, episode)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(next, viewModel.state.value.nextEpisode)
             assertEquals(listOf("ep-1"), gateway.nextEpisodeAfterCalls)
@@ -623,7 +624,7 @@ class DetailViewModelTest {
         val movie = testCard(id = "movie-1", itemType = "Movie")
         val gateway = FakeCoreGateway()
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertNull(viewModel.state.value.nextEpisode)
             assertTrue(gateway.nextEpisodeAfterCalls.isEmpty())
@@ -635,7 +636,7 @@ class DetailViewModelTest {
         val movie = testCard(id = "movie-1", itemType = "Movie", libraryId = "lib-1")
         val gateway = FakeCoreGateway(viewsList = listOf(ViewSnapshot(id = "lib-1", name = "My Movies", kind = ViewKind.LIBRARY), ViewSnapshot(id = "lib-2", name = "TV Shows", kind = ViewKind.LIBRARY)))
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals("My Movies", viewModel.state.value.libraryName)
         }
@@ -646,7 +647,7 @@ class DetailViewModelTest {
         val movie = testCard(id = "movie-1", itemType = "Movie", libraryId = null)
         val gateway = FakeCoreGateway(viewsList = listOf(ViewSnapshot(id = "lib-1", name = "My Movies", kind = ViewKind.LIBRARY)))
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertNull(viewModel.state.value.libraryName)
         }
@@ -657,7 +658,7 @@ class DetailViewModelTest {
         val episode = testCard(id = "ep-1", itemType = "Episode", libraryId = "lib-1")
         val gateway = FakeCoreGateway(viewsList = listOf(ViewSnapshot(id = "lib-1", name = "My Movies", kind = ViewKind.LIBRARY)))
 
-        withDetailViewModel(DetailViewModel(gateway, episode)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
 
             assertNull(viewModel.state.value.libraryName)
         }
@@ -679,7 +680,7 @@ class DetailViewModelTest {
             ),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(listOf("ep-1"), viewModel.state.value.episodes.map { it.id })
         }
@@ -698,7 +699,7 @@ class DetailViewModelTest {
                 "season-2" to listOf(dupe, dupe.copy(name = "Duplicate")),
             ),
         )
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             viewModel.selectSeason("season-2")
 
@@ -715,7 +716,7 @@ class DetailViewModelTest {
             seriesEpisodesBySeriesId = mapOf("series-1" to listOf(dupe, dupe.copy(played = true))),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(listOf("s1-ep"), viewModel.state.value.allEpisodes.map { it.id })
         }
@@ -729,7 +730,7 @@ class DetailViewModelTest {
             childrenByParent = mapOf("series-1" to listOf(dupe, dupe.copy(name = "Duplicate"))),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(listOf("season-1"), viewModel.state.value.seasons.map { it.id })
         }
@@ -741,7 +742,7 @@ class DetailViewModelTest {
         val dupe = testCard(id = "similar-1")
         val gateway = FakeCoreGateway(similarResultsByItemId = mapOf("movie-1" to listOf(dupe, dupe.copy(name = "Duplicate"))))
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(listOf("similar-1"), viewModel.state.value.similar.map { it.id })
         }
@@ -761,7 +762,7 @@ class DetailViewModelTest {
             override fun changeEvents(): Flow<ChangeEvent> = changes
         }
 
-        withDetailViewModel(DetailViewModel(gateway, episode)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
             assertEquals(1_000L, viewModel.state.value.card.positionTicks)
 
             changes.tryEmit(ChangeEvent.Upserted(ids = listOf("ep-1"), libraryId = null))
@@ -781,7 +782,7 @@ class DetailViewModelTest {
         }
         val stopEpoch = MutableStateFlow(0L)
 
-        withDetailViewModel(DetailViewModel(fake, movie, stopEpoch)) { viewModel ->
+        withDetailViewModel(DetailViewModel(fake, movie, ResourceUiStrings.default, stopEpoch)) { viewModel ->
             assertEquals(1_000L, viewModel.state.value.card.positionTicks)
 
             // docs/17-mini-player.md §6: a PiP dismissal gives this screen only the stop-epoch
@@ -805,7 +806,7 @@ class DetailViewModelTest {
             collectionIdsByItemId = mutableMapOf("movie-1" to listOf("c2")),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             assertEquals(listOf("c1", "c2"), viewModel.state.value.collections.map { it.id })
             assertTrue(viewModel.state.value.isAdministrator)
@@ -816,7 +817,7 @@ class DetailViewModelTest {
     @Test
     fun `a failed collections, admin, or membership fetch fails open -- empty, ordinary user`() = runTest {
         val movie = testCard(id = "movie-1", itemType = "Movie")
-        withDetailViewModel(DetailViewModel(FakeCoreGateway(), movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(FakeCoreGateway(), movie, ResourceUiStrings.default)) { viewModel ->
 
             assertTrue(viewModel.state.value.collections.isEmpty())
             assertFalse(viewModel.state.value.isAdministrator)
@@ -831,7 +832,7 @@ class DetailViewModelTest {
             collectionsResult = listOf(CollectionInfo(id = "c1", name = "Alpha")),
             isAdministratorResult = true,
         )
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
 
             viewModel.openMenu()
 
@@ -850,7 +851,7 @@ class DetailViewModelTest {
         val gateway = FakeCoreGateway(
             childrenByParent = mapOf("series-1" to listOf(season2), "season-2" to emptyList()),
         )
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             viewModel.selectSeason("season-2")
 
             viewModel.openMenu()
@@ -863,7 +864,7 @@ class DetailViewModelTest {
     fun `mark watched calls setPlayed, closes the menu, and toasts Marked as watched`() = runTest {
         val movie = testCard(id = "movie-1", itemType = "Movie", played = false)
         val gateway = FakeCoreGateway()
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
             viewModel.openMenu()
 
             viewModel.runAction(MenuAction.MarkWatched)
@@ -878,7 +879,7 @@ class DetailViewModelTest {
     fun `mark unwatched calls setPlayed with false and toasts the unwatched text`() = runTest {
         val movie = testCard(id = "movie-1", itemType = "Movie", played = true)
         val gateway = FakeCoreGateway()
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
             viewModel.openMenu()
 
             viewModel.runAction(MenuAction.MarkUnwatched)
@@ -895,7 +896,7 @@ class DetailViewModelTest {
         val gateway = object : CoreGateway by FakeCoreGateway() {
             override suspend fun setPlayed(itemId: String, played: Boolean) = gate.await()
         }
-        val viewModel = DetailViewModel(gateway, movie)
+        val viewModel = DetailViewModel(gateway, movie, ResourceUiStrings.default)
         val store = ViewModelStore().apply { put("detail", viewModel) }
         try {
             viewModel.openMenu()
@@ -915,7 +916,7 @@ class DetailViewModelTest {
     fun `a failed mark toasts the server-unreachable text and changes nothing else`() = runTest {
         val movie = testCard(id = "movie-1", itemType = "Movie", played = false)
         val gateway = FakeCoreGateway().apply { setPlayedError = RuntimeException("boom") }
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
             val cardBefore = viewModel.state.value.card
             viewModel.openMenu()
 
@@ -931,7 +932,7 @@ class DetailViewModelTest {
         val series = testCard(id = "series-1", itemType = "Series", name = "Sample Series Title")
         val unplayed = testCard(id = "e1", itemType = "Episode", played = false)
         val gateway = FakeCoreGateway(seriesEpisodesBySeriesId = mapOf("series-1" to listOf(unplayed)))
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             viewModel.openMenu()
             val row = viewModel.state.value.menu!!.model.groups
                 .flatMap { it.rows }
@@ -966,7 +967,7 @@ class DetailViewModelTest {
             childrenByParent = mapOf("series-1" to listOf(season1), "season-1" to listOf(ep)),
             seriesEpisodesBySeriesId = mapOf("series-1" to listOf(ep)),
         )
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             // A real viewer tap (not the resume-season auto-pick) is what latches menu scope to
             // "season".
             viewModel.selectSeason("season-1")
@@ -990,7 +991,7 @@ class DetailViewModelTest {
     fun `dismissConfirm returns to the still-open menu without calling the gateway`() = runTest {
         val series = testCard(id = "series-1", itemType = "Series")
         val gateway = FakeCoreGateway(seriesEpisodesBySeriesId = mapOf("series-1" to listOf(testCard(id = "e1", itemType = "Episode", played = false))))
-        withDetailViewModel(DetailViewModel(gateway, series)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             viewModel.openMenu()
             val row = viewModel.state.value.menu!!.model.groups.flatMap { it.rows }.first { it.action is MenuAction.MarkScopeWatched }
             viewModel.runAction(row.action)
@@ -1009,7 +1010,7 @@ class DetailViewModelTest {
         val ep1 = testCard(id = "e1", itemType = "Episode", played = false)
         val ep2 = testCard(id = "e2", itemType = "Episode", played = true)
         val gateway = FakeCoreGateway(seriesEpisodesBySeriesId = mapOf("series-1" to listOf(ep1, ep2)))
-        withDetailViewModel(DetailViewModel(gateway, series, random = Random(42))) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default, random = Random(42))) { viewModel ->
             viewModel.openMenu()
             val row = viewModel.state.value.menu!!.model.groups.flatMap { it.rows }.first { it.action is MenuAction.PlayRandom }
 
@@ -1035,7 +1036,7 @@ class DetailViewModelTest {
             // The mirror hasn't caught up yet; the optimistic id must survive the re-read.
             collectionIdsByItemId = mutableMapOf("movie-1" to emptyList()),
         )
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
             viewModel.openMenu()
 
             viewModel.selectCollection(CollectionInfo(id = "c1", name = "Alpha"))
@@ -1054,7 +1055,7 @@ class DetailViewModelTest {
             collectionsResult = listOf(CollectionInfo(id = "c1", name = "Alpha")),
             collectionIdsByItemId = mutableMapOf("movie-1" to listOf("c1")),
         )
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
             viewModel.openMenu()
 
             viewModel.selectCollection(CollectionInfo(id = "c1", name = "Alpha"))
@@ -1072,7 +1073,7 @@ class DetailViewModelTest {
         val gateway = FakeCoreGateway(collectionsResult = listOf(CollectionInfo(id = "c1", name = "Alpha"))).apply {
             addToCollectionError = RuntimeException("boom")
         }
-        withDetailViewModel(DetailViewModel(gateway, movie)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
             viewModel.openMenu()
 
             viewModel.selectCollection(CollectionInfo(id = "c1", name = "Alpha"))
@@ -1085,7 +1086,7 @@ class DetailViewModelTest {
     @Test
     fun `Go to series closes the menu with no toast and hands back the series card`() = runTest {
         val episode = testCard(id = "ep-1", itemType = "Episode", seriesId = "series-1", seriesName = "Sample Series Title")
-        withDetailViewModel(DetailViewModel(FakeCoreGateway(), episode)) { viewModel ->
+        withDetailViewModel(DetailViewModel(FakeCoreGateway(), episode, ResourceUiStrings.default)) { viewModel ->
             viewModel.openMenu()
             val row = viewModel.state.value.menu!!.model.groups.flatMap { it.rows }.first { it.action is MenuAction.GoToSeries }
 
@@ -1120,7 +1121,7 @@ class DetailViewModelTest {
             ),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, box)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, box, ResourceUiStrings.default)) { viewModel ->
             val state = viewModel.state.value
             assertEquals(listOf("show", "film"), state.members.map { it.id })
             assertTrue(state.membersSettled)
@@ -1138,7 +1139,7 @@ class DetailViewModelTest {
             childrenByParent = mapOf("box" to listOf(testCard(id = "a", played = true), testCard(id = "b", played = true))),
         )
 
-        withDetailViewModel(DetailViewModel(gateway, box)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, box, ResourceUiStrings.default)) { viewModel ->
             viewModel.playCollection()
             assertEquals(PendingPlayback("a", startFromBeginning = true), viewModel.state.value.pendingPlayback)
         }
@@ -1148,7 +1149,7 @@ class DetailViewModelTest {
     fun `an empty collection settles with no play target`() = runTest {
         val box = testCard(id = "box", itemType = "BoxSet")
 
-        withDetailViewModel(DetailViewModel(FakeCoreGateway(), box)) { viewModel ->
+        withDetailViewModel(DetailViewModel(FakeCoreGateway(), box, ResourceUiStrings.default)) { viewModel ->
             assertTrue(viewModel.state.value.membersSettled)
             assertNull(viewModel.state.value.collectionPlay)
         }

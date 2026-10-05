@@ -1,9 +1,10 @@
 package tv.jellybeam.ui.detail
 
+import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.ui.cards.ArtSource
 import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.cards.WatchIndicator
-import tv.jellybeam.ui.common.countLabel
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
 
@@ -17,14 +18,11 @@ object CollectionFormatting {
     const val BOXSET_ITEM_TYPE = "BoxSet"
     private const val SERIES_ITEM_TYPE = "Series"
     private const val SEASON_ITEM_TYPE = "Season"
+    /** Compared against server-provided season names, never displayed as our own text. */
     private const val SPECIALS_SEASON_NAME = "Specials"
 
     /** Members Play can start; a nested collection, album, book or photo never is the target. */
     private val PLAYABLE_ITEM_TYPES = setOf("Movie", "Episode", "Video", "MusicVideo", SERIES_ITEM_TYPE)
-
-    const val LABEL_PLAY = "Play"
-    const val LABEL_RESUME = "Resume"
-    const val LABEL_PLAY_AGAIN = "Play again"
 
     /** Meta line separator (mono caps line under the title). */
     const val META_SEPARATOR = " | "
@@ -69,6 +67,7 @@ object CollectionFormatting {
      * (`null`) keeps [previous] if it already targeted that series, else yields too.
      */
     suspend fun resolvePlay(
+        strings: UiStrings,
         members: List<Card>,
         previous: CollectionPlay?,
         episodesOf: suspend (Card) -> List<Card>?,
@@ -79,7 +78,7 @@ object CollectionFormatting {
             }
             val episodes = episodesOf(target.member)
                 ?: if (previous?.member?.id == target.member.id) return previous else continue
-            val pick = seriesPlayEpisode(target.member, episodes, target.replay) ?: continue
+            val pick = seriesPlayEpisode(strings, target.member, episodes, target.replay) ?: continue
             return CollectionPlay(target.member, pick.episode, fromStart = pick.fromStart, replayAll = target.replay)
         }
         return null
@@ -93,9 +92,9 @@ object CollectionFormatting {
      * episode with progress, else first unplayed; [replay] (or nothing left unplayed) starts the
      * first non-Specials episode from the beginning. `null` when the series has no episode.
      */
-    fun seriesPlayEpisode(series: Card, episodes: List<Card>, replay: Boolean): EpisodePick? {
+    fun seriesPlayEpisode(strings: UiStrings, series: Card, episodes: List<Card>, replay: Boolean): EpisodePick? {
         if (!replay) {
-            val action = DetailFormatting.resolvePrimaryAction(series, episodes)
+            val action = DetailFormatting.resolvePrimaryAction(strings, series, episodes)
             if (action is DetailFormatting.PrimaryAction.Playable) {
                 episodes.firstOrNull { it.id == action.targetId }?.let { return EpisodePick(it, fromStart = false) }
             }
@@ -113,24 +112,26 @@ object CollectionFormatting {
         val resuming: Boolean get() = !fromStart && (episode ?: member).positionTicks > 0
     }
 
-    fun playLabel(play: CollectionPlay): String = when {
-        play.replayAll -> LABEL_PLAY_AGAIN
-        play.resuming -> LABEL_RESUME
-        else -> LABEL_PLAY
-    }
+    fun playLabel(strings: UiStrings, play: CollectionPlay): String = strings.get(
+        when {
+            play.replayAll -> R.string.detail_play_again
+            play.resuming -> R.string.detail_resume
+            else -> R.string.detail_play
+        },
+    )
 
     /**
      * `"<name> · <runtime>"` (`"<name> · 53m left"` when resuming), or `"<series name> · S2 E6"` for a
      * Series target (verbatim names).
      */
-    fun playSubtext(play: CollectionPlay): String? {
+    fun playSubtext(strings: UiStrings, play: CollectionPlay): String? {
         val episode = play.episode
         val detail = if (episode != null) {
             val season = episode.parentIndexNumber
             val number = episode.indexNumber
-            if (season != null && number != null) "S$season E$number" else null
+            if (season != null && number != null) strings.get(R.string.detail_season_episode, season, number) else null
         } else {
-            CardFormatting.remainingLabel(play.member.runtimeTicks, if (play.resuming) play.member.positionTicks else 0)
+            CardFormatting.remainingLabel(strings, play.member.runtimeTicks, if (play.resuming) play.member.positionTicks else 0)
         }
         return if (detail != null) "${play.member.name} · $detail" else play.member.name
     }
@@ -144,14 +145,14 @@ object CollectionFormatting {
     }
 
     /** `"6 ITEMS | 5 WATCHED | 2007–2026"`; the watched segment hides when empty, years when none. */
-    fun metaItems(members: List<Card>): List<String> {
-        val items = mutableListOf(countLabel(members.size, "ITEM", "ITEMS"))
-        if (members.isNotEmpty()) items += "${watchedCount(members)} WATCHED"
+    fun metaItems(strings: UiStrings, members: List<Card>): List<String> {
+        val items = mutableListOf(strings.plural(R.plurals.detail_item_count_caps, members.size, members.size))
+        if (members.isNotEmpty()) items += strings.get(R.string.detail_watched_count, watchedCount(members))
         yearRange(members)?.let { items += it }
         return items
     }
 
-    fun metaLine(members: List<Card>): String = metaItems(members).joinToString(META_SEPARATOR)
+    fun metaLine(strings: UiStrings, members: List<Card>): String = metaItems(strings, members).joinToString(META_SEPARATOR)
 
     /** Seasons of a series, Specials excluded (matches the series page's chip row count). */
     fun seasonCount(seriesChildren: List<Card>): Int = seriesChildren.count {
@@ -162,10 +163,14 @@ object CollectionFormatting {
      * A member poster's caption line under its title: `"Series · 12 seasons"` / `"2025 · 1h 42m"`;
      * `null` keeps the shared poster line (an Episode's own).
      */
-    fun cardSubline(member: Card, seasonCount: Int?): String? = when (member.itemType) {
-        SERIES_ITEM_TYPE -> if (seasonCount != null) "Series · ${countLabel(seasonCount, "season", "seasons")}" else "Series"
+    fun cardSubline(strings: UiStrings, member: Card, seasonCount: Int?): String? = when (member.itemType) {
+        SERIES_ITEM_TYPE -> if (seasonCount != null) {
+            strings.get(R.string.detail_collection_series_with_seasons, strings.plural(R.plurals.detail_season_count, seasonCount, seasonCount))
+        } else {
+            strings.get(R.string.detail_collection_series)
+        }
         "Episode" -> null
-        else -> CardFormatting.detailMetaLine(member.productionYear, member.runtimeTicks)
+        else -> CardFormatting.detailMetaLine(strings, member.productionYear, member.runtimeTicks)
     }
 
     /** Detail backdrop: the collection's own, else the first member that has a backdrop. */
@@ -204,10 +209,14 @@ object CollectionFormatting {
     }
 
     /** `"8 UNPLAYED"` / `"ALL WATCHED"`; `null` when unknown or the collection is known empty. */
-    fun stackCaption(card: Card, preview: List<Card>?): String? {
+    fun stackCaption(strings: UiStrings, card: Card, preview: List<Card>?): String? {
         if (preview != null && preview.isEmpty()) return null
         val unplayed = unplayedOf(card, preview) ?: return null
-        return if (unplayed > 0) "$unplayed UNPLAYED" else "ALL WATCHED"
+        return if (unplayed > 0) {
+            strings.get(R.string.detail_collection_unplayed, unplayed)
+        } else {
+            strings.get(R.string.detail_collection_all_watched)
+        }
     }
 
     /** The collection card's badge: how many items it holds, once its members load (docs/07 §Collection card). */

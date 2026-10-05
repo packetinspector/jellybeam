@@ -1,5 +1,7 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
 import uniffi.jellybeam_core.MediaSegment
 import uniffi.jellybeam_core.MediaSegmentKind
 import uniffi.jellybeam_core.SegmentAction
@@ -23,24 +25,24 @@ object SkipSegment {
         segments.firstOrNull { positionTicks >= it.startTicks && positionTicks < it.endTicks }
 
     /** The skip pill's label, per type (docs/12: "Skip Intro/Credits/Recap/Preview/Commercial"). */
-    fun pillLabel(kind: MediaSegmentKind): String = when (kind) {
-        MediaSegmentKind.INTRO -> "Skip Intro"
-        MediaSegmentKind.OUTRO -> "Skip Credits"
-        MediaSegmentKind.RECAP -> "Skip Recap"
-        MediaSegmentKind.PREVIEW -> "Skip Preview"
-        MediaSegmentKind.COMMERCIAL -> "Skip Commercial"
-        MediaSegmentKind.UNKNOWN -> "Skip"
-    }
+    fun pillLabel(strings: UiStrings, kind: MediaSegmentKind): String = strings.get(when (kind) {
+        MediaSegmentKind.INTRO -> R.string.player_skip_intro
+        MediaSegmentKind.OUTRO -> R.string.player_skip_credits
+        MediaSegmentKind.RECAP -> R.string.player_skip_recap
+        MediaSegmentKind.PREVIEW -> R.string.player_skip_preview
+        MediaSegmentKind.COMMERCIAL -> R.string.player_skip_commercial
+        MediaSegmentKind.UNKNOWN -> R.string.player_skip_unknown
+    })
 
     /** The post-skip Undo toast's label, past tense -- mirrors [pillLabel]'s per-type wording. */
-    fun toastLabel(kind: MediaSegmentKind): String = when (kind) {
-        MediaSegmentKind.INTRO -> "Skipped intro"
-        MediaSegmentKind.OUTRO -> "Skipped credits"
-        MediaSegmentKind.RECAP -> "Skipped recap"
-        MediaSegmentKind.PREVIEW -> "Skipped preview"
-        MediaSegmentKind.COMMERCIAL -> "Skipped commercial"
-        MediaSegmentKind.UNKNOWN -> "Skipped segment"
-    }
+    fun toastLabel(strings: UiStrings, kind: MediaSegmentKind): String = strings.get(when (kind) {
+        MediaSegmentKind.INTRO -> R.string.player_skipped_intro
+        MediaSegmentKind.OUTRO -> R.string.player_skipped_credits
+        MediaSegmentKind.RECAP -> R.string.player_skipped_recap
+        MediaSegmentKind.PREVIEW -> R.string.player_skipped_preview
+        MediaSegmentKind.COMMERCIAL -> R.string.player_skipped_commercial
+        MediaSegmentKind.UNKNOWN -> R.string.player_skipped_unknown
+    })
 
     /** `SegmentAction` x `MediaSegmentKind` -> [SegmentDecision] lookup. */
     fun decision(kind: MediaSegmentKind, actions: SkipSegmentActions): SegmentDecision =

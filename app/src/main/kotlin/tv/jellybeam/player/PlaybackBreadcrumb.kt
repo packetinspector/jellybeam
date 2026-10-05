@@ -1,5 +1,6 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.ui.cards.CardFormatting
 
 /** `Card::item_type`'s own Episode string -- see [PlaybackViewModel]'s `ITEM_TYPE_EPISODE` for the
@@ -18,6 +19,7 @@ private const val ITEM_TYPE_EPISODE = "Episode"
  */
 object PlaybackBreadcrumb {
     fun format(
+        strings: UiStrings,
         itemType: String,
         itemName: String,
         seriesName: String?,
@@ -25,7 +27,7 @@ object PlaybackBreadcrumb {
         indexNumber: Int?,
     ): String {
         if (itemType != ITEM_TYPE_EPISODE) return itemName
-        val seasonEpisode = CardFormatting.seasonEpisodeLabel(parentIndexNumber, indexNumber)
+        val seasonEpisode = CardFormatting.seasonEpisodeLabel(strings, parentIndexNumber, indexNumber)
         return listOfNotNull(seriesName, seasonEpisode, itemName).joinToString(" · ")
     }
 }

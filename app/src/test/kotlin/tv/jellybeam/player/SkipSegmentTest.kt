@@ -1,5 +1,6 @@
 package tv.jellybeam.player
 
+import tv.jellybeam.i18n.ResourceUiStrings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -9,6 +10,8 @@ import uniffi.jellybeam_core.SegmentAction
 
 /** [SkipSegment] is pure Kotlin (docs/12 "Skip intro/credits") -- exercised directly, no Compose/ViewModel needed. */
 class SkipSegmentTest {
+    private val strings = ResourceUiStrings.default
+
 
     private fun segment(kind: MediaSegmentKind, startTicks: Long, endTicks: Long) =
         MediaSegment(segmentType = kind, startTicks = startTicks, endTicks = endTicks)
@@ -33,19 +36,19 @@ class SkipSegmentTest {
 
     @Test
     fun `pillLabel and toastLabel are per-type, per docs-12`() {
-        assertEquals("Skip Intro", SkipSegment.pillLabel(MediaSegmentKind.INTRO))
-        assertEquals("Skip Credits", SkipSegment.pillLabel(MediaSegmentKind.OUTRO))
-        assertEquals("Skip Recap", SkipSegment.pillLabel(MediaSegmentKind.RECAP))
-        assertEquals("Skip Preview", SkipSegment.pillLabel(MediaSegmentKind.PREVIEW))
-        assertEquals("Skip Commercial", SkipSegment.pillLabel(MediaSegmentKind.COMMERCIAL))
-        assertEquals("Skip", SkipSegment.pillLabel(MediaSegmentKind.UNKNOWN))
+        assertEquals("Skip Intro", SkipSegment.pillLabel(strings, MediaSegmentKind.INTRO))
+        assertEquals("Skip Credits", SkipSegment.pillLabel(strings, MediaSegmentKind.OUTRO))
+        assertEquals("Skip Recap", SkipSegment.pillLabel(strings, MediaSegmentKind.RECAP))
+        assertEquals("Skip Preview", SkipSegment.pillLabel(strings, MediaSegmentKind.PREVIEW))
+        assertEquals("Skip Commercial", SkipSegment.pillLabel(strings, MediaSegmentKind.COMMERCIAL))
+        assertEquals("Skip", SkipSegment.pillLabel(strings, MediaSegmentKind.UNKNOWN))
 
-        assertEquals("Skipped intro", SkipSegment.toastLabel(MediaSegmentKind.INTRO))
-        assertEquals("Skipped credits", SkipSegment.toastLabel(MediaSegmentKind.OUTRO))
-        assertEquals("Skipped recap", SkipSegment.toastLabel(MediaSegmentKind.RECAP))
-        assertEquals("Skipped preview", SkipSegment.toastLabel(MediaSegmentKind.PREVIEW))
-        assertEquals("Skipped commercial", SkipSegment.toastLabel(MediaSegmentKind.COMMERCIAL))
-        assertEquals("Skipped segment", SkipSegment.toastLabel(MediaSegmentKind.UNKNOWN))
+        assertEquals("Skipped intro", SkipSegment.toastLabel(strings, MediaSegmentKind.INTRO))
+        assertEquals("Skipped credits", SkipSegment.toastLabel(strings, MediaSegmentKind.OUTRO))
+        assertEquals("Skipped recap", SkipSegment.toastLabel(strings, MediaSegmentKind.RECAP))
+        assertEquals("Skipped preview", SkipSegment.toastLabel(strings, MediaSegmentKind.PREVIEW))
+        assertEquals("Skipped commercial", SkipSegment.toastLabel(strings, MediaSegmentKind.COMMERCIAL))
+        assertEquals("Skipped segment", SkipSegment.toastLabel(strings, MediaSegmentKind.UNKNOWN))
     }
 
     // -- docs/09-settings-plan.md skip-segment settings: SkipSegmentActions/decision --

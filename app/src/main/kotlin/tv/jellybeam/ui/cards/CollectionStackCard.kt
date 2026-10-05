@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.detail.CollectionFormatting
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
@@ -48,7 +49,7 @@ fun CollectionStackCard(
     val frontHeight = frontWidth * 1.5f
     val frontTop = height - frontHeight
     val layers = CollectionFormatting.stackLayers(card, members.orEmpty())
-    val caption = CollectionFormatting.stackCaption(card, members)
+    val caption = CollectionFormatting.stackCaption(rememberUiStrings(), card, members)
     val indicator = CollectionFormatting.stackIndicator(members)
 
     Column(

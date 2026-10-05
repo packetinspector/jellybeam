@@ -3,8 +3,11 @@ package tv.jellybeam.ui.common
 import org.junit.Test
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import tv.jellybeam.i18n.ResourceUiStrings
 
 class EmptyStateFormatTest {
+    private val strings = ResourceUiStrings.default
+
     @Test
     fun host_label_keeps_non_default_port_and_drops_default_port() {
         assertEquals("jellyfin.example.test:8096", serverHostLabel("http://jellyfin.example.test:8096/"))
@@ -20,8 +23,8 @@ class EmptyStateFormatTest {
 
     @Test
     fun spec_line_joins_host_libraries_and_items() {
-        assertEquals("jellyfin.example.test:8096 │ 3 LIBRARIES │ 0 ITEMS", emptyLibrarySpecLine("jellyfin.example.test:8096", 3, 0))
-        assertEquals("0 LIBRARIES │ 0 ITEMS", emptyLibrarySpecLine(null, 0, 0))
-        assertEquals("1 LIBRARY │ 1 ITEM", emptyLibrarySpecLine(null, 1, 1))
+        assertEquals("jellyfin.example.test:8096 │ 3 LIBRARIES │ 0 ITEMS", emptyLibrarySpecLine(strings, "jellyfin.example.test:8096", 3, 0))
+        assertEquals("0 LIBRARIES │ 0 ITEMS", emptyLibrarySpecLine(strings, null, 0, 0))
+        assertEquals("1 LIBRARY │ 1 ITEM", emptyLibrarySpecLine(strings, null, 1, 1))
     }
 }

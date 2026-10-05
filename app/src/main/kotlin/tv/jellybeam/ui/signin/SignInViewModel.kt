@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.AppGraph
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.R
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,6 +50,7 @@ data class SignInUiState(
 
 class SignInViewModel(
     private val gateway: CoreGateway,
+    private val strings: UiStrings,
     val reauthorizationTarget: ReauthorizationTarget? = null,
 ) : ViewModel() {
 
@@ -155,7 +158,7 @@ class SignInViewModel(
                 }
                 _state.update { it.copy(isSigningIn = false, signedIn = true) }
             } catch (e: CoreException) {
-                _state.update { it.copy(isSigningIn = false, error = e.displayMessage()) }
+                _state.update { it.copy(isSigningIn = false, error = e.displayMessage(strings)) }
             }
         }
     }
@@ -188,7 +191,7 @@ class SignInViewModel(
     private fun startQuickConnect() {
         val serverUrl = _state.value.serverUrl.trim()
         if (serverUrl.isEmpty()) {
-            _state.update { it.copy(error = "Enter a server address first.") }
+            _state.update { it.copy(error = strings.get(R.string.signin_error_server_address_empty)) }
             return
         }
         quickConnectJob?.cancel()
@@ -206,7 +209,7 @@ class SignInViewModel(
                     _state.update {
                         it.copy(
                             isQuickConnecting = false,
-                            error = "Quick Connect is disabled on this server.",
+                            error = strings.get(R.string.signin_error_quick_connect_disabled),
                         )
                     }
                     return@launch
@@ -245,7 +248,7 @@ class SignInViewModel(
                 _state.update {
                     it.copy(
                         isQuickConnecting = false,
-                        error = e.displayMessage(),
+                        error = e.displayMessage(strings),
                     )
                 }
             }
@@ -264,11 +267,12 @@ internal fun singleUnsavedServerToPrefill(servers: List<DiscoveredServer>, touch
 
 class SignInViewModelFactory(
     private val gateway: CoreGateway,
+    private val strings: UiStrings,
     private val reauthorizationTarget: ReauthorizationTarget? = null,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(SignInViewModel::class.java))
-        return SignInViewModel(gateway, reauthorizationTarget) as T
+        return SignInViewModel(gateway, strings, reauthorizationTarget) as T
     }
 }

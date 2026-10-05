@@ -4,6 +4,10 @@ import java.time.LocalDate
 import java.time.Month
 import java.time.format.TextStyle
 import java.util.Locale
+import tv.jellybeam.R
+import tv.jellybeam.i18n.AppLocale
+import tv.jellybeam.i18n.UiStrings
+import tv.jellybeam.i18n.uppercaseUi
 import uniffi.jellybeam_core.GridGroup
 import uniffi.jellybeam_core.GridSort
 import uniffi.jellybeam_core.GridSortField
@@ -18,17 +22,40 @@ data class RailEntry(val label: String, val offset: Int, val count: Int)
  */
 object IndexRailModel {
 
-    private val RUNTIME_BANDS_ASCENDING = listOf("<30m", "30m", "1h", "1h30", "2h", "2h30", "3h+")
     private val RUNTIME_KEYS = listOf("0", "30", "60", "90", "120", "150", "180")
-    private val YEAR_LABELS_NATURAL = listOf("2020s", "2010s", "2000s", "1990s", "1980s", "OLD")
+
+    private fun runtimeBandsAscending(strings: UiStrings): List<String> = listOf(
+        R.string.library_rail_runtime_under_30,
+        R.string.library_rail_runtime_30,
+        R.string.library_rail_runtime_60,
+        R.string.library_rail_runtime_90,
+        R.string.library_rail_runtime_120,
+        R.string.library_rail_runtime_150,
+        R.string.library_rail_runtime_180,
+    ).map { strings.get(it) }
+
+    private fun yearLabelsNatural(strings: UiStrings): List<String> = listOf(
+        R.string.library_decade_2020s,
+        R.string.library_decade_2010s,
+        R.string.library_decade_2000s,
+        R.string.library_decade_1990s,
+        R.string.library_decade_1980s,
+        R.string.library_rail_old,
+    ).map { strings.get(it) }
 
     /** The rail's entries, in grid order, for the current [sort] and (already-filtered) [groups].
      * Every label in the field's set is always present, `count == 0` when empty; Year additionally
      * trims to the decades between the newest and oldest present group (§4.4), and an empty
      * [groups] returns the full natural Year set at zero count.
      */
-    fun build(sort: GridSort, groups: List<GridGroup>, today: LocalDate): List<RailEntry> {
-        val naturalLabels = naturalLabels(sort.field, today)
+    fun build(
+        strings: UiStrings,
+        sort: GridSort,
+        groups: List<GridGroup>,
+        today: LocalDate,
+        locale: Locale = AppLocale.format,
+    ): List<RailEntry> {
+        val naturalLabels = naturalLabels(strings, sort.field, today, locale)
 
         // First pass: accumulate each label's first-member offset and total count -- labels can
         // recur non-contiguously.
@@ -36,7 +63,7 @@ object IndexRailModel {
         val counts = LinkedHashMap<String, Int>()
         var running = 0
         for (group in groups) {
-            val label = keyToLabel(sort.field, group.key, today)
+            val label = keyToLabel(strings, sort.field, group.key, today, locale)
             if (label !in offsets) offsets[label] = running
             val count = group.count.toInt()
             counts[label] = (counts[label] ?: 0) + count
@@ -86,56 +113,64 @@ object IndexRailModel {
 
     // ---- label sets, in each field's *natural* order ----------------------
 
-    private fun naturalLabels(field: GridSortField, today: LocalDate): List<String> = when (field) {
-        GridSortField.NAME -> listOf("#") + ('A'..'Z').map { it.toString() }
-        GridSortField.DATE_ADDED -> dateAddedNaturalLabels(today)
-        GridSortField.YEAR -> YEAR_LABELS_NATURAL
-        GridSortField.RUNTIME -> RUNTIME_BANDS_ASCENDING.reversed()
-    }
+    private fun naturalLabels(strings: UiStrings, field: GridSortField, today: LocalDate, locale: Locale): List<String> =
+        when (field) {
+            GridSortField.NAME -> listOf("#") + ('A'..'Z').map { it.toString() }
+            GridSortField.DATE_ADDED -> dateAddedNaturalLabels(strings, today, locale)
+            GridSortField.YEAR -> yearLabelsNatural(strings)
+            GridSortField.RUNTIME -> runtimeBandsAscending(strings).reversed()
+        }
 
-    private fun dateAddedNaturalLabels(today: LocalDate): List<String> {
+    private fun dateAddedNaturalLabels(strings: UiStrings, today: LocalDate, locale: Locale): List<String> {
         val months = (today.monthValue - 1) downTo 1
-        val monthLabels = months.map { monthLabel(it) }
+        val monthLabels = months.map { monthLabel(it, locale) }
         val years = (today.year - 1) downTo (today.year - 5)
-        val yearLabels = years.map { "'" + "%02d".format(it % 100) }
-        return listOf("NOW") + monthLabels + yearLabels + listOf("OLD")
+        val yearLabels = years.map { "'" + String.format(Locale.ROOT, "%02d", it % 100) }
+        return listOf(strings.get(R.string.library_rail_now)) + monthLabels + yearLabels +
+            listOf(strings.get(R.string.library_rail_old))
     }
 
-    private fun monthLabel(month: Int): String =
-        Month.of(month).getDisplayName(TextStyle.SHORT, Locale.US).uppercase(Locale.US)
+    private fun monthLabel(month: Int, locale: Locale): String =
+        Month.of(month).getDisplayName(TextStyle.SHORT, locale).uppercaseUi()
 
     // ---- key -> label ------------------------------------------------------
 
-    private fun keyToLabel(field: GridSortField, key: String, today: LocalDate): String = when (field) {
-        GridSortField.NAME -> key
-        GridSortField.DATE_ADDED -> dateAddedLabel(key, today)
-        GridSortField.YEAR -> yearLabel(key)
-        GridSortField.RUNTIME -> RUNTIME_KEYS.indexOf(key).let { if (it >= 0) RUNTIME_BANDS_ASCENDING[it] else "" }
-    }
+    private fun keyToLabel(strings: UiStrings, field: GridSortField, key: String, today: LocalDate, locale: Locale): String =
+        when (field) {
+            GridSortField.NAME -> key
+            GridSortField.DATE_ADDED -> dateAddedLabel(strings, key, today, locale)
+            GridSortField.YEAR -> yearLabel(strings, key)
+            GridSortField.RUNTIME ->
+                RUNTIME_KEYS.indexOf(key).let { if (it >= 0) runtimeBandsAscending(strings)[it] else "" }
+        }
 
-    private fun dateAddedLabel(key: String, today: LocalDate): String {
-        if (key.length != 7) return "OLD" // "" (NULL) or malformed
-        val year = key.substring(0, 4).toIntOrNull() ?: return "OLD"
-        val month = key.substring(5, 7).toIntOrNull() ?: return "OLD"
-        val todayYm = "%04d-%02d".format(today.year, today.monthValue)
+    private fun dateAddedLabel(strings: UiStrings, key: String, today: LocalDate, locale: Locale): String {
+        val old = strings.get(R.string.library_rail_old)
+        if (key.length != 7) return old // "" (NULL) or malformed
+        val year = key.substring(0, 4).toIntOrNull() ?: return old
+        val month = key.substring(5, 7).toIntOrNull() ?: return old
+        // Matched against the server's "yyyy-MM" key, so ASCII digits whatever the device locale.
+        val todayYm = String.format(Locale.ROOT, "%04d-%02d", today.year, today.monthValue)
         return when {
-            key == todayYm -> "NOW"
-            year == today.year -> monthLabel(month)
-            year in (today.year - 5)..(today.year - 1) -> "'" + "%02d".format(year % 100)
-            else -> "OLD"
+            key == todayYm -> strings.get(R.string.library_rail_now)
+            year == today.year -> monthLabel(month, locale)
+            year in (today.year - 5)..(today.year - 1) -> "'" + String.format(Locale.ROOT, "%02d", year % 100)
+            else -> old
         }
     }
 
-    private fun yearLabel(key: String): String {
-        val year = key.toIntOrNull() ?: return "OLD"
-        return when {
-            year >= 2020 -> "2020s"
-            year >= 2010 -> "2010s"
-            year >= 2000 -> "2000s"
-            year >= 1990 -> "1990s"
-            year >= 1980 -> "1980s"
-            else -> "OLD"
-        }
+    private fun yearLabel(strings: UiStrings, key: String): String {
+        val year = key.toIntOrNull() ?: return strings.get(R.string.library_rail_old)
+        return strings.get(
+            when {
+                year >= 2020 -> R.string.library_decade_2020s
+                year >= 2010 -> R.string.library_decade_2010s
+                year >= 2000 -> R.string.library_decade_2000s
+                year >= 1990 -> R.string.library_decade_1990s
+                year >= 1980 -> R.string.library_decade_1980s
+                else -> R.string.library_rail_old
+            },
+        )
     }
 
     // ---- Year trimming and grid-order reversal -----------------------------

@@ -1,6 +1,7 @@
 package tv.jellybeam.ui.discover
 
 import tv.jellybeam.MainDispatcherRule
+import tv.jellybeam.i18n.ResourceUiStrings
 import tv.jellybeam.data.FakeCoreGateway
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -84,7 +85,7 @@ class DiscoverDetailViewModelTest {
             seerrMovieResultsByTmdbId = mapOf(1L to Result.success(movieDetail(1L))),
             seerrRequestOptionsResult = Result.success(SeerrRequestOptions(servers = emptyList())),
         )
-        val viewModel = DiscoverDetailViewModel(fake, SeerrMediaType.MOVIE, 1L)
+        val viewModel = DiscoverDetailViewModel(fake, ResourceUiStrings.default, SeerrMediaType.MOVIE, 1L)
         advanceUntilIdle()
 
         viewModel.startRequest(false)
@@ -103,7 +104,7 @@ class DiscoverDetailViewModelTest {
             seerrTvResultsByTmdbId = mapOf(2L to Result.success(tvDetail(2L, seasons))),
             seerrRequestOptionsResult = Result.success(SeerrRequestOptions(servers = emptyList())),
         )
-        val viewModel = DiscoverDetailViewModel(fake, SeerrMediaType.TV, 2L)
+        val viewModel = DiscoverDetailViewModel(fake, ResourceUiStrings.default, SeerrMediaType.TV, 2L)
         advanceUntilIdle()
 
         viewModel.startRequest(false)
@@ -121,7 +122,7 @@ class DiscoverDetailViewModelTest {
             seerrTvResultsByTmdbId = mapOf(3L to Result.success(tvDetail(3L, seasons))),
             seerrRequestOptionsResult = Result.failure(uniffi.jellybeam_core.CoreException.Api(detail = "unreachable")),
         )
-        val viewModel = DiscoverDetailViewModel(fake, SeerrMediaType.TV, 3L)
+        val viewModel = DiscoverDetailViewModel(fake, ResourceUiStrings.default, SeerrMediaType.TV, 3L)
         advanceUntilIdle()
 
         viewModel.startRequest(false)
@@ -139,7 +140,7 @@ class DiscoverDetailViewModelTest {
             seerrTvResultsByTmdbId = mapOf(4L to Result.success(tvDetail(4L, seasons))),
             seerrRequestOptionsResult = Result.success(SeerrRequestOptions(servers = emptyList())),
         )
-        val viewModel = DiscoverDetailViewModel(fake, SeerrMediaType.TV, 4L)
+        val viewModel = DiscoverDetailViewModel(fake, ResourceUiStrings.default, SeerrMediaType.TV, 4L)
         advanceUntilIdle()
 
         viewModel.startRequest(false)
@@ -170,7 +171,7 @@ class DiscoverDetailViewModelTest {
             seerrTvResultsByTmdbId = mapOf(5L to Result.success(tvDetail(5L, seasons))),
             seerrRequestOptionsResult = Result.success(SeerrRequestOptions(servers = listOf(server))),
         )
-        val viewModel = DiscoverDetailViewModel(fake, SeerrMediaType.TV, 5L)
+        val viewModel = DiscoverDetailViewModel(fake, ResourceUiStrings.default, SeerrMediaType.TV, 5L)
         advanceUntilIdle()
 
         viewModel.startRequest(false)

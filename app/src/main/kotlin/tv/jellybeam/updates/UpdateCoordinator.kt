@@ -16,7 +16,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import tv.jellybeam.AppGraph
-import tv.jellybeam.R
 import uniffi.jellybeam_core.AppUpdater
 import uniffi.jellybeam_core.UpdateSnapshot
 
@@ -120,7 +119,7 @@ class UpdateCoordinator(private val context: Context) {
         work?.cancel()
         AppGraph.updateAvailable.value = false
         ready.complete(Unit)
-        mutable.value = UpdateSnapshot(0u, 0u, "Error", context.getString(R.string.updates_unavailable), 0u, "", "", 0u, 0u, "", null, false, 0u, "")
+        mutable.value = UpdateSnapshot(0u, 0u, "Error", null, 0u, "", "", 0u, 0u, "", null, false, 0u, "")
     }
     private fun eligible(): Boolean = !unavailable && updateForeground(resumed, pageVisible, playback, playbackStarting)
     fun resume(activity: Activity) {

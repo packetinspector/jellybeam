@@ -2,7 +2,7 @@
 //! address and mapping a failed sign-in/Quick Connect `ApiError` to a
 //! specific `CoreError` variant instead of raw transport/decode text.
 
-use crate::error::CoreError;
+use crate::error::{CoreError, UnreachableReason};
 
 /// Normalizes a user-typed server address for `JellyfinClient`: trims outer
 /// whitespace, defaults to `http://` when no scheme was given, requires an
@@ -104,21 +104,33 @@ fn classify_transport_error(host: &str, msg: &str) -> CoreError {
         };
     }
 
-    let reason = if msg.contains("dns error") {
-        "the name could not be resolved".to_string()
-    } else if msg.contains("Connection refused") {
-        "connection refused".to_string()
-    } else if msg.contains("timed out") || msg.contains("timeout") {
-        "timed out".to_string()
-    } else if msg.contains("Network is unreachable") || msg.contains("unreachable") {
-        "network unreachable".to_string()
-    } else {
+    let reason = unreachable_reason(msg);
+    let detail = if reason == UnreachableReason::Other {
         truncate_chars(msg, 120)
+    } else {
+        String::new()
     };
 
     CoreError::ServerUnreachable {
         host: host.to_string(),
         reason,
+        detail,
+    }
+}
+
+/// Why a request never got an answer, read from reqwest's `Display` text
+/// (the only error info that crosses the client boundary).
+pub(crate) fn unreachable_reason(msg: &str) -> UnreachableReason {
+    if msg.contains("dns error") {
+        UnreachableReason::NameNotResolved
+    } else if msg.contains("Connection refused") {
+        UnreachableReason::ConnectionRefused
+    } else if msg.contains("timed out") || msg.contains("timeout") {
+        UnreachableReason::TimedOut
+    } else if msg.contains("Network is unreachable") || msg.contains("unreachable") {
+        UnreachableReason::NetworkUnreachable
+    } else {
+        UnreachableReason::Other
     }
 }
 
@@ -270,9 +282,9 @@ mod tests {
             ),
         );
         match err {
-            CoreError::ServerUnreachable { host, reason } => {
+            CoreError::ServerUnreachable { host, reason, .. } => {
                 assert_eq!(host, "nowhere.example.test");
-                assert_eq!(reason, "the name could not be resolved");
+                assert_eq!(reason, UnreachableReason::NameNotResolved);
             }
             other => panic!("expected ServerUnreachable, got {other:?}"),
         }
@@ -289,7 +301,7 @@ mod tests {
         );
         match err {
             CoreError::ServerUnreachable { reason, .. } => {
-                assert_eq!(reason, "connection refused");
+                assert_eq!(reason, UnreachableReason::ConnectionRefused);
             }
             other => panic!("expected ServerUnreachable, got {other:?}"),
         }
@@ -302,7 +314,9 @@ mod tests {
             jellyfin_api::ApiError::Transport("operation timed out".to_string()),
         );
         match err {
-            CoreError::ServerUnreachable { reason, .. } => assert_eq!(reason, "timed out"),
+            CoreError::ServerUnreachable { reason, .. } => {
+                assert_eq!(reason, UnreachableReason::TimedOut);
+            }
             other => panic!("expected ServerUnreachable, got {other:?}"),
         }
     }
@@ -317,7 +331,7 @@ mod tests {
         );
         match err {
             CoreError::ServerUnreachable { reason, .. } => {
-                assert_eq!(reason, "network unreachable");
+                assert_eq!(reason, UnreachableReason::NetworkUnreachable);
             }
             other => panic!("expected ServerUnreachable, got {other:?}"),
         }
@@ -330,8 +344,9 @@ mod tests {
             jellyfin_api::ApiError::Transport("something unexpected happened".to_string()),
         );
         match err {
-            CoreError::ServerUnreachable { reason, .. } => {
-                assert_eq!(reason, "something unexpected happened");
+            CoreError::ServerUnreachable { reason, detail, .. } => {
+                assert_eq!(reason, UnreachableReason::Other);
+                assert_eq!(detail, "something unexpected happened");
             }
             other => panic!("expected ServerUnreachable, got {other:?}"),
         }
@@ -342,7 +357,7 @@ mod tests {
         let long_msg = "x".repeat(500);
         let err = classify_sign_in_error("192.0.2.10", jellyfin_api::ApiError::Transport(long_msg));
         match err {
-            CoreError::ServerUnreachable { reason, .. } => assert_eq!(reason.chars().count(), 120),
+            CoreError::ServerUnreachable { detail, .. } => assert_eq!(detail.chars().count(), 120),
             other => panic!("expected ServerUnreachable, got {other:?}"),
         }
     }

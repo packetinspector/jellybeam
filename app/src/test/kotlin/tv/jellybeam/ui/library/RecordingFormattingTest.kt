@@ -2,6 +2,7 @@ package tv.jellybeam.ui.library
 
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.Locale
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -20,6 +21,7 @@ class RecordingFormattingTest {
             premiereDate = "2026-08-31T02:00:00+00:00",
             zone = zone,
             today = LocalDate.of(2026, 1, 1),
+            locale = Locale.US,
         )
         assertEquals("Sun, Aug 30", dateLine)
     }
@@ -30,6 +32,7 @@ class RecordingFormattingTest {
             premiereDate = "2026-06-15T12:00:00+00:00",
             zone = zone,
             today = LocalDate.of(2026, 1, 1),
+            locale = Locale.US,
         )
         assertEquals("Mon, Jun 15", dateLine)
     }
@@ -40,18 +43,19 @@ class RecordingFormattingTest {
             premiereDate = "2025-06-15T12:00:00+00:00",
             zone = zone,
             today = LocalDate.of(2026, 1, 1),
+            locale = Locale.US,
         )
         assertEquals("Jun 15, 2025", dateLine)
     }
 
     @Test
     fun `dateLine is null for a null premiereDate`() {
-        assertNull(RecordingFormatting.dateLine(null, zone, LocalDate.of(2026, 1, 1)))
+        assertNull(RecordingFormatting.dateLine(null, zone, LocalDate.of(2026, 1, 1), Locale.US))
     }
 
     @Test
     fun `dateLine is null for unparseable input, never throws`() {
-        assertNull(RecordingFormatting.dateLine("not-a-date", zone, LocalDate.of(2026, 1, 1)))
+        assertNull(RecordingFormatting.dateLine("not-a-date", zone, LocalDate.of(2026, 1, 1), Locale.US))
     }
 
     // ---- timeLine -------------------------------------------------------
@@ -63,6 +67,7 @@ class RecordingFormattingTest {
             premiereDate = "2026-08-31T02:00:00+00:00",
             zone = zone,
             use24h = false,
+            locale = Locale.US,
         )
         assertEquals("10:00 PM", timeLine)
     }
@@ -73,6 +78,7 @@ class RecordingFormattingTest {
             premiereDate = "2026-08-31T02:00:00+00:00",
             zone = zone,
             use24h = true,
+            locale = Locale.US,
         )
         assertEquals("22:00", timeLine)
     }
@@ -80,17 +86,17 @@ class RecordingFormattingTest {
     @Test
     fun `timeLine converts noon UTC into the local morning`() {
         // 12:00 UTC is 08:00 EDT (UTC-4).
-        assertEquals("8:00 AM", RecordingFormatting.timeLine("2026-06-15T12:00:00+00:00", zone, use24h = false))
-        assertEquals("08:00", RecordingFormatting.timeLine("2026-06-15T12:00:00+00:00", zone, use24h = true))
+        assertEquals("8:00 AM", RecordingFormatting.timeLine("2026-06-15T12:00:00+00:00", zone, use24h = false, locale = Locale.US))
+        assertEquals("08:00", RecordingFormatting.timeLine("2026-06-15T12:00:00+00:00", zone, use24h = true, locale = Locale.US))
     }
 
     @Test
     fun `timeLine is null for a null premiereDate`() {
-        assertNull(RecordingFormatting.timeLine(null, zone, use24h = false))
+        assertNull(RecordingFormatting.timeLine(null, zone, use24h = false, locale = Locale.US))
     }
 
     @Test
     fun `timeLine is null for unparseable input, never throws`() {
-        assertNull(RecordingFormatting.timeLine("garbage", zone, use24h = true))
+        assertNull(RecordingFormatting.timeLine("garbage", zone, use24h = true, locale = Locale.US))
     }
 }

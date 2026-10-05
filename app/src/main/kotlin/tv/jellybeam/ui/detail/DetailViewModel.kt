@@ -3,8 +3,10 @@ package tv.jellybeam.ui.detail
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import tv.jellybeam.R
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.runCatchingCancellable
+import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.player.PlaybackReports
 import tv.jellybeam.ui.common.ChangeRefreshScheduler
 import kotlin.random.Random
@@ -34,14 +36,6 @@ private const val BOXSET_ITEM_TYPE = CollectionFormatting.BOXSET_ITEM_TYPE
 
 /** docs/11-detail-ux-spec.md tier 2 item 13: "up to [limit]... from a live GetSimilar call." */
 private const val SIMILAR_LIMIT = 16u
-
-// docs/19-detail-action-menu.md §1.4: fixed toast texts.
-private const val TOAST_MARKED_WATCHED = "Marked as watched"
-private const val TOAST_MARKED_UNWATCHED = "Marked as unwatched"
-private const val TOAST_ADDED_FAVORITE = "Added to favorites"
-private const val TOAST_REMOVED_FAVORITE = "Removed from favorites"
-private const val TOAST_REFRESHING_METADATA = "Refreshing metadata"
-private const val TOAST_SERVER_UNREACHABLE = "Couldn't reach the server"
 
 /** How long [DetailUiState.toast] stays before [DetailViewModel] clears it (docs/19 §1.4). */
 private const val TOAST_DURATION_MS = 2_500L
@@ -150,6 +144,8 @@ data class DetailUiState(
 class DetailViewModel(
     private val gateway: CoreGateway,
     private val card: Card,
+    /** docs/27 §3: toast and menu text. */
+    private val strings: UiStrings,
     /** docs/17 §6's mini-player dismissal edge; injected so a test can drive it directly. */
     private val stopEpoch: Flow<Long> = PlaybackReports.stopEpoch,
     /** docs/19 §3.3's "Play something random" -- injected so tests are deterministic. */
@@ -281,7 +277,7 @@ class DetailViewModel(
                     }
                 }.awaitAll().filterNotNull().toMap()
             }
-            val play = CollectionFormatting.resolvePlay(members, previous = _state.value.collectionPlay) { series ->
+            val play = CollectionFormatting.resolvePlay(strings, members, previous = _state.value.collectionPlay) { series ->
                 runCatchingCancellable { gateway.seriesEpisodes(series.id) }.getOrNull()
             }
             _state.update { it.copy(members = members, membersSettled = true, memberSeasonCounts = seasonCounts, collectionPlay = play) }
@@ -475,14 +471,14 @@ class DetailViewModel(
             scopeSeason = scopeSeason,
             scopeEpisodes = scopeEpisodes,
             allEpisodes = state.allEpisodes,
-            primaryAction = DetailFormatting.resolvePrimaryAction(state.card, state.allEpisodes),
+            primaryAction = DetailFormatting.resolvePrimaryAction(strings, state.card, state.allEpisodes),
             isFavorite = state.card.isFavorite,
             hasCollections = state.collections.isNotEmpty(),
             isAdministrator = state.isAdministrator,
             seriesCard = seriesCard,
             highlightedSeasonNumber = state.seasons.firstOrNull { it.id == state.selectedSeasonId }?.indexNumber,
         )
-        val model = buildMenu(input)
+        val model = buildMenu(strings, input)
         randomPool = scopeSeason?.let { scopeEpisodes } ?: state.allEpisodes
         _state.update { it.copy(menu = MenuUiState(model = model, level = MenuLevel.FIRST, scopeSeasonNumber = scopeSeason?.indexNumber)) }
     }
@@ -518,7 +514,7 @@ class DetailViewModel(
                 // a mirror read now could still predate it.
                 refreshMemberOfCollections(keep = setOf(collection.id))
             }
-            showToast(if (result.isSuccess) "Added to ${collection.name}" else TOAST_SERVER_UNREACHABLE)
+            showToast(if (result.isSuccess) strings.get(R.string.detail_toast_added_to_collection, collection.name) else serverUnreachable())
         }
     }
 
@@ -556,7 +552,7 @@ class DetailViewModel(
         _state.update { it.copy(menu = null) }
         viewModelScope.launch {
             val result = runCatchingCancellable { gateway.setPlayed(itemId, played) }
-            showToast(if (result.isSuccess) (if (played) TOAST_MARKED_WATCHED else TOAST_MARKED_UNWATCHED) else TOAST_SERVER_UNREACHABLE)
+            showToast(if (result.isSuccess) (if (played) markedWatched() else markedUnwatched()) else serverUnreachable())
         }
     }
 
@@ -575,7 +571,7 @@ class DetailViewModel(
         _state.update { it.copy(confirm = null, menu = null) }
         viewModelScope.launch {
             val result = runCatchingCancellable { gateway.setPlayedRecursive(confirm.scopeId, confirm.played) }
-            showToast(if (result.isSuccess) (if (confirm.played) TOAST_MARKED_WATCHED else TOAST_MARKED_UNWATCHED) else TOAST_SERVER_UNREACHABLE)
+            showToast(if (result.isSuccess) (if (confirm.played) markedWatched() else markedUnwatched()) else serverUnreachable())
         }
     }
 
@@ -589,7 +585,7 @@ class DetailViewModel(
         _state.update { it.copy(menu = null) }
         viewModelScope.launch {
             val result = runCatchingCancellable { gateway.setFavorite(itemId, favorite) }
-            showToast(if (result.isSuccess) (if (favorite) TOAST_ADDED_FAVORITE else TOAST_REMOVED_FAVORITE) else TOAST_SERVER_UNREACHABLE)
+            showToast(if (result.isSuccess) strings.get(if (favorite) R.string.detail_toast_added_favorite else R.string.detail_toast_removed_favorite) else serverUnreachable())
         }
     }
 
@@ -598,7 +594,7 @@ class DetailViewModel(
         _state.update { it.copy(menu = null) }
         viewModelScope.launch {
             val result = runCatchingCancellable { gateway.refreshMetadata(itemId) }
-            showToast(if (result.isSuccess) TOAST_REFRESHING_METADATA else TOAST_SERVER_UNREACHABLE)
+            showToast(if (result.isSuccess) strings.get(R.string.detail_toast_refreshing_metadata) else serverUnreachable())
         }
     }
 
@@ -616,6 +612,12 @@ class DetailViewModel(
     fun consumePendingSeriesNavigation() {
         _state.update { it.copy(pendingSeriesNavigation = null) }
     }
+
+    private fun markedWatched() = strings.get(R.string.detail_toast_marked_watched)
+
+    private fun markedUnwatched() = strings.get(R.string.detail_toast_marked_unwatched)
+
+    private fun serverUnreachable() = strings.get(R.string.detail_toast_server_unreachable)
 
     private fun showToast(text: String) {
         _state.update { it.copy(toast = text) }
@@ -636,12 +638,13 @@ class DetailViewModel(
 class DetailViewModelFactory(
     private val gateway: CoreGateway,
     private val card: Card,
+    private val strings: UiStrings,
     /** See [DetailViewModel]'s own constructor param of the same name. */
     private val stopEpoch: Flow<Long> = PlaybackReports.stopEpoch,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(DetailViewModel::class.java))
-        return DetailViewModel(gateway, card, stopEpoch) as T
+        return DetailViewModel(gateway, card, strings, stopEpoch) as T
     }
 }

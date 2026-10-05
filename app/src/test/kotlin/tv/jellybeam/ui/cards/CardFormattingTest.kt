@@ -1,13 +1,17 @@
 package tv.jellybeam.ui.cards
 
 import java.time.Instant
+import java.util.Locale
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tv.jellybeam.i18n.ResourceUiStrings
 import uniffi.jellybeam_core.ImageKind
 
 class CardFormattingTest {
+    private val strings = ResourceUiStrings.default
+
 
     // ---- posterLines / posterEpisodeTag (docs/07 §2) -------------------
 
@@ -15,24 +19,24 @@ class CardFormattingTest {
     fun `a poster episode names itself and its series, and carries the S E tag`() {
         val episode = testCard(itemType = "Episode", name = "Pilot", indexNumber = 5, parentIndexNumber = 1, seriesName = "Harbor Lights")
 
-        assertEquals("E5 · Pilot" to "Harbor Lights · S1", CardFormatting.posterLines(episode))
-        assertEquals("S1 E5", CardFormatting.posterEpisodeTag(episode))
+        assertEquals("E5 · Pilot" to "Harbor Lights · S1", CardFormatting.posterLines(strings, episode))
+        assertEquals("S1 E5", CardFormatting.posterEpisodeTag(strings, episode))
     }
 
     @Test
     fun `a poster season shows its server name over the series name, with no tag`() {
         val season = testCard(itemType = "Season", name = "Season 2", seriesName = "Harbor Lights", productionYear = 2020)
 
-        assertEquals("Season 2" to "Harbor Lights", CardFormatting.posterLines(season))
-        assertNull(CardFormatting.posterEpisodeTag(season))
+        assertEquals("Season 2" to "Harbor Lights", CardFormatting.posterLines(strings, season))
+        assertNull(CardFormatting.posterEpisodeTag(strings, season))
     }
 
     @Test
     fun `movies, series and collections keep title over year`() {
         for (type in listOf("Movie", "Series", "BoxSet")) {
             val card = testCard(itemType = type, name = "Harbor Lights", productionYear = 1999)
-            assertEquals("Harbor Lights" to "1999", CardFormatting.posterLines(card))
-            assertNull(CardFormatting.posterEpisodeTag(card))
+            assertEquals("Harbor Lights" to "1999", CardFormatting.posterLines(strings, card))
+            assertNull(CardFormatting.posterEpisodeTag(strings, card))
         }
     }
 
@@ -67,87 +71,87 @@ class CardFormattingTest {
 
     @Test
     fun `format runtime shows hours and minutes`() {
-        assertEquals("6m", CardFormatting.formatRuntime(3_600_000_000L))
-        assertEquals("45m", CardFormatting.formatRuntime(45L * 60 * 10_000_000))
-        assertEquals("1h 30m", CardFormatting.formatRuntime(90L * 60 * 10_000_000))
+        assertEquals("6m", CardFormatting.formatRuntime(strings, 3_600_000_000L))
+        assertEquals("45m", CardFormatting.formatRuntime(strings, 45L * 60 * 10_000_000))
+        assertEquals("1h 30m", CardFormatting.formatRuntime(strings, 90L * 60 * 10_000_000))
         // Sub-minute rounds up: "0m" reads as broken metadata.
-        assertEquals("1m", CardFormatting.formatRuntime(5L * 10_000_000))
+        assertEquals("1m", CardFormatting.formatRuntime(strings, 5L * 10_000_000))
         // Partial minutes ceil too: 6m01s -> "7m".
-        assertEquals("7m", CardFormatting.formatRuntime((6L * 60 + 1) * 10_000_000))
-        assertEquals("0m", CardFormatting.formatRuntime(0L))
+        assertEquals("7m", CardFormatting.formatRuntime(strings, (6L * 60 + 1) * 10_000_000))
+        assertEquals("0m", CardFormatting.formatRuntime(strings, 0L))
     }
 
     @Test
     fun `episode title is E-n dot name`() {
-        assertEquals("E9 · Pilot", CardFormatting.episodeTitle("Pilot", 9))
+        assertEquals("E9 · Pilot", CardFormatting.episodeTitle(strings, "Pilot", 9))
     }
 
     @Test
     fun `episode title with no index number is a bare name`() {
-        assertEquals("Pilot", CardFormatting.episodeTitle("Pilot", null))
+        assertEquals("Pilot", CardFormatting.episodeTitle(strings, "Pilot", null))
     }
 
     @Test
     fun `season episode label formats both numbers`() {
-        assertEquals("S3 E9", CardFormatting.seasonEpisodeLabel(3, 9))
+        assertEquals("S3 E9", CardFormatting.seasonEpisodeLabel(strings, 3, 9))
     }
 
     @Test
     fun `season episode label drops a missing season number`() {
-        assertEquals("E9", CardFormatting.seasonEpisodeLabel(null, 9))
+        assertEquals("E9", CardFormatting.seasonEpisodeLabel(strings, null, 9))
     }
 
     @Test
     fun `season episode label drops a missing episode number`() {
-        assertEquals("S3", CardFormatting.seasonEpisodeLabel(3, null))
+        assertEquals("S3", CardFormatting.seasonEpisodeLabel(strings, 3, null))
     }
 
     @Test
     fun `season episode label is null with neither number`() {
-        assertNull(CardFormatting.seasonEpisodeLabel(null, null))
+        assertNull(CardFormatting.seasonEpisodeLabel(strings, null, null))
     }
 
     @Test
     fun `remaining label subtracts position from runtime`() {
         val runtime = 30L * 60 * 10_000_000
         val position = 18L * 60 * 10_000_000
-        assertEquals("12m left", CardFormatting.remainingLabel(runtime, position))
+        assertEquals("12m left", CardFormatting.remainingLabel(strings, runtime, position))
     }
 
     @Test
     fun `remaining label drops left when unstarted`() {
         // Unstarted (positionTicks == 0) shows plain runtime, never a "left" suffix.
         val runtime = 42L * 60 * 10_000_000
-        assertEquals("42m", CardFormatting.remainingLabel(runtime, 0))
+        assertEquals("42m", CardFormatting.remainingLabel(strings, runtime, 0))
     }
 
     @Test
     fun `remaining label is null with no runtime`() {
-        assertNull(CardFormatting.remainingLabel(null, 0))
+        assertNull(CardFormatting.remainingLabel(strings, null, 0))
     }
 
     @Test
     fun `virtual status label is airs date for a future premiere`() {
         val now = Instant.parse("2026-01-01T00:00:00Z")
         val future = "2026-01-31T00:00:00Z"
-        assertEquals("Airs Jan 31", CardFormatting.virtualStatusLabel(future, now))
+        assertEquals("Airs Jan 31", CardFormatting.virtualStatusLabel(strings, future, now, Locale.US))
     }
 
     @Test
     fun `virtual status label is missing for a past premiere`() {
         val now = Instant.parse("2026-01-01T00:00:00Z")
         val past = "2025-01-01T00:00:00Z"
-        assertEquals("Missing", CardFormatting.virtualStatusLabel(past, now))
+        assertEquals("Missing", CardFormatting.virtualStatusLabel(strings, past, now))
     }
 
     @Test
     fun `virtual status label is missing with no premiere date at all`() {
-        assertEquals("Missing", CardFormatting.virtualStatusLabel(null))
+        assertEquals("Missing", CardFormatting.virtualStatusLabel(strings, null))
     }
 
     @Test
     fun `virtual status label is missing for an unparseable date`() {
-        assertEquals("Missing", CardFormatting.virtualStatusLabel("not-a-date"))
+        assertEquals("Missing", CardFormatting.virtualStatusLabel(strings, "not-a-date"))
     }
 
     @Test
@@ -159,7 +163,7 @@ class CardFormattingTest {
             runtimeTicks = 30L * 60 * 10_000_000,
             positionTicks = 18L * 60 * 10_000_000,
         )
-        assertEquals("S3 E9 · 12m left", CardFormatting.resumeMetaLine(card))
+        assertEquals("S3 E9 · 12m left", CardFormatting.resumeMetaLine(strings, card))
     }
 
     @Test
@@ -169,7 +173,7 @@ class CardFormattingTest {
             runtimeTicks = 120L * 60 * 10_000_000,
             positionTicks = 90L * 60 * 10_000_000,
         )
-        assertEquals("30m left", CardFormatting.resumeMetaLine(card))
+        assertEquals("30m left", CardFormatting.resumeMetaLine(strings, card))
     }
 
     @Test
@@ -181,13 +185,13 @@ class CardFormattingTest {
             isVirtual = true,
             premiereDate = null,
         )
-        assertEquals("S2 E4 · Missing", CardFormatting.resumeMetaLine(card))
+        assertEquals("S2 E4 · Missing", CardFormatting.resumeMetaLine(strings, card))
     }
 
     @Test
     fun `resume meta line is null with nothing to show`() {
         val card = testCard(itemType = "Movie")
-        assertNull(CardFormatting.resumeMetaLine(card))
+        assertNull(CardFormatting.resumeMetaLine(strings, card))
     }
 
     @Test
@@ -201,7 +205,7 @@ class CardFormattingTest {
             runtimeTicks = 30L * 60 * 10_000_000,
             positionTicks = 0,
         )
-        assertEquals("S3 E9 · 30m", CardFormatting.resumeMetaLine(card))
+        assertEquals("S3 E9 · 30m", CardFormatting.resumeMetaLine(strings, card))
     }
 
     @Test
@@ -211,50 +215,50 @@ class CardFormattingTest {
             runtimeTicks = 30L * 60 * 10_000_000,
             positionTicks = 18L * 60 * 10_000_000,
         )
-        assertEquals("12m left", CardFormatting.resumeTimingLabel(card))
+        assertEquals("12m left", CardFormatting.resumeTimingLabel(strings, card))
     }
 
     @Test
     fun `resume timing label uses virtual status label for a virtual episode`() {
         val card = testCard(itemType = "Episode", isVirtual = true, premiereDate = null)
-        assertEquals("Missing", CardFormatting.resumeTimingLabel(card))
+        assertEquals("Missing", CardFormatting.resumeTimingLabel(strings, card))
     }
 
     @Test
     fun `resume timing label is null with nothing to show`() {
         val card = testCard(itemType = "Movie")
-        assertNull(CardFormatting.resumeTimingLabel(card))
+        assertNull(CardFormatting.resumeTimingLabel(strings, card))
     }
 
     @Test
     fun `resume timing label drops left for an unstarted card`() {
         // Next Up shelf thumb pill: positionTicks == 0 there, so reads "55m", never "55m left".
         val card = testCard(itemType = "Episode", runtimeTicks = 55L * 60 * 10_000_000, positionTicks = 0)
-        assertEquals("55m", CardFormatting.resumeTimingLabel(card))
+        assertEquals("55m", CardFormatting.resumeTimingLabel(strings, card))
     }
 
     @Test
     fun `resume series season line joins series name and season`() {
         val card = testCard(itemType = "Episode", seriesName = "Firefly", parentIndexNumber = 7)
-        assertEquals("Firefly · S7", CardFormatting.resumeSeriesSeasonLine(card))
+        assertEquals("Firefly · S7", CardFormatting.resumeSeriesSeasonLine(strings, card))
     }
 
     @Test
     fun `resume series season line drops a missing season number`() {
         val card = testCard(itemType = "Episode", seriesName = "Firefly", parentIndexNumber = null)
-        assertEquals("Firefly", CardFormatting.resumeSeriesSeasonLine(card))
+        assertEquals("Firefly", CardFormatting.resumeSeriesSeasonLine(strings, card))
     }
 
     @Test
     fun `resume series season line drops a missing series name`() {
         val card = testCard(itemType = "Episode", seriesName = null, parentIndexNumber = 7)
-        assertEquals("S7", CardFormatting.resumeSeriesSeasonLine(card))
+        assertEquals("S7", CardFormatting.resumeSeriesSeasonLine(strings, card))
     }
 
     @Test
     fun `resume series season line is null for a movie`() {
         val card = testCard(itemType = "Movie", seriesName = "Firefly", parentIndexNumber = 7)
-        assertNull(CardFormatting.resumeSeriesSeasonLine(card))
+        assertNull(CardFormatting.resumeSeriesSeasonLine(strings, card))
     }
 
     @Test
@@ -384,22 +388,22 @@ class CardFormattingTest {
 
     @Test
     fun `detail meta line joins year and runtime`() {
-        assertEquals("2024 · 1h 30m", CardFormatting.detailMetaLine(2024, 90L * 60 * 10_000_000))
+        assertEquals("2024 · 1h 30m", CardFormatting.detailMetaLine(strings, 2024, 90L * 60 * 10_000_000))
     }
 
     @Test
     fun `detail meta line drops a missing runtime`() {
-        assertEquals("2024", CardFormatting.detailMetaLine(2024, null))
+        assertEquals("2024", CardFormatting.detailMetaLine(strings, 2024, null))
     }
 
     @Test
     fun `detail meta line drops a missing year`() {
-        assertEquals("45m", CardFormatting.detailMetaLine(null, 45L * 60 * 10_000_000))
+        assertEquals("45m", CardFormatting.detailMetaLine(strings, null, 45L * 60 * 10_000_000))
     }
 
     @Test
     fun `detail meta line is null with neither year nor runtime`() {
-        assertNull(CardFormatting.detailMetaLine(null, null))
+        assertNull(CardFormatting.detailMetaLine(strings, null, null))
     }
 
     @Test
@@ -411,31 +415,31 @@ class CardFormattingTest {
             runtimeTicks = 45L * 60 * 10_000_000,
             productionYear = 2024,
         )
-        assertEquals("S3 E9 · 45m · 2024", CardFormatting.heroMetaLine(card))
+        assertEquals("S3 E9 · 45m · 2024", CardFormatting.heroMetaLine(strings, card))
     }
 
     @Test
     fun `hero meta line drops missing parts for an episode`() {
         val card = testCard(itemType = "Episode", indexNumber = 9, runtimeTicks = null, productionYear = null)
-        assertEquals("E9", CardFormatting.heroMetaLine(card))
+        assertEquals("E9", CardFormatting.heroMetaLine(strings, card))
     }
 
     @Test
     fun `hero meta line is null for an episode with nothing to show`() {
         val card = testCard(itemType = "Episode")
-        assertNull(CardFormatting.heroMetaLine(card))
+        assertNull(CardFormatting.heroMetaLine(strings, card))
     }
 
     @Test
     fun `hero meta line is just the year for a movie`() {
         val card = testCard(itemType = "Movie", productionYear = 2019)
-        assertEquals("2019", CardFormatting.heroMetaLine(card))
+        assertEquals("2019", CardFormatting.heroMetaLine(strings, card))
     }
 
     @Test
     fun `hero meta line is null for a movie with no year`() {
         val card = testCard(itemType = "Movie", productionYear = null)
-        assertNull(CardFormatting.heroMetaLine(card))
+        assertNull(CardFormatting.heroMetaLine(strings, card))
     }
 
     @Test
@@ -451,20 +455,20 @@ class CardFormattingTest {
     @Test
     fun `play button is playable for a non-virtual item`() {
         val card = testCard(isVirtual = false)
-        assertEquals(PlayButtonState.Playable, CardFormatting.playButtonState(card))
+        assertEquals(PlayButtonState.Playable, CardFormatting.playButtonState(strings, card))
     }
 
     @Test
     fun `play button is unavailable with the airs-date label for a future virtual episode`() {
         val now = Instant.parse("2026-01-01T00:00:00Z")
         val card = testCard(isVirtual = true, premiereDate = "2026-01-31T00:00:00Z")
-        assertEquals(PlayButtonState.Unavailable("Airs Jan 31"), CardFormatting.playButtonState(card, now))
+        assertEquals(PlayButtonState.Unavailable("Airs Jan 31"), CardFormatting.playButtonState(strings, card, now, Locale.US))
     }
 
     @Test
     fun `play button is unavailable with the missing label for a virtual episode with no premiere date`() {
         val card = testCard(isVirtual = true, premiereDate = null)
-        assertEquals(PlayButtonState.Unavailable("Missing"), CardFormatting.playButtonState(card))
+        assertEquals(PlayButtonState.Unavailable("Missing"), CardFormatting.playButtonState(strings, card))
     }
 
     @Test

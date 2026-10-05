@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,7 +36,7 @@ data class DiscoverSettingsUiState(
  * init, then writes through only on an explicit Connect/Disconnect press -- unlike
  * [SettingsViewModel]'s `Settings` record, Seerr's config isn't part of that whole-record store.
  */
-class DiscoverSettingsViewModel(private val gateway: CoreGateway) : ViewModel() {
+class DiscoverSettingsViewModel(private val gateway: CoreGateway, private val strings: UiStrings) : ViewModel() {
     private val _state = MutableStateFlow(DiscoverSettingsUiState())
     val state: StateFlow<DiscoverSettingsUiState> = _state.asStateFlow()
 
@@ -71,7 +72,7 @@ class DiscoverSettingsViewModel(private val gateway: CoreGateway) : ViewModel() 
                 _state.update { it.copy(isConnecting = false, status = status, secret = "", error = null) }
                 onConnected()
             } catch (e: CoreException) {
-                _state.update { it.copy(isConnecting = false, error = e.displayMessage()) }
+                _state.update { it.copy(isConnecting = false, error = e.displayMessage(strings)) }
             }
         }
     }
@@ -94,10 +95,10 @@ class DiscoverSettingsViewModel(private val gateway: CoreGateway) : ViewModel() 
     }
 }
 
-class DiscoverSettingsViewModelFactory(private val gateway: CoreGateway) : ViewModelProvider.Factory {
+class DiscoverSettingsViewModelFactory(private val gateway: CoreGateway, private val strings: UiStrings) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(DiscoverSettingsViewModel::class.java))
-        return DiscoverSettingsViewModel(gateway) as T
+        return DiscoverSettingsViewModel(gateway, strings) as T
     }
 }

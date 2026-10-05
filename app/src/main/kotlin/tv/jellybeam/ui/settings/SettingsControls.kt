@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.focusKey
@@ -191,7 +192,7 @@ internal fun rowLabelStyle() = TextStyle(
 @Composable
 internal fun SectionHeader(text: String) {
     BasicText(
-        text = text.uppercase(),
+        text = text.uppercaseUi(),
         modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
         style = TextStyle(
             fontFamily = JellybeamTheme.Archivo,

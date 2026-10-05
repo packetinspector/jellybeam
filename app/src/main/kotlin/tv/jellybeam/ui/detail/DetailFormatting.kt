@@ -9,9 +9,13 @@ import java.util.Locale
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.roundToLong
+import tv.jellybeam.R
+import tv.jellybeam.i18n.AppLocale
+import tv.jellybeam.i18n.mediumDateFormatter
+import tv.jellybeam.i18n.UiStrings
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.ArtSource
 import tv.jellybeam.ui.cards.CardFormatting
-import tv.jellybeam.ui.common.countLabel
 import uniffi.jellybeam_core.AudioSpatialKind
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
@@ -33,10 +37,9 @@ object DetailFormatting {
      * same resume semantics as a Movie.
      */
     private val OTHER_SINGLE_VIDEO_ITEM_TYPES = setOf("Video", "MusicVideo", "Recording")
-    private const val SPECIALS_SEASON_NAME = "Specials"
 
-    private const val LABEL_PLAY = "Play"
-    private const val LABEL_RESUME = "Resume"
+    /** Compared against server-provided season names, never displayed as our own text. */
+    private const val SPECIALS_SEASON_NAME = "Specials"
 
     /**
      * The detail header's meta-line separator -- Tier-2 item 6 calls for a wider gap than
@@ -48,9 +51,9 @@ object DetailFormatting {
     /** Tier-2 item 6's Movie/Episode header meta line: `"{year}{sep}{runtime}"`, dropping whichever
      * half is missing rather than formatting a literal zero.
      */
-    fun movieMetaLine(productionYear: Int?, runtimeTicks: Long?): String? {
+    fun movieMetaLine(strings: UiStrings, productionYear: Int?, runtimeTicks: Long?): String? {
         val yearPart = productionYear?.toString()
-        val runtimePart = runtimeTicks?.let { CardFormatting.formatRuntime(it) }
+        val runtimePart = runtimeTicks?.let { CardFormatting.formatRuntime(strings, it) }
         return joinMetaParts(yearPart, runtimePart)
     }
 
@@ -77,9 +80,9 @@ object DetailFormatting {
      * genres, never a placeholder "0 seasons" while loading. `seasonCount` must come from the
      * loaded seasons list, never a server `ChildCount` field.
      */
-    fun seriesMetaLine(productionYear: Int?, seasonCount: Int, endYear: Int? = null, status: String? = null): String? {
+    fun seriesMetaLine(strings: UiStrings, productionYear: Int?, seasonCount: Int, endYear: Int? = null, status: String? = null): String? {
         val yearPart = yearRangeLabel(productionYear, endYear, status)
-        val seasonPart = if (seasonCount > 0) "$seasonCount season${if (seasonCount == 1) "" else "s"}" else null
+        val seasonPart = if (seasonCount > 0) strings.plural(R.plurals.detail_season_count, seasonCount, seasonCount) else null
         return joinMetaParts(yearPart, seasonPart)
     }
 
@@ -137,19 +140,19 @@ object DetailFormatting {
      * number is missing; otherwise the first unplayed episode wins plain `"Play"`; otherwise
      * [PrimaryAction.None] -- spec doesn't define a "rewatch" fallback when everything's watched.
      */
-    fun resolvePrimaryAction(card: Card, seriesEpisodes: List<Card>, now: Instant = Instant.now()): PrimaryAction =
+    fun resolvePrimaryAction(strings: UiStrings, card: Card, seriesEpisodes: List<Card>, now: Instant = Instant.now()): PrimaryAction =
         when (card.itemType) {
-            MOVIE_ITEM_TYPE, EPISODE_ITEM_TYPE -> resolveSingleItemAction(card, now)
-            in OTHER_SINGLE_VIDEO_ITEM_TYPES -> resolveSingleItemAction(card, now)
-            SERIES_ITEM_TYPE -> resolveSeriesAction(seriesEpisodes)
+            MOVIE_ITEM_TYPE, EPISODE_ITEM_TYPE -> resolveSingleItemAction(strings, card, now)
+            in OTHER_SINGLE_VIDEO_ITEM_TYPES -> resolveSingleItemAction(strings, card, now)
+            SERIES_ITEM_TYPE -> resolveSeriesAction(strings, seriesEpisodes)
             else -> PrimaryAction.None
         }
 
-    private fun resolveSingleItemAction(card: Card, now: Instant): PrimaryAction {
-        if (card.isVirtual) return PrimaryAction.Unavailable(CardFormatting.virtualStatusLabel(card.premiereDate, now))
+    private fun resolveSingleItemAction(strings: UiStrings, card: Card, now: Instant): PrimaryAction {
+        if (card.isVirtual) return PrimaryAction.Unavailable(CardFormatting.virtualStatusLabel(strings, card.premiereDate, now))
         val resuming = card.positionTicks > 0
         return PrimaryAction.Playable(
-            label = if (resuming) LABEL_RESUME else LABEL_PLAY,
+            label = strings.get(if (resuming) R.string.detail_resume else R.string.detail_play),
             targetId = card.id,
             hasProgress = resuming,
         )
@@ -161,24 +164,28 @@ object DetailFormatting {
     private fun orderedPlayableEpisodes(seriesEpisodes: List<Card>): List<Card> =
         seriesEpisodes.filterNot { it.isVirtual }.sortedBy { if (isSpecialEpisode(it)) 1 else 0 }
 
-    private fun resolveSeriesAction(seriesEpisodes: List<Card>): PrimaryAction {
+    private fun resolveSeriesAction(strings: UiStrings, seriesEpisodes: List<Card>): PrimaryAction {
         val candidates = orderedPlayableEpisodes(seriesEpisodes)
         val resuming = candidates.firstOrNull { it.positionTicks > 0 }
         if (resuming != null) {
-            val seasonEpisode = strictSeasonEpisode(resuming.parentIndexNumber, resuming.indexNumber)
-            val label = if (seasonEpisode != null) "$LABEL_RESUME $seasonEpisode" else LABEL_RESUME
+            val seasonEpisode = strictSeasonEpisode(strings, resuming.parentIndexNumber, resuming.indexNumber)
+            val label = if (seasonEpisode != null) strings.get(R.string.detail_resume_episode, seasonEpisode) else strings.get(R.string.detail_resume)
             return PrimaryAction.Playable(label, resuming.id, hasProgress = true)
         }
         val next = candidates.firstOrNull { !it.played }
-        if (next != null) return PrimaryAction.Playable(LABEL_PLAY, next.id, hasProgress = false)
+        if (next != null) return PrimaryAction.Playable(strings.get(R.string.detail_play), next.id, hasProgress = false)
         return PrimaryAction.None
     }
 
     /** `"S{n} E{n}"`, but unlike [CardFormatting.seasonEpisodeLabel] degrades to `null` the moment
      * either half is missing -- spec item 11 bans a partial "S2"/"E6" here.
      */
-    private fun strictSeasonEpisode(parentIndexNumber: Int?, indexNumber: Int?): String? =
-        if (parentIndexNumber != null && indexNumber != null) "S$parentIndexNumber E$indexNumber" else null
+    private fun strictSeasonEpisode(strings: UiStrings, parentIndexNumber: Int?, indexNumber: Int?): String? =
+        if (parentIndexNumber != null && indexNumber != null) {
+            strings.get(R.string.detail_season_episode, parentIndexNumber, indexNumber)
+        } else {
+            null
+        }
 
     private fun isSpecialEpisode(episode: Card): Boolean = episode.parentIndexNumber == 0
 
@@ -305,29 +312,29 @@ object DetailFormatting {
      * a mix that isn't exactly 6/8 channels falls to `"N CH"`. TODO: named layouts need
      * `ChannelLayout` added to the FFI's `MediaStreamInfo`.
      */
-    fun channelLabel(channels: Int?): String? = when (channels) {
-        1 -> "MONO"
-        2 -> "STEREO"
+    fun channelLabel(strings: UiStrings, channels: Int?): String? = when (channels) {
+        1 -> strings.get(R.string.detail_channels_mono)
+        2 -> strings.get(R.string.detail_channels_stereo)
         6 -> "5.1"
         8 -> "7.1"
-        else -> channels?.takeIf { it > 0 }?.let { "$it CH" }
+        else -> channels?.takeIf { it > 0 }?.let { strings.get(R.string.detail_channels_count, it) }
     }
 
     /**
      * `"AAC 5.1"`, `"TRUEHD 7.1 ATMOS"` -- codec with the channel layout appended, plus the
      * object-based format when the core found one (never repeated if the codec already names it).
      */
-    fun audioLabel(codec: String?, channels: Int?, spatial: AudioSpatialKind? = null): String? {
+    fun audioLabel(strings: UiStrings, codec: String?, channels: Int?, spatial: AudioSpatialKind? = null): String? {
         val name = codec?.takeIf { it.isNotBlank() }?.uppercase() ?: return null
         val suffix = when (spatial) {
             AudioSpatialKind.DOLBY_ATMOS -> "ATMOS"
             AudioSpatialKind.DTS_X -> "DTS:X"
             null -> null
         }?.takeUnless { name.contains(it) }
-        return listOfNotNull(name, channelLabel(channels), suffix).joinToString(" ")
+        return listOfNotNull(name, channelLabel(strings, channels), suffix).joinToString(" ")
     }
 
-    private fun formatMbps(bitRate: Int): String = String.format(Locale.US, "%.1f MBPS", bitRate / 1_000_000.0)
+    private fun formatMbps(bitRate: Int, locale: Locale): String = String.format(locale, "%.1f MBPS", bitRate / 1_000_000.0)
 
     /**
      * docs/11 item 1's field order: RESOLUTION │ VIDEO CODEC │ BIT DEPTH │ HDR │ AUDIO(+ch) │
@@ -336,7 +343,7 @@ object DetailFormatting {
      * available stand-in for an overall source bitrate. Unknown fields are omitted, never
      * placeholdered.
      */
-    fun specStripFields(detail: ItemDetail): List<SpecField> {
+    fun specStripFields(strings: UiStrings, detail: ItemDetail, locale: Locale = AppLocale.format): List<SpecField> {
         val video = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.VIDEO }
         val audio = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.AUDIO && it.isDefault }
             ?: detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.AUDIO }
@@ -348,9 +355,9 @@ object DetailFormatting {
             out += SpecField(value, classify(value))
         }
         hdrLabel(video?.videoRange, video?.videoRangeType)?.let { out += SpecField(it, classify(it)) }
-        audioLabel(audio?.codec, audio?.channels, audio?.audioSpatial)?.let { out += SpecField(it, classify(it)) }
+        audioLabel(strings, audio?.codec, audio?.channels, audio?.audioSpatial)?.let { out += SpecField(it, classify(it)) }
         video?.bitRate?.takeIf { it > 0 }?.let {
-            val value = formatMbps(it)
+            val value = formatMbps(it, locale)
             out += SpecField(value, classify(value))
         }
         containerLabel(detail.container)?.let { out += SpecField(it, classify(it)) }
@@ -404,7 +411,7 @@ object DetailFormatting {
         status: String?,
     ): String? {
         val fields = detailsFooterFields(itemType, genres, studios, officialRating, productionYear, endYear, status)
-        return fields.takeIf { it.isNotEmpty() }?.joinToString(DETAILS_SEPARATOR)?.uppercase(Locale.US)
+        return fields.takeIf { it.isNotEmpty() }?.joinToString(DETAILS_SEPARATOR)?.uppercaseUi()
     }
 
     // docs/11 tier 2 item 9: cast row.
@@ -527,38 +534,38 @@ object DetailFormatting {
         else -> null
     }
 
-    private val MEDIUM_DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.US)
+    private fun mediumDateFormat(locale: Locale): DateTimeFormatter = mediumDateFormatter(locale)
 
     /** `"Mar 6, 2014"` from an RFC3339 timestamp, `null` if absent/unparseable. Shared by
      * [runtimeAndDateLine] and [relativeAddedClause]'s "older than a month" fallback.
      */
-    fun shortDate(dateStr: String?): String? =
-        dateStr?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }?.let { MEDIUM_DATE_FORMAT.format(it) }
+    fun shortDate(dateStr: String?, locale: Locale = AppLocale.format): String? =
+        dateStr?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }?.let { mediumDateFormat(locale).format(it) }
 
     /** §3 item 7 / §2 item 5's episode-grid-cell/Up-Next-panel meta line: `"{runtime} · {date}"`,
      * dropping whichever half is missing.
      */
-    fun runtimeAndDateLine(runtimeTicks: Long?, premiereDate: String?): String? {
-        val runtimePart = runtimeTicks?.let { CardFormatting.formatRuntime(it) }
-        val datePart = shortDate(premiereDate)
+    fun runtimeAndDateLine(strings: UiStrings, runtimeTicks: Long?, premiereDate: String?, locale: Locale = AppLocale.format): String? {
+        val runtimePart = runtimeTicks?.let { CardFormatting.formatRuntime(strings, it) }
+        val datePart = shortDate(premiereDate, locale)
         return join(runtimePart, datePart, THIN_SEPARATOR)
     }
 
     /** §2 item 2's Episode eyebrow: `"{seriesName} · S{p} E{i}"`, dropping whichever half is
      * missing (reuses [CardFormatting.seasonEpisodeLabel]'s "never S? E?" rule).
      */
-    fun episodeEyebrow(seriesName: String?, parentIndexNumber: Int?, indexNumber: Int?): String? {
+    fun episodeEyebrow(strings: UiStrings, seriesName: String?, parentIndexNumber: Int?, indexNumber: Int?): String? {
         val namePart = seriesName?.takeIf { it.isNotBlank() }
-        val sePart = CardFormatting.seasonEpisodeLabel(parentIndexNumber, indexNumber)
+        val sePart = CardFormatting.seasonEpisodeLabel(strings, parentIndexNumber, indexNumber)
         return join(namePart, sePart, THIN_SEPARATOR)
     }
 
     /** §2 item 2's Episode header line as constituent parts -- docs/19 §1.5's [ItemBoundaryLine]
      * needs individual items to drop trailing ones whole.
      */
-    fun episodeHeaderItems(productionYear: Int?, runtimeTicks: Long?, officialRating: String?, genres: List<String>): List<String> {
+    fun episodeHeaderItems(strings: UiStrings, productionYear: Int?, runtimeTicks: Long?, officialRating: String?, genres: List<String>): List<String> {
         val yearPart = productionYear?.toString()
-        val runtimePart = runtimeTicks?.let { CardFormatting.formatRuntime(it) }
+        val runtimePart = runtimeTicks?.let { CardFormatting.formatRuntime(strings, it) }
         val ratingPart = officialRating?.takeIf { it.isNotBlank() }
         val genrePart = genres.filter { it.isNotBlank() }.takeIf { it.isNotEmpty() }?.joinToString(", ")
         return listOfNotNull(yearPart, runtimePart, ratingPart, genrePart)
@@ -567,8 +574,8 @@ object DetailFormatting {
     /** §2 item 2's Episode header line: `"{year} · {runtime} · {rating} · {genres}"`, each part
      * dropped when absent. Genres uncapped. Delegates to [episodeHeaderItems].
      */
-    fun episodeHeaderLine(productionYear: Int?, runtimeTicks: Long?, officialRating: String?, genres: List<String>): String? =
-        episodeHeaderItems(productionYear, runtimeTicks, officialRating, genres).takeIf { it.isNotEmpty() }?.joinToString(META_SEPARATOR)
+    fun episodeHeaderLine(strings: UiStrings, productionYear: Int?, runtimeTicks: Long?, officialRating: String?, genres: List<String>): String? =
+        episodeHeaderItems(strings, productionYear, runtimeTicks, officialRating, genres).takeIf { it.isNotEmpty() }?.joinToString(META_SEPARATOR)
 
     /**
      * §3 item 4's Series header line: `"{yearRange} · {n} seasons · {n} episodes · {rating} ·
@@ -577,6 +584,7 @@ object DetailFormatting {
      * clauses rather than placeholdering. Genres capped at 2.
      */
     fun seriesHeaderItems(
+        strings: UiStrings,
         productionYear: Int?,
         endYear: Int?,
         status: String?,
@@ -586,8 +594,8 @@ object DetailFormatting {
         genres: List<String>,
     ): List<String> {
         val yearPart = yearRangeLabel(productionYear, endYear, status)
-        val seasonPart = seasonCount?.takeIf { it > 0 }?.let { "$it season${if (it == 1) "" else "s"}" }
-        val episodePart = episodeCount?.takeIf { it > 0 }?.let { "$it episode${if (it == 1) "" else "s"}" }
+        val seasonPart = seasonCount?.takeIf { it > 0 }?.let { strings.plural(R.plurals.detail_season_count, it, it) }
+        val episodePart = episodeCount?.takeIf { it > 0 }?.let { strings.plural(R.plurals.detail_episode_count, it, it) }
         val ratingPart = officialRating?.takeIf { it.isNotBlank() }
         val genrePart = genres.filter { it.isNotBlank() }.take(2).takeIf { it.isNotEmpty() }?.joinToString(", ")
         return listOfNotNull(yearPart, seasonPart, episodePart, ratingPart, genrePart)
@@ -597,6 +605,7 @@ object DetailFormatting {
      * needs; this joins all of them verbatim.
      */
     fun seriesHeaderLine(
+        strings: UiStrings,
         productionYear: Int?,
         endYear: Int?,
         status: String?,
@@ -605,7 +614,7 @@ object DetailFormatting {
         officialRating: String?,
         genres: List<String>,
     ): String? =
-        seriesHeaderItems(productionYear, endYear, status, seasonCount, episodeCount, officialRating, genres)
+        seriesHeaderItems(strings, productionYear, endYear, status, seasonCount, episodeCount, officialRating, genres)
             .takeIf { it.isNotEmpty() }
             ?.joinToString(META_SEPARATOR)
 
@@ -615,27 +624,31 @@ object DetailFormatting {
      * badge's display register only -- the season chip itself still shows the server's name
      * verbatim.
      */
-    fun seasonSummaryLine(seasonName: String, episodes: List<Card>): String =
-        seasonSummaryItems(seasonName, episodes).joinToString(THIN_SEPARATOR)
+    fun seasonSummaryLine(strings: UiStrings, seasonName: String, episodes: List<Card>): String =
+        seasonSummaryItems(strings, seasonName, episodes).joinToString(THIN_SEPARATOR)
 
     /**
      * [seasonSummaryLine]'s three parts, unjoined -- docs/19 §1.5's [ItemBoundaryLine] drops them
      * end-first as the panel reflow narrows. Unlike every other `*Items` variant, this one is never
      * empty -- always exactly `[name, count, watched]`.
      */
-    fun seasonSummaryItems(seasonName: String, episodes: List<Card>): List<String> {
+    fun seasonSummaryItems(strings: UiStrings, seasonName: String, episodes: List<Card>): List<String> {
         val watched = episodes.count { it.played }
-        return listOf(seasonName.uppercase(Locale.US), countLabel(episodes.size, "EPISODE", "EPISODES"), "$watched WATCHED")
+        return listOf(
+            seasonName.uppercaseUi(),
+            strings.plural(R.plurals.detail_episode_count_caps, episodes.size, episodes.size),
+            strings.get(R.string.detail_watched_count, watched),
+        )
     }
 
     /** §4 item 7's file-size cell: `"7.2 GB"` / `"512 MB"` -- GB at one decimal once >= 1024MB,
      * else whole-number MB. Binary (1024-based) units. `null` for absent/non-positive.
      */
-    fun formatFileSize(bytes: Long?): String? {
+    fun formatFileSize(bytes: Long?, locale: Locale = AppLocale.format): String? {
         val value = bytes?.takeIf { it > 0 } ?: return null
         val megabytes = value / (1024.0 * 1024.0)
         return if (megabytes >= 1024.0) {
-            String.format(Locale.US, "%.1f GB", megabytes / 1024.0)
+            String.format(locale, "%.1f GB", megabytes / 1024.0)
         } else {
             "${megabytes.roundToLong()} MB"
         }
@@ -646,25 +659,32 @@ object DetailFormatting {
      * the bare [shortDate] once more than a month old. `null` when unparseable. Day boundaries use
      * each timestamp's own UTC-normalized date, not the system zone, keeping this deterministic.
      */
-    fun relativeAddedClause(dateCreated: String?, now: Instant = Instant.now()): String? {
+    fun relativeAddedClause(strings: UiStrings, dateCreated: String?, now: Instant = Instant.now(), locale: Locale = AppLocale.format): String? {
         val added = dateCreated?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() } ?: return null
         val addedDate = added.toLocalDate()
         val today = OffsetDateTime.ofInstant(now, ZoneOffset.UTC).toLocalDate()
         val days = ChronoUnit.DAYS.between(addedDate, today)
         return when {
-            days <= 0L -> "Today"
-            days == 1L -> "Yesterday"
-            days <= 30L -> "$days days ago"
-            else -> MEDIUM_DATE_FORMAT.format(added)
+            days <= 0L -> strings.get(R.string.detail_added_today)
+            days == 1L -> strings.get(R.string.detail_added_yesterday)
+            days <= 30L -> strings.plural(R.plurals.detail_added_days_ago, days.toInt(), days.toInt())
+            else -> mediumDateFormat(locale).format(added)
         }
     }
 
     /** §4 item 3's Movie eyebrow: `"{libraryName} · ADDED {clause}"`, uppercasing only the
      * generated clause -- [libraryName] stays exactly as given (never prettified).
      */
-    fun movieEyebrow(libraryName: String?, dateCreated: String?, now: Instant = Instant.now()): String? {
+    fun movieEyebrow(
+        strings: UiStrings,
+        libraryName: String?,
+        dateCreated: String?,
+        now: Instant = Instant.now(),
+        locale: Locale = AppLocale.format,
+    ): String? {
         val libraryPart = libraryName?.takeIf { it.isNotBlank() }
-        val addedPart = relativeAddedClause(dateCreated, now)?.let { "ADDED ${it.uppercase(Locale.US)}" }
+        val addedPart = relativeAddedClause(strings, dateCreated, now, locale)
+            ?.let { strings.get(R.string.detail_added_clause, it.uppercaseUi()) }
         return join(libraryPart, addedPart, THIN_SEPARATOR)
     }
 
@@ -684,11 +704,11 @@ object DetailFormatting {
     /** §4 item 6's STUDIO row: the first studio's name plus a "+N more" count -- never the whole
      * list verbatim (the panel's single-line budget can't fit it).
      */
-    fun studioSummary(studios: List<String>): String? {
+    fun studioSummary(strings: UiStrings, studios: List<String>): String? {
         val clean = studios.filter { it.isNotBlank() }
         if (clean.isEmpty()) return null
         val extra = clean.size - 1
-        return if (extra > 0) "${clean.first()} +$extra more" else clean.first()
+        return if (extra > 0) strings.plural(R.plurals.detail_studio_more, extra, clean.first(), extra) else clean.first()
     }
 
     // docs/19 §1.5 panel-open reflow: pure arithmetic backing [ItemBoundaryLine] and DetailScreen's

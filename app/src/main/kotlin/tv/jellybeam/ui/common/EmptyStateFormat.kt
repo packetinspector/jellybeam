@@ -1,6 +1,8 @@
 package tv.jellybeam.ui.common
 
 import java.net.URI
+import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
 
 /**
  * `host` or `host:port` for a saved server URL, shown verbatim (docs/brand.md §6.2/§6.3);
@@ -18,7 +20,11 @@ fun serverHostLabel(serverUrl: String?): String? {
 }
 
 /** The empty-library spec strip: `HOST:PORT │ N LIBRARIES │ 0 ITEMS` (§6.2), host omitted when unknown. */
-fun emptyLibrarySpecLine(host: String?, libraries: Int, items: Int): String {
-    val parts = listOfNotNull(host, countLabel(libraries, "LIBRARY", "LIBRARIES"), countLabel(items, "ITEM", "ITEMS"))
+fun emptyLibrarySpecLine(strings: UiStrings, host: String?, libraries: Int, items: Int): String {
+    val parts = listOfNotNull(
+        host,
+        strings.plural(R.plurals.common_library_count, libraries, libraries),
+        strings.plural(R.plurals.common_item_count, items, items),
+    )
     return parts.joinToString(" │ ")
 }

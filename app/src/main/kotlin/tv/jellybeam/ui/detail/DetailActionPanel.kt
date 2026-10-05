@@ -70,9 +70,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
-import java.util.Locale
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.focusKey
@@ -276,7 +276,7 @@ internal fun DetailActionPanel(
                         MenuLevel.FIRST -> Column {
                             var flatIndex = 0
                             menu.model.groups.forEachIndexed { groupIndex, groupModel ->
-                                HeadingBand(label = stringResource(groupLabelRes(groupModel.group)).uppercase(Locale.US), isFirst = groupIndex == 0)
+                                HeadingBand(label = stringResource(groupLabelRes(groupModel.group)).uppercaseUi(), isFirst = groupIndex == 0)
                                 groupModel.rows.forEach { row ->
                                     val index = flatIndex++
                                     if (confirm != null && row.action == confirm.action) {
@@ -307,11 +307,11 @@ internal fun DetailActionPanel(
                         // docs/19 §1.3/§1.5: unlike the first level, this one scrolls (up to 200
                         // rows); `PanelActionRow`'s `clickable` brings a focused row into view.
                         MenuLevel.COLLECTIONS -> Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                            HeadingBand(label = pluralStringResource(R.plurals.detail_menu_collections_count, collections.size, collections.size).uppercase(Locale.US), isFirst = true)
+                            HeadingBand(label = pluralStringResource(R.plurals.detail_menu_collections_count, collections.size, collections.size).uppercaseUi(), isFirst = true)
                             if (collectionRequesters.none { it != null }) {
                                 Box(Modifier.size(1.dp).focusRequester(collectionsAnchorRequester).focusable())
                             }
-                            val alreadyInLabel = stringResource(R.string.detail_menu_already_in).uppercase(Locale.US)
+                            val alreadyInLabel = stringResource(R.string.detail_menu_already_in).uppercaseUi()
                             collectionRows.forEachIndexed { index, row ->
                                 PanelActionRow(
                                     label = row.collection.name,
@@ -335,9 +335,9 @@ internal fun DetailActionPanel(
  */
 @Composable
 private fun PanelHeader(itemName: String, seasonNumber: Int?, level: MenuLevel) {
-    val actionsLabel = stringResource(R.string.detail_menu_kicker_actions).uppercase(Locale.US)
-    val seasonLabel = seasonNumber?.let { stringResource(R.string.detail_menu_kicker_season, it).uppercase(Locale.US) }
-    val collectionsLabel = stringResource(R.string.detail_menu_collections_header).uppercase(Locale.US)
+    val actionsLabel = stringResource(R.string.detail_menu_kicker_actions).uppercaseUi()
+    val seasonLabel = seasonNumber?.let { stringResource(R.string.detail_menu_kicker_season, it).uppercaseUi() }
+    val collectionsLabel = stringResource(R.string.detail_menu_collections_header).uppercaseUi()
     val kicker = remember(level, actionsLabel, seasonLabel, collectionsLabel) {
         buildAnnotatedString {
             if (level == MenuLevel.COLLECTIONS) {
@@ -446,10 +446,10 @@ private fun PanelActionRow(
  */
 @Composable
 private fun footerText(level: MenuLevel, confirmVisible: Boolean, actionRowCount: Int): AnnotatedString {
-    val backToCancel = stringResource(R.string.detail_menu_footer_back_to_cancel).uppercase(Locale.US)
-    val backForActions = stringResource(R.string.detail_menu_footer_back_for_actions).uppercase(Locale.US)
-    val backToClose = stringResource(R.string.detail_menu_footer_close).uppercase(Locale.US)
-    val actionsCount = pluralStringResource(R.plurals.detail_menu_footer_actions_count, actionRowCount, actionRowCount).uppercase(Locale.US)
+    val backToCancel = stringResource(R.string.detail_menu_footer_back_to_cancel).uppercaseUi()
+    val backForActions = stringResource(R.string.detail_menu_footer_back_for_actions).uppercaseUi()
+    val backToClose = stringResource(R.string.detail_menu_footer_close).uppercaseUi()
+    val actionsCount = pluralStringResource(R.plurals.detail_menu_footer_actions_count, actionRowCount, actionRowCount).uppercaseUi()
     return remember(level, confirmVisible, actionRowCount, backToCancel, backForActions, backToClose, actionsCount) {
         buildAnnotatedString {
             when {

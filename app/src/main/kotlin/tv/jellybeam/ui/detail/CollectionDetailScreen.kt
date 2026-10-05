@@ -59,6 +59,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.cards.POSTER_CELL_WIDTH
 import tv.jellybeam.ui.cards.PosterCard
@@ -108,6 +109,7 @@ internal fun CollectionDetailScreen(
     val cardWindowActive = contentEndInset > 0.dp
     val members = state.members
     val play = state.collectionPlay
+    val strings = rememberUiStrings()
 
     // The pill resolves with the members (one state write), so [ready] gates the seed on it.
     val seedTarget = remember(card.id, play != null) {
@@ -246,7 +248,7 @@ internal fun CollectionDetailScreen(
                 )
                 if (state.membersSettled) {
                     BasicText(
-                        text = CollectionFormatting.metaLine(members),
+                        text = CollectionFormatting.metaLine(strings, members),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna2, fontSize = 13.sp),
@@ -317,6 +319,7 @@ private fun MemberRow(
     // docs/19 §1.5 FIX D: whole poster cards only while the panel is open.
     val window = rememberCardWindow(members, listState, contentWidth, POSTER_CELL_WIDTH, MEMBER_ROW_GAP, active)
     val upNextLabel = stringResource(R.string.detail_up_next)
+    val strings = rememberUiStrings()
     CompositionLocalProvider(LocalBringIntoViewSpec provides rememberShelfBringIntoViewSpec(startMargin = PAGE_MARGIN)) {
         LazyRow(
             state = listState,
@@ -334,7 +337,7 @@ private fun MemberRow(
                     modifier = Modifier
                         .focusKey(memory, "$MEMBER_KEY_PREFIX${member.id}")
                         .onFocusChanged { isFocused = it.isFocused },
-                    metaOverride = CollectionFormatting.cardSubline(member, seasonCounts[member.id]),
+                    metaOverride = CollectionFormatting.cardSubline(strings, member, seasonCounts[member.id]),
                     indicatorOverride = if (CollectionFormatting.isWatched(member)) WatchIndicator.WatchedCheck else null,
                     topStartTag = if (member.id == upNextId) upNextLabel else null,
                 )
@@ -353,7 +356,8 @@ private fun CollectionPlayPill(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    val subtext = CollectionFormatting.playSubtext(play)
+    val strings = rememberUiStrings()
+    val subtext = CollectionFormatting.playSubtext(strings, play)
     // Keyed on the target too: a reload can retarget a focused pill, and the old item's preload must stop.
     // Cleans up only what it started, so a background page never cancels another page's preload.
     DisposableEffect(play.targetId, isFocused) {
@@ -377,7 +381,7 @@ private fun CollectionPlayPill(
                 .padding(horizontal = ACTION_BUTTON_HPADDING),
         ) {
             BasicText(
-                text = CollectionFormatting.playLabel(play),
+                text = CollectionFormatting.playLabel(strings, play),
                 style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = JellybeamTheme.Notte, fontSize = 15.sp),
             )
             subtext?.let {

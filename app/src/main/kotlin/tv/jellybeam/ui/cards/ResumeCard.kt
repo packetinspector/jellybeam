@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.i18n.rememberUiStrings
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
 
@@ -41,9 +42,10 @@ fun ResumeCard(
     val artSource = CardFormatting.resumeArtSource(card)
     val progress = CardFormatting.watchProgress(card)
     val indicator = CardFormatting.watchIndicator(card, progress)
-    val timingLabel = CardFormatting.resumeTimingLabel(card)
-    val seriesSeasonLine = CardFormatting.resumeSeriesSeasonLine(card)
-    val title = if (isEpisode) CardFormatting.episodeTitle(card.name, card.indexNumber) else card.name
+    val strings = rememberUiStrings()
+    val timingLabel = CardFormatting.resumeTimingLabel(strings, card)
+    val seriesSeasonLine = CardFormatting.resumeSeriesSeasonLine(strings, card)
+    val title = if (isEpisode) CardFormatting.episodeTitle(strings, card.name, card.indexNumber) else card.name
 
     Column(
         modifier = modifier.clickable(onClick = onClick),

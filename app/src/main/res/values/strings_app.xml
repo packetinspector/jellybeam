@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- docs/27 §3: text for the errors, About formatting and Updates areas that code builds outside Compose. -->
+<resources>
+    <string name="error_not_signed_in">Not signed in.</string>
+    <string name="error_library_not_ready">Library isn\'t ready yet.</string>
+    <string name="error_authorization_expired">Authorization expired.</string>
+    <string name="error_would_transcode">Direct Play isn\'t possible for this file on this TV: %1$s. Set Quality to Auto in Settings › Playback to let the server transcode it.</string>
+    <string name="error_server_removed">That server is no longer available.</string>
+    <string name="error_discover_not_set_up">Discover isn\'t set up yet. Connect it from Settings.</string>
+    <string name="error_playback_session_stale">Playback session is no longer current.</string>
+    <string name="error_invalid_server_address">That doesn\'t look like a server address. Enter it the way your browser shows it, like http://192.0.2.10:8096.</string>
+    <string name="error_server_unreachable">Couldn\'t reach %1$s (%2$s). Check the address and port, and that the server is running.</string>
+    <string name="error_unreachable_name_not_resolved">the name could not be resolved</string>
+    <string name="error_unreachable_connection_refused">connection refused</string>
+    <string name="error_unreachable_timed_out">timed out</string>
+    <string name="error_unreachable_network_unreachable">network unreachable</string>
+    <string name="error_https_not_offered">%1$s isn\'t answering over HTTPS. Try the same address with http:// instead.</string>
+    <string name="error_not_jellyfin_server">%1$s answered, but it isn\'t a Jellyfin server (HTTP %2$d). Check the port; Jellyfin\'s default is 8096.</string>
+    <string name="error_invalid_credentials">Wrong username or password.</string>
+    <string name="error_seerr_wrong_email_or_password">Wrong email or password. A Seerr account signs in with its email address.</string>
+    <string name="error_seerr_api_key_rejected">The server rejected that API key.</string>
+    <string name="error_seerr_media_server_sign_in">Seerr couldn\'t sign in to its own Jellyfin server, so it can\'t check this account. Jellyfin 12 needs Seerr 3.0 or newer; otherwise check Seerr\'s Jellyfin settings.</string>
+    <string name="error_seerr_new_users_blocked">Seerr doesn\'t have this Jellyfin user yet and new sign-ins are turned off there. Sign in to Seerr in a browser once, or allow new Jellyfin sign-ins in Seerr.</string>
+    <string name="error_seerr_method_disabled">Seerr has this sign-in method turned off. Try another method.</string>
+    <string name="error_seerr_unreachable">Couldn\'t reach Seerr. Check that it\'s running, or its address in Settings.</string>
+    <string name="error_seerr_unreachable_reason">Couldn\'t reach Seerr (%1$s). Check that it\'s running, or its address in Settings.</string>
+    <string name="error_seerr_refused">Seerr refused the sign-in.</string>
+    <string name="error_seerr_refused_detail">Seerr refused the sign-in: %1$s</string>
+    <string name="error_update_storage_unavailable">Update storage is unavailable</string>
+
+    <string name="signin_error_server_address_empty">Enter a server address first.</string>
+    <string name="signin_error_quick_connect_disabled">Quick Connect is disabled on this server.</string>
+
+    <string name="settings_about_size_bytes">%1$d B</string>
+    <string name="settings_about_size_kb">%1$.1f KB</string>
+    <string name="settings_about_size_mb">%1$.1f MB</string>
+    <string name="settings_about_size_gb">%1$.1f GB</string>
+    <string name="settings_about_size_tb">%1$.1f TB</string>
+    <string name="settings_about_android_value">%1$s · API %2$d</string>
+
+    <plurals name="updates_checked_minutes_ago">
+        <item quantity="one">%1$d min ago</item>
+        <item quantity="other">%1$d min ago</item>
+    </plurals>
+    <plurals name="updates_checked_hours_ago">
+        <item quantity="one">%1$d h ago</item>
+        <item quantity="other">%1$d h ago</item>
+    </plurals>
+    <plurals name="updates_checked_days_ago">
+        <item quantity="one">%1$d d ago</item>
+        <item quantity="other">%1$d d ago</item>
+    </plurals>
+
+    <string name="updates_failure_network">Connection failed. Try again.</string>
+    <string name="updates_failure_rate_limited">GitHub is busy. Try again later.</string>
+    <string name="updates_failure_unsupported_release">This release does not support secure in-app updates.</string>
+    <string name="updates_failure_incompatible">This update is not compatible with this device.</string>
+    <string name="updates_failure_verification">The update could not be verified. Download it again.</string>
+    <string name="updates_failure_storage">Not enough storage for this update.</string>
+    <string name="updates_failure_installation">Android could not install the update. Try again.</string>
+    <string name="updates_failure_withdrawn">The release is no longer available for installation.</string>
+</resources>

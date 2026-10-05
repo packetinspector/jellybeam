@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,6 +54,7 @@ data class DiscoverGridUiState(
  */
 class DiscoverGridViewModel(
     private val gateway: CoreGateway,
+    private val strings: UiStrings,
     private val kind: SeerrBrowseKind,
     /** Pre-selects a genre (opened from a genre link), seeded into the first fetch rather than a
      * follow-up [selectGenre] call so opening pre-filtered never double-fetches page 1.
@@ -114,7 +116,7 @@ class DiscoverGridViewModel(
                     it.copy(
                         isLoading = false,
                         notConfigured = e is CoreException.SeerrNotConfigured,
-                        error = e.displayMessage(),
+                        error = e.displayMessage(strings),
                     )
                 }
             }
@@ -192,12 +194,13 @@ class DiscoverGridViewModel(
 
 class DiscoverGridViewModelFactory(
     private val gateway: CoreGateway,
+    private val strings: UiStrings,
     private val kind: SeerrBrowseKind,
     private val initialGenre: SeerrGenre? = null,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(DiscoverGridViewModel::class.java))
-        return DiscoverGridViewModel(gateway, kind, initialGenre) as T
+        return DiscoverGridViewModel(gateway, strings, kind, initialGenre) as T
     }
 }
