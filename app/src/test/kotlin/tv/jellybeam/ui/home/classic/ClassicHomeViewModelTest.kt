@@ -58,6 +58,7 @@ class ClassicHomeViewModelTest {
             "Continue Watching",
             "Next Up",
             "Favorites",
+            resumeAsPosters = false,
         ) { "Latest in $it" }
 
         assertEquals(
@@ -68,6 +69,24 @@ class ClassicHomeViewModelTest {
             listOf(ShelfKind.RESUME, ShelfKind.RESUME, ShelfKind.POSTER, ShelfKind.POSTER, ShelfKind.POSTER),
             shelves.map { it.kind },
         )
+    }
+
+    @Test
+    fun `resume posters turns only Continue Watching and Next Up into poster shelves`() {
+        val shelves = buildShelves(
+            listOf(
+                HomeShelf(ShelfSource.ContinueWatching, listOf(testCard(id = "r1"))),
+                HomeShelf(ShelfSource.NextUp, listOf(testCard(id = "n1"))),
+                latestShelf("v1", "Movies", listOf(testCard(id = "m1"))),
+            ),
+            "Continue Watching",
+            "Next Up",
+            "Favorites",
+            resumeAsPosters = true,
+        ) { "Latest in $it" }
+
+        assertEquals(listOf(ShelfKind.POSTER, ShelfKind.POSTER, ShelfKind.POSTER), shelves.map { it.kind })
+        assertEquals(listOf("resume", "next-up", "latest:v1"), shelves.map { it.id })
     }
 
     @Test

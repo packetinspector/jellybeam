@@ -13,18 +13,20 @@ data class ShelfSpec(val id: String, val title: String, val items: List<Card>, v
 /**
  * docs/25 §3: the core already decided which shelves show and in what order; this only gives each
  * one its localised title and card treatment. Pulled out of the Composable file so it's
- * plain-JVM-testable.
+ * plain-JVM-testable. [resumeAsPosters] mirrors `Settings.homeResumePosters` (docs/07 §1).
  */
 fun buildShelves(
     shelves: List<HomeShelf>,
     continueWatchingTitle: String,
     nextUpTitle: String,
     favoritesTitle: String,
+    resumeAsPosters: Boolean,
     latestInTitle: (viewName: String) -> String,
 ): List<ShelfSpec> = shelves.map { shelf ->
+    val resumeKind = if (resumeAsPosters) ShelfKind.POSTER else ShelfKind.RESUME
     when (val source = shelf.source) {
-        ShelfSource.ContinueWatching -> ShelfSpec(source.key(), continueWatchingTitle, shelf.cards, ShelfKind.RESUME)
-        ShelfSource.NextUp -> ShelfSpec(source.key(), nextUpTitle, shelf.cards, ShelfKind.RESUME)
+        ShelfSource.ContinueWatching -> ShelfSpec(source.key(), continueWatchingTitle, shelf.cards, resumeKind)
+        ShelfSource.NextUp -> ShelfSpec(source.key(), nextUpTitle, shelf.cards, resumeKind)
         ShelfSource.Favorites -> ShelfSpec(source.key(), favoritesTitle, shelf.cards, ShelfKind.POSTER)
         is ShelfSource.Latest -> ShelfSpec(source.key(), latestInTitle(source.viewName), shelf.cards, ShelfKind.POSTER)
     }

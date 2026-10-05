@@ -21,7 +21,7 @@ Shelves beyond the first two mount progressively, one per frame, once initial fo
 Hero: item = shelves[0].items[0]. Full-bleed backdrop (own tag, else ancestor), 42% viewport height, min 320px. Eyebrow = series name (episodes only); title = item name; metadata = `"S{s} E{e} · {runtime} · {year}"` (episode) / `"{year}"` (movie). Resume + "More Info" buttons.
 
 Card sizes:
-- Resume shelves (Continue Watching, Next Up): mixed-aspect single row, row height solved so 5.5 cards fit (`RESUME_CARDS_ACROSS = 5.5` — 5 visible + bleed). Episodes 16:9, movies 2:3 at the same height. Width clamp [180, 320]px.
+- Resume shelves (Continue Watching, Next Up): mixed-aspect single row, row height solved so 5.5 cards fit (`RESUME_CARDS_ACROSS = 5.5` — 5 visible + bleed). Episodes 16:9, movies 2:3 at the same height. Width clamp [180, 320]px. With the Home setting "Posters for Continue Watching & Next Up" (`home_resume_posters`, default off) both shelves draw the Latest poster cells instead: series poster for episodes, progress bar, S·E tag.
 - Favorites and Latest shelves: uniform 2:3 poster, `CELL_WIDTH = 160`px.
 
 Poster-slot image requests are bucketed to the nearest of a small fixed set of server widths (`CardFormatting.bucketedImageWidth`) rather than each surface's exact drawn size, so Home's POSTER shelf, the library grid, and Detail's hero-poster placeholder key all share one 240-wide rendition instead of fragmenting the server's resize cache.

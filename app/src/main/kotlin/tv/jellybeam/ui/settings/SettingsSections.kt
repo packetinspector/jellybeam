@@ -101,7 +101,8 @@ private fun nextUpCutoffChipLabel(days: UInt?): String = when (days) {
 }
 
 /**
- * Home section: Next Up cutoff + rewatching, per-library Home visibility, shelf size, "hide
+ * Home section: Next Up cutoff + rewatching, per-library Home visibility, shelf size, resume
+ * posters, "hide
  * watched from Latest", and the startup screen picker, grouped into "Next Up" and "Libraries on Home" subgroups.
  * `showVirtualEpisodes` lives in [LibrarySectionContent] instead since it affects detail pages,
  * not Home.
@@ -163,6 +164,13 @@ internal fun HomeSectionContent(state: SettingsUiState, viewModel: SettingsViewM
             selected = settings.homeShelfSize,
             onSelect = viewModel::selectHomeShelfSize,
             chipLabel = { size -> size.toString() },
+        )
+        ToggleRow(
+            label = stringResource(R.string.settings_home_resume_posters),
+            description = stringResource(R.string.settings_desc_home_resume_posters),
+            value = settings.homeResumePosters,
+            onToggle = viewModel::toggleHomeResumePosters,
+            key = "home/resume_posters",
         )
         ToggleRow(
             label = stringResource(R.string.settings_hide_watched_in_latest),

@@ -346,6 +346,11 @@ pub struct Settings {
     #[serde(default = "default_home_show_favorites")]
     #[uniffi(default = true)]
     pub home_show_favorites: bool,
+    /// docs/07 §1: Continue Watching and Next Up draw 2:3 posters instead of 16:9 thumbnails,
+    /// which can spoil an unwatched episode. Off by default, today's thumbnail rows.
+    #[serde(default)]
+    #[uniffi(default = false)]
+    pub home_resume_posters: bool,
     /// Seek-back magnitude, in seconds. One of Kotlin's skip-length presets
     /// by convention, not validated as such here.
     #[serde(default = "default_skip_back_secs")]
@@ -490,6 +495,7 @@ impl Default for Settings {
             startup_screen_view_id: None,
             home_shelf_size: default_home_shelf_size(),
             home_show_favorites: default_home_show_favorites(),
+            home_resume_posters: false,
             skip_back_secs: default_skip_back_secs(),
             skip_forward_secs: default_skip_forward_secs(),
             language: LanguageSettings::default(),
@@ -622,6 +628,7 @@ mod tests {
             startup_screen_view_id: Some("view-1".to_string()),
             home_shelf_size: 30,
             home_show_favorites: false,
+            home_resume_posters: true,
             skip_back_secs: 15,
             skip_forward_secs: 30,
             language: LanguageSettings {
@@ -707,6 +714,7 @@ mod tests {
         assert!(settings.startup_screen_view_id.is_none());
         assert_eq!(settings.home_shelf_size, 20);
         assert!(settings.home_show_favorites);
+        assert!(!settings.home_resume_posters);
         assert!(settings.language.audio.is_none());
         assert!(settings.language.subtitle.is_none());
         assert_eq!(settings.subtitle_scale, 1.0);
@@ -823,6 +831,8 @@ mod tests {
         assert_eq!(loaded.home_shelf_size, 20);
         // Absent from the old file: the shelf shows, not hides.
         assert!(loaded.home_show_favorites);
+        // Absent from the old file: resume shelves keep thumbnails.
+        assert!(!loaded.home_resume_posters);
         assert!(loaded.autoplay_enabled);
         // Missing field falls back to the playback-policy default, not 0.
         assert_eq!(

@@ -131,6 +131,7 @@ fun defaultSettings(): Settings = Settings(
     startupScreenViewId = null,
     homeShelfSize = 20u,
     homeShowFavorites = true,
+    homeResumePosters = false,
     skipBackSecs = 10u,
     skipForwardSecs = 10u,
     language = LanguageSettings(audio = null, subtitle = null, subtitleMode = SubtitleModeSetting.DEFAULT),
@@ -292,6 +293,8 @@ class SettingsViewModel(
     fun toggleHideWatchedInLatest() = updateSettings { it.copy(hideWatchedInLatest = !it.hideWatchedInLatest) }
 
     fun toggleHomeShowFavorites() = updateSettings { it.copy(homeShowFavorites = !it.homeShowFavorites) }
+
+    fun toggleHomeResumePosters() = updateSettings { it.copy(homeResumePosters = !it.homeResumePosters) }
 
     fun toggleLibraryVisibility(viewId: String) = updateSettings { settings ->
         settings.copy(hiddenLibraryIds = toggleHiddenLibrary(settings.hiddenLibraryIds, viewId))

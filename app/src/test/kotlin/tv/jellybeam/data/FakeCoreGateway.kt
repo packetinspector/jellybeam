@@ -78,6 +78,7 @@ fun defaultTestSettings(): Settings = Settings(
     hideWatchedInLatest = false,
     startupScreenViewId = null,
     homeShelfSize = 20u,
+    homeResumePosters = false,
     skipBackSecs = 10u,
     skipForwardSecs = 10u,
     language = LanguageSettings(audio = null, subtitle = null, subtitleMode = SubtitleModeSetting.DEFAULT),

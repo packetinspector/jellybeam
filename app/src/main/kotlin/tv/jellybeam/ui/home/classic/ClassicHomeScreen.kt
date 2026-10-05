@@ -426,8 +426,9 @@ internal fun ClassicHomeScreen(
     val nextUpTitle = stringResource(R.string.shelf_next_up)
     val favoritesTitle = stringResource(R.string.shelf_favorites)
     val latestInTemplate = stringResource(R.string.shelf_latest_in)
-    val shelves = remember(state.shelves) {
-        buildShelves(state.shelves, continueWatchingTitle, nextUpTitle, favoritesTitle) { viewName ->
+    val resumeAsPosters = chrome.resumeAsPosters
+    val shelves = remember(state.shelves, resumeAsPosters) {
+        buildShelves(state.shelves, continueWatchingTitle, nextUpTitle, favoritesTitle, resumeAsPosters) { viewName ->
             String.format(latestInTemplate, viewName)
         }
     }

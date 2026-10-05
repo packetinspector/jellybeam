@@ -213,6 +213,17 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `the resume posters toggle flips the home setting`() = runTest {
+        val gateway = FakeCoreGateway(settings = defaultTestSettings().copy(homeResumePosters = false))
+        val viewModel = SettingsViewModel(gateway)
+
+        viewModel.toggleHomeResumePosters()
+
+        assertEquals(true, viewModel.state.value.settings.homeResumePosters)
+        assertEquals(true, gateway.setSettingsCalls.single().homeResumePosters)
+    }
+
+    @Test
     fun `the favorites row toggle flips the home setting`() = runTest {
         val gateway = FakeCoreGateway(settings = defaultTestSettings().copy(homeShowFavorites = true))
         val viewModel = SettingsViewModel(gateway)

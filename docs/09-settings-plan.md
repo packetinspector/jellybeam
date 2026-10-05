@@ -32,6 +32,8 @@ the in-memory state and mirror side effects.
   resume, next_up, favorites and every latest shelf in home_snapshot.
 - `home_show_favorites: bool` (default true) → whether home_snapshot returns
   the Favorites shelf; the drawer's Favorites entry ignores it (docs/07 §5).
+- `home_resume_posters: bool` (default false) → Kotlin-only: Continue Watching
+  and Next Up draw poster cells instead of 16:9 thumbnails (docs/07 §1).
 - `startup_screen: Option<String>` (view id; None = Home) — Kotlin resolves at
   launch, stale id falls back to Home (docs/07 §5).
 - `skip_back_secs/skip_forward_secs: u32` (SkipLengthPrefs semantics; presets

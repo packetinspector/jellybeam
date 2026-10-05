@@ -331,6 +331,14 @@ class HomeFeedTest {
     }
 
     @Test
+    fun `home state mirrors the resume posters setting`() = runTest {
+        val gateway = FakeHomeGateway(settingsResult = tv.jellybeam.data.defaultTestSettings().copy(homeResumePosters = true))
+        withFeed(gateway) { feed ->
+            assertTrue(feed.state.value.chrome.resumeAsPosters)
+        }
+    }
+
+    @Test
     fun `idle status reads Loading before the still-loading escalation`() {
         assertEquals("Loading…", loadingStatusText(SyncStatus.Idle, tickCount = 0))
         assertEquals("Loading…", loadingStatusText(SyncStatus.Idle, tickCount = 1))

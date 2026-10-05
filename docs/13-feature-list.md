@@ -21,7 +21,8 @@ session resolves.
 **Browsing & library** — mirror-backed instant browse everywhere (local SQLite
 mirror, no server round-trip for navigation); Home shelves (resume, next-up,
 favorites, latest, per-library visibility; a user-set shelf size caps every row,
-and Next Up never repeats a Continue Watching title); Favorites (docs/16 §2.7):
+and Next Up never repeats a Continue Watching title; an opt-in setting draws
+Continue Watching and Next Up as spoiler-free posters instead of thumbnails); Favorites (docs/16 §2.7):
 a Home row of your favorite movies, shows, seasons, episodes and collections,
 most recently played first, and a Favorites page under Home in the drawer while
 any exist, the same sortable grid with a Type filter; a favorited episode shows
@@ -321,7 +322,7 @@ payload.
 `set_settings`, tolerant load/migration, atomic file replacement and ordered
 Settings-screen saves); Home section (Next Up cutoff
 presets + rewatching toggle, per-library Home visibility, shelf size (10/20/30,
-default 20, every Home row), Favorites row toggle, hide-watched-in-Latest,
+default 20, every Home row), resume-shelf posters toggle, Favorites row toggle, hide-watched-in-Latest,
 startup screen picker, clock toggle, show/hide missing episodes); Playback
 section (skip back/forward, Quality chips (Direct Play / Auto / 20 / 8 / 3
 Mbps, default Direct Play), autoplay enabled + delay, mini player toggle

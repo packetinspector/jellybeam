@@ -54,6 +54,8 @@ data class HomeChrome(
     val syncProgressText: String? = null,
     /** Mirrors [uniffi.jellybeam_core.Settings.showClock]; refreshed with each snapshot. */
     val showClock: Boolean = true,
+    /** Mirrors [uniffi.jellybeam_core.Settings.homeResumePosters]; refreshed with each snapshot. */
+    val resumeAsPosters: Boolean = false,
     /** `host[:port]` of the active server for the empty-library strip; loaded only when that
      * state shows, so the hot refresh path stays untouched (docs/10).
      */
@@ -222,6 +224,7 @@ class HomeFeed<T : Any, U>(
                     isLoading = false,
                     views = reuseIfUnchanged(current.chrome.views, views),
                     showClock = settings.showClock,
+                    resumeAsPosters = settings.homeResumePosters,
                 ),
                 content = incoming?.let { reduce(current.content, it) } ?: current.content,
             )
