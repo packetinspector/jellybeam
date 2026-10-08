@@ -4,17 +4,26 @@ import tv.jellybeam.AppGraph
 import tv.jellybeam.perf.PerfAccumulator
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.authorizationRecoveryCoordinator
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicLong
+import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
@@ -24,6 +33,7 @@ import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.DeviceCaps
 import uniffi.jellybeam_core.DiscoveredServer
 import uniffi.jellybeam_core.EpisodeNeighbors
+import uniffi.jellybeam_core.FailedTrackFfi
 import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.GridCounts
 import uniffi.jellybeam_core.GridFilters
@@ -37,12 +47,15 @@ import uniffi.jellybeam_core.JellybeamCoreInterface
 import uniffi.jellybeam_core.LibraryGridPrefs
 import uniffi.jellybeam_core.LiveSort
 import uniffi.jellybeam_core.MediaSegment
+import uniffi.jellybeam_core.PersonPage
 import uniffi.jellybeam_core.PlaybackOsdDetail
 import uniffi.jellybeam_core.PlaybackPlan
+import uniffi.jellybeam_core.PlaybackRequest
 import uniffi.jellybeam_core.QuickConnectSession
 import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SeerrBrowseFilters
 import uniffi.jellybeam_core.SeerrBrowseKind
+import uniffi.jellybeam_core.SeerrCard
 import uniffi.jellybeam_core.SeerrGenre
 import uniffi.jellybeam_core.SeerrHome
 import uniffi.jellybeam_core.SeerrMediaType
@@ -60,6 +73,7 @@ import uniffi.jellybeam_core.Settings
 import uniffi.jellybeam_core.SortOrder
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SyncStatus
+import uniffi.jellybeam_core.TitleTmdbRef
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
@@ -236,7 +250,7 @@ interface CoreGateway {
      * (docs/11 tier 1 item 20).
      */
     @Throws(CoreException::class)
-    suspend fun getItemDetail(itemId: String): ItemDetail
+    suspend fun getItemDetail(itemId: String, accountEpoch: ULong? = null): ItemDetail
 
     /** Mirror-only lookup of one item's full [Card] by bare id, `null` if not in the local mirror.
      * Backs Discover's "Go to library" routing (docs/14-seerr-discover.md).
@@ -244,9 +258,13 @@ interface CoreGateway {
     @Throws(CoreException::class)
     suspend fun cardById(itemId: String): Card?
 
+    /** [cardById] for many ids in one call: the mirror's cards in the order asked, unknown ids dropped. */
+    @Throws(CoreException::class)
+    suspend fun cardsByIds(itemIds: List<String>): List<Card>
+
     /** Narrow post-load stream/chapter enrichment; never collector metadata. */
     @Throws(CoreException::class)
-    suspend fun getPlaybackOsdDetail(itemId: String): PlaybackOsdDetail
+    suspend fun getPlaybackOsdDetail(itemId: String, accountEpoch: ULong? = null): PlaybackOsdDetail
 
     /** The "Similar Titles" row (docs/11 tier 2 item 13): up to [limit] [Card]s from a live,
      * non-mirror-backed `GetSimilar` call, fetched alongside the Detail paint.
@@ -257,7 +275,7 @@ interface CoreGateway {
     /** Skip-intro/credits markers for [itemId] (docs/12 "Skip intro/credits"). Fails open to
      * an empty list; a markers fetch must never block or error out playback.
      */
-    suspend fun getMediaSegments(itemId: String): List<MediaSegment>
+    suspend fun getMediaSegments(itemId: String, accountEpoch: ULong? = null): List<MediaSegment>
 
     /** Pure delegate to `outro_start_secs_from_segments`: the Outro segment's start (seconds)
      * within [segments], if any. No I/O; not `suspend`.
@@ -274,25 +292,74 @@ interface CoreGateway {
      */
     suspend fun setSettings(settings: Settings)
 
-    fun imageUrl(itemId: String, kind: ImageKind, tag: String, maxWidth: UInt): String?
+    fun imageUrl(itemId: String, kind: ImageKind, tag: String, maxWidth: UInt, accountEpoch: ULong? = null): String?
+
+    /** docs/18 §2.1: the next playback request, minted on the caller's main thread before any
+     * dispatch so the core admits requests in viewer order, under [accountEpoch] (a playback
+     * continuing on its own account) or else the current one. Account-bound calls take the same
+     * `accountEpoch`; `null` is the current account.
+     */
+    fun mintPlaybackRequest(accountEpoch: ULong? = null): PlaybackRequest
+
+    /** docs/18 §2.1: the core's account epoch, updated as each account call returns. */
+    val accountEpoch: StateFlow<ULong>
+
+    /** docs/18 §2.1: the epoch a playback kept on its own account across a change still owns,
+     * updated before [accountEpoch]; it can clear without the epoch moving (its account removed).
+     */
+    val parkedEpoch: StateFlow<ULong?>
+
+    /** docs/18 §2.1: the saved account to re-authorize for a token [rejected] was issued to -- while
+     * the app uses it (browsed, or a playback runs or negotiates on it), or, for the player's own
+     * [failedPlayback], while it is saved; `null` otherwise.
+     */
+    suspend fun reauthorizationAccount(rejected: AccountIdentity, failedPlayback: Boolean): AccountInfo?
+
+    /** docs/18 §2.1: whether a request minted under [accountEpoch] still owns playback: the current
+     * account's, or a playback kept on its own account across a change. Main-thread safe: no FFI.
+     */
+    fun playbackOwnershipOpen(accountEpoch: ULong): Boolean
+
+    /** docs/18 §2.1: suspends while any account call is in flight, so a playback result is never
+     * judged between the core's account reset and the epoch update; returns at once otherwise.
+     */
+    suspend fun awaitAccountCalls()
+
+    /** docs/18 §2.1: suspends until the first account call (the launch restore) has returned, so the
+     * first playback request carries the epoch the core will hold.
+     */
+    suspend fun awaitAccountRestored()
+
+    /** Whether the launch restore has returned, without suspending. */
+    fun accountRestoredNow(): Boolean
 
     /** Negotiates playback for [itemId] and starts a fresh reporting session. Direct Play only
      * (CLAUDE.md hard rule): throws [CoreException.WouldTranscode] instead of returning a plan.
      * [startFromBeginning] (docs/11 item 11 pill) ignores any saved resume position.
      */
     @Throws(CoreException::class)
-    suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean): PlaybackPlan
+    suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean, request: PlaybackRequest): PlaybackPlan
 
     /**
      * The Auto/Cap quality modes' one fallback per item (docs/18 §1/§2): renegotiates [itemId]
      * as a server transcode from [positionTicks] after direct play proves unplayable. [reason]
      * is free text surfaced via [tv.jellybeam.player.PlaybackUiState.transcodeReason]. Refuses with
      * [CoreException.WouldTranscode] when `Settings.playbackQuality` is `DirectPlay`.
-     * [playSessionId] guards staleness (§2): throws [CoreException.StalePlaybackSession] if
-     * superseded.
+     * Also renegotiates a playing transcode for a new subtitle choice (§3.1): [failed] is the
+     * session's fallback cause, if any, and [subtitleStreamIndex] the stream to name (`-1` none).
+     * [playSessionId] and [request] guard staleness (§2.1): throws
+     * [CoreException.StalePlaybackSession] if superseded.
      */
     @Throws(CoreException::class)
-    suspend fun prepareTranscodeFallback(itemId: String, positionTicks: Long, reason: String, playSessionId: String): PlaybackPlan
+    suspend fun prepareTranscodeFallback(
+        itemId: String,
+        positionTicks: Long,
+        reason: String,
+        playSessionId: String,
+        failed: FailedTrackFfi?,
+        subtitleStreamIndex: Int?,
+        request: PlaybackRequest,
+    ): PlaybackPlan
 
     /**
      * Focus-dwell preload (`Settings.preloadOnFocus`, default on): best-effort playback-handshake
@@ -301,7 +368,7 @@ interface CoreGateway {
      * never throws -- a no-op when the setting is off or the negotiation fails. Any fresh result
      * is silently consumed by the next [preparePlayback] call within the core's cache TTL.
      */
-    suspend fun preloadPlayback(itemId: String)
+    suspend fun preloadPlayback(itemId: String, accountEpoch: ULong? = null)
 
     /**
      * The next episode within [itemId]'s series (season/episode order, skipping virtual
@@ -328,12 +395,12 @@ interface CoreGateway {
     /** Both episode-edge controls from one lookup; the Rust side prefers the mirror, falling
      * back to one live series request only when the episode can't be placed locally.
      */
-    suspend fun episodeNeighbors(itemId: String, seriesId: String): EpisodeNeighbors?
+    suspend fun episodeNeighbors(itemId: String, seriesId: String, accountEpoch: ULong? = null): EpisodeNeighbors?
 
     /** The playback stats sheet's SOURCE row (docs/12 §8b): derived from the active session's
      * server URL, no network round trip. `null` if signed out or the URL has no parseable host.
      */
-    suspend fun serverDisplayName(): String?
+    suspend fun serverDisplayName(accountEpoch: ULong? = null): String?
 
     /** Pure delegate to `next_episode_trigger_remaining_secs`: the threshold at which the next-up
      * card should appear (~15%-of-runtime default, or the Outro start when known, brought forward
@@ -368,13 +435,13 @@ interface CoreGateway {
      */
     suspend fun resetStillWatching(nowMs: ULong)
 
-    /** Forwards a position update (ticks) to the active reporting session; a no-op if there isn't
-     * one.
+    /** Forwards a position update (ticks) to the installed session [playSessionId] names; a no-op
+     * for any other (docs/18 §2.1).
      */
-    suspend fun reportPosition(ticks: Long)
+    suspend fun reportPosition(playSessionId: String, ticks: Long)
 
-    /** Forwards a pause/resume edge to the active reporting session; a no-op if there isn't one. */
-    suspend fun reportPaused(paused: Boolean)
+    /** Forwards a pause/resume edge, as [reportPosition]. */
+    suspend fun reportPaused(playSessionId: String, paused: Boolean)
 
     /** Ends the active reporting session if it's still the one named by [playSessionId]: a final
      * Stopped report plus a mirror writeback fired over [changeEvents]. Fire-and-forget (docs/18
@@ -407,12 +474,15 @@ interface CoreGateway {
     /** Trickplay tile-sheet image URL for [tv.jellybeam.player.TrickplayPreviewer], or `null` with no
      * signed-in client. `suspend` (unlike [imageUrl]): called once per debounced seek gesture.
      */
-    suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt): String?
+    suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt, accountEpoch: ULong? = null): String?
 
     /** Trickplay scrub-preview manifest for [itemId]/[mediaSourceId], fetched fire-and-forget
      * right after `load()`. A seek before it resolves fails open to no preview tile.
      */
-    suspend fun getTrickplay(itemId: String, mediaSourceId: String): TrickplayMetaFfi?
+    suspend fun getTrickplay(itemId: String, mediaSourceId: String, accountEpoch: ULong? = null): TrickplayMetaFfi?
+
+    /** docs/18 §3.2: sidecar [index]'s text for session [playSessionId], fetched on pick; null on any failure. */
+    suspend fun fetchExternalSubtitle(playSessionId: String, index: Int): String?
 
     /** Pure delegate to `trickplay_locate`: the sprite-sheet tile (if any) covering [positionMs]
      * for [meta]. No I/O; not `suspend`. Callers must not re-derive the tile-grid math themselves.
@@ -560,6 +630,14 @@ interface CoreGateway {
     @Throws(CoreException::class)
     suspend fun seerrPerson(personId: Long): SeerrPersonCredits
 
+    /** A person's record and library titles, live (docs/11 §Person page). [personId] is a Jellyfin id. */
+    @Throws(CoreException::class)
+    suspend fun getPersonPage(personId: String): PersonPage
+
+    /** Seerr credits for a TMDB person minus [inLibrary] (null: the core lists ownership); callers fail open on any error. */
+    @Throws(CoreException::class)
+    suspend fun personDiscoverCredits(personId: String, tmdbPersonId: Long, inLibrary: List<TitleTmdbRef>?): List<SeerrCard>
+
     /** Radarr/Sonarr instances (with profiles/root folders) available for a request at [is4k];
      * empty means the UI shows a plain Request button.
      */
@@ -605,25 +683,32 @@ class RealCoreGateway(
      * argument -- privacy rule). [imageUrl], [preparePlayback]/[preloadPlayback], [changeEvents]
      * and the pure delegates don't go through this; they're written out explicitly.
      */
-    private suspend inline fun <T> ffi(section: String, crossinline op: suspend JellybeamCoreInterface.() -> T): T =
+    private suspend inline fun <T> ffi(
+        section: String,
+        reauthorize: Boolean = true,
+        crossinline op: suspend JellybeamCoreInterface.() -> T,
+    ): T =
         withContext(Dispatchers.IO) {
             try {
                 PerfLog.timed(section) { core.await().op() }
             } catch (e: CoreException) {
-                noteCoreFailure(section, e)
+                noteCoreFailure(section, e, reauthorize)
                 throw e
             }
         }
 
     /** Callers mostly fail open, so this is the one place a failed call is always recorded
-     * (docs/21: section and variant only) and a dead token always reaches re-authorization.
+     * (docs/21: section and variant only) and a dead token always reaches re-authorization, unless
+     * the caller owns that decision ([reauthorize] false: playback requests, docs/18 §2.1).
      */
-    private fun noteCoreFailure(section: String, error: CoreException) {
+    private fun noteCoreFailure(section: String, error: CoreException, reauthorize: Boolean) {
         AppGraph.diag.event("ffi.error") {
             tag("section", section)
             tag("kind", error.diagLabel())
         }
-        if (routesToReauthorization(section, error)) authorizationRecoveryCoordinator.request()
+        if (reauthorize && routesToReauthorization(section, error)) {
+            authorizationRecoveryCoordinator.request((error as? CoreException.Unauthorized)?.account)
+        }
     }
 
     /** docs/21 §2.1: shared timing+outcome recording for the three auth calls -- [result] maps a
@@ -652,16 +737,17 @@ class RealCoreGateway(
         }
     }
 
-    override suspend fun restoreSession(): AccountInfo? =
+    override suspend fun restoreSession(): AccountInfo? = accountChange {
         authTimed("auth.restore", "ffi.restoreSession", result = { if (it != null) "ok" else "none" }) {
             restoreSession()
         }
+    }
 
     override suspend fun signIn(serverUrl: String, username: String, password: String): AccountInfo =
-        authTimed("auth.signin", "ffi.signIn") { signIn(serverUrl, username, password) }
+        accountChange { authTimed("auth.signin", "ffi.signIn") { signIn(serverUrl, username, password) } }
 
     override suspend fun reauthorizeSession(index: UInt, username: String, password: String): AccountInfo =
-        authTimed("auth.reauth", "ffi.reauthorizeSession") { reauthorizeSession(index, username, password) }
+        accountChange { authTimed("auth.reauth", "ffi.reauthorizeSession") { reauthorizeSession(index, username, password) } }
 
     override suspend fun quickConnectEnabled(serverUrl: String): Boolean =
         ffi("ffi.quickConnectEnabled") { quickConnectEnabled(serverUrl) }
@@ -673,17 +759,19 @@ class RealCoreGateway(
         ffi("ffi.pollQuickConnect") { pollQuickConnect(serverUrl, secret) }
 
     override suspend fun completeQuickConnect(serverUrl: String, secret: String): AccountInfo =
-        ffi("ffi.completeQuickConnect") { completeQuickConnect(serverUrl, secret) }
+        accountChange { ffi("ffi.completeQuickConnect") { completeQuickConnect(serverUrl, secret) } }
 
     override suspend fun completeQuickConnectReauthorization(index: UInt, secret: String): AccountInfo =
-        ffi("ffi.completeQuickConnectReauthorization") { completeQuickConnectReauthorization(index, secret) }
+        accountChange { ffi("ffi.completeQuickConnectReauthorization") { completeQuickConnectReauthorization(index, secret) } }
 
     override suspend fun discoverServers(): List<DiscoveredServer> =
         ffi("ffi.discoverServers") { discoverServers() }
 
-    override suspend fun signOut() = withContext(Dispatchers.IO) {
-        PerfLog.timed("ffi.signOut") { core.await().signOut() }
-        AppGraph.diag.event("auth.signout")
+    override suspend fun signOut() = accountChange {
+        withContext(Dispatchers.IO) {
+            PerfLog.timed("ffi.signOut") { core.await().signOut() }
+            AppGraph.diag.event("auth.signout")
+        }
     }
 
     override suspend fun listAccounts(): List<AccountInfo> =
@@ -699,10 +787,10 @@ class RealCoreGateway(
         ffi("ffi.serverAtLeast") { serverAtLeast(major, minor) }
 
     override suspend fun switchSession(index: UInt): AccountInfo =
-        ffi("ffi.switchSession") { switchSession(index) }
+        accountChange { ffi("ffi.switchSession") { switchSession(index) } }
 
     override suspend fun removeSession(index: UInt): Boolean =
-        ffi("ffi.removeSession") { removeSession(index) }
+        accountChange { ffi("ffi.removeSession") { removeSession(index) } }
 
     override suspend fun openMirror() =
         ffi("ffi.openMirror") { openMirror() }
@@ -761,20 +849,23 @@ class RealCoreGateway(
     override suspend fun search(query: String, limit: UInt): List<Card> =
         ffi("ffi.search") { search(query, limit) }
 
-    override suspend fun getItemDetail(itemId: String): ItemDetail =
-        ffi("ffi.getItemDetail") { getItemDetail(itemId) }
+    override suspend fun getItemDetail(itemId: String, accountEpoch: ULong?): ItemDetail =
+        ffi("ffi.getItemDetail") { getItemDetail(itemId, accountEpoch) }
 
     override suspend fun cardById(itemId: String): Card? =
         ffi("ffi.cardById") { cardById(itemId) }
 
-    override suspend fun getPlaybackOsdDetail(itemId: String): PlaybackOsdDetail =
-        ffi("ffi.getPlaybackOsdDetail") { getPlaybackOsdDetail(itemId) }
+    override suspend fun cardsByIds(itemIds: List<String>): List<Card> =
+        ffi("ffi.cardsByIds") { cardsByIds(itemIds) }
+
+    override suspend fun getPlaybackOsdDetail(itemId: String, accountEpoch: ULong?): PlaybackOsdDetail =
+        ffi("ffi.getPlaybackOsdDetail") { getPlaybackOsdDetail(itemId, accountEpoch) }
 
     override suspend fun getSimilar(itemId: String, limit: UInt): List<Card> =
         ffi("ffi.getSimilar") { getSimilar(itemId, limit) }
 
-    override suspend fun getMediaSegments(itemId: String): List<MediaSegment> =
-        ffi("ffi.getMediaSegments") { getMediaSegments(itemId) }
+    override suspend fun getMediaSegments(itemId: String, accountEpoch: ULong?): List<MediaSegment> =
+        ffi("ffi.getMediaSegments") { getMediaSegments(itemId, accountEpoch) }
 
     override fun outroStartSecsFromSegments(segments: List<MediaSegment>): Double? =
         uniffi.jellybeam_core.outroStartSecsFromSegments(segments)
@@ -794,18 +885,18 @@ class RealCoreGateway(
      * placeholder tile instead of [Deferred.getCompleted]'s `IllegalStateException`.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    override fun imageUrl(itemId: String, kind: ImageKind, tag: String, maxWidth: UInt): String? {
+    override fun imageUrl(itemId: String, kind: ImageKind, tag: String, maxWidth: UInt, accountEpoch: ULong?): String? {
         if (!core.isCompleted) return null
         if (!PerfLog.enabled) {
             return try {
-                core.getCompleted().imageUrl(itemId, kind, tag, maxWidth)
+                core.getCompleted().imageUrl(itemId, kind, tag, maxWidth, accountEpoch)
             } catch (_: CoreException) {
                 null
             }
         }
         val startNs = System.nanoTime()
         val result = try {
-            core.getCompleted().imageUrl(itemId, kind, tag, maxWidth)
+            core.getCompleted().imageUrl(itemId, kind, tag, maxWidth, accountEpoch)
         } catch (_: CoreException) {
             null
         }
@@ -814,21 +905,86 @@ class RealCoreGateway(
         return result
     }
 
-    override suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean): PlaybackPlan =
+    private val lastPlaybackSeq = AtomicLong(0)
+
+    private val _accountEpoch = MutableStateFlow(0uL)
+    override val accountEpoch: StateFlow<ULong> = _accountEpoch.asStateFlow()
+
+    private val accountCallsInFlight = MutableStateFlow(0)
+
+    private val accountRestored = CompletableDeferred<Unit>()
+
+    private val _parkedEpoch = MutableStateFlow<ULong?>(null)
+    override val parkedEpoch: StateFlow<ULong?> = _parkedEpoch.asStateFlow()
+
+    override fun mintPlaybackRequest(accountEpoch: ULong?): PlaybackRequest =
+        PlaybackRequest(seq = lastPlaybackSeq.incrementAndGet().toULong(), accountEpoch = accountEpoch ?: _accountEpoch.value)
+
+    override suspend fun reauthorizationAccount(rejected: AccountIdentity, failedPlayback: Boolean): AccountInfo? =
+        ffi("ffi.reauthorizationAccount") { reauthorizationAccount(rejected, failedPlayback) }
+
+    override fun playbackOwnershipOpen(accountEpoch: ULong): Boolean =
+        accountEpoch == _accountEpoch.value || accountEpoch == _parkedEpoch.value
+
+    override suspend fun awaitAccountCalls() {
+        accountCallsInFlight.first { it == 0 }
+    }
+
+    override suspend fun awaitAccountRestored() = accountRestored.await()
+
+    override fun accountRestoredNow(): Boolean = accountRestored.isCompleted
+
+    /** Closes playback ownership before the call, then re-reads the epoch even if it failed
+     * part-way (the core may already have reset the account) before reopening it.
+     */
+    private suspend inline fun <T> accountChange(crossinline call: suspend () -> T): T {
+        accountCallsInFlight.update { it + 1 }
+        try {
+            return call()
+        } finally {
+            // Inside NonCancellable: a cancelled caller still reopens ownership (a resume after the
+            // dispatcher switch would throw before a statement placed after this block).
+            withContext(NonCancellable + Dispatchers.IO) {
+                try {
+                    // Parked first: the epoch's collectors judge ownership with both.
+                    runCatching {
+                        val core = core.await()
+                        _parkedEpoch.value = core.parkedAccountEpoch()
+                        _accountEpoch.value = core.accountEpoch()
+                    }
+                } finally {
+                    accountCallsInFlight.update { it - 1 }
+                    accountRestored.complete(Unit)
+                }
+            }
+        }
+    }
+
+    override suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean, request: PlaybackRequest): PlaybackPlan =
         withContext(Dispatchers.IO) {
             PerfLog.timed("gateway.preparePlayback.total") {
                 deviceCapsReady?.await()
-                PerfLog.timed("ffi.preparePlayback") { core.await().preparePlayback(itemId, startFromBeginning) }
+                PerfLog.timed("ffi.preparePlayback") { core.await().preparePlayback(itemId, startFromBeginning, request) }
             }
         }
 
-    override suspend fun prepareTranscodeFallback(itemId: String, positionTicks: Long, reason: String, playSessionId: String): PlaybackPlan =
-        ffi("ffi.prepareTranscodeFallback") { prepareTranscodeFallback(itemId, positionTicks, reason, playSessionId) }
+    override suspend fun prepareTranscodeFallback(
+        itemId: String,
+        positionTicks: Long,
+        reason: String,
+        playSessionId: String,
+        failed: FailedTrackFfi?,
+        subtitleStreamIndex: Int?,
+        request: PlaybackRequest,
+    ): PlaybackPlan =
+        ffi("ffi.prepareTranscodeFallback", reauthorize = false) {
+            prepareTranscodeFallback(itemId, positionTicks, reason, playSessionId, failed, subtitleStreamIndex, request)
+        }
 
-    override suspend fun preloadPlayback(itemId: String) =
+    override suspend fun preloadPlayback(itemId: String, accountEpoch: ULong?) =
         withContext(Dispatchers.IO) {
             deviceCapsReady?.await()
-            PerfLog.timed("ffi.preloadPlayback") { core.await().preloadPlayback(itemId) }
+            PerfLog.timed("ffi.preloadPlayback") { core.await().preloadPlayback(itemId, accountEpoch) }
         }
 
     override suspend fun nextEpisodeAfter(itemId: String): Card? =
@@ -840,11 +996,11 @@ class RealCoreGateway(
     override suspend fun previousEpisodeBefore(itemId: String): Card? =
         ffi("ffi.previousEpisodeBefore") { previousEpisodeBefore(itemId) }
 
-    override suspend fun episodeNeighbors(itemId: String, seriesId: String): EpisodeNeighbors? =
-        ffi("ffi.episodeNeighbors") { episodeNeighbors(itemId, seriesId) }
+    override suspend fun episodeNeighbors(itemId: String, seriesId: String, accountEpoch: ULong?): EpisodeNeighbors? =
+        ffi("ffi.episodeNeighbors") { episodeNeighbors(itemId, seriesId, accountEpoch) }
 
-    override suspend fun serverDisplayName(): String? =
-        ffi("ffi.serverDisplayName") { serverDisplayName() }
+    override suspend fun serverDisplayName(accountEpoch: ULong?): String? =
+        ffi("ffi.serverDisplayName") { serverDisplayName(accountEpoch) }
 
     override fun nextEpisodeTriggerRemainingSecs(
         durationSecs: Double,
@@ -866,11 +1022,11 @@ class RealCoreGateway(
     override suspend fun resetStillWatching(nowMs: ULong) =
         ffi("ffi.resetStillWatching") { resetStillWatching(nowMs) }
 
-    override suspend fun reportPosition(ticks: Long) =
-        ffi("ffi.reportPosition") { reportPosition(ticks) }
+    override suspend fun reportPosition(playSessionId: String, ticks: Long) =
+        ffi("ffi.reportPosition") { reportPosition(playSessionId, ticks) }
 
-    override suspend fun reportPaused(paused: Boolean) =
-        ffi("ffi.reportPaused") { reportPaused(paused) }
+    override suspend fun reportPaused(playSessionId: String, paused: Boolean) =
+        ffi("ffi.reportPaused") { reportPaused(playSessionId, paused) }
 
     override suspend fun stopPlayback(playSessionId: String, positionTicks: Long) =
         ffi("ffi.stopPlayback") { stopPlayback(playSessionId, positionTicks) }
@@ -886,11 +1042,14 @@ class RealCoreGateway(
 
     override fun trackPrefKeyOf(track: TrackInfo): String? = uniffi.jellybeam_core.trackPrefKeyOf(track)
 
-    override suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt): String? =
-        ffi("ffi.trickplayTileUrl") { trickplayTileUrl(itemId, width, imageIndex) }
+    override suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt, accountEpoch: ULong?): String? =
+        ffi("ffi.trickplayTileUrl") { trickplayTileUrl(itemId, width, imageIndex, accountEpoch) }
 
-    override suspend fun getTrickplay(itemId: String, mediaSourceId: String): TrickplayMetaFfi? =
-        ffi("ffi.getTrickplay") { getTrickplay(itemId, mediaSourceId) }
+    override suspend fun getTrickplay(itemId: String, mediaSourceId: String, accountEpoch: ULong?): TrickplayMetaFfi? =
+        ffi("ffi.getTrickplay") { getTrickplay(itemId, mediaSourceId, accountEpoch) }
+
+    override suspend fun fetchExternalSubtitle(playSessionId: String, index: Int): String? =
+        ffi("ffi.fetchExternalSubtitle") { fetchExternalSubtitle(playSessionId, index) }
 
     override fun trickplayLocate(meta: TrickplayMetaFfi, positionMs: ULong): TrickplayTileFfi? =
         uniffi.jellybeam_core.trickplayLocate(meta, positionMs)
@@ -1004,6 +1163,13 @@ class RealCoreGateway(
 
     override suspend fun seerrPerson(personId: Long): SeerrPersonCredits =
         ffi("ffi.seerrPerson") { seerrPerson(personId) }
+
+    override suspend fun getPersonPage(personId: String): PersonPage =
+        ffi("ffi.getPersonPage") { getPersonPage(personId) }
+
+    override suspend fun personDiscoverCredits(personId: String, tmdbPersonId: Long, inLibrary: List<TitleTmdbRef>?): List<SeerrCard> =
+        // Named as a Seerr call: its 401 is Seerr's login, never the Jellyfin session's.
+        ffi("ffi.seerrPersonDiscoverCredits") { personDiscoverCredits(personId, tmdbPersonId, inLibrary) }
 
     override suspend fun seerrRequestOptions(mediaType: SeerrMediaType, is4k: Boolean): SeerrRequestOptions =
         ffi("ffi.seerrRequestOptions") { seerrRequestOptions(mediaType, is4k) }

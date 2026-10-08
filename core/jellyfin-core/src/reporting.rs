@@ -4,14 +4,15 @@
 //! `advance`.
 //!
 //! The final `Stopped` report is processed by the session's actor task, attempted inline with
-//! failures handed to a shared bounded [`FlushQueue`]. If the actor doesn't acknowledge within
-//! [`STOP_ACK_TIMEOUT`], `stop()` aborts it and enqueues the report itself; none of this survives
-//! process exit, so the app's quit path separately persists a pending stop report.
+//! failures handed to a shared bounded [`FlushQueue`]. If the actor hasn't begun that delivery
+//! within [`STOP_ACK_TIMEOUT`], `stop()` aborts it and enqueues the report itself; exactly one of
+//! them owns the Stopped report, so the server never sees it twice. None of this survives process
+//! exit.
 
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -37,10 +38,23 @@ const FLUSH_MAX_DURATION: Duration = Duration::from_secs(30 * 60);
 /// Position updates arrive in bursts while the user drags a scrub bar; a detected seek is only
 /// reported once updates go quiet for this long, so a burst of jumps collapses into one report.
 const SEEK_DEBOUNCE: Duration = Duration::from_millis(500);
-/// How long `stop()` waits for the actor to acknowledge final delivery before aborting it and
-/// enqueueing the report itself. Equal to `gpui::SHUTDOWN_TIMEOUT` (100ms); the quit path also
-/// persists the pending report to disk before calling `stop()`.
+/// How long `stop()` waits for the actor to acknowledge final delivery before taking it over,
+/// when the actor hasn't begun it yet.
 const STOP_ACK_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Who sends the final Stopped report: claimed once, by the actor when it begins delivery or by
+/// `stop()` when the actor hasn't within [`STOP_ACK_TIMEOUT`]. A Stopped already on the wire is
+/// never re-sent: Jellyfin can take over a second to process one (it ends the transcode), and a
+/// duplicate reaches the server as a second playback stop.
+const FINAL_UNCLAIMED: u8 = 0;
+const FINAL_BY_ACTOR: u8 = 1;
+const FINAL_BY_CALLER: u8 = 2;
+
+fn claim_final(owner: &AtomicU8, by: u8) -> bool {
+    owner
+        .compare_exchange(FINAL_UNCLAIMED, by, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -70,7 +84,27 @@ enum Cmd {
     Stop {
         ticks: i64,
         completion: oneshot::Sender<()>,
+        delivered: DeliverySlot,
     },
+}
+
+/// Held by whichever side owns the final Stopped report and dropped once it has landed or its
+/// retries gave up, which settles the matching [`FinalDelivery`].
+type DeliverySlot = Arc<Mutex<Option<oneshot::Sender<()>>>>;
+
+fn take_delivery(slot: &DeliverySlot) -> Option<oneshot::Sender<()>> {
+    slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// Settles once the server has the final Stopped report, or its bounded retries gave up; work
+/// that the server must see after Stopped (mark played, recounts) waits on this, not on `stop()`.
+pub struct FinalDelivery(oneshot::Receiver<()>);
+
+impl FinalDelivery {
+    pub async fn settled(self) {
+        // The sender only ever drops, so an error is the settle signal.
+        let _ = self.0.await;
+    }
 }
 
 /// `#[must_use]` catches a `ReportingSession` created and discarded without `.stop()` at compile
@@ -96,6 +130,8 @@ pub struct ReportingSession {
     /// can read it directly -- a lone Stopped has no `Sessions/Playing` record to close if Start
     /// never landed (see [`flush_with_cap`]).
     start_acked: Arc<AtomicBool>,
+    /// Final Stopped delivery owner, shared with `run()` (see [`FINAL_UNCLAIMED`]).
+    final_owner: Arc<AtomicU8>,
 }
 
 impl ReportingSession {
@@ -107,12 +143,14 @@ impl ReportingSession {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (position_tx, position_rx) = watch::channel(0i64);
         let start_acked = Arc::new(AtomicBool::new(false));
+        let final_owner = Arc::new(AtomicU8::new(FINAL_UNCLAIMED));
         let task = tokio::spawn(run(
             sink.clone(),
             ctx.clone(),
             cmd_rx,
             position_rx,
             start_acked.clone(),
+            final_owner.clone(),
         ));
         Self {
             cmd_tx,
@@ -122,6 +160,7 @@ impl ReportingSession {
             ctx,
             stopped: false,
             start_acked,
+            final_owner,
         }
     }
 
@@ -151,28 +190,42 @@ impl ReportingSession {
         );
     }
 
+    /// The last position handed to [`Self::on_position`] (0 before any), for a stop that has no
+    /// fresher position of its own.
+    pub fn last_position(&self) -> i64 {
+        *self.position_tx.borrow()
+    }
+
     /// Read-only view of this session's report identifiers, so the app's quit path can persist a
     /// pending Stopped report without this crate knowing about paths or serialization.
     pub fn context(&self) -> &ReportContext {
         &self.ctx
     }
 
-    /// Final position report; consumes the session. Either the actor acknowledges within
-    /// [`STOP_ACK_TIMEOUT`], or it's aborted and the report goes to the shared [`FlushQueue`]
-    /// (which re-establishes Start first if never acked). Doesn't survive process exit -- the quit
-    /// path persists the pending report separately.
-    pub async fn stop(mut self, ticks: i64) {
+    /// Final position report; consumes the session. The actor delivers it, or, if the actor
+    /// hasn't begun within [`STOP_ACK_TIMEOUT`], it's aborted and the report goes to the shared
+    /// [`FlushQueue`] (which re-establishes Start first if never acked). Doesn't survive process
+    /// exit. Returns once delivery is handed off; the returned [`FinalDelivery`] settles when it
+    /// lands.
+    pub async fn stop(mut self, ticks: i64) -> FinalDelivery {
         self.stopped = true;
         let (completion_tx, completion_rx) = oneshot::channel();
+        let (delivered_tx, delivered_rx) = oneshot::channel();
+        let delivered: DeliverySlot = Arc::new(Mutex::new(Some(delivered_tx)));
+        let finished = FinalDelivery(delivered_rx);
         if let Ok(()) = self.cmd_tx.send(Cmd::Stop {
             ticks,
             completion: completion_tx,
+            delivered: delivered.clone(),
         }) {
             if let Ok(Ok(())) = tokio::time::timeout(STOP_ACK_TIMEOUT, completion_rx).await {
-                return;
+                return finished;
             }
-            // Timed out or exited unacknowledged; abort so a later Start/Progress retry can't land
-            // after the final report.
+            // The actor already sending the Stopped finishes it (and queues its own retry).
+            if !claim_final(&self.final_owner, FINAL_BY_CALLER) {
+                return finished;
+            }
+            // Abort so a later Start/Progress retry can't land after the final report.
             self.task.abort();
         }
         // Bounded background retry, never inline (would hold `stop()` for a full request timeout);
@@ -190,7 +243,9 @@ impl ReportingSession {
             self.ctx.clone(),
             self.start_acked.load(Ordering::Relaxed),
             report,
+            take_delivery(&delivered),
         );
+        finished
     }
 }
 
@@ -202,6 +257,7 @@ async fn send_final_stopped(
     ctx: &ReportContext,
     start_acked: bool,
     ticks: i64,
+    delivered: Option<oneshot::Sender<()>>,
 ) {
     let report = build_report(
         ctx,
@@ -225,14 +281,14 @@ async fn send_final_stopped(
                 "start-repair before final stopped failed inline; queuing \
                  ordered pair for bounded background retry"
             );
-            flush_queue().enqueue(sink.clone(), ctx.clone(), false, report);
+            flush_queue().enqueue(sink.clone(), ctx.clone(), false, report, delivered);
             return;
         }
     }
     if (sink.report(report.clone()).await).is_err() {
         tracing::warn!("stopped report failed inline; queuing for bounded background retry");
         // Start is established by this point, so the flush only needs to deliver the Stopped.
-        flush_queue().enqueue(sink.clone(), ctx.clone(), true, report);
+        flush_queue().enqueue(sink.clone(), ctx.clone(), true, report, delivered);
     }
 }
 
@@ -282,6 +338,7 @@ async fn run(
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     mut position_rx: watch::Receiver<i64>,
     start_acked: Arc<AtomicBool>,
+    final_owner: Arc<AtomicU8>,
 ) {
     let mut state = PlaybackState {
         position_ticks: 0,
@@ -342,12 +399,16 @@ async fn run(
                         send_retrying(&sink, report_for(&ctx, &state, PlaybackReportKind::Progress)).await;
                         ticker.reset();
                     }
-                    Some(Cmd::Stop { ticks, completion }) => {
+                    Some(Cmd::Stop { ticks, completion, delivered }) => {
+                        if !claim_final(&final_owner, FINAL_BY_ACTOR) {
+                            break;
+                        }
                         send_final_stopped(
                             &sink,
                             &ctx,
                             start_acked.load(Ordering::Relaxed),
                             ticks,
+                            take_delivery(&delivered),
                         ).await;
                         let _ = completion.send(());
                         break;
@@ -440,13 +501,14 @@ impl FlushQueue {
 
     /// Queues `report`'s delivery, unless a flush for the same `play_session_id` is already in
     /// flight (a no-op). `start_acked: false` means the flush must resend Start before `report`
-    /// (see [`flush_with_cap`]).
+    /// (see [`flush_with_cap`]). `delivered` drops when this flush ends.
     fn enqueue(
         &'static self,
         sink: Arc<dyn ReportSink>,
         ctx: ReportContext,
         start_acked: bool,
         report: PlaybackReport,
+        delivered: Option<oneshot::Sender<()>>,
     ) {
         let session_id = report.play_session_id.clone();
         let already_in_flight = {
@@ -468,6 +530,7 @@ impl FlushQueue {
                 .lock()
                 .expect("flush queue lock")
                 .remove(&session_id);
+            drop(delivered);
         });
     }
 }
@@ -971,6 +1034,77 @@ mod tests {
         );
     }
 
+    /// A Stopped the server is slow to answer (it ends the transcode first) is sent once, never
+    /// re-sent by `stop()` after its ack timeout.
+    struct SlowStoppedSink {
+        calls: Mutex<Vec<PlaybackReport>>,
+    }
+
+    impl ReportSink for SlowStoppedSink {
+        fn report(&self, report: PlaybackReport) -> BoxFuture<'_, Result<(), ApiError>> {
+            Box::pin(async move {
+                let slow = matches!(report.kind, PlaybackReportKind::Stopped);
+                self.calls.lock().expect("lock").push(report);
+                if slow {
+                    tokio::time::sleep(STOP_ACK_TIMEOUT * 15).await;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_final_stopped_is_sent_once() {
+        let sink = Arc::new(SlowStoppedSink {
+            calls: Mutex::new(Vec::new()),
+        });
+        let session =
+            ReportingSession::start_with_sink(sink.clone(), ctx_with_session("slow-stop"));
+        tokio::task::yield_now().await;
+
+        session.stop(321).await;
+        tokio::time::sleep(FLUSH_MAX_DURATION).await;
+
+        let stopped: Vec<_> = sink
+            .calls
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|report| matches!(report.kind, PlaybackReportKind::Stopped))
+            .map(|report| report.position_ticks)
+            .collect();
+        assert_eq!(stopped, vec![321]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_delivery_settles_only_once_a_slow_stopped_lands() {
+        let sink = Arc::new(SlowStoppedSink {
+            calls: Mutex::new(Vec::new()),
+        });
+        let session =
+            ReportingSession::start_with_sink(sink.clone(), ctx_with_session("slow-settle"));
+        tokio::task::yield_now().await;
+
+        let stopped_at = tokio::time::Instant::now();
+        session.stop(321).await.settled().await;
+        assert!(stopped_at.elapsed() >= STOP_ACK_TIMEOUT * 15);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_delivery_settles_only_once_a_retried_stopped_lands() {
+        let sink = FakeSink::new(3);
+        let session =
+            ReportingSession::start_with_sink(sink.clone(), ctx_with_session("retry-settle"));
+        tokio::task::yield_now().await;
+
+        session.stop(999).await.settled().await;
+
+        assert_eq!(*sink.fail_first.lock().expect("lock"), 0);
+        let last = sink.calls().pop().expect("a report was sent");
+        assert!(matches!(last.kind, PlaybackReportKind::Stopped));
+        assert_eq!(last.position_ticks, 999);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn stop_reestablishes_never_acked_start_before_inline_stopped() {
         // Pins: after Start exhausts its attempts, inline final delivery still sends Start before
@@ -1075,10 +1209,10 @@ mod tests {
         );
 
         // `start_acked: true`: not exercising the never-acked-Start resend path here.
-        flush_queue().enqueue(sink.clone(), ctx.clone(), true, report.clone());
+        flush_queue().enqueue(sink.clone(), ctx.clone(), true, report.clone(), None);
         tokio::task::yield_now().await;
         // Pins: a second enqueue for the same in-flight session is dropped, not a new task.
-        flush_queue().enqueue(sink.clone(), ctx.clone(), true, report.clone());
+        flush_queue().enqueue(sink.clone(), ctx.clone(), true, report.clone(), None);
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
 
@@ -1115,8 +1249,8 @@ mod tests {
             None,
         );
 
-        flush_queue().enqueue(sink.clone(), ctx_a, true, report_a);
-        flush_queue().enqueue(sink.clone(), ctx_b, true, report_b);
+        flush_queue().enqueue(sink.clone(), ctx_a, true, report_a, None);
+        flush_queue().enqueue(sink.clone(), ctx_b, true, report_b, None);
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
 
@@ -1144,7 +1278,7 @@ mod tests {
             None,
             None,
         );
-        flush_queue().enqueue(sink.clone(), ctx, true, report);
+        flush_queue().enqueue(sink.clone(), ctx, true, report, None);
 
         // Advance well past FLUSH_MAX_DURATION (30 minutes).
         for _ in 0..40 {

@@ -190,6 +190,17 @@ class NavBackStackTest {
     }
 
     @Test
+    fun `the same title reached twice is two entries with two keys`() {
+        val stack = NavBackStack.of(Screen.Home)
+            .push(Screen.Detail(testCard(id = "a")))
+            .push(Screen.Person("p1", "Sample Person"))
+            .push(Screen.Detail(testCard(id = "a")))
+
+        assertEquals(listOf("0:home", "1:detail-a", "2:person-p1", "3:detail-a"), stack.entryKeys())
+        assertEquals("3:detail-a", stack.current.entryKey(3))
+    }
+
+    @Test
     fun `pop leaves every surviving entry's key untouched`() {
         val stack = NavBackStack.of(Screen.Home)
             .push(Screen.Detail(testCard(id = "a")))
@@ -259,5 +270,11 @@ class NavBackStackTest {
             Screen.DiscoverDetail(uniffi.jellybeam_core.SeerrMediaType.MOVIE, 42L).entryIdentity(),
         )
         assertEquals("discover-person-7", Screen.DiscoverPerson(7L).entryIdentity())
+    }
+
+    @Test
+    fun `entryIdentity for a library Person is keyed on the person id only`() {
+        assertEquals("person-p1", Screen.Person("p1", "Sample Person").entryIdentity())
+        assertEquals("person-p1", Screen.Person("p1", "Renamed").entryIdentity())
     }
 }

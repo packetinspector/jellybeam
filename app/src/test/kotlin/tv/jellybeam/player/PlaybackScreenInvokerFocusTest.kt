@@ -40,4 +40,17 @@ class PlaybackScreenInvokerFocusTest {
         assertNull(resolveInvokerReturn(ControlButton.PLAY_PAUSE, emptyList()))
         assertNull(resolveInvokerReturn(null, emptyList()))
     }
+
+    @Test
+    fun `a focused button that left the row moves the ring to PLAY_PAUSE, else the first button`() {
+        assertEquals(ControlButton.PLAY_PAUSE, reconcileFocusedButton(ControlButton.CHAPTERS, buttons))
+        assertEquals(ControlButton.TRACKS, reconcileFocusedButton(ControlButton.CHAPTERS, listOf(ControlButton.TRACKS)))
+        assertNull(reconcileFocusedButton(ControlButton.CHAPTERS, emptyList()))
+    }
+
+    @Test
+    fun `reconcile keeps a present button and a cleared ring`() {
+        assertEquals(ControlButton.TRACKS, reconcileFocusedButton(ControlButton.TRACKS, buttons))
+        assertNull(reconcileFocusedButton(null, buttons))
+    }
 }

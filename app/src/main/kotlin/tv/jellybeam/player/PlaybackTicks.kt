@@ -11,4 +11,9 @@ object PlaybackTicks {
 
     /** Media3 milliseconds -> Jellyfin ticks. */
     fun msToTicks(ms: Long): Long = ms * TICKS_PER_MS
+
+    /** Jellyfin ticks (100 ns) -> microseconds, truncating. */
+    fun ticksToUs(ticks: Long): Long = ticks / TICKS_PER_US
+
+    private const val TICKS_PER_US = 10L
 }

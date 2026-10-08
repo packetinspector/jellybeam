@@ -126,21 +126,25 @@ fields. Presets are a Kotlin concern (the chip row), the core accepts any
   `CoreError::WouldTranscode { reasons: reason }` when the mode is
   DirectPlay (the variant keeps its name and its Kotlin message mapping;
   its meaning is now "the setting forbids the transcode this would need").
-  Otherwise: takes the active `ReportingSession` and `stop`s it at
-  `position_ticks` (final Stopped for the direct-play play session, plus
-  the mirror writeback — the position is real), negotiates again with
+  Otherwise: takes over the active `ReportingSession`, which keeps
+  reporting (and its stream keeps playing) until the fallback's claim
+  resolves (§2.1), negotiates again with
   `force_transcode: true` and `StartTimeTicks = position_ticks`, requires
   a `Transcode` decision (else `NoPlayableSource`), starts a fresh
   `ReportingSession` with `play_method: Transcode`, returns a Transcode
   plan whose `start_position_ticks == position_ticks`.
   **Staleness guard**: the call carries the plan's
-  `play_session_id` and only takes the active session if it is that one;
-  `State.playback_generation` is bumped whenever the active session
-  changes hands (prepare, stop, abandon, fallback install), captured before
-  the negotiation and re-checked before installing — a mismatch abandons
-  the freshly started session and returns `CoreError::StalePlaybackSession`,
-  so a fallback started for one title can never take over the reporting of
-  the title that replaced it.
+  `play_session_id` and only takes the active session if it is that one,
+  then claims ownership as in §2.1 with that id as the session it retires.
+  **Never the same stream back**: the fallback names the current
+  `MediaSourceId` and, from the Kotlin-classified `FailedTrackFfi` (renderer
+  error's format type, the unplayable track type, or a software video
+  decoder), sends `AllowVideoStreamCopy: false` (video or unattributed) or
+  `AllowAudioStreamCopy: false` (audio), so the server re-encodes the type
+  that failed. The transcoding profile's video targets are H.264 plus only
+  the codecs this device decodes: a listed codec is copied, so an
+  undecodable HEVC listed there came straight back (dev-server evidence:
+  `-codec:v:0 copy` before, `libx264` after).
 - `preload_playback` caches DirectPlay plans only (an attempt-anyway plan
   included — its URL is position-independent); a Transcode plan is never
   cached (its HLS URL embeds the start position), and preload is a no-op
@@ -149,21 +153,103 @@ fields. Presets are a Kotlin concern (the chip row), the core accepts any
   aborting it, reusing the negotiation already under way; a preload for
   any other item is aborted as before.
 
-Session identity and threading rules shared by every path above:
+### 2.1 Playback ownership
 
-- `prepare_playback` negotiates over the network with the state lock
-  released; it captures `playback_generation` before releasing the lock
-  and re-checks it at `install_prepared_session`. A mismatch abandons the
-  freshly negotiated session and returns `StalePlaybackSession`, the same
-  guard as `prepare_transcode_fallback`.
-- `stop_playback` / `abandon_playback` take the `play_session_id` they are
-  for and act only if it still names the active session; a mismatch,
-  including "no session", is a debug-logged no-op that touches neither the
-  session nor the generation.
+Stop, replacement, fallback and account change are ordinary events that can
+overlap a negotiation; these rules give every overlap one outcome.
+
+- **Requests.** Kotlin mints a `PlaybackRequest { seq, account_epoch }` on
+  the main thread before dispatch; `prepare_playback` and
+  `prepare_transcode_fallback` take it. The epoch names the account the
+  request plays on (see Account boundary). `seq` is process-wide and
+  increasing, so native admission follows viewer order, not IO arrival.
+- **Admission** (under the state lock, after local preconditions): a
+  request from an epoch that is neither the current one nor the parked
+  playback's is refused with `CoreError::AccountChanged`; a `seq` not above the highest admitted is
+  refused with `StalePlaybackSession`. Otherwise it becomes the one claim.
+  A fallback's claim also names the session it stopped (`retires`).
+- **Install** happens only while the claim is still the owner, and the
+  `ReportingSession` starts only then, so a refused negotiation never sends
+  Start. The sidecars install with it. A refused install returns
+  `StalePlaybackSession`. A failed negotiation gives up its claim if it
+  still holds it and is undone (the playing account reverts), so it
+  neither owns playback nor gets parked, and never revives older work.
+- **Stop / abandon** take the `play_session_id` they are for. If it names the
+  active session, that session (and its sidecars) is retired; a newer
+  pending claim is untouched. If it names the session a pending fallback
+  retired, that fallback's claim is revoked and the retired session ends:
+  a stop at the stop's position (where the viewer actually left), an
+  abandon at the fallback's position. If it names the session the installed
+  fallback replaced (sent before the caller learned the new id), it acts on
+  the installed session. Anything else is a debug-logged no-op. Position
+  and pause reports name their session too, so one queued behind a stop, or
+  sent by the outgoing session while a fallback negotiates, is ignored.
+- **Retired session.** A fallback's taken-over session ends exactly once,
+  with its final Stopped and mirror writeback. Its stream keeps playing and
+  its own position reports keep arriving until then. It ends at the
+  fallback's position when its own replacement installs (where that
+  replacement takes over), and otherwise where the viewer is: its latest
+  report when something newer installs, the negotiation fails, it is
+  abandoned or the account changes, and the stop's position when a stop
+  revokes the claim.
+- **Account boundary.** Every sign-in, reauthentication, Quick Connect,
+  restore, switch, sign-out and removal of the active account goes through
+  one reset, and the epoch advances. A live playback (installed, retiring
+  or negotiating) outlives it: its account (client and mirror) is parked
+  with the epoch its requests carry, so the player keeps reporting, falls
+  back, renegotiates, fetches sidecars, reads trickplay, segments and OSD
+  detail and plays next-up on the server it started on, while browsing
+  moves to the new account. A parked account resolves to the installed
+  client whenever it is the same saved account again (a re-sign-in's fresh
+  token, a switch back). The newest admitted request that has not failed
+  names the playing account: a switch parks the account the newest playback is on, replacing
+  an older parked one (a playback started on the browsed account after the
+  kept one ended), so its negotiation survives a further switch. Only
+  leaving the account that plays ends it:
+  signing out of it, or removing it (active or not), clears the claim and
+  stops the installed session at its last reported position (it keeps its
+  resume point, at most a second old), with its sidecars cleared. The
+  parked account is released when a request on the current account
+  installs or its account is left; not when its playback stops, since
+  next-up stops before it prepares. Leaving it ends playback only while
+  its playback is the newest admitted; otherwise it is just dropped, so a
+  newer playback negotiating elsewhere is untouched. Every 401 names the
+  account whose token was rejected (the HTTP client attaches its server and
+  user where it sees the status), and `reauthorization_account` re-authorizes
+  that account only while the app uses it -- browsed, or a playback runs or
+  negotiates on it; a playback that ended (stopped, abandoned, failed) keeps
+  its account for next-up only. The player's own 401 still re-authorizes its
+  account after its teardown ends the playback, while that account is saved.
+  A 401 from any other account, one switched away from or removed, prompts
+  nobody, never the browsed account in its place; switching back re-checks
+  that token. "Still watching?" Stop
+  on a parked playback closes instead of opening a detail page the browsed
+  account would resolve. A parked account resolves to the installed one field by
+  field, so a switch back still has its mirror until Kotlin reopens it.
+  Sync yields to playback on any account: every mirror the core opens
+  shares one yield flag, re-derived from the playback state (a session
+  installed or retiring) whenever the state lock is released, so no path
+  that ends a playback can leave any account's sync paused. Every
+  session's final writes (Stopped, mirror
+  position, mark-played) go to the account it belongs to, never to the one
+  that replaced it. Removing an account nothing plays on is not an account
+  change, and neither is restoring the account already installed (a
+  recreated Activity, a failed switch).
+- Kotlin reads `parked_account_epoch()` then `account_epoch()` after every
+  account call (`RealCoreGateway`, in a `NonCancellable` `finally`, so a
+  cancelled caller still refreshes and reopens); a request owns playback
+  while its epoch is either. `AccountChanged` is logged, never swallowed
+  as stale.
+
+Session threading rules shared by every path above:
+
 - `stop_session_and_sync_mirror` spawns the final Stopped report on the
   runtime rather than blocking on it: `ReportingSession::stop` is
   delivered-or-queued (100 ms ack, then the flush queue), so nothing is
   lost and the next negotiation is not serialized behind the old report.
+  It is sent exactly once: a Stopped already on the wire is never re-queued,
+  since Jellyfin can take over a second to answer one and would record a
+  second stop.
   The mirror write stays synchronous: it is the barrier a same-item
   resume reads through (docs/17 §6).
 - The synchronous `fetch_item_dto` reads the mirror on the caller's thread
@@ -173,6 +259,30 @@ Session identity and threading rules shared by every path above:
 
 ## 3. Kotlin
 
+- **Request owner (§2.1).** `PlaybackViewModel` mints a request on the main thread before every
+  prepare, replacement and fallback (`init`, `replaceItem` and transitions mint before they launch,
+  so an initial prepare still negotiating is obsolete at once) and keeps only the newest as
+  `currentRequest`. `init`, `replaceItem` and the post-restore re-mint take the current account's
+  epoch; transitions, fallbacks and renegotiations keep the player's own (`accountEpoch`), which
+  every account-bound read (trickplay, segments, OSD and library detail, episode neighbours,
+  next-up art, server name, preload) also names. Stop, abandon and leaving the playing account
+  retire it, before the exactly-once session guard. A returned plan loads only while its request is the newest and ownership is open
+  (`planOutcome`); otherwise it is abandoned by its own `play_session_id`, and the player closes if
+  the account changed under it. A failure reaches the viewer only from its owner
+  (`failureOutcome`), which also decides re-authorization: the fallback call never routes a 401 to
+  recovery through the gateway. A plan or failure that lands while an
+  account call is in flight waits for it (`CoreGateway.awaitAccountCalls`) and
+  is then judged against ownership: still open, it publishes; closed, the
+  player closes. A live owner whose epoch no longer owns playback closes; the watch starts once
+  the first request is minted after the launch restore
+  (`awaitAccountRestored`), so a cold start never closes itself. A transcode
+  negotiation in flight owns the session it retires: stop and abandon name
+  that session (which also ends a fallback the core installed over it, so
+  the landing's own disposal is skipped rather than racing that stop; a
+  transition captures it before anything else runs), the old stream's
+  errors are ignored until the landing reloads
+  the player, and a second renegotiation waits for the landing to re-check
+  the choice.
 - `PlaybackViewModel.enrichmentGate` (`CompletableDeferred`, reset per session): the OSD detail,
   trickplay manifest/warm, and server-display-name fetches await it instead of firing right after
   `load()`, so they stop competing with the media loads for time-to-first-frame; it completes on
@@ -208,10 +318,10 @@ Session identity and threading rules shared by every path above:
     software-only decoder names is collected by `DeviceCapsProbe` (which
     already enumerates `MediaCodecList` off the main thread at startup) and
     remembered process-wide; the name heuristic is the fallback.
-  - The fallback coroutine snapshots a per-session generation and the
-    plan's `playSessionId`; a result (success or failure) arriving after a
-    newer session started is ignored, and `StalePlaybackSession` is
-    ignored silently.
+  - The fallback mints its own request (§2.1) and runs the native call
+    under `NonCancellable`; its result publishes only through the request
+    owner (§3), and `StalePlaybackSession` for a live owner is ignored
+    silently (a software-decoder fallback may still be playing).
   - `onPlayerError` non-recoverable branch → if the plan is DirectPlay
     and `transcodeFallbackAllowed` and no fallback happened yet →
     `fallBackToTranscode("Playback error: <errorCodeName>")`; else the
@@ -231,10 +341,10 @@ Session identity and threading rules shared by every path above:
     fatal path with the core's message. `sessionEnded` stays false
     throughout (the core swapped reporting sessions itself).
   - `start()` runs the native prepare under `NonCancellable` (the JNI call
-    cannot be cancelled anyway); if its own job was cancelled meanwhile it
-    abandons the session Rust installed, by `playSessionId`, instead of
-    leaking it. A live owner receiving `StalePlaybackSession` finishes
-    quietly.
+    cannot be cancelled anyway); its plan goes through the request owner
+    (§3), so a plan whose owner was cleared meanwhile is abandoned by its own
+    `playSessionId` instead of leaking. An owner with no session receiving
+    `StalePlaybackSession` finishes quietly.
   - Every exit path snapshots `currentPlan.playSessionId` synchronously at
     the exit decision (`StopSnapshot`) before dispatching onto the
     process-lifetime report scope, because `currentPlan` may change
@@ -275,6 +385,90 @@ Session identity and threading rules shared by every path above:
   viewport preference anywhere) is touched. This is what makes
   `SubtitleActionFfi.LEAVE` mean "this item's own default", never "whatever
   the previous item left selected".
+- **A same-item fallback reload restores the choice.** The view model
+  records the subtitle and audio choice as it applies one, manual or
+  automatic (Off, the player's default, a sidecar, or an embedded track's
+  language, title and forced flag); Media3's announced selection lags a pick,
+  so it is never read back for this. Before the fallback's `load()` resets
+  the baseline, that record is captured: an automatic decision still in
+  flight counts as undecided, and the new load resolves afresh through Rust.
+  Otherwise text is turned off at once (no track id needed) and an embedded
+  choice is matched again on the first announcement carrying that kind (an
+  empty or audio-only announcement keeps it pending): a unique language and
+  forced match wins, an exact title breaks ties, and ambiguity is no match,
+  never the first candidate, since tracks carry no role. No match leaves
+  text off silently; audio keeps the player's default. A manual pick clears
+  whatever is still pending. The test player applies decisions through the
+  same `trackSelectionBaseline` and `withTrackDecision` as `PlayerHolder`.
+- **The negotiation carries the subtitle choice, so nothing the viewer turned
+  off is burned in.** No Media3 selection can remove pixels, so every transcode
+  negotiation names the stream the recorded choice wants
+  (`subtitleStreamIndexFor`): Off or a sidecar names none (`-1`), an embedded
+  choice names its matched stream from `PlaybackPlan.embedded_subtitles`
+  (same matching policy; ambiguous or missing names none), and an undecided
+  or default choice leaves the server's default, which is what the Direct
+  Play player showed. JF12 honours `SubtitleStreamIndex` only with
+  `MediaSourceId` (dev-server evidence: an ASS-default file burned in for
+  omitted, `-1` and `2` alike without it; with it, `-1` drops the stream and
+  `2` burns it in). `PlaybackPlan.burned_subtitle_index` is read from the
+  transcode URL and needs both `SubtitleMethod=Encode` and an index (a `-1`
+  negotiation still says Encode, with no index). While transcoding, the
+  picker also lists the plan's embedded streams no Media3 track carries
+  (ASS and bitmaps reach a transcode only burned in), the burned one
+  selected: picking another of them renegotiates with it burned in, and
+  moving off a burned one (Off, a sidecar, a delivered track) renegotiates
+  without it; picking the one already burned in is a no-op. A choice changed while a negotiation is
+  in flight is renegotiated from the landed session before anything loads,
+  as often as the choice keeps changing (a landing that contradicts it never
+  loads: burned-in pixels can't be turned off), and every renegotiation
+  resends the session's copy policy
+  (§2), so a subtitle change never lets a failed stream be copied back.
+
+### 3.2 External subtitles
+
+The device profile advertises `External` delivery for SRT/WebVTT/TTML, so the
+server hands back sidecar files as `MediaStream`s with `DeliveryUrl`. ASS/SSA
+sidecars are never side-loaded: Media3's SSA parser expands every overlap
+before it yields a cue, so no budget can bound it.
+`PlaybackPlan::external_subtitles` lists the chosen source's text sidecars,
+only streams with `IsExternal` (bitmap formats and off-server URLs are
+dropped). An embedded track the server also offers as External is left in the
+container: side-loading it makes the server extract it from the whole file,
+which stalls the first frame and leaves the item unseekable until it lands.
+
+Nothing is fetched at prepare time, so a sidecar can never delay the first
+frame. `ExternalSubtitleFfi` is a descriptor (index, codec, language, title,
+default, forced); the core keeps each authed `DeliveryUrl` for the installed
+play session only (`SessionSidecars`, installed and cleared with the
+`ReportingSession` itself), so no token reaches Kotlin, a stale session can't
+fetch another's file, and a stopped one has nothing left to fetch.
+
+Sidecars never enter the player. Each one is a picker row under a synthetic
+`TrackInfo` id above every `TrackMapping` id (`ExternalSubtitles.idFor`), so it
+joins `resolve_tracks` auto-selection and per-series memory like an embedded
+track; `ExternalSubtitles.route` hands the player only the embedded half (text
+off when a sidecar won). With subtitles left to the file's defaults and no
+embedded track showing, Media3's own rule applies: a default-flagged sidecar,
+else a forced one in the playing audio language (`eng` and `en` match).
+
+Choosing a sidecar turns embedded text off and asks the core for the file
+(`fetch_external_subtitle`: 10 s, 2 MiB, HTTP 2xx, UTF-8, refused off-server;
+failures are logged by index and failure class, never the URL). Kotlin parses
+it off the main thread with Media3's own parsers, outside the player, into
+`SidecarCues` segments (at most 8 cues each, so heavy overlap stays linear),
+cached for the session. Our own `SubtitleView`, a sibling of PlayerView's with
+the same styling, is fed from the live position, sleeping until the next cue
+change scaled by the playback rate (at most 120 ms, so a seek lands promptly).
+The video is never re-prepared, so a pick or a switch never rebuffers. The row
+reads `Loading…` until the file is in; a fetch or parse failure (or a file with
+no cues) marks it `Unavailable`, returns subtitles to Off and shows a short
+notice, and the video plays on. Sidecar indices belong to one media source: a
+transcode fallback on the same source keeps the showing sidecar, one that moves
+to another source drops every cached file and re-picks the same language and
+title there. A fetch the old session refuses mid-swap is not the file failing:
+the pick stays chosen and Loading, and is asked again under the new session
+once it exists; a later pick or Off in between wins.
+It never changes the play method, so Direct Play stays Direct Play.
 
 ## 4. On-device test cases
 

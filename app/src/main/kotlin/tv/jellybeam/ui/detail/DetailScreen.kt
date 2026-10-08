@@ -173,7 +173,7 @@ internal val DETAIL_TITLE_STYLE = TextStyle(
 /** The overview's own focus-stop key ([OverviewBlock]/[MoreStop]/[SynopsisPanel]'s shared
  * contract).
  */
-private const val OVERVIEW_MORE_KEY = "overview:more"
+internal const val OVERVIEW_MORE_KEY = "overview:more"
 
 // One pill spec for every Detail screen's action row, enforced via `widthIn(min = ...)`, never
 // `fillMaxWidth()`/`weight()` (which would stretch every button uniformly).
@@ -219,6 +219,7 @@ val EPISODE_VERTICAL_SCRIM_STOPS: List<Pair<Float, Float>> = listOf(
 fun DetailScreen(
     card: Card,
     onOpenDetail: (Card) -> Unit,
+    onOpenPerson: (PersonInfo) -> Unit,
     isTop: Boolean = true,
     focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: DetailViewModel = viewModel(
@@ -344,10 +345,10 @@ fun DetailScreen(
         // it.
         val panelOpen = state.menu != null || composedMenu != null
         when (card.itemType) {
-            EPISODE_ITEM_TYPE -> EpisodeDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
-            SERIES_ITEM_TYPE -> SeriesDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
+            EPISODE_ITEM_TYPE -> EpisodeDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
+            SERIES_ITEM_TYPE -> SeriesDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
             CollectionFormatting.BOXSET_ITEM_TYPE -> CollectionDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
-            else -> MovieDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
+            else -> MovieDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
         }
 
         // The live model while open, the last-known one while the panel is still sliding out.
@@ -395,6 +396,7 @@ private fun EpisodeDetailScreen(
     state: DetailUiState,
     viewModel: DetailViewModel,
     onOpenDetail: (Card) -> Unit,
+    onOpenPerson: (PersonInfo) -> Unit,
     isTop: Boolean,
     focusGate: MutableState<Boolean>,
     memory: FocusMemory,
@@ -690,6 +692,7 @@ private fun EpisodeDetailScreen(
                     Box(modifier = Modifier.height(12.dp))
                     CastRow(
                         members = castMembers,
+                        onOpenPerson = onOpenPerson,
                         memory = memory,
                         listState = castListState,
                         showRole = false,
@@ -855,6 +858,7 @@ private fun SeriesDetailScreen(
     state: DetailUiState,
     viewModel: DetailViewModel,
     onOpenDetail: (Card) -> Unit,
+    onOpenPerson: (PersonInfo) -> Unit,
     isTop: Boolean,
     focusGate: MutableState<Boolean>,
     memory: FocusMemory,
@@ -1176,6 +1180,7 @@ private fun SeriesDetailScreen(
             Box(modifier = Modifier.padding(top = SECTION_TOP_GAP, end = contentEndInset)) {
                 CastRow(
                     members = castMembers,
+                    onOpenPerson = onOpenPerson,
                     memory = memory,
                     listState = castListState,
                     showHeader = true,
@@ -1532,6 +1537,7 @@ private fun MovieDetailScreen(
     state: DetailUiState,
     viewModel: DetailViewModel,
     onOpenDetail: (Card) -> Unit,
+    onOpenPerson: (PersonInfo) -> Unit,
     isTop: Boolean,
     focusGate: MutableState<Boolean>,
     memory: FocusMemory,
@@ -1776,6 +1782,7 @@ private fun MovieDetailScreen(
                         Spacer(modifier = Modifier.height(22.dp))
                         CastRow(
                             members = castMembers,
+                            onOpenPerson = onOpenPerson,
                             memory = memory,
                             listState = castListState,
                             showHeader = true,
@@ -1933,7 +1940,7 @@ private fun MovieActionRow(
  * guess).
  */
 @Composable
-private fun OverviewBlock(text: String?, color: Color, memory: FocusMemory, moreKey: String, onMore: () -> Unit) {
+internal fun OverviewBlock(text: String?, color: Color, memory: FocusMemory, moreKey: String, onMore: () -> Unit) {
     if (text.isNullOrBlank()) return
     var clamped by remember(text) { mutableStateOf(false) }
     // The stop is part of the overview, not a sibling row: 4dp under the text, so the caller's own
@@ -2053,7 +2060,7 @@ private fun CreditsSeparator() {
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SynopsisPanel(
+internal fun SynopsisPanel(
     title: String,
     overview: String,
     open: Boolean,
@@ -2066,6 +2073,14 @@ private fun SynopsisPanel(
     val requester = remember { FocusRequester() }
     val density = LocalDensity.current
     val scrollStepPx = with(density) { 80.dp.toPx() }
+
+    // docs/19 §1.5: the panel owns Left, so the drawer's "focus can't move left" open gesture
+    // stands down while it is composed (every caller composes it only while shown).
+    val drawerLeftEdgeSuppressed = LocalDrawerLeftEdgeSuppressed.current
+    DisposableEffect(drawerLeftEdgeSuppressed) {
+        drawerLeftEdgeSuppressed?.value = true
+        onDispose { drawerLeftEdgeSuppressed?.value = false }
+    }
 
     LaunchedEffect(open) {
         if (open) requestFocusWithRetry(focusGate) { requester.requestFocus() }
@@ -2330,7 +2345,7 @@ private val EDGE_FADE_LEFT_BRUSH = androidx.compose.ui.graphics.Brush.horizontal
 private val EDGE_FADE_RIGHT_BRUSH = androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color.Transparent, JellybeamTheme.Notte))
 
 @Composable
-private fun EdgeFadedLazyRow(listState: LazyListState, height: Dp, content: @Composable () -> Unit) {
+internal fun EdgeFadedLazyRow(listState: LazyListState, height: Dp, content: @Composable () -> Unit) {
     val showLeftFade by remember { derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0 } }
     val showRightFade by remember { derivedStateOf { listState.canScrollForward } }
 
@@ -2346,7 +2361,7 @@ private fun EdgeFadedLazyRow(listState: LazyListState, height: Dp, content: @Com
 }
 
 @Composable
-private fun SectionHeader(textRes: Int) {
+internal fun SectionHeader(textRes: Int) {
     // At the page margin, where the row's content padding puts its first card and CastRow puts
     // its own label.
     BasicText(
@@ -2370,6 +2385,7 @@ private val CAST_ROW_GAP = 22.dp
 @Composable
 private fun CastRow(
     members: List<PersonInfo>,
+    onOpenPerson: (PersonInfo) -> Unit,
     memory: FocusMemory,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
@@ -2425,6 +2441,7 @@ private fun CastRow(
                             key = "person:${person.id}",
                             showRole = showRole,
                             focusRequester = requester,
+                            onClick = { onOpenPerson(person) },
                         )
                     }
                 }
@@ -2434,7 +2451,7 @@ private fun CastRow(
 }
 
 @Composable
-private fun CastPortrait(person: PersonInfo, memory: FocusMemory, key: String, showRole: Boolean, focusRequester: FocusRequester) {
+private fun CastPortrait(person: PersonInfo, memory: FocusMemory, key: String, showRole: Boolean, focusRequester: FocusRequester, onClick: () -> Unit) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
 
@@ -2446,7 +2463,7 @@ private fun CastPortrait(person: PersonInfo, memory: FocusMemory, key: String, s
             .width(CAST_CARD_WIDTH)
             .focusKey(memory, key)
             .focusRequester(focusRequester)
-            .focusable(interactionSource = interactionSource),
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         val density = LocalDensity.current

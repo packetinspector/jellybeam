@@ -89,6 +89,10 @@ interface PlaybackPlayer {
     /** Seeks by [deltaMs] from the current position, clamped to `[0, duration]`. */
     fun seekBy(deltaMs: Long)
 
+    /** Media3's current window seekability; UNSEEKABLE for e.g. an MKV with no Cues index, where
+     * every seekTo restarts from 0:00, and UNKNOWN while the window is still a placeholder (docs/12 §9). */
+    val seekability: Seekability get() = Seekability.SEEKABLE
+
     /** Stops playback and clears the loaded item; must not release/tear down the player. */
     fun stopAndClear()
 
@@ -173,6 +177,39 @@ internal fun trackSelectionBaseline(current: TrackSelectionParameters): TrackSel
         .build()
 
 /**
+ * [decision] applied onto [current] against the [tracks] snapshot its ids came from -- top-level so
+ * the test player applies decisions exactly as [PlayerHolder] does. Audio and subtitle halves are
+ * independent; an out-of-range id on one never prevents the other.
+ */
+internal fun withTrackDecision(current: TrackSelectionParameters, decision: TrackDecisionFfi, tracks: Tracks): TrackSelectionParameters {
+    var params = current.buildUpon()
+
+    decision.audioTrackId?.let { id ->
+        TrackMapping.resolve(tracks, id)?.let { resolved ->
+            val group = tracks.groups[resolved.groupIndex].mediaTrackGroup
+            params = params.setOverrideForType(TrackSelectionOverride(group, resolved.trackIndex))
+        }
+    }
+
+    val subtitleTrackId = decision.subtitleTrackId
+    if (subtitleTrackId != null) {
+        // A specific track wins outright, regardless of subtitleAction.
+        TrackMapping.resolve(tracks, subtitleTrackId)?.let { resolved ->
+            val group = tracks.groups[resolved.groupIndex].mediaTrackGroup
+            params = params
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .setOverrideForType(TrackSelectionOverride(group, resolved.trackIndex))
+        }
+    } else if (decision.subtitleAction == SubtitleActionFfi.OFF) {
+        params = params.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+    }
+    // SubtitleActionFfi.LEAVE with no subtitleTrackId does nothing here, since load() already
+    // reset trackSelectionParameters to a clean per-item baseline.
+
+    return params.build()
+}
+
+/**
  * docs/18-playback-quality.md §5.2: sequences the resume-seek [PlayerHolder.load] arms for a
  * `startPositionMs > 0` load. `setMediaItem(item, startPositionMs)` applies that position exactly
  * (decoding through every frame back to the last keyframe); one extra `seekTo` issued once the
@@ -244,9 +281,15 @@ internal fun reserveResumeSeek(gate: ResumeSeekGate, seeks: SeekSerializer, gene
 }
 
 /** The resume target to hand to the player once tracks are known, or `null` when a user seek
- * already owns the slot: their exact position wins and the keyframe snap is dropped. */
-internal fun resumeSeekToIssue(gate: ResumeSeekGate, seeks: SeekSerializer, generation: Long): Long? {
+ * already owns the slot: their exact position wins and the keyframe snap is dropped. An
+ * unseekable file drops it and frees the slot, since that seekTo would only restart from 0:00
+ * (docs/12 §9). */
+internal fun resumeSeekToIssue(gate: ResumeSeekGate, seeks: SeekSerializer, generation: Long, seekability: Seekability): Long? {
     val target = gate.onTracksChanged(generation) ?: return null
+    if (seekability == Seekability.UNSEEKABLE) {
+        seeks.reset()
+        return null
+    }
     return target.takeIf { seeks.inFlightTargetMs == it }
 }
 
@@ -414,7 +457,7 @@ class PlayerHolder(
                         // resume seek reserved at the transition; a skip held behind it replays on
                         // landing (see reserveResumeSeek).
                         if (tracks.groups.isNotEmpty()) {
-                            resumeSeekToIssue(resumeSeekGate, seeks, loadGeneration)?.let { targetMs ->
+                            resumeSeekToIssue(resumeSeekGate, seeks, loadGeneration, seekability)?.let { targetMs ->
                                 issue(targetMs)
                                 PerfLog.markPlayback("resume.seek")
                             }
@@ -664,6 +707,21 @@ class PlayerHolder(
 
     override val playWhenReady: Boolean get() = player.playWhenReady
 
+    /** Reused by [seekability]: Player is read on the main looper only, so one scratch window suffices. */
+    private val seekabilityWindow = androidx.media3.common.Timeline.Window()
+
+    override val seekability: Seekability
+        get() {
+            val timeline = player.currentTimeline
+            if (timeline.isEmpty) return Seekability.UNKNOWN
+            val window = timeline.getWindow(player.currentMediaItemIndex, seekabilityWindow)
+            return when {
+                window.isPlaceholder -> Seekability.UNKNOWN
+                window.isSeekable -> Seekability.SEEKABLE
+                else -> Seekability.UNSEEKABLE
+            }
+        }
+
     override fun bandwidthBytesPerSecond(): Long = lastBandwidthBitsPerSecond.coerceAtLeast(0L) / 8L
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -793,30 +851,6 @@ class PlayerHolder(
      * out-of-range/missing override on one never prevents the other from applying.
      */
     override fun applyTrackDecision(decision: TrackDecisionFfi, tracks: Tracks) {
-        var params = player.trackSelectionParameters.buildUpon()
-
-        decision.audioTrackId?.let { id ->
-            TrackMapping.resolve(tracks, id)?.let { resolved ->
-                val group = tracks.groups[resolved.groupIndex].mediaTrackGroup
-                params = params.setOverrideForType(TrackSelectionOverride(group, resolved.trackIndex))
-            }
-        }
-
-        val subtitleTrackId = decision.subtitleTrackId
-        if (subtitleTrackId != null) {
-            // A specific track wins outright, regardless of subtitleAction.
-            TrackMapping.resolve(tracks, subtitleTrackId)?.let { resolved ->
-                val group = tracks.groups[resolved.groupIndex].mediaTrackGroup
-                params = params
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                    .setOverrideForType(TrackSelectionOverride(group, resolved.trackIndex))
-            }
-        } else if (decision.subtitleAction == SubtitleActionFfi.OFF) {
-            params = params.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-        }
-        // SubtitleActionFfi.LEAVE with no subtitleTrackId does nothing here, since load() already
-        // reset trackSelectionParameters to a clean per-item baseline.
-
-        player.trackSelectionParameters = params.build()
+        player.trackSelectionParameters = withTrackDecision(player.trackSelectionParameters, decision, tracks)
     }
 }

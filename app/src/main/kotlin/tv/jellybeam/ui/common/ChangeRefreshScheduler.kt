@@ -26,7 +26,8 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * [active] means the screen is top of its stack and the host Activity is resumed. This class owns
  * only the dirty flag; other callers (`refreshNow`, `onBecameTop`, `ON_RESUME`) may still call
- * [refresh] concurrently -- that dedup is [refresh]'s own problem, not this scheduler's.
+ * [refresh] concurrently -- that dedup is [refresh]'s own problem, not this scheduler's. A caller
+ * that must not overlap it asks through [requestRefresh] instead, and the one loop serves it.
  */
 class ChangeRefreshScheduler<T>(
     scope: CoroutineScope,
@@ -37,6 +38,11 @@ class ChangeRefreshScheduler<T>(
     private val hiddenPeriodMs: Long = 3000L,
 ) {
     private val dirty = MutableStateFlow(false)
+
+    /** Marks dirty as an event would: the loop runs [refresh] next, in order with every other run. */
+    fun requestRefresh() {
+        dirty.value = true
+    }
 
     init {
         scope.launch { events.collect { dirty.value = true } }

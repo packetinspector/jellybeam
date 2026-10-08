@@ -235,6 +235,24 @@ pub struct CollectionInfo {
     pub name: String,
 }
 
+/// docs/18 §2: which track type a local playback failure is attributed to, so the fallback
+/// forbids copying exactly that stream.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedTrackFfi {
+    Video,
+    Audio,
+    Unknown,
+}
+
+/// docs/18 §2.1: one Kotlin playback request. `seq` is minted on the main thread before dispatch,
+/// so native admission follows viewer order; `account_epoch` is the epoch the request was minted
+/// under ([`crate::JellybeamCore::account_epoch`]).
+#[derive(uniffi::Record, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackRequest {
+    pub seq: u64,
+    pub account_epoch: u64,
+}
+
 /// Account identity returned by [`crate::JellybeamCore::sign_in`] and
 /// [`crate::JellybeamCore::restore_session`]. Deliberately carries no token --
 /// that stays inside the Rust core (see `session.rs`).
@@ -243,6 +261,23 @@ pub struct AccountInfo {
     pub server_url: String,
     pub user_id: String,
     pub user_name: String,
+}
+
+/// docs/18 §2.1: the saved account a rejected token was issued to, carried by
+/// [`crate::CoreError::Unauthorized`] so a 401 re-authorizes the account that sent it.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct AccountIdentity {
+    pub server_url: String,
+    pub user_id: String,
+}
+
+impl From<jellyfin_api::TokenOwner> for AccountIdentity {
+    fn from(owner: jellyfin_api::TokenOwner) -> Self {
+        Self {
+            server_url: owner.server_url,
+            user_id: owner.user_id,
+        }
+    }
 }
 
 /// One in-progress Jellyfin Quick Connect handshake. `code` is shown on the
@@ -1218,6 +1253,161 @@ pub enum PlayMethodFfi {
     Transcode,
 }
 
+/// One sidecar subtitle the picker can offer (docs/18-playback-quality.md §3.2). Descriptor only:
+/// nothing is fetched at prepare time; Kotlin asks for the text via
+/// [`crate::JellybeamCore::fetch_external_subtitle`] when the track is chosen.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct ExternalSubtitleFfi {
+    /// Server `MediaStream.Index`; the fetch key.
+    pub index: i32,
+    /// Lowercased server codec name (`srt`, `subrip`, `vtt`, `webvtt`, `ass`, `ssa`, `ttml`).
+    pub codec: String,
+    pub language: Option<String>,
+    pub display_title: Option<String>,
+    pub is_default: bool,
+    pub is_forced: bool,
+}
+
+/// A sidecar's authed URL plus its descriptor. Deliberately not `Debug`: `url` embeds the token.
+pub(crate) struct ExternalSubtitleSource {
+    pub url: String,
+    pub track: ExternalSubtitleFfi,
+}
+
+/// docs/18 §3.2: the current playback session's sidecars, so a fetch can never reach another
+/// session's file.
+pub(crate) struct SessionSidecars {
+    pub play_session_id: String,
+    pub sources: Vec<ExternalSubtitleSource>,
+}
+
+impl SessionSidecars {
+    /// The authed URL for `index` in session `play_session_id`, or `None` when stale or unknown.
+    pub(crate) fn url_for(&self, play_session_id: &str, index: i32) -> Option<&str> {
+        if self.play_session_id != play_session_id {
+            return None;
+        }
+        self.sources
+            .iter()
+            .find(|s| s.track.index == index)
+            .map(|s| s.url.as_str())
+    }
+}
+
+/// docs/18 §3.2: one sidecar fetch's deadline.
+pub(crate) const SUBTITLE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// docs/18 §3.2: larger sidecars are refused (real subtitle files are tens of KiB).
+pub(crate) const SUBTITLE_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Short failure class for the drop log; the error text itself could echo a URL.
+pub(crate) const fn subtitle_failure_kind(err: &jellyfin_api::ApiError) -> &'static str {
+    match err {
+        jellyfin_api::ApiError::Status { .. } => "status",
+        jellyfin_api::ApiError::Transport(_) => "transport",
+        jellyfin_api::ApiError::Decode(_) => "body",
+        jellyfin_api::ApiError::Unauthorized { .. } => "unauthorized",
+    }
+}
+
+/// docs/18 §3.2: the profile's `External` formats. Bitmaps can't be parsed, and Media3's SSA
+/// parser expands every overlap before yielding a cue, so an ASS sidecar has no memory bound.
+const SIDELOADABLE_SUBTITLE_CODECS: &[&str] = &["srt", "subrip", "vtt", "webvtt", "ttml"];
+
+/// docs/18 §3.2: the chosen source's sidecar text subtitles, unfetched. `resolve_url` turns
+/// a `DeliveryUrl` into an authed absolute URL (`None` drops the track).
+pub(crate) fn external_subtitles_of(
+    source: &jellyfin_api::models::MediaSourceInfo,
+    resolve_url: impl Fn(&str) -> Option<String>,
+) -> Vec<ExternalSubtitleSource> {
+    use jellyfin_api::models::{MediaStreamType, SubtitleDeliveryMethod};
+    source
+        .media_streams
+        .iter()
+        .filter(|s| s.type_ == Some(MediaStreamType::Subtitle))
+        // Only real sidecar files: an embedded track the server offers as External would be
+        // extracted from the whole file on demand, stalling startup and making seeks restart.
+        .filter(|s| s.is_external == Some(true))
+        // Embed/Hls/Encode/Drop means the server is not serving a sidecar for this track.
+        .filter(|s| {
+            matches!(
+                s.delivery_method,
+                None | Some(SubtitleDeliveryMethod::External)
+            )
+        })
+        .filter_map(|s| {
+            let codec = s.codec.as_deref()?.to_ascii_lowercase();
+            if !SIDELOADABLE_SUBTITLE_CODECS.contains(&codec.as_str()) {
+                return None;
+            }
+            let url = resolve_url(s.delivery_url.as_deref().filter(|u| !u.is_empty())?)?;
+            Some(ExternalSubtitleSource {
+                url,
+                track: ExternalSubtitleFfi {
+                    index: s.index?,
+                    codec,
+                    language: s.language.clone().filter(|l| !l.is_empty()),
+                    display_title: s.display_title.clone().filter(|t| !t.is_empty()),
+                    is_default: s.is_default.unwrap_or(false),
+                    is_forced: s.is_forced.unwrap_or(false),
+                },
+            })
+        })
+        .collect()
+}
+
+/// docs/18 §3.1: one embedded subtitle stream of the chosen source, by its server index.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedSubtitleFfi {
+    pub index: i32,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub forced: bool,
+    /// The file's default flag: what the transcode burns in when no stream is named.
+    pub default: bool,
+    pub codec: Option<String>,
+}
+
+/// The source's embedded (not sidecar) subtitle streams.
+pub(crate) fn embedded_subtitles_of(
+    source: &jellyfin_api::models::MediaSourceInfo,
+) -> Vec<EmbeddedSubtitleFfi> {
+    use jellyfin_api::models::MediaStreamType;
+    source
+        .media_streams
+        .iter()
+        .filter(|s| s.type_ == Some(MediaStreamType::Subtitle) && s.is_external != Some(true))
+        .filter_map(|s| {
+            Some(EmbeddedSubtitleFfi {
+                index: s.index?,
+                language: s.language.clone(),
+                title: s.title.clone(),
+                forced: s.is_forced == Some(true),
+                default: s.is_default == Some(true),
+                codec: s.codec.clone(),
+            })
+        })
+        .collect()
+}
+
+/// docs/18 §3.1: the subtitle index a transcode URL burns in. Both parameters are needed: a
+/// `SubtitleStreamIndex=-1` negotiation still says `SubtitleMethod=Encode` with no index.
+pub(crate) fn burned_subtitle_index(url: &str) -> Option<i32> {
+    let query = url.split_once('?')?.1;
+    let param = |name: &str| {
+        query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            key.eq_ignore_ascii_case(name).then_some(value)
+        })
+    };
+    if !param("SubtitleMethod")?.eq_ignore_ascii_case("Encode") {
+        return None;
+    }
+    param("SubtitleStreamIndex")?
+        .parse()
+        .ok()
+        .filter(|index: &i32| *index >= 0)
+}
+
 /// The plan Kotlin's Media3 player executes, returned by
 /// `prepare_playback`/`prepare_transcode_fallback`. docs/18-playback-quality.md
 /// §2: the `play_method`/`transcode_reason`/`server_verdict` fields let
@@ -1256,6 +1446,15 @@ pub struct PlaybackPlan {
     /// The item's own `SeriesId`, if any (`None` for a Movie): docs/09 step
     /// 3 keys per-series track memory on this, not the individual episode.
     pub series_id: Option<String>,
+    /// docs/18-playback-quality.md §3.2: the source's sidecar subtitle files, unfetched; Kotlin
+    /// fetches one only when it is chosen.
+    pub external_subtitles: Vec<ExternalSubtitleFfi>,
+    /// docs/18 §3.1: the source's embedded subtitle streams, so Kotlin can name the one the viewer
+    /// chose when it renegotiates a transcode.
+    pub embedded_subtitles: Vec<EmbeddedSubtitleFfi>,
+    /// docs/18 §3.1: the stream a Transcode plan burns into the video, if any; no Media3 track
+    /// selection can remove it, only a renegotiation.
+    pub burned_subtitle_index: Option<i32>,
     // `outro_start_secs`/`trickplay` don't live here: neither is needed to
     // start a frame, and Kotlin fetches both separately (fire-and-forget).
 }
@@ -1437,7 +1636,132 @@ impl From<playback_policy::tracks::TrackDecision> for TrackDecisionFfi {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_burned_subtitle_needs_both_encode_and_an_index() {
+        let url = |query: &str| format!("http://server.test/videos/x/master.m3u8?{query}");
+        let cases = [
+            ("SubtitleStreamIndex=2&SubtitleMethod=Encode", Some(2)),
+            ("subtitleMethod=encode&subtitleStreamIndex=0", Some(0)),
+            ("SubtitleMethod=Encode", None),
+            ("SubtitleMethod=Encode&SubtitleStreamIndex=-1", None),
+            ("SubtitleStreamIndex=2&SubtitleMethod=Hls", None),
+            ("SubtitleStreamIndex=2", None),
+            ("VideoCodec=h264", None),
+        ];
+        for (query, expected) in cases {
+            assert_eq!(burned_subtitle_index(&url(query)), expected, "{query}");
+        }
+        assert_eq!(
+            burned_subtitle_index("http://server.test/videos/x/stream"),
+            None
+        );
+    }
+
+    #[test]
+    fn embedded_subtitles_exclude_sidecars_and_other_streams() {
+        use jellyfin_api::models::{MediaSourceInfo, MediaStream, MediaStreamType};
+        let stream = |index: i32, kind: MediaStreamType, external: bool| MediaStream {
+            index: Some(index),
+            type_: Some(kind),
+            is_external: Some(external),
+            language: Some("eng".to_string()),
+            is_forced: Some(index == 3),
+            is_default: Some(index == 2),
+            codec: Some("ass".to_string()),
+            ..Default::default()
+        };
+        let source = MediaSourceInfo {
+            media_streams: vec![
+                stream(0, MediaStreamType::Video, false),
+                stream(2, MediaStreamType::Subtitle, false),
+                stream(3, MediaStreamType::Subtitle, false),
+                stream(4, MediaStreamType::Subtitle, true),
+            ],
+            ..Default::default()
+        };
+        let got = embedded_subtitles_of(&source);
+        assert_eq!(
+            got.iter()
+                .map(|s| (s.index, s.forced, s.default))
+                .collect::<Vec<_>>(),
+            vec![(2, false, true), (3, true, false)]
+        );
+    }
+
     use super::*;
+
+    #[test]
+    fn external_subtitles_keep_only_sidecar_text_tracks() {
+        use jellyfin_api::models::{
+            MediaSourceInfo, MediaStream, MediaStreamType, SubtitleDeliveryMethod,
+        };
+        let sub = |index, codec: &str, method, url: Option<&str>| MediaStream {
+            index: Some(index),
+            type_: Some(MediaStreamType::Subtitle),
+            codec: Some(codec.to_string()),
+            delivery_method: method,
+            delivery_url: url.map(str::to_string),
+            is_external: Some(index != 4 && index != 8),
+            language: Some("eng".to_string()),
+            ..Default::default()
+        };
+        let ext = Some(SubtitleDeliveryMethod::External);
+        let source = MediaSourceInfo {
+            media_streams: vec![
+                sub(2, "SubRip", ext, Some("/s/2.srt")),
+                sub(3, "pgssub", ext, Some("/s/3.sup")),
+                sub(4, "srt", Some(SubtitleDeliveryMethod::Embed), None),
+                sub(5, "vtt", ext, None),
+                sub(6, "ass", ext, Some("/s/6.ass")),
+                sub(9, "ttml", None, Some("/s/9.ttml")),
+                sub(7, "srt", ext, Some("https://other.example.org/7.srt")),
+                // Embedded in the container but offered as External: stays embedded.
+                sub(8, "subrip", ext, Some("/s/8.srt")),
+            ],
+            ..Default::default()
+        };
+        let got = external_subtitles_of(&source, |u| {
+            u.starts_with('/')
+                .then(|| format!("http://example.test{u}"))
+        });
+        let got: Vec<_> = got
+            .iter()
+            .map(|t| (t.track.index, t.track.codec.as_str(), t.url.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (2, "subrip", "http://example.test/s/2.srt"),
+                (9, "ttml", "http://example.test/s/9.ttml"),
+            ]
+        );
+    }
+
+    #[test]
+    fn session_sidecars_answer_only_their_own_session() {
+        let track = |index| ExternalSubtitleFfi {
+            index,
+            codec: "srt".to_string(),
+            language: None,
+            display_title: None,
+            is_default: false,
+            is_forced: false,
+        };
+        let sidecars = SessionSidecars {
+            play_session_id: "a".to_string(),
+            sources: vec![ExternalSubtitleSource {
+                url: "http://example.test/s/2.srt".to_string(),
+                track: track(2),
+            }],
+        };
+        assert_eq!(
+            sidecars.url_for("a", 2),
+            Some("http://example.test/s/2.srt")
+        );
+        assert_eq!(sidecars.url_for("a", 3), None);
+        assert_eq!(sidecars.url_for("b", 2), None);
+    }
 
     #[test]
     fn mirror_item_counts_bucket_known_types_and_drop_the_rest() {

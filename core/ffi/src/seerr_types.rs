@@ -64,7 +64,7 @@ pub struct SeerrStatus {
 }
 
 /// A Seerr title's kind -- movies and TV use different endpoints/season semantics.
-#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SeerrMediaType {
     Movie,
     Tv,

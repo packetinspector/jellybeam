@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use jellybeam_core::{HomeLayout, HomeSnapshot, JellybeamCore, ShelfSource};
+use jellybeam_core::{HomeLayout, HomeSnapshot, JellybeamCore, PlaybackRequest, ShelfSource};
 
 mod common;
 
@@ -62,7 +62,7 @@ fn live_prepare_playback() {
         .unwrap_or_else(|| panic!("expected at least one Movie card somewhere in home/children"));
 
     let plan = core
-        .prepare_playback(movie_id.clone(), false)
+        .prepare_playback(movie_id.clone(), false, first_request(&core))
         .unwrap_or_else(|e| panic!("prepare_playback({movie_id}): {e}"));
 
     assert_eq!(plan.item_id, movie_id);
@@ -240,14 +240,14 @@ fn live_trickplay() {
         .unwrap_or_else(|| panic!("expected to find an item named \"98\" in the synced mirror"));
 
     let plan = core
-        .prepare_playback(item_id.clone(), false)
+        .prepare_playback(item_id.clone(), false, first_request(&core))
         .unwrap_or_else(|e| panic!("prepare_playback({item_id}): {e}"));
 
     let poll_deadline = Instant::now() + Duration::from_secs(180);
-    let mut trickplay = core.get_trickplay(item_id.clone(), plan.media_source_id.clone());
+    let mut trickplay = core.get_trickplay(item_id.clone(), plan.media_source_id.clone(), None);
     while trickplay.is_none() && Instant::now() < poll_deadline {
         std::thread::sleep(Duration::from_secs(5));
-        trickplay = core.get_trickplay(item_id.clone(), plan.media_source_id.clone());
+        trickplay = core.get_trickplay(item_id.clone(), plan.media_source_id.clone(), None);
     }
 
     let Some(trickplay) = trickplay else {
@@ -273,7 +273,7 @@ fn live_trickplay() {
     );
 
     let url = core
-        .trickplay_tile_url(item_id.clone(), trickplay.width, 0)
+        .trickplay_tile_url(item_id.clone(), trickplay.width, 0, None)
         .unwrap_or_else(|| panic!("trickplay_tile_url should return Some while signed in"));
     assert!(
         url.contains(&format!(
@@ -390,4 +390,12 @@ fn latest_shelves(core: &JellybeamCore) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+/// The first request under the current account epoch; each live test uses its own core.
+fn first_request(core: &JellybeamCore) -> PlaybackRequest {
+    PlaybackRequest {
+        seq: 1,
+        account_epoch: core.account_epoch(),
+    }
 }

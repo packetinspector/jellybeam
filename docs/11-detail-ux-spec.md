@@ -78,7 +78,8 @@ it, ranked by contribution to "feels like Jellybeam".
 9. **Cast row.** Header "Cast" (20px SEMIBOLD). 72px circular portraits,
    name (12px, 1-line) + role (11px TERTIARY, 1-line), 84px columns.
    HARD RULE: skip anyone without a portrait — no gray placeholder circles.
-   Row absent if none survive. Edge-faded horizontal strip.
+   Row absent if none survive. Edge-faded horizontal strip. Select on a
+   card opens that person's page (§Person page).
 10. **Series-specific meta line:** `YearRange · N seasons · OfficialRating`.
     Year range: `2007–2013`, `2007–` if Status=Continuing. NEVER runtime or
     genres on a Series. Season count from loaded seasons, not ChildCount.
@@ -190,6 +191,53 @@ movie layout. Members come from the mirror in the server's display order
   (docs/15).
 - The `···` menu holds only the favorite toggle and, for administrators,
   Refresh metadata (docs/19 §1.1).
+
+## Person page
+
+Select on a cast card (Movie, Series, Episode) opens the person's library
+page (`PersonScreen`, route `Screen.Person`), fetched live: people are never
+mirrored.
+
+- Header: the person's Primary portrait (100×150dp, 8dp radius; absent
+  without an image, never a placeholder), name verbatim (Archivo bold 28sp, 2
+  lines), then `Born <date> in <place>` / `Died <date>` lines when the server
+  has them (dates medium-format in the TV's locale, docs/27 §1), then the
+  biography under the Detail overview clamp (4 lines, `MORE ↓` stop,
+  full-text panel, docs/23 Rule 2). Blank biography: block absent.
+- Row `In your library`: the person's Movies and Series in the signed-in
+  user's library (`GET /Items?PersonIds=…&Recursive=true`, newest premiere
+  first, capped at 200), as `PosterCard`s; Select opens the title's Detail
+  page. Empty: one muted line, no row. The shown cards are re-read from the
+  mirror by id (`cards_by_ids`) on return and on every mirror change to one
+  of them (`ChangeRefreshScheduler`, as Detail; the return read goes through
+  the same loop, so reads never publish out of order), even while the Seerr
+  row is still loading, so a title played meanwhile shows its new badge
+  whenever the mirror commits it; which cards are shown never changes there,
+  so the restored focus can't vanish.
+- Row `Not in your library`: only when Seerr is configured and the person
+  has a TMDB id (the Seerr person id). It is the Seerr person credits
+  (docs/14, `seerr_person`) minus titles already in the library (kind and
+  TMDB id both match, or Seerr reports them Available;
+  `person_discover_credits`), capped at 50 after
+  filtering, as `SeerrPosterCard`s; Select opens the Discover detail page.
+  The 200 cap is not ownership: past it, the row's own call lists every
+  owned title (ids only) before filtering. Any failure there or in Seerr
+  omits the row with no message and never touches the page (docs/05 "Fail
+  open").
+- The core owns the data: `get_person_page` returns the record plus library
+  cards and, when uncapped, their TMDB identities; the filter and the
+  TMDB-id read are Rust functions with unit tests.
+- Focus (docs/15 §2-§5): a fresh entry lands on the first library poster,
+  else the first Seerr card, else the biography's `MORE ↓` stop, else the
+  name (a focus stop only on such a page, so the D-pad has an anchor). After
+  an error, Retry reloads and lands focus afresh (Retry again on a repeat
+  error). The header has no stop of its own once a poster row exists, so
+  the first row ends it for docs/15 §2's header rule: focusing that row
+  while the page is scrolled brings the page back to its top, never leaving
+  the name clipped above it. The full-biography panel owns Left, so it
+  never opens the nav drawer. Back to the Detail page restores focus to the
+  cast card (`person:<id>`), and Back from a title restores the poster
+  (`item:<id>` / `card:<key>`).
 
 ## Deliberate NON-features (do not "fix" these)
 

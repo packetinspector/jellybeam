@@ -80,7 +80,10 @@ opens the report screen with the crash pinned at the top of the
 summary. Later keeps the capture and shows the dialog again on at most
 the next two Home launches, then falls silent while the capture stays
 available from Report a problem. Discard deletes the capture. A new crash
-replaces an older capture.
+replaces an older capture. The dialog and the expired-token prompt never
+share the screen: whichever is up holds focus, and the other waits for it
+to close (an expired-token prompt then opens with its first action
+focused).
 
 **Crash reports** is its own Troubleshooting switch, default on. Off means
 the exception handler writes nothing and the dialog never appears; there

@@ -104,12 +104,12 @@ class CoreExceptionsTest {
 
     @Test
     fun `unauthorized is unchanged`() {
-        assertEquals("Authorization expired.", CoreException.Unauthorized().displayMessage(strings))
+        assertEquals("Authorization expired.", CoreException.Unauthorized(account = null).displayMessage(strings))
     }
 
     @Test
     fun `a dead Jellyfin token routes to re-authorization from any browse call`() {
-        val unauthorized = CoreException.Unauthorized()
+        val unauthorized = CoreException.Unauthorized(account = null)
 
         assertTrue(routesToReauthorization("ffi.getItemDetail", unauthorized))
         assertTrue(routesToReauthorization("ffi.getSimilar", unauthorized))
@@ -117,9 +117,10 @@ class CoreExceptionsTest {
 
     @Test
     fun `Seerr's own 401, the sign-in flows and other failures never open re-authorization`() {
-        val unauthorized = CoreException.Unauthorized()
+        val unauthorized = CoreException.Unauthorized(account = null)
 
         assertFalse(routesToReauthorization("ffi.seerrHome", unauthorized))
+        assertFalse(routesToReauthorization("ffi.seerrPersonDiscoverCredits", unauthorized))
         assertFalse(routesToReauthorization("ffi.pollQuickConnect", unauthorized))
         assertFalse(routesToReauthorization("ffi.completeQuickConnectReauthorization", unauthorized))
         assertFalse(routesToReauthorization("ffi.getItemDetail", CoreException.Api("boom")))
@@ -127,7 +128,7 @@ class CoreExceptionsTest {
 
     @Test
     fun `the diagnostic label is the variant, never its text`() {
-        assertEquals("unauthorized", CoreException.Unauthorized().diagLabel())
+        assertEquals("unauthorized", CoreException.Unauthorized(account = null).diagLabel())
         assertEquals("api", CoreException.Api("GET http://media.example.test/Items failed").diagLabel())
         assertEquals("server_unreachable", CoreException.ServerUnreachable(host, UnreachableReason.TIMED_OUT, "").diagLabel())
     }

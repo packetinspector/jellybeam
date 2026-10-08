@@ -18,8 +18,8 @@ class ResumeSeekOrderingTest {
         if (seeks.request(targetMs, nowMs) is SeekSerializer.Decision.Issue) issued += targetMs
     }
 
-    private fun tracksChanged() {
-        resumeSeekToIssue(gate, seeks, 1L)?.let { issued += it }
+    private fun tracksChanged(seekability: Seekability = Seekability.SEEKABLE) {
+        resumeSeekToIssue(gate, seeks, 1L, seekability)?.let { issued += it }
     }
 
     private fun landed(nowMs: Long) {
@@ -76,6 +76,16 @@ class ResumeSeekOrderingTest {
     fun `a stale generation reserves and issues nothing`() {
         gate.arm(1L, 42_000L)
         assertNull(reserveResumeSeek(gate, seeks, 2L, nowMs = 0L))
-        assertNull(resumeSeekToIssue(gate, seeks, 2L))
+        assertNull(resumeSeekToIssue(gate, seeks, 2L, Seekability.SEEKABLE))
+    }
+
+    @Test
+    fun `an unseekable file never gets the resume seek and frees the slot`() {
+        gate.arm(1L, 42_000L)
+        reserveResumeSeek(gate, seeks, 1L, nowMs = 0L)
+        tracksChanged(Seekability.UNSEEKABLE)
+
+        assertEquals(emptyList<Long>(), issued)
+        assertNull(seeks.inFlightTargetMs)
     }
 }

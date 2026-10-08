@@ -972,7 +972,7 @@ class DetailFormattingTest {
     fun `seriesHeaderLine joins year range, season and episode counts, rating and up to two genres`() {
         assertEquals(
             "2007–2019  ·  13 seasons  ·  279 episodes  ·  TV-PG  ·  Comedy, Drama",
-            DetailFormatting.seriesHeaderLine(strings, 
+            DetailFormatting.seriesHeaderLine(strings,
                 productionYear = 2007,
                 endYear = 2019,
                 status = "Ended",
@@ -1006,7 +1006,7 @@ class DetailFormattingTest {
     fun `seriesHeaderItems is the same parts seriesHeaderLine joins, unjoined`() {
         assertEquals(
             listOf("2007–2019", "13 seasons", "279 episodes", "TV-PG", "Comedy, Drama"),
-            DetailFormatting.seriesHeaderItems(strings, 
+            DetailFormatting.seriesHeaderItems(strings,
                 productionYear = 2007,
                 endYear = 2019,
                 status = "Ended",

@@ -26,7 +26,6 @@
     <string name="reauthorize_explanation">Refresh this saved account’s access without deleting its local library.</string>
     <string name="reauthorize_button">Reauthorize</string>
     <string name="reauthorizing">Reauthorizing…</string>
-    <string name="authorization_expired_manage_servers">Authorization expired. Reauthorize this account from Manage Servers.</string>
     <string name="quick_connect_button">Use Quick Connect</string>
     <string name="quick_connect_use_password">Use password instead</string>
     <string name="quick_connect_code_label">Enter this code in Jellyfin</string>

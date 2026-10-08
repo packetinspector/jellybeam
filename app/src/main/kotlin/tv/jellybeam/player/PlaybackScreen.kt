@@ -109,6 +109,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.text.Cue
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
@@ -130,6 +131,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.GlideSeek
@@ -167,6 +169,9 @@ private object Osd {
     val BUTTON_GAP = 10.dp
     val BUTTON_BREAK_EXTRA = 6.dp
     val ACTIVE_DOT = 4.dp
+
+    /** Skip back/forward glyph alpha while the file cannot seek (docs/12 §9). */
+    const val DISABLED_ALPHA = 0.35f
     val SHEET_WIDTH = 450.dp
     val SHEET_MAX_Y = 350.dp
     val SHEET_PAD_TOP = 32.dp
@@ -313,6 +318,13 @@ fun resolveBackAction(
  */
 internal fun resolveInvokerReturn(invoker: ControlButton?, visible: List<ControlButton>): ControlButton? =
     invoker?.takeIf { it in visible } ?: visible.firstOrNull { it == ControlButton.PLAY_PAUSE } ?: visible.firstOrNull()
+
+/**
+ * docs/12 §9: a held ring whose button left the row (Chapters on a file found unseekable) moves to
+ * Play / Pause or the first button; a cleared ring (card or menu owns focus) stays cleared.
+ */
+internal fun reconcileFocusedButton(focused: ControlButton?, visible: List<ControlButton>): ControlButton? =
+    if (focused == null || focused in visible) focused else resolveInvokerReturn(null, visible)
 
 /**
  * docs/12 §5 codec summary (Full only): `"1080p · H264 · EAC3 5.1"`, each part dropped
@@ -687,7 +699,7 @@ private val TRACK_ROW_H_PADDING = 16.dp
 fun PlaybackScreen(
     viewModel: PlaybackViewModel,
     onFinish: () -> Unit,
-    onReauthorizationRequired: () -> Unit,
+    onReauthorizationRequired: (account: AccountIdentity?) -> Unit,
     focusRestoreEpoch: Long = 0L,
     /**
      * docs/12 §13: fired for [PlaybackEvent.FinishToDetail] instead of [onFinish] -- routes to the
@@ -718,6 +730,11 @@ fun PlaybackScreen(
     var flashJob by remember { mutableStateOf<Job?>(null) }
     val focusRequester = remember { FocusRequester() }
     var pickerFocusIndex by remember { mutableIntStateOf(0) }
+    // A rebuilt picker can lose rows; focus stays on a real one.
+    val pickerRows = state.trackPicker?.let { it.audioTracks.size + it.subtitleTracks.size } ?: 0
+    LaunchedEffect(pickerRows) {
+        if (pickerRows > 0) pickerFocusIndex = pickerFocusIndex.coerceIn(0, pickerRows - 1)
+    }
     /** The button row's focused identity; null only while another overlay owns interaction. */
     var focusedButton by remember { mutableStateOf<ControlButton?>(null) }
     /** docs/15 §4: the button that opened the current nested surface, captured before
@@ -725,6 +742,14 @@ fun PlaybackScreen(
     var menuInvoker by remember { mutableStateOf<ControlButton?>(null) }
     var activeSegment by remember { mutableStateOf<MediaSegment?>(null) }
     var skipUndo by remember { mutableStateOf<SkipUndoState?>(null) }
+    /** docs/12 §9, docs/18 §3.2: bumped per notice event; each bump restarts the toast with [noticeText]. */
+    var noticeToken by remember { mutableIntStateOf(0) }
+    var noticeText by remember { mutableIntStateOf(R.string.player_seek_unavailable) }
+    var noticeShown by remember { mutableStateOf(false) }
+    /** docs/18 §3.2: our own subtitle view for sidecar cues, beside PlayerView's. */
+    var sidecarView by remember { mutableStateOf<SubtitleView?>(null) }
+    /** docs/12 §14: the skip pill holds the focus ring instead of [focusedButton] (which is kept). */
+    var pillFocused by remember { mutableStateOf(false) }
     val sheetScrollState = rememberScrollState()
     val sheetScrollStepPx = remember(density) { with(density) { 120.dp.roundToPx() } }
     var speedMenuFocusIndex by remember { mutableIntStateOf(0) }
@@ -804,14 +829,19 @@ fun PlaybackScreen(
     // reorder), feeding the speed/chapters menu anchor.
     val buttonCentersPx = remember { mutableStateOf(emptyMap<ControlButton, Float>()) }
 
-    val visibleButtons = remember(state.osdDetail, state.itemType, state.hasPreviousEpisode, state.hasNextEpisode, state.chapters) {
+    val visibleButtons = remember(state.osdDetail, state.itemType, state.hasPreviousEpisode, state.hasNextEpisode, state.chapters, state.seekability) {
         visibleControls(
             osdDetail = state.osdDetail,
             isEpisode = state.itemType == "Episode",
             hasPrev = state.hasPreviousEpisode,
             hasNext = state.hasNextEpisode,
-            hasChapters = state.chapters.isNotEmpty(),
+            hasChapters = SeekGuard.chaptersButtonVisible(state.chapters.isNotEmpty(), state.seekability),
         )
+    }
+
+    // docs/12 §9: seekability can drop the Chapters button under a ring resting on it.
+    LaunchedEffect(visibleButtons) {
+        focusedButton = reconcileFocusedButton(focusedButton, visibleButtons)
     }
 
     fun flash(text: String, numeral: String? = null) {
@@ -852,7 +882,7 @@ fun PlaybackScreen(
         isEpisode = state.itemType == "Episode",
         hasPrev = state.hasPreviousEpisode,
         hasNext = state.hasNextEpisode,
-        hasChapters = state.chapters.isNotEmpty(),
+        hasChapters = SeekGuard.chaptersButtonVisible(state.chapters.isNotEmpty(), state.seekability),
     )
 
     /** docs/15 §4: every nested-surface close routes through here. Resolves [menuInvoker] against
@@ -922,7 +952,12 @@ fun PlaybackScreen(
             trickplayPreviewState = trickplayPreview.preview
             activeSegment = if (skipUndo == null) {
                 SkipSegment.activeSegment(state.mediaSegments, viewModel.positionTicks.value)
-                    ?.takeIf { SkipSegment.decision(it.segmentType, state.skipSegmentActions) == SegmentDecision.PILL }
+                    ?.takeIf {
+                        SeekGuard.segmentDecision(
+                            SkipSegment.decision(it.segmentType, state.skipSegmentActions),
+                            viewModel.state.value.seekability,
+                        ) == SegmentDecision.PILL
+                    }
             } else {
                 null
             }
@@ -987,6 +1022,41 @@ fun PlaybackScreen(
         if (state.chaptersMenuOpen) chaptersMenuFocusIndex = 0
     }
 
+    // docs/12 §14: a pill that vanishes or an OSD that hides hands the ring back to the buttons.
+    val pillVisible = state.skipPillVisible(activeSegment)
+    LaunchedEffect(pillVisible, osdVisible) {
+        pillFocused = SkipSelectRouting.pillStaysFocused(pillFocused, osdVisible, pillVisible)
+    }
+
+    LaunchedEffect(noticeToken) {
+        if (noticeToken > 0) {
+            noticeShown = true
+            delay(SeekGuard.NOTICE_MS)
+            noticeShown = false
+        }
+    }
+
+    // docs/18 §3.2: feeds sidecar cues from the live position, sleeping until the next change.
+    val sidecarCues = state.sidecarCues
+    val playbackRate = state.playbackRate
+    LaunchedEffect(sidecarCues, sidecarView, playbackRate) {
+        val view = sidecarView ?: return@LaunchedEffect
+        if (sidecarCues == null) {
+            view.setCues(emptyList())
+            return@LaunchedEffect
+        }
+        var shown: List<Cue>? = null
+        while (true) {
+            val positionUs = viewModel.positionUs()
+            val cues = sidecarCues.cuesAt(positionUs)
+            if (cues !== shown) {
+                view.setCues(cues)
+                shown = cues
+            }
+            delay(SidecarCues.pollDelayMs(sidecarCues.nextChangeUs(positionUs) - positionUs, playbackRate))
+        }
+    }
+
     LaunchedEffect(skipUndo) {
         if (skipUndo != null) {
             delay(SKIP_UNDO_WINDOW_MS)
@@ -999,7 +1069,12 @@ fun PlaybackScreen(
             when (event) {
                 PlaybackEvent.Finish -> onFinish()
                 is PlaybackEvent.FinishToDetail -> onFinishToDetail(event.itemId)
-                PlaybackEvent.ReauthorizationRequired -> onReauthorizationRequired()
+                is PlaybackEvent.ReauthorizationRequired -> onReauthorizationRequired(event.account)
+                PlaybackEvent.SeekUnavailable, PlaybackEvent.SubtitleUnavailable -> {
+                    noticeText = if (event == PlaybackEvent.SeekUnavailable) R.string.player_seek_unavailable else R.string.player_subtitle_unavailable
+                    noticeToken++
+                    viewModel.noticeShown()
+                }
                 is PlaybackEvent.FinishWithMessage -> {
                     Toast.makeText(context, event.message, Toast.LENGTH_LONG).show()
                     onFinish()
@@ -1007,8 +1082,14 @@ fun PlaybackScreen(
                 is PlaybackEvent.AutoSkipped -> {
                     skipUndo = SkipUndoState(event.preSkipPositionTicks, event.segmentType)
                     activeSegment = null
-                    osd.onKeyEvent()
-                    osdVisible = true
+                    // docs/12 §14: like a manual skip, an auto-skip closes the bare OSD so the
+                    // toast shows and Select undoes; a menu, a card or a pause is left alone.
+                    val live = viewModel.state.value
+                    if (SkipSelectRouting.skipHidesOsd(osdVisible, live.playerMenuOpen, live.nextUp != null || live.stillWatching != null, live.isPaused)) {
+                        osd.hide()
+                        osdVisible = false
+                        pillFocused = false
+                    }
                 }
             }
         }
@@ -1045,8 +1126,7 @@ fun PlaybackScreen(
             // doesn't know whether the item has chapters -- that's resolved
             // via [PlaybackViewModel.jumpToChapter]'s null return.
             if (PageKeys.isPageKey(event.key)) {
-                val nestedSurfaceOpen = current.speedMenuOpen || current.chaptersMenuOpen ||
-                    current.trackPicker != null || current.statsSheetLive != null || current.libraryInfoOverlay != null
+                val nestedSurfaceOpen = current.playerMenuOpen
                 val cardShowing = current.nextUp != null || current.stillWatching != null
                 val glideActive = glide?.isActive == true
                 val action = PageKeys.resolve(
@@ -1076,6 +1156,12 @@ fun PlaybackScreen(
             }
 
             fun doSeek(direction: SeekDirection, showFeedback: Boolean = true) {
+                // docs/12 §9: a refused seek flashes nothing and shows the notice instead.
+                when (SeekGuard.route(current.seekability)) {
+                    SeekRoute.SEEK -> Unit
+                    SeekRoute.NOTICE -> return viewModel.notifySeekUnavailable()
+                    SeekRoute.DROP -> return
+                }
                 val baseMs = if (direction == SeekDirection.BACK) current.skipBackMs else current.skipForwardMs
                 val signedMs = baseMs * if (direction == SeekDirection.BACK) -1L else 1L
                 // Hidden seeks have no preview UI, so skip the trickplay tile lookup too -- no
@@ -1089,8 +1175,45 @@ fun PlaybackScreen(
                 }
             }
 
+            // docs/12 §9: hidden Left/Right glide or tap-seek; an unseekable file only shows the
+            // notice and an unknown one drops the press, neither starting a glide.
+            fun hiddenSeek(glideDirection: GlideDirection, seekDirection: SeekDirection) {
+                when (SeekGuard.route(current.seekability)) {
+                    SeekRoute.NOTICE -> viewModel.notifySeekUnavailable()
+                    SeekRoute.DROP -> Unit
+                    SeekRoute.SEEK -> if (glide?.onKeyDown(glideDirection, osdVisible = false) == true) {
+                        glideEpoch++
+                    } else {
+                        doSeek(seekDirection, showFeedback = false)
+                    }
+                }
+            }
+
             fun focusPlayPauseOrFirst() {
                 focusedButton = if (currentButtons.contains(ControlButton.PLAY_PAUSE)) ControlButton.PLAY_PAUSE else currentButtons.firstOrNull()
+            }
+
+            // docs/12 §14: an arrow key makes the Undo toast stale; Select then follows the focus ring.
+            if (SkipSelectRouting.dismissesUndoToast(event.key)) skipUndo = null
+
+            // docs/12 §14: a skip never reveals the OSD, so Select stays one-press while hidden.
+            fun undoSkipNow(undo: SkipUndoState) {
+                viewModel.undoSkip(undo.preSkipPositionTicks)
+                skipUndo = null
+                if (osdVisible) osd.onKeyEvent()
+            }
+            fun skipSegmentNow(segment: MediaSegment) {
+                val before = viewModel.skipSegment(segment) ?: return
+                skipUndo = SkipUndoState(before, segment.segmentType)
+                activeSegment = null
+                pillFocused = false
+                // docs/12 §14: a skip from the focused pill hides the OSD so "Select to undo" is
+                // true; a pause keeps it pinned (docs/12 §9).
+                val live = viewModel.state.value
+                if (SkipSelectRouting.skipHidesOsd(osdVisible, live.playerMenuOpen, live.nextUp != null || live.stillWatching != null, live.isPaused)) {
+                    osd.hide()
+                    osdVisible = false
+                }
             }
 
             // Most keys wake a hidden OSD; Left/Right are silent seek
@@ -1104,28 +1227,32 @@ fun PlaybackScreen(
                 // Back is a navigation level, not an OSD-wake key -- must reach BackHandler when
                 // hidden.
                 if (event.key == Key.Back || event.key == Key.Escape) return@keyHandler false
+                if (event.key in SELECT_KEYS) {
+                    val undo = skipUndo
+                    val segment = activeSegment
+                    // A held Select must not skip and then undo itself.
+                    when (
+                        SkipSelectRouting.resolveSelect(
+                            osdVisible = false,
+                            pillFocused = false,
+                            segmentShown = current.skipPillVisible(segment),
+                            undoShown = undo != null,
+                            nextUpShown = current.nextUp != null,
+                            stillWatchingShown = current.stillWatching != null,
+                        )
+                    ) {
+                        SelectRoute.UNDO -> if (event.nativeKeyEvent.repeatCount == 0 && undo != null) undoSkipNow(undo)
+                        SelectRoute.SKIP_SEGMENT -> if (event.nativeKeyEvent.repeatCount == 0 && segment != null) skipSegmentNow(segment)
+                        SelectRoute.PLAY_NEXT, SelectRoute.ACTIVATE_FOCUSED, SelectRoute.REVEAL_OSD -> revealOsdToPlayPause()
+                    }
+                    return@keyHandler true
+                }
                 when (event.key) {
                     // docs/12 §9: first press fires the tap seek immediately via
                     // `glide.onKeyDown` -> `GlideHost.tapSeek`, then starts the hold timer.
                     // `glide == null` falls back to plain tap seek.
-                    Key.DirectionLeft -> {
-                        if (event.nativeKeyEvent.repeatCount == 0) {
-                            if (glide?.onKeyDown(GlideDirection.BACK, osdVisible = false) == true) {
-                                glideEpoch++
-                            } else {
-                                doSeek(SeekDirection.BACK, showFeedback = false)
-                            }
-                        }
-                    }
-                    Key.DirectionRight -> {
-                        if (event.nativeKeyEvent.repeatCount == 0) {
-                            if (glide?.onKeyDown(GlideDirection.FORWARD, osdVisible = false) == true) {
-                                glideEpoch++
-                            } else {
-                                doSeek(SeekDirection.FORWARD, showFeedback = false)
-                            }
-                        }
-                    }
+                    Key.DirectionLeft -> if (event.nativeKeyEvent.repeatCount == 0) hiddenSeek(GlideDirection.BACK, SeekDirection.BACK)
+                    Key.DirectionRight -> if (event.nativeKeyEvent.repeatCount == 0) hiddenSeek(GlideDirection.FORWARD, SeekDirection.FORWARD)
                     else -> revealOsdToPlayPause()
                 }
                 return@keyHandler true
@@ -1244,25 +1371,24 @@ fun PlaybackScreen(
                     // the picker from any focused button.
                     menuInvoker = focusedButton
                     focusedButton = null
+                    pillFocused = false
                     openPickerAndFocusSelected()
                     true
                 }
                 in SELECT_KEYS -> {
-                    val undo = skipUndo
                     val segment = activeSegment
-                    if (undo != null) {
-                        viewModel.undoSkip(undo.preSkipPositionTicks)
-                        skipUndo = null
-                        osd.onKeyEvent()
-                        osdVisible = true
-                    } else if (current.nextUp != null) {
+                    val route = SkipSelectRouting.resolveSelect(
+                        osdVisible = true,
+                        pillFocused = pillFocused,
+                        segmentShown = current.skipPillVisible(segment),
+                        undoShown = skipUndo != null,
+                        nextUpShown = current.nextUp != null,
+                        stillWatchingShown = current.stillWatching != null,
+                    )
+                    if (route == SelectRoute.PLAY_NEXT) {
                         viewModel.playNext()
-                    } else if (segment != null) {
-                        val before = viewModel.skipSegment(segment)
-                        skipUndo = SkipUndoState(before, segment.segmentType)
-                        activeSegment = null
-                        osd.onKeyEvent()
-                        osdVisible = true
+                    } else if (route == SelectRoute.SKIP_SEGMENT && segment != null) {
+                        skipSegmentNow(segment)
                     } else {
                         val focused = focusedButton
                         if (focused != null) {
@@ -1310,27 +1436,23 @@ fun PlaybackScreen(
                     }
                     true
                 }
-                Key.DirectionLeft -> {
+                Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
                     osd.onKeyEvent()
                     osdVisible = true
-                    moveFocus(-1)
-                    true
-                }
-                Key.DirectionRight -> {
-                    osd.onKeyEvent()
-                    osdVisible = true
-                    moveFocus(1)
-                    true
-                }
-                Key.DirectionUp -> {
-                    osd.onKeyEvent()
-                    osdVisible = true
-                    true
-                }
-                Key.DirectionDown -> {
-                    osd.onKeyEvent()
-                    osdVisible = true
-                    if (focusedButton == null && current.nextUp == null && current.stillWatching == null) {
+                    val move = SkipSelectRouting.pillFocusMove(event.key, osdVisible, pillFocused, current.skipPillVisible(activeSegment))
+                    if (move == PillFocusMove.FOCUS_PILL) {
+                        pillFocused = true
+                    } else if (move == PillFocusMove.RETURN_TO_BUTTONS) {
+                        // docs/12 §14: the ring goes back to the previous button, else Play / Pause.
+                        pillFocused = false
+                        if (focusedButton == null) focusPlayPauseOrFirst()
+                    } else if (event.key == Key.DirectionLeft) {
+                        moveFocus(-1)
+                    } else if (event.key == Key.DirectionRight) {
+                        moveFocus(1)
+                    } else if (event.key == Key.DirectionDown &&
+                        focusedButton == null && current.nextUp == null && current.stillWatching == null
+                    ) {
                         focusPlayPauseOrFirst()
                     }
                     true
@@ -1359,32 +1481,45 @@ fun PlaybackScreen(
                     setBackgroundColor(android.graphics.Color.BLACK)
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
                     AppGraph.playerHolder.attach(this)
+                    // docs/18 §3.2: beside PlayerView's subtitle view, styled identically below.
+                    (subtitleView?.parent as? android.view.ViewGroup)?.let { frame ->
+                        val view = SubtitleView(ctx)
+                        frame.addView(
+                            view,
+                            frame.indexOfChild(subtitleView) + 1,
+                            android.widget.FrameLayout.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                        sidecarView = view
+                    }
                 }
             },
             update = { playerView ->
-                val subtitleView = playerView.subtitleView
-                subtitleView?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * state.subtitleStyle.scale)
-                subtitleView?.setStyle(
-                    captionStyleCompat(state.subtitleStyle, captioningManager),
-                )
                 // docs/12 §16: SubtitleView lays out cues within its own measured bounds, ignoring
                 // the sheet drawn over it. Shrinking the view's right margin by the sheet width
                 // reflows cues into the remaining left column; reset to 0 when no sheet is open.
                 val sheetOpen = state.statsSheetLive != null || state.libraryInfoOverlay != null
                 val sheetMarginPx = if (sheetOpen) with(density) { Osd.SHEET_WIDTH.roundToPx() } else 0
-                subtitleView?.let { view ->
+                val osdFraction = if (osdVisible) SUBTITLE_BOTTOM_FRACTION_OSD else SUBTITLE_BOTTOM_FRACTION_DEFAULT
+                val positionFraction = subtitlePositionBottomFraction(state.subtitleStyle.position)
+                listOfNotNull(playerView.subtitleView, sidecarView).forEach { view ->
+                    view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * state.subtitleStyle.scale)
+                    view.setStyle(captionStyleCompat(state.subtitleStyle, captioningManager))
                     (view.layoutParams as? android.widget.FrameLayout.LayoutParams)?.let { params ->
                         if (params.rightMargin != sheetMarginPx) {
                             params.rightMargin = sheetMarginPx
                             view.layoutParams = params
                         }
                     }
+                    view.setBottomPaddingFraction(maxOf(osdFraction, positionFraction))
                 }
-                val osdFraction = if (osdVisible) SUBTITLE_BOTTOM_FRACTION_OSD else SUBTITLE_BOTTOM_FRACTION_DEFAULT
-                val positionFraction = subtitlePositionBottomFraction(state.subtitleStyle.position)
-                subtitleView?.setBottomPaddingFraction(maxOf(osdFraction, positionFraction))
             },
-            onRelease = { playerView -> AppGraph.playerHolder.detach(playerView) },
+            onRelease = { playerView ->
+                sidecarView = null
+                AppGraph.playerHolder.detach(playerView)
+            },
         )
 
         // docs/17-mini-player.md §2/§3: everything below the player surface
@@ -1451,7 +1586,7 @@ fun PlaybackScreen(
                 state = state,
                 directPlayDetail = state.playbackStatsDetail,
                 visibleButtons = visibleButtons,
-                focusedButton = focusedButton,
+                focusedButton = if (pillFocused) null else focusedButton,
                 positionTicks = viewModel.positionTicks,
                 bufferedPositionTicks = viewModel.bufferedPositionTicks,
                 onButtonCentersMeasured = { buttonCentersPx.value = it },
@@ -1589,6 +1724,7 @@ fun PlaybackScreen(
                 osdLift = if (osdVisible) controlZoneHeight(state.osdDetail) else 0.dp,
                 livePositionTicks = viewModel::livePositionTicks,
                 onCountdownElapsed = viewModel::nextUpCountdownElapsed,
+                accountEpoch = viewModel.accountEpoch,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -1608,20 +1744,31 @@ fun PlaybackScreen(
 
         if (state.phase == PlaybackUiState.Phase.READY) {
             activeSegment?.let { segment ->
-                if (state.nextUp == null && state.stillWatching == null) {
+                // docs/12 §14: hidden under the cards and any open player menu, never drawn over them.
+                if (state.skipPillVisible(segment)) {
                     SkipPill(
                         label = SkipSegment.pillLabel(strings, segment.segmentType),
+                        focused = pillFocused,
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
                             .padding(end = OSD_MARGIN, bottom = controlZoneHeight(state.osdDetail) + 16.dp),
                     )
                 }
             }
-            skipUndo?.let { undo ->
-                SkipUndoToast(
-                    label = SkipSegment.toastLabel(strings, undo.segmentType),
-                    modifier = Modifier.align(Alignment.TopCenter),
-                )
+            // One top-centre slot. The notice (docs/12 §9: informational, no key route reads it)
+            // outranks the Undo toast, which is drawn only while Select would undo, i.e. with the
+            // OSD hidden (docs/12 §14); Select still undoes underneath a notice.
+            if (noticeShown) {
+                NoticeToast(text = noticeText, modifier = Modifier.align(Alignment.TopCenter))
+            } else {
+                skipUndo?.takeIf {
+                    SkipSelectRouting.undoToastVisible(true, osdVisible, state.nextUp != null || state.stillWatching != null)
+                }?.let { undo ->
+                    SkipUndoToast(
+                        label = SkipSegment.toastLabel(strings, undo.segmentType),
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    )
+                }
             }
         }
 
@@ -2038,9 +2185,13 @@ private fun OsdControlButton(
 ) {
     val tint = if (focused) JellybeamTheme.Pistacchio else JellybeamTheme.Panna
 
+    // docs/12 §8/§9: stays in the row so layout and focus order hold; dimmed while it can't seek.
+    val dimmed = SeekGuard.skipButtonsDimmed(state.seekability) && (button == ControlButton.SKIP_BACK || button == ControlButton.SKIP_FORWARD)
+
     Box(
         modifier = modifier
             .size(Osd.BUTTON_TARGET)
+            .graphicsLayer { alpha = if (dimmed) Osd.DISABLED_ALPHA else 1f }
             .onGloballyPositioned { coords -> onCenterMeasured(coords.positionInRoot().x + coords.size.width / 2f) },
         contentAlignment = Alignment.Center,
     ) {
@@ -2622,6 +2773,7 @@ private fun EndOfEpisodeOverlay(
     osdLift: Dp,
     livePositionTicks: () -> Long,
     onCountdownElapsed: () -> Unit,
+    accountEpoch: ULong?,
     modifier: Modifier = Modifier,
 ) {
     if (nextUp == null && stillWatching == null) return
@@ -2631,9 +2783,9 @@ private fun EndOfEpisodeOverlay(
             .align(Alignment.BottomEnd)
             .padding(end = OSD_MARGIN, bottom = osdLift + END_OF_EPISODE_CARD_BOTTOM)
         nextUp?.let {
-            NextUpCard(nextUp = it, livePositionTicks = livePositionTicks, onCountdownElapsed = onCountdownElapsed, modifier = cardModifier)
+            NextUpCard(nextUp = it, livePositionTicks = livePositionTicks, onCountdownElapsed = onCountdownElapsed, accountEpoch = accountEpoch, modifier = cardModifier)
         }
-        stillWatching?.let { StillWatchingCard(stillWatching = it, modifier = cardModifier) }
+        stillWatching?.let { StillWatchingCard(stillWatching = it, accountEpoch = accountEpoch, modifier = cardModifier) }
     }
 }
 
@@ -2732,6 +2884,7 @@ private fun EndOfEpisodeCard(
     actionLabel: String,
     remainingFraction: State<Float>?,
     numeral: String?,
+    accountEpoch: ULong?,
     modifier: Modifier = Modifier,
 ) {
     val artSource = remember(card.id) { CardFormatting.railArtSource(card) }
@@ -2748,7 +2901,7 @@ private fun EndOfEpisodeCard(
             ) {
                 CardArtImage(
                     source = artSource,
-                    imageUrl = { itemId, kind, tag -> AppGraph.gateway.imageUrl(itemId, kind, tag, thumbImageWidth) },
+                    imageUrl = { itemId, kind, tag -> AppGraph.gateway.imageUrl(itemId, kind, tag, thumbImageWidth, accountEpoch) },
                     itemName = card.name,
                     contentAlpha = 1f,
                     blurhash = card.blurhash,
@@ -2833,6 +2986,7 @@ private fun NextUpCard(
     nextUp: NextUpState,
     livePositionTicks: () -> Long,
     onCountdownElapsed: () -> Unit,
+    accountEpoch: ULong?,
     modifier: Modifier = Modifier,
 ) {
     val card = nextUp.card
@@ -2880,6 +3034,7 @@ private fun NextUpCard(
         actionLabel = stringResource(R.string.next_up_play_next),
         remainingFraction = if (nextUp.autoAdvance) remainingFraction else null,
         numeral = if (nextUp.autoAdvance) NextUpCountdown.numeral(strings, remainingSecs) else null,
+        accountEpoch = accountEpoch,
         modifier = modifier,
     )
 }
@@ -2893,6 +3048,7 @@ private fun NextUpCard(
 @Composable
 private fun StillWatchingCard(
     stillWatching: StillWatchingState,
+    accountEpoch: ULong?,
     modifier: Modifier = Modifier,
     nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
@@ -2929,6 +3085,7 @@ private fun StillWatchingCard(
         actionLabel = stringResource(R.string.still_watching_keep_watching),
         remainingFraction = remainingFraction,
         numeral = NextUpCountdown.numeral(strings, remainingSecs),
+        accountEpoch = accountEpoch,
         modifier = modifier,
     )
 }
@@ -3029,17 +3186,29 @@ private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, modifier: Mo
 
 // -- Skip intro/credits pill + Undo toast -----------------------------------
 
+/** docs/12 §12: a player menu or sheet is open over the OSD. */
+private val PlaybackUiState.playerMenuOpen: Boolean
+    get() = trackPicker != null || speedMenuOpen || chaptersMenuOpen || statsSheetLive != null || libraryInfoOverlay != null
+
+/** docs/12 §14: whether the skip pill is drawn, the one test drawing, focus and Select all share. */
+private fun PlaybackUiState.skipPillVisible(segment: MediaSegment?): Boolean =
+    SkipSelectRouting.pillVisible(segment != null, nextUp != null || stillWatching != null, playerMenuOpen)
+
 private val SKIP_PILL_RADIUS = 6.dp
 private val SKIP_UNDO_TOAST_RADIUS = 8.dp
 
 @Composable
-private fun SkipPill(label: String, modifier: Modifier = Modifier) {
+private fun SkipPill(label: String, focused: Boolean, modifier: Modifier = Modifier) {
     BasicText(
         text = label,
         modifier = modifier
             .background(JellybeamTheme.SurfaceRaised.copy(alpha = 0xee / 255f), RoundedCornerShape(SKIP_PILL_RADIUS))
             .padding(horizontal = 12.dp, vertical = 8.dp),
-        style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 14.sp),
+        style = TextStyle(
+            fontFamily = JellybeamTheme.Archivo,
+            color = if (focused) JellybeamTheme.Pistacchio else JellybeamTheme.Panna,
+            fontSize = 14.sp,
+        ),
     )
 }
 
@@ -3053,6 +3222,21 @@ private fun SkipUndoToast(label: String, modifier: Modifier = Modifier) {
     ) {
         BasicText(
             text = stringResource(R.string.player_skip_toast, label),
+            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 13.sp),
+        )
+    }
+}
+
+@Composable
+private fun NoticeToast(@androidx.annotation.StringRes text: Int, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .padding(top = 24.dp)
+            .background(JellybeamTheme.SurfacePanel, RoundedCornerShape(SKIP_UNDO_TOAST_RADIUS))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        BasicText(
+            text = stringResource(text),
             style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 13.sp),
         )
     }

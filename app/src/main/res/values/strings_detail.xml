@@ -82,4 +82,13 @@
     <string name="detail_toast_refreshing_metadata">Refreshing metadata</string>
     <string name="detail_toast_server_unreachable">Couldn\'t reach the server</string>
     <string name="detail_toast_added_to_collection">Added to %1$s</string>
+
+    <!-- Library person page (docs/11 Person page). Dates arrive already formatted for the locale. -->
+    <string name="person_in_library">In your library</string>
+    <string name="person_not_in_library">Not in your library</string>
+    <string name="person_nothing_in_library">Nothing from this person in your library.</string>
+    <string name="person_born">Born %1$s</string>
+    <string name="person_born_in">Born %1$s in %2$s</string>
+    <string name="person_born_place">Born in %1$s</string>
+    <string name="person_died">Died %1$s</string>
 </resources>

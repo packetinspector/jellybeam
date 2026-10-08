@@ -3,7 +3,10 @@ package tv.jellybeam.data
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.first
+import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
@@ -13,6 +16,7 @@ import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.DeviceCaps
 import uniffi.jellybeam_core.DiscoveredServer
 import uniffi.jellybeam_core.EpisodeNeighbors
+import uniffi.jellybeam_core.FailedTrackFfi
 import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.GridCounts
 import uniffi.jellybeam_core.GridFilters
@@ -29,14 +33,17 @@ import uniffi.jellybeam_core.LiveSort
 import uniffi.jellybeam_core.MediaSegment
 import uniffi.jellybeam_core.MediaSegmentKind
 import uniffi.jellybeam_core.OsdDetailSetting
+import uniffi.jellybeam_core.PersonPage
 import uniffi.jellybeam_core.PlaybackOsdDetail
 import uniffi.jellybeam_core.PlaybackPlan
+import uniffi.jellybeam_core.PlaybackRequest
 import uniffi.jellybeam_core.PlaybackQuality
 import uniffi.jellybeam_core.QuickConnectSession
 import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SeerrBrowseFilters
 import uniffi.jellybeam_core.SeerrBrowseKind
+import uniffi.jellybeam_core.SeerrCard
 import uniffi.jellybeam_core.SeerrGenre
 import uniffi.jellybeam_core.SeerrHome
 import uniffi.jellybeam_core.SeerrMediaType
@@ -62,6 +69,7 @@ import uniffi.jellybeam_core.SubtitleModeSetting
 import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.SyncStatus
+import uniffi.jellybeam_core.TitleTmdbRef
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
@@ -207,6 +215,8 @@ class FakeCoreGateway(
     var trickplayTileUrlResult: String? = "https://fake.test/trickplay-tile.jpg",
     /** The manifest every [getTrickplay] call returns; `null` (default) is "not resolved yet". */
     var getTrickplayResult: TrickplayMetaFfi? = null,
+    /** Sidecar text by index for [fetchExternalSubtitle]; a missing index fails. */
+    var externalSubtitleText: Map<Int, String> = emptyMap(),
     // -- Seerr Discover (docs/14-seerr-discover.md) --------------------------
     /** [seerrStatus] result; defaults to "not configured" (`SeerrStatus.configured = false`). */
     var seerrStatusValue: SeerrStatus = notConfiguredSeerrStatus(),
@@ -226,6 +236,10 @@ class FakeCoreGateway(
     private val seerrTvResultsByTmdbId: Map<Long, Result<SeerrTvDetail>> = emptyMap(),
     /** [seerrPerson] results keyed by person id; an unmapped id throws [UnconfiguredFakeCall]. */
     private val seerrPersonResultsByPersonId: Map<Long, Result<SeerrPersonCredits>> = emptyMap(),
+    /** [getPersonPage] results keyed by Jellyfin person id; an unmapped id throws [UnconfiguredFakeCall]. */
+    private val personPageResultsById: Map<String, Result<PersonPage>> = emptyMap(),
+    /** [personDiscoverCredits] results keyed by TMDB person id; an unmapped id throws [UnconfiguredFakeCall]. */
+    private val personDiscoverResultsByTmdbId: Map<Long, Result<List<SeerrCard>>> = emptyMap(),
     /** [seerrRequestOptions] result; defaults to an empty server list (plain-Request-button
      * case). */
     var seerrRequestOptionsResult: Result<SeerrRequestOptions> = Result.success(SeerrRequestOptions(servers = emptyList())),
@@ -294,6 +308,10 @@ class FakeCoreGateway(
     private val _reportPausedCalls = mutableListOf<Boolean>()
     val reportPausedCalls: List<Boolean> get() = _reportPausedCalls
 
+    /** `playSessionId` of every [reportPaused] call, index-aligned with [reportPausedCalls]. */
+    private val _reportPausedSessionIds = mutableListOf<String>()
+    val reportPausedSessionIds: List<String> get() = _reportPausedSessionIds
+
     private val _stopPlaybackCalls = mutableListOf<Long>()
     val stopPlaybackCalls: List<Long> get() = _stopPlaybackCalls
 
@@ -320,7 +338,14 @@ class FakeCoreGateway(
     private val _preparePlaybackStartFromBeginningCalls = mutableListOf<Boolean>()
     val preparePlaybackStartFromBeginningCalls: List<Boolean> get() = _preparePlaybackStartFromBeginningCalls
 
-    data class PrepareTranscodeFallbackCall(val itemId: String, val positionTicks: Long, val reason: String, val playSessionId: String)
+    data class PrepareTranscodeFallbackCall(
+        val itemId: String,
+        val positionTicks: Long,
+        val reason: String,
+        val playSessionId: String,
+        val failed: FailedTrackFfi?,
+        val subtitleStreamIndex: Int? = null,
+    )
 
     private val _prepareTranscodeFallbackCalls = mutableListOf<PrepareTranscodeFallbackCall>()
     val prepareTranscodeFallbackCalls: List<PrepareTranscodeFallbackCall> get() = _prepareTranscodeFallbackCalls
@@ -328,6 +353,19 @@ class FakeCoreGateway(
     /** When non-null, [prepareTranscodeFallback] awaits this after snapshotting, holding one
      * fallback negotiation open while a second session runs ahead (docs/18 §3). */
     var prepareTranscodeFallbackGate: CompletableDeferred<Unit>? = null
+
+    /** When non-null, [stopPlayback] awaits this before it reaches the core (is recorded). */
+    var stopPlaybackGate: CompletableDeferred<Unit>? = null
+
+    /** [stopPlayback] calls begun, held at [stopPlaybackGate] or not. */
+    var stopPlaybackEntered: Int = 0
+        private set
+
+    /** The n-th (zero-based) [prepareTranscodeFallback] call's result, over [prepareTranscodeFallbackResult]. */
+    val prepareTranscodeFallbackResultsByCall = mutableMapOf<Int, Result<PlaybackPlan>>()
+
+    /** Holds the n-th (zero-based) [prepareTranscodeFallback] call until completed. */
+    val prepareTranscodeFallbackGatesByCall = mutableMapOf<Int, CompletableDeferred<Unit>>()
 
     private val _preloadPlaybackCalls = mutableListOf<String>()
     val preloadPlaybackCalls: List<String> get() = _preloadPlaybackCalls
@@ -410,6 +448,14 @@ class FakeCoreGateway(
 
     private val _seerrPersonCalls = mutableListOf<Long>()
     val seerrPersonCalls: List<Long> get() = _seerrPersonCalls
+
+    private val _getPersonPageCalls = mutableListOf<String>()
+    val getPersonPageCalls: List<String> get() = _getPersonPageCalls
+
+    data class PersonDiscoverCall(val personId: String, val tmdbPersonId: Long, val inLibrary: List<TitleTmdbRef>?)
+
+    private val _personDiscoverCalls = mutableListOf<PersonDiscoverCall>()
+    val personDiscoverCalls: List<PersonDiscoverCall> get() = _personDiscoverCalls
 
     data class SeerrRequestOptionsCall(val mediaType: SeerrMediaType, val is4k: Boolean)
 
@@ -573,7 +619,8 @@ class FakeCoreGateway(
         return searchResultsByQuery[query].orEmpty()
     }
 
-    override suspend fun getItemDetail(itemId: String): ItemDetail {
+    override suspend fun getItemDetail(itemId: String, accountEpoch: ULong?): ItemDetail {
+        accountBoundCalls.add("getItemDetail" to accountEpoch)
         _getItemDetailCalls.add(itemId)
         val result = itemDetailResultsByItemId[itemId]
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.getItemDetail($itemId): no result configured")
@@ -591,7 +638,10 @@ class FakeCoreGateway(
         return cardsByItemId[itemId]
     }
 
-    override suspend fun getPlaybackOsdDetail(itemId: String): PlaybackOsdDetail {
+    override suspend fun cardsByIds(itemIds: List<String>): List<Card> = itemIds.mapNotNull { cardsByItemId[it] }
+
+    override suspend fun getPlaybackOsdDetail(itemId: String, accountEpoch: ULong?): PlaybackOsdDetail {
+        accountBoundCalls.add("getPlaybackOsdDetail" to accountEpoch)
         _getPlaybackOsdDetailCalls.add(itemId)
         val result = itemDetailResultsByItemId[itemId]
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.getPlaybackOsdDetail($itemId): no result configured")
@@ -612,7 +662,8 @@ class FakeCoreGateway(
         return similarResultsByItemId[itemId].orEmpty()
     }
 
-    override suspend fun getMediaSegments(itemId: String): List<MediaSegment> {
+    override suspend fun getMediaSegments(itemId: String, accountEpoch: ULong?): List<MediaSegment> {
+        accountBoundCalls.add("getMediaSegments" to accountEpoch)
         _getMediaSegmentsCalls.add(itemId)
         return mediaSegmentsByItemId[itemId].orEmpty()
     }
@@ -628,27 +679,84 @@ class FakeCoreGateway(
         this.settings = settings
     }
 
-    override fun imageUrl(itemId: String, kind: ImageKind, tag: String, maxWidth: UInt): String? = null
+    override fun imageUrl(itemId: String, kind: ImageKind, tag: String, maxWidth: UInt, accountEpoch: ULong?): String? = null
 
-    override suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean): PlaybackPlan {
+    private var lastPlaybackSeq = 0uL
+
+    /** Requests passed to [preparePlayback]/[prepareTranscodeFallback], in call order. */
+    val playbackRequests = mutableListOf<PlaybackRequest>()
+
+    /** Tests move the epoch to model an account change. */
+    override val accountEpoch = MutableStateFlow(0uL)
+
+    /** Models an account call in flight (the gateway's ownership barrier). */
+    val accountCallInFlight = MutableStateFlow(false)
+
+    /** Completed by default; a test replaces it to hold the first request until the restore. */
+    var accountRestored = CompletableDeferred(Unit)
+
+    override fun mintPlaybackRequest(accountEpoch: ULong?): PlaybackRequest =
+        PlaybackRequest(seq = ++lastPlaybackSeq, accountEpoch = accountEpoch ?: this.accountEpoch.value)
+
+    /** The epoch a playback kept across an account change owns, as the core reports it. */
+    override val parkedEpoch = MutableStateFlow<ULong?>(null)
+
+    override fun playbackOwnershipOpen(accountEpoch: ULong): Boolean =
+        accountEpoch == this.accountEpoch.value || accountEpoch == parkedEpoch.value
+
+    /** [reauthorizationAccount]'s answers: the in-use accounts by identity. */
+    val reauthorizationAccounts = mutableMapOf<AccountIdentity, AccountInfo>()
+
+    override suspend fun reauthorizationAccount(rejected: AccountIdentity, failedPlayback: Boolean): AccountInfo? =
+        reauthorizationAccounts[rejected]
+
+    /** Every account-bound call by name with the epoch it named (null: the current account). */
+    val accountBoundCalls = java.util.concurrent.CopyOnWriteArrayList<Pair<String, ULong?>>()
+
+    override suspend fun awaitAccountCalls() {
+        accountCallInFlight.first { !it }
+    }
+
+    override suspend fun awaitAccountRestored() = accountRestored.await()
+
+    override fun accountRestoredNow(): Boolean = accountRestored.isCompleted
+
+    /** Holds [preparePlayback] for an item id (after recording the call) until completed. */
+    val preparePlaybackGates = mutableMapOf<String, CompletableDeferred<Unit>>()
+
+    override suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean, request: PlaybackRequest): PlaybackPlan {
+        playbackRequests.add(request)
         _preparePlaybackCalls.add(itemId)
         _preparePlaybackStartFromBeginningCalls.add(startFromBeginning)
         val result = preparePlaybackResultsByItemId[itemId]
             ?: preparePlaybackResult
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.preparePlayback($itemId): no result configured")
+        preparePlaybackGates[itemId]?.await()
         return result.getOrElse { throw it }
     }
 
-    override suspend fun prepareTranscodeFallback(itemId: String, positionTicks: Long, reason: String, playSessionId: String): PlaybackPlan {
-        _prepareTranscodeFallbackCalls.add(PrepareTranscodeFallbackCall(itemId, positionTicks, reason, playSessionId))
-        val result = prepareTranscodeFallbackResult
+    override suspend fun prepareTranscodeFallback(
+        itemId: String,
+        positionTicks: Long,
+        reason: String,
+        playSessionId: String,
+        failed: FailedTrackFfi?,
+        subtitleStreamIndex: Int?,
+        request: PlaybackRequest,
+    ): PlaybackPlan {
+        playbackRequests.add(request)
+        _prepareTranscodeFallbackCalls.add(PrepareTranscodeFallbackCall(itemId, positionTicks, reason, playSessionId, failed, subtitleStreamIndex))
+        val result = prepareTranscodeFallbackResultsByCall[_prepareTranscodeFallbackCalls.size - 1]
+            ?: prepareTranscodeFallbackResult
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.prepareTranscodeFallback($itemId): no result configured")
         // Snapshot before awaiting the gate, same as libraryGrid's gate above.
         prepareTranscodeFallbackGate?.await()
+        prepareTranscodeFallbackGatesByCall[_prepareTranscodeFallbackCalls.size - 1]?.await()
         return result.getOrElse { throw it }
     }
 
-    override suspend fun preloadPlayback(itemId: String) {
+    override suspend fun preloadPlayback(itemId: String, accountEpoch: ULong?) {
+        accountBoundCalls.add("preloadPlayback" to accountEpoch)
         _preloadPlaybackCalls.add(itemId)
     }
 
@@ -667,13 +775,16 @@ class FakeCoreGateway(
         return previousEpisodeByItemId[itemId]
     }
 
-    override suspend fun episodeNeighbors(itemId: String, seriesId: String): EpisodeNeighbors =
-        EpisodeNeighbors(
+    override suspend fun episodeNeighbors(itemId: String, seriesId: String, accountEpoch: ULong?): EpisodeNeighbors {
+        accountBoundCalls.add("episodeNeighbors" to accountEpoch)
+        return EpisodeNeighbors(
             previous = previousEpisodeBefore(itemId),
             next = nextEpisodeAfter(itemId),
         )
+    }
 
-    override suspend fun serverDisplayName(): String? {
+    override suspend fun serverDisplayName(accountEpoch: ULong?): String? {
+        accountBoundCalls.add("serverDisplayName" to accountEpoch)
         serverDisplayNameCallCount++
         return serverDisplayNameValue
     }
@@ -722,15 +833,18 @@ class FakeCoreGateway(
         _resetStillWatchingCalls.add(nowMs)
     }
 
-    override suspend fun reportPosition(ticks: Long) {
+    override suspend fun reportPosition(playSessionId: String, ticks: Long) {
         _reportPositionCalls.add(ticks)
     }
 
-    override suspend fun reportPaused(paused: Boolean) {
+    override suspend fun reportPaused(playSessionId: String, paused: Boolean) {
+        _reportPausedSessionIds.add(playSessionId)
         _reportPausedCalls.add(paused)
     }
 
     override suspend fun stopPlayback(playSessionId: String, positionTicks: Long) {
+        stopPlaybackEntered++
+        stopPlaybackGate?.await()
         _stopPlaybackCalls.add(positionTicks)
         _stopPlaybackSessionIds.add(playSessionId)
     }
@@ -753,12 +867,30 @@ class FakeCoreGateway(
     /** Test-only reimplementation of `track_pref_key_of` (lang, else title). */
     override fun trackPrefKeyOf(track: TrackInfo): String? = track.lang ?: track.title
 
-    override suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt): String? {
+    override suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt, accountEpoch: ULong?): String? {
+        accountBoundCalls.add("trickplayTileUrl" to accountEpoch)
         _trickplayTileUrlCalls.add(TrickplayTileUrlCall(itemId, width, imageIndex))
         return trickplayTileUrlResult
     }
 
-    override suspend fun getTrickplay(itemId: String, mediaSourceId: String): TrickplayMetaFfi? {
+    val fetchExternalSubtitleCalls = mutableListOf<Pair<String, Int>>()
+
+    /** Holds the fetch for `(playSessionId, index)` open until completed, so a pick, a session
+     * change or a fallback can run while it is in flight (docs/18 §3.2). */
+    val externalSubtitleGates = mutableMapOf<Pair<String, Int>, CompletableDeferred<Unit>>()
+
+    /** Per-session text, over [externalSubtitleText]; an absent key there means the core refused. */
+    var externalSubtitleTextBySession: Map<Pair<String, Int>, String?> = emptyMap()
+
+    override suspend fun fetchExternalSubtitle(playSessionId: String, index: Int): String? {
+        val key = playSessionId to index
+        fetchExternalSubtitleCalls += key
+        externalSubtitleGates[key]?.await()
+        return if (key in externalSubtitleTextBySession) externalSubtitleTextBySession[key] else externalSubtitleText[index]
+    }
+
+    override suspend fun getTrickplay(itemId: String, mediaSourceId: String, accountEpoch: ULong?): TrickplayMetaFfi? {
+        accountBoundCalls.add("getTrickplay" to accountEpoch)
         _getTrickplayCalls.add(GetTrickplayCall(itemId, mediaSourceId))
         return getTrickplayResult
     }
@@ -852,6 +984,20 @@ class FakeCoreGateway(
         _seerrPersonCalls.add(personId)
         val result = seerrPersonResultsByPersonId[personId]
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.seerrPerson($personId): no result configured")
+        return result.getOrElse { throw it }
+    }
+
+    override suspend fun getPersonPage(personId: String): PersonPage {
+        _getPersonPageCalls.add(personId)
+        val result = personPageResultsById[personId]
+            ?: throw UnconfiguredFakeCall("FakeCoreGateway.getPersonPage($personId): no result configured")
+        return result.getOrElse { throw it }
+    }
+
+    override suspend fun personDiscoverCredits(personId: String, tmdbPersonId: Long, inLibrary: List<TitleTmdbRef>?): List<SeerrCard> {
+        _personDiscoverCalls.add(PersonDiscoverCall(personId, tmdbPersonId, inLibrary))
+        val result = personDiscoverResultsByTmdbId[tmdbPersonId]
+            ?: throw UnconfiguredFakeCall("FakeCoreGateway.personDiscoverCredits($tmdbPersonId): no result configured")
         return result.getOrElse { throw it }
     }
 

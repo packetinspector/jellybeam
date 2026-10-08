@@ -23,6 +23,8 @@ sealed interface Screen {
     data object Home : Screen
     data class Library(val view: ViewSnapshot) : Screen
     data class Detail(val card: Card) : Screen
+    /** docs/11 §Person page: a cast/crew member's library page; [name] only titles the loading state. */
+    data class Person(val personId: String, val name: String) : Screen
     data object Search : Screen
     data object Settings : Screen
     data object Discover : Screen
@@ -52,6 +54,7 @@ fun Screen.diagName(): String = when (this) {
     Screen.Home -> "Home"
     is Screen.Library -> "Library"
     is Screen.Detail -> "Detail"
+    is Screen.Person -> "Person"
     Screen.Search -> "Search"
     Screen.Settings -> "Settings"
     Screen.Discover -> "Discover"

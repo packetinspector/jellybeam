@@ -49,11 +49,45 @@ fn build_http_client() -> reqwest::Client {
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .redirect(redirect_policy())
+        // Stream and sidecar URLs carry `ApiKey` in the query; a redirect must not hand it to the
+        // next host as a Referer.
+        .referer(false)
         // The system resolver intermittently stalls ~5s; the shared cache
         // serves every post-first lookup instantly (see `dns`'s module docs).
         .dns_resolver(crate::dns::shared_dns_resolver())
         .build()
         .expect("reqwest client with connect/request timeouts should always build")
+}
+
+/// Pure acceptance of a fetched sidecar body (docs/18 §3.2): valid UTF-8 or nothing, since a
+/// lossy decode would hand the player garbled cues.
+fn text_from_delivery_body(body: Vec<u8>) -> Result<String, ApiError> {
+    String::from_utf8(body).map_err(|_| ApiError::Decode("delivery body is not utf-8".to_string()))
+}
+
+/// Pure body of [`JellyfinClient::delivery_url`]: relative paths resolve against `base` and gain
+/// `ApiKey` (unless one is present); an absolute URL is kept only when it is on `base`.
+fn authed_delivery_url(base: &str, token: &str, delivery_url: &str) -> Option<String> {
+    let absolute = delivery_url.starts_with("http://") || delivery_url.starts_with("https://");
+    let full = if absolute {
+        if !delivery_url.starts_with(&format!("{base}/")) {
+            return None;
+        }
+        delivery_url.to_string()
+    } else {
+        format!("{base}/{}", delivery_url.trim_start_matches('/'))
+    };
+    let has_key = full.split_once('?').is_some_and(|(_, q)| {
+        q.split('&').any(|kv| {
+            let k = kv.split('=').next().unwrap_or("");
+            k.eq_ignore_ascii_case("apikey") || k.eq_ignore_ascii_case("api_key")
+        })
+    });
+    if has_key {
+        return Some(full);
+    }
+    let sep = if full.contains('?') { '&' } else { '?' };
+    Some(format!("{full}{sep}ApiKey={}", percent_encode(token)))
 }
 
 /// Redirect hop limit -- matches reqwest's own default, so a deployment
@@ -140,8 +174,16 @@ pub enum ApiError {
     Transport(String),
     #[error("decode: {0}")]
     Decode(String),
+    /// 401: the token was rejected. `owner` names whose token it was; `None` before sign-in.
     #[error("unauthorized")]
-    Unauthorized,
+    Unauthorized { owner: Option<TokenOwner> },
+}
+
+/// The account a token was issued to: a 401 on a request sent with it re-authorizes this account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenOwner {
+    pub server_url: String,
+    pub user_id: String,
 }
 
 /// Connection identity sent in the `Authorization: MediaBrowser ...` header.
@@ -358,6 +400,8 @@ pub struct ItemQuery {
     /// `isFavorite` query param: the requesting user's favorites only (favorites are per user).
     /// `None` omits it.
     pub is_favorite: Option<bool>,
+    /// `personIds` query param: items crediting any of these person ids. Empty omits it.
+    pub person_ids: Vec<String>,
 }
 
 impl ItemQuery {
@@ -384,9 +428,11 @@ pub struct NextUpOptions {
     pub enable_rewatching: bool,
 }
 
-async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response, ApiError> {
+/// Status check for a request sent without a token (sign-in, public info); an authenticated
+/// request goes through [`JellyfinClient::check`], so its 401 names the token's owner.
+async fn check_public_status(resp: reqwest::Response) -> Result<reqwest::Response, ApiError> {
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(ApiError::Unauthorized);
+        return Err(ApiError::Unauthorized { owner: None });
     }
     if !resp.status().is_success() {
         let code = resp.status().as_u16();
@@ -444,7 +490,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_status(resp).await?;
+        let resp = check_public_status(resp).await?;
         let result: AuthenticationResult =
             read_json_capped(resp, "/Users/AuthenticateByName").await?;
 
@@ -486,7 +532,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_status(resp).await?;
+        let resp = check_public_status(resp).await?;
         read_json_capped(resp, "/QuickConnect/Initiate").await
     }
 
@@ -510,7 +556,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_status(resp).await?;
+        let resp = check_public_status(resp).await?;
         read_json_capped(resp, "/QuickConnect/Connect").await
     }
 
@@ -530,7 +576,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_status(resp).await?;
+        let resp = check_public_status(resp).await?;
         read_json_capped(resp, "/QuickConnect/Enabled").await
     }
 
@@ -550,7 +596,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_status(resp).await?;
+        let resp = check_public_status(resp).await?;
         read_json_capped(resp, "/System/Info/Public").await
     }
 
@@ -581,7 +627,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_status(resp).await?;
+        let resp = check_public_status(resp).await?;
         let result: AuthenticationResult =
             read_json_capped(resp, "/Users/AuthenticateWithQuickConnect").await?;
 
@@ -650,6 +696,26 @@ impl JellyfinClient {
         auth_header(&self.inner.identity, Some(&self.inner.token))
     }
 
+    /// [`check_public_status`] for a request sent with this client's token.
+    async fn check(&self, resp: reqwest::Response) -> Result<reqwest::Response, ApiError> {
+        check_public_status(resp)
+            .await
+            .map_err(|err| self.owned(err))
+    }
+
+    /// Names this client's token owner on a 401, so it re-authorizes the account that sent it.
+    fn owned(&self, err: ApiError) -> ApiError {
+        match err {
+            ApiError::Unauthorized { owner: None } => ApiError::Unauthorized {
+                owner: self.inner.user_id.as_ref().map(|user_id| TokenOwner {
+                    server_url: self.inner.base_url.clone(),
+                    user_id: user_id.clone(),
+                }),
+            },
+            other => other,
+        }
+    }
+
     /// Appends `userId` to `query` when [`Self::user_id`] is known; a no-op for a token-resumed
     /// session that never got one. Shared by every call site that personalizes a request this way.
     fn push_user_id(&self, query: &mut Vec<(&str, String)>) {
@@ -673,7 +739,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_status(resp).await?;
+        let resp = self.check(resp).await?;
         read_json_capped(resp, path).await
     }
 
@@ -711,6 +777,9 @@ impl JellyfinClient {
         if let Some(is_favorite) = q.is_favorite {
             query.push(("isFavorite", is_favorite.to_string()));
         }
+        if !q.person_ids.is_empty() {
+            query.push(("personIds", q.person_ids.join(",")));
+        }
         if let Some(min_date_last_saved) = &q.min_date_last_saved {
             query.push(("minDateLastSaved", min_date_last_saved.clone()));
             // Not a second filter: see `ItemQuery::min_date_last_saved`'s doc comment (10.10.x 500s
@@ -725,6 +794,26 @@ impl JellyfinClient {
             query.push(("enableUserData", enable_user_data.to_string()));
         }
         self.get("/Items", &query).await
+    }
+
+    /// One item by id, user-scoped (`/Users/{userId}/Items/{id}`) when the user id is known, else
+    /// `/Items/{id}`. Unlike [`Self::get_items`] with `ids`, it resolves non-library kinds such as
+    /// a `Person`.
+    pub async fn get_item_by_id(
+        &self,
+        item_id: &str,
+        fields: &[String],
+    ) -> Result<BaseItemDto, ApiError> {
+        let item = percent_encode(item_id);
+        let path = self.user_id().map_or_else(
+            || format!("/Items/{item}"),
+            |user_id| format!("/Users/{}/Items/{item}", percent_encode(user_id)),
+        );
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if !fields.is_empty() {
+            query.push(("fields", fields.join(",")));
+        }
+        self.get(&path, &query).await
     }
 
     /// `fields` matters as documented on [`Self::get_next_up`]: `media-cache::sync::sync_resume`
@@ -834,6 +923,10 @@ impl JellyfinClient {
             // transcode instead of re-deciding Direct Play.
             enable_direct_play: options.force_transcode.then_some(false),
             enable_direct_stream: options.force_transcode.then_some(false),
+            media_source_id: options.media_source_id,
+            allow_video_stream_copy: options.allow_video_stream_copy,
+            allow_audio_stream_copy: options.allow_audio_stream_copy,
+            subtitle_stream_index: options.subtitle_stream_index,
             ..Default::default()
         };
         let resp = self
@@ -845,7 +938,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_status(resp).await?;
+        let resp = self.check(resp).await?;
         read_json_capped(resp, "/Items/{itemId}/PlaybackInfo").await
     }
 
@@ -880,7 +973,7 @@ impl JellyfinClient {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(Vec::new());
         }
-        let resp = check_status(resp).await?;
+        let resp = self.check(resp).await?;
         let result: MediaSegmentDtoQueryResult =
             read_json_capped(resp, "/MediaSegments/{itemId}").await?;
         Ok(result.items)
@@ -907,7 +1000,7 @@ impl JellyfinClient {
         }
         .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
 
-        check_status(resp).await?;
+        self.check(resp).await?;
         Ok(())
     }
 
@@ -937,7 +1030,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_status(resp).await?;
+        let resp = self.check(resp).await?;
         read_json_capped(resp, path_prefix).await
     }
 
@@ -1010,7 +1103,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        check_status(resp).await?;
+        self.check(resp).await?;
         Ok(())
     }
 
@@ -1037,7 +1130,7 @@ impl JellyfinClient {
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        check_status(resp).await?;
+        self.check(resp).await?;
         Ok(())
     }
 
@@ -1171,10 +1264,61 @@ impl JellyfinClient {
         )
     }
 
+    /// Absolute, authenticated URL for a `MediaStream` `DeliveryUrl` (docs/18 §3.2): carries
+    /// `ApiKey` the way [`Self::stream_url`] does. `None` for an off-server absolute URL, so
+    /// the token never reaches a third-party host. Never log the result.
+    pub fn delivery_url(&self, delivery_url: &str) -> Option<String> {
+        authed_delivery_url(&self.inner.base_url, &self.inner.token, delivery_url)
+    }
+
+    /// GETs a `MediaStream` `DeliveryUrl` sidecar as text (docs/18 §3.2): authenticated like
+    /// [`Self::delivery_url`] (an off-server URL is refused before any request), at most
+    /// `max_bytes`, 2xx and valid UTF-8 only. No overall deadline here: callers wrap it. Errors
+    /// never carry the URL or token.
+    pub async fn fetch_delivery_text(
+        &self,
+        delivery_url: &str,
+        max_bytes: usize,
+    ) -> Result<String, ApiError> {
+        let url = self
+            .delivery_url(delivery_url)
+            .ok_or_else(|| ApiError::Decode("delivery url is off-server".to_string()))?;
+        let resp = self
+            .inner
+            .http
+            .get(&url)
+            .send()
+            .await
+            // The transport message can embed the request URL; keep only that it failed.
+            .map_err(|_| ApiError::Transport("delivery fetch failed".to_string()))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(ApiError::Status {
+                code: status,
+                body: String::new(),
+            });
+        }
+        let body = read_capped_body(resp, max_bytes, "delivery text")
+            .await
+            .map_err(|e| match e {
+                ApiError::Transport(_) => ApiError::Transport("delivery read failed".to_string()),
+                other => other,
+            })?;
+        text_from_delivery_body(body)
+    }
+
     /// This client's server base URL (scheme://host[:port], no trailing
     /// slash) -- e.g. as a cache key for per-server measured state.
     pub fn base_url(&self) -> &str {
         &self.inner.base_url
+    }
+
+    /// Whether `other` is the same signed-in account and credential as this client, without
+    /// exposing the token.
+    pub fn same_account(&self, other: &Self) -> bool {
+        self.inner.base_url == other.inner.base_url
+            && self.inner.token == other.inner.token
+            && self.user_id() == other.user_id()
     }
 
     /// Warms the play path for an item the user is looking at but hasn't played (ranged GET of the
@@ -1212,6 +1356,7 @@ impl JellyfinClient {
             &self.inner.token,
         )
         .await
+        .map_err(|err| self.owned(err))
     }
 }
 
@@ -1225,12 +1370,22 @@ pub enum ImageKind {
 /// [`JellyfinClient::get_playback_info`]'s options beyond item/profile/start-ticks
 /// (docs/18-playback-quality.md's Auto/Cap transcode-fallback path). `Default` (`force_transcode:
 /// false`) matches the pre-existing request body.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaybackInfoOptions {
     /// When `true`, sets `EnableDirectPlay`/`EnableDirectStream` to
     /// `Some(false)` -- forces the server to negotiate a transcode rather
     /// than re-deciding Direct Play.
     pub force_transcode: bool,
+    /// The source being renegotiated; the server applies the stream choices
+    /// below only to the source named here.
+    pub media_source_id: Option<String>,
+    /// docs/18 §2: `Some(false)` forbids copying that stream type, so a type
+    /// that just failed to decode is re-encoded rather than handed back.
+    pub allow_video_stream_copy: Option<bool>,
+    pub allow_audio_stream_copy: Option<bool>,
+    /// docs/18 §3.1: the subtitle stream the viewer chose (`-1` for none), honoured only with
+    /// `media_source_id`; `None` leaves the server's default, which may burn it in.
+    pub subtitle_stream_index: Option<i32>,
 }
 
 /// Start/progress/stopped payloads unified, mapped to the three endpoints
@@ -1730,6 +1885,101 @@ mod tests {
         format!("http://{addr}/")
     }
 
+    /// One-shot local HTTP server answering its first request with a bare 401.
+    async fn unauthorized_server() -> String {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut discard = [0u8; 4096];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut discard).await;
+                let response =
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Every request sent with a client's token names that token's owner on a 401, so the app
+    /// re-authorizes the account that sent it; one sent before sign-in names nobody.
+    #[tokio::test]
+    async fn a_401_names_the_account_whose_token_was_rejected() {
+        type Call =
+            fn(JellyfinClient) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApiError>>>;
+        let calls: [(&str, Call); 8] = [
+            ("get", |c| {
+                Box::pin(async move { c.get_user_views().await.expect_err("401") })
+            }),
+            ("playback info", |c| {
+                Box::pin(async move {
+                    c.get_playback_info(
+                        "item",
+                        &DeviceProfile::default(),
+                        None,
+                        PlaybackInfoOptions::default(),
+                    )
+                    .await
+                    .expect_err("401")
+                })
+            }),
+            ("media segments", |c| {
+                Box::pin(async move { c.get_media_segments("item", &[]).await.expect_err("401") })
+            }),
+            ("report", |c| {
+                Box::pin(async move {
+                    c.report_playback(sample_report(PlaybackReportKind::Progress))
+                        .await
+                        .expect_err("401")
+                })
+            }),
+            ("user item data", |c| {
+                Box::pin(async move { c.mark_played("item").await.expect_err("401") })
+            }),
+            ("add to collection", |c| {
+                Box::pin(async move { c.add_to_collection("box", "item").await.expect_err("401") })
+            }),
+            ("refresh", |c| {
+                Box::pin(async move { c.refresh_item("item").await.expect_err("401") })
+            }),
+            ("websocket", |c| {
+                Box::pin(async move { c.connect_ws().await.expect_err("401") })
+            }),
+        ];
+        for (name, call) in calls {
+            let base_url = unauthorized_server().await;
+            let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok")
+                .with_user_id("user-1");
+            let err = call(client).await;
+            let ApiError::Unauthorized { owner } = err else {
+                panic!("{name}: expected Unauthorized, got {err:?}");
+            };
+            assert_eq!(
+                owner,
+                Some(TokenOwner {
+                    server_url: base_url,
+                    user_id: "user-1".to_string()
+                }),
+                "{name}"
+            );
+        }
+
+        let base_url = unauthorized_server().await;
+        let err = JellyfinClient::public_system_info(&base_url, &sample_identity())
+            .await
+            .expect_err("401");
+        assert!(
+            matches!(err, ApiError::Unauthorized { owner: None }),
+            "{err:?}"
+        );
+    }
+
     /// Minimal one-shot HTTP server (raw TCP) returning `body` for the
     /// first request, then stopping. Local-only (127.0.0.1, ephemeral port).
     async fn httpbin_style_server(body: String) -> String {
@@ -1780,6 +2030,80 @@ mod tests {
         assert_eq!(
             client.stream_url("item-1", &source),
             "http://localhost:8096/videos/1/master.m3u8?DeviceId=x"
+        );
+    }
+
+    #[test]
+    fn delivery_body_accepts_utf8_and_refuses_anything_else() {
+        assert_eq!(
+            text_from_delivery_body("1\n00:00:01,000 --> 00:00:02,000\nh\u{e9}llo\n".into())
+                .as_deref()
+                .ok(),
+            Some("1\n00:00:01,000 --> 00:00:02,000\nh\u{e9}llo\n")
+        );
+        assert!(matches!(
+            text_from_delivery_body(vec![0x68, 0xe9, 0x6c]),
+            Err(ApiError::Decode(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_delivery_text_returns_the_body_and_refuses_off_server_urls() {
+        let (base_url, _rx) = capturing_json_server("1\nhello".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        let text = client
+            .fetch_delivery_text("/Videos/x/s/0.srt", 1024)
+            .await
+            .expect("sidecar fetch");
+        assert_eq!(text, "1\nhello");
+        assert!(matches!(
+            client
+                .fetch_delivery_text("https://other.example.test/s.srt", 1024)
+                .await,
+            Err(ApiError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn delivery_url_appends_api_key_to_a_relative_path() {
+        assert_eq!(
+            authed_delivery_url(
+                "http://example.test:8096",
+                "tok",
+                "/Videos/i/s/Subtitles/3/0/Stream.srt"
+            ),
+            Some(
+                "http://example.test:8096/Videos/i/s/Subtitles/3/0/Stream.srt?ApiKey=tok"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn delivery_url_extends_an_existing_query_and_keeps_an_existing_key() {
+        assert_eq!(
+            authed_delivery_url("http://example.test", "tok", "/s.vtt?x=1"),
+            Some("http://example.test/s.vtt?x=1&ApiKey=tok".to_string())
+        );
+        assert_eq!(
+            authed_delivery_url("http://example.test", "tok", "/s.vtt?api_key=other"),
+            Some("http://example.test/s.vtt?api_key=other".to_string())
+        );
+    }
+
+    #[test]
+    fn delivery_url_refuses_to_send_the_token_off_server() {
+        assert_eq!(
+            authed_delivery_url(
+                "http://example.test",
+                "tok",
+                "https://cdn.example.org/s.srt"
+            ),
+            None
+        );
+        assert_eq!(
+            authed_delivery_url("http://example.test", "tok", "http://example.test/s.srt"),
+            Some("http://example.test/s.srt?ApiKey=tok".to_string())
         );
     }
 
@@ -2089,6 +2413,70 @@ mod tests {
         assert!(
             request_line.contains("sortOrder=Descending"),
             "request line missing sortOrder: {request_line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_items_sends_person_ids_only_when_set() {
+        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        let query = ItemQuery {
+            person_ids: vec!["person-1".to_string()],
+            ..ItemQuery::new()
+        };
+        client
+            .get_items(&query)
+            .await
+            .expect("get_items against mock server");
+        let request = rx.await.expect("mock server captured a request");
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.contains("personIds=person-1"),
+            "request line missing personIds: {request_line}"
+        );
+
+        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        client
+            .get_items(&ItemQuery::new())
+            .await
+            .expect("get_items against mock server");
+        let request = rx.await.expect("mock server captured a request");
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(!request_line.contains("personIds"), "{request_line}");
+    }
+
+    #[tokio::test]
+    async fn get_item_by_id_is_user_scoped_when_the_user_id_is_known() {
+        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let client =
+            JellyfinClient::from_token(&base_url, sample_identity(), "tok").with_user_id("user-1");
+        client
+            .get_item_by_id("person-1", &["Overview".to_string()])
+            .await
+            .expect("get_item_by_id against mock server");
+        let request = rx.await.expect("mock server captured a request");
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.contains("/Users/user-1/Items/person-1"),
+            "{request_line}"
+        );
+        assert!(request_line.contains("fields=Overview"), "{request_line}");
+    }
+
+    #[tokio::test]
+    async fn get_item_by_id_without_a_user_id_uses_the_plain_route() {
+        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        client
+            .get_item_by_id("person-1", &[])
+            .await
+            .expect("get_item_by_id against mock server");
+        let request = rx.await.expect("mock server captured a request");
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.starts_with("GET /Items/person-1"),
+            "{request_line}"
         );
     }
 

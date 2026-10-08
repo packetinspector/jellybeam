@@ -199,7 +199,8 @@ density.
   1.5× is visible without opening the menu.
 - Tracks dot: a 4dp Pistacchio dot hugging the 22dp glyph's top-right
   corner (offset 7dp in from the target's corner) whenever a non-default
-  audio or subtitle track is active.
+  audio or subtitle track is active, a subtitle burned into a transcode
+  included (docs/18 §3.1).
 - Episode neighbours resolve from the local mirror with one live fallback
   after load for items the mirror has not seen (deep links, new items).
 
@@ -254,6 +255,26 @@ Owner: `PlaybackOsdController`, ticked every 250ms.
   as a no-op while any nested surface, the up-next or still-watching card,
   or a hold-to-seek glide is active, and when the item has no markers or
   nothing lies ahead.
+- **Unseekable files** (`SeekGuard`, pure and tested): seekability is
+  unknown until Media3's timeline window stops being a placeholder, and
+  re-read on every state or timeline change and at each seek. While unknown,
+  every seek is dropped quietly (no notice; the file may turn out fine). When
+  the window reports it can't seek (e.g. an MKV with no Cues index, where
+  every `seekTo` restarts at 0:00), no seek is issued from any
+  path: D-pad skip, hold-to-seek, chapter jumps, skip pill, auto-skip and
+  Undo. Instead a one-shot notice, "This file doesn't support seeking", shows
+  as the §14 toast surface (top-center, SurfacePanel, 3s, restarted by each
+  refused seek). It is informational: no key route reads it, so Select is
+  never taken. The skip back / forward buttons stay in the row, dimmed (35%
+  alpha), and their Select shows the notice; hidden Left / Right show it
+  instead of seeking and never start a glide. The skip pill is not shown and
+  segments are never auto-skipped. The Chapters button is dropped from the row
+  (chapters only seek), and a focus ring resting on it when it goes moves to
+  Play / Pause; opening the menu is refused with the notice. Page Up / Down show the notice. The scrubber has no
+  input of its own, so there is nothing further to disable. Playback itself
+  continues; a saved resume position it can't seek to plays from 0:00 and shows
+  the notice once, and a reconnect after a network drop restarts from 0:00 the
+  same way (`SeekGuard.recoveryPositionTicks`) instead of a seek that can't land.
 - Any other key while hidden reveals to Play / Pause and is otherwise
   swallowed (the waking key does not also actuate).
 - Visible, no nested surface: Left / Right move focus one button across
@@ -486,14 +507,32 @@ Ask; unknown types are Off.
 
 - Ask: a pill at end 48dp, bottom = datum + 16dp: SurfaceRaised@0xee, 6dp
   radius, padding 12×8, Archivo 14sp Panna, `Skip Intro` / `Skip Credits`
-  / `Skip Recap` / `Skip Preview` / `Skip Commercial`. While it shows,
-  Select skips instead of activating the focused button. Hidden while
-  either card shows.
-- Auto-skip: seek past the segment on entry and reveal the OSD.
+  / `Skip Recap` / `Skip Preview` / `Skip Commercial`. Hidden while
+  either card or a player menu shows. Select acts on what holds the focus ring
+  (`SkipSelectRouting`, pure and tested):
+  - OSD hidden: Select skips in one press.
+  - OSD visible: Select activates the focused OSD button and the pill
+    stays, unfocused. Up moves focus to the pill, which draws the OSD buttons' focus style (Pistacchio tint);
+    Select then skips and hides the OSD. Down / Left / Right from the pill return focus to
+    the previously focused button (Play / Pause if none). A pill that
+    disappears while focused hands focus back the same way. A pill that
+    appears under a visible OSD never takes focus.
+- Auto-skip: seek past the segment on entry; the OSD is not revealed, and
+  a visible OSD with no player menu or §13 card open closes, like a manual
+  skip, so the Undo toast shows. A card outranks Undo: while one shows, the
+  toast is not drawn and Select never undoes (hidden Select reveals the OSD,
+  visible Select plays next / keeps watching).
 - After either skip, a toast top-center at 24dp: SurfacePanel, 8dp
   radius, padding 16×8, Archivo 13sp Panna, `Skipped intro · Select to
-  undo`. Live 5s; Select seeks back to the pre-skip position. The toast
-  does not pin the OSD; it and the idle window share the same 5s.
+  undo`. Live 5s; with the OSD hidden, Select seeks back to the pre-skip
+  position; neither a skip nor Undo reveals the OSD, and a skip from the
+  focused pill hides it so the toast's promise holds, except while paused,
+  where the OSD stays pinned (§9) and no toast is drawn. Any
+  arrow key dismisses the toast and reveals the OSD as usual, after which
+  Select goes to the focused button. The toast shows only while the OSD
+  is hidden, the one state where Select undoes; it does not pin the OSD,
+  and it and the idle window share the same 5s. The §9 notice shares the
+  slot and outranks it while shown; Select still undoes underneath.
 - Outro Auto-skip defers to the up-next / still-watching decision (§13).
 
 ## 15. Buffering and reconnecting
@@ -521,7 +560,12 @@ tracking). Rows run edge to edge with no gap between them, padding 16×8, a 20dp
 a `✓` on the selected track, label Archivo 16sp Panna, meta Archivo 11sp
 Grigio; focused row = §12's Pistacchio fill with Notte text and markers. Opens
 with focus on the selected track; Up / Down clamp; Select chooses; Back,
-Escape or Menu close. Choices are remembered per series.
+Escape or Menu close. Choices are remembered per series. A row's label is the
+track title, else its language, else `Track N` (a blank title counts as none);
+its meta is `lang codec`, and a sidecar subtitle file (docs/18 §3.2) adds
+`· External`, then `· Loading…` while it is fetched or `· Unavailable` once it
+failed. A failed sidecar puts subtitles back to Off with a top-centre notice
+(the §9 seek notice's toast).
 
 Subtitles: bottom padding fraction 0.08 by default, 0.24 while the OSD is
 visible, never below the viewer's position preset (0.08 / 0.16 / 0.24 /

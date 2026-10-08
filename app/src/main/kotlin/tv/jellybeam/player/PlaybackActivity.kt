@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.update
 import tv.jellybeam.AppGraph
 import tv.jellybeam.MainActivity
 import tv.jellybeam.perf.PerfLog
+import uniffi.jellybeam_core.AccountIdentity
 
 /**
  * Barrier for externally replacing an active player Activity: Android can resume the singleTask
@@ -55,19 +56,25 @@ internal val playbackActivityTracker = PlaybackActivityTracker()
  * [QUIET_AFTER_REAUTHORIZATION_MS] after [noteReauthorized].
  */
 internal class AuthorizationRecoveryCoordinator(private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 }) {
-    private val pendingRequest = MutableStateFlow<Long?>(null)
+    private val pendingRequest = MutableStateFlow<AuthorizationRequest?>(null)
     val requests = pendingRequest.asStateFlow()
     private var nextId = 0L
     private var quietUntilMs = Long.MIN_VALUE
 
+    /** A call's 401: [account] is the one whose token was rejected (docs/18 §2.1). */
+    fun request(account: AccountIdentity?) = post(account, failedPlayback = false)
+
+    /** The player's own 401, sent after its teardown ended the playback on [account] (docs/18 §2.1). */
+    fun requestForFailedPlayback(account: AccountIdentity?) = post(account, failedPlayback = true)
+
     @Synchronized
-    fun request() {
+    private fun post(account: AccountIdentity?, failedPlayback: Boolean) {
         if (nowMs() < quietUntilMs) return
-        pendingRequest.value = ++nextId
+        pendingRequest.value = AuthorizationRequest(++nextId, account, failedPlayback)
     }
 
     fun consume(id: Long) {
-        pendingRequest.compareAndSet(id, null)
+        pendingRequest.update { it?.takeUnless { request -> request.id == id } }
     }
 
     @Synchronized
@@ -80,6 +87,11 @@ internal class AuthorizationRecoveryCoordinator(private val nowMs: () -> Long = 
         const val QUIET_AFTER_REAUTHORIZATION_MS = 5_000L
     }
 }
+
+/** One pending [AuthorizationRecoveryCoordinator] request: the account whose token was rejected,
+ * and whether the player's own failed playback sent it.
+ */
+internal data class AuthorizationRequest(val id: Long, val account: AccountIdentity?, val failedPlayback: Boolean)
 
 internal val authorizationRecoveryCoordinator = AuthorizationRecoveryCoordinator()
 
@@ -278,15 +290,15 @@ class PlaybackActivity : ComponentActivity() {
                 }
             ) {
                 PlaybackEvent.Finish -> closePlayer()
-                PlaybackEvent.ReauthorizationRequired -> {
-                    authorizationRecoveryCoordinator.request()
+                is PlaybackEvent.ReauthorizationRequired -> {
+                    authorizationRecoveryCoordinator.requestForFailedPlayback(event.account)
                     closePlayer()
                 }
                 is PlaybackEvent.FinishWithMessage -> {
                     Toast.makeText(this@PlaybackActivity, event.message, Toast.LENGTH_LONG).show()
                     closePlayer()
                 }
-                is PlaybackEvent.AutoSkipped -> Unit // excluded by the predicate above
+                is PlaybackEvent.AutoSkipped, PlaybackEvent.SeekUnavailable, PlaybackEvent.SubtitleUnavailable -> Unit // excluded by the predicate above
                 is PlaybackEvent.FinishToDetail -> Unit // excluded above; PlaybackScreen-owned once running
             }
         }
@@ -301,8 +313,8 @@ class PlaybackActivity : ComponentActivity() {
                 PlaybackScreen(
                     viewModel = viewModel,
                     onFinish = ::closePlayer,
-                    onReauthorizationRequired = {
-                        authorizationRecoveryCoordinator.request()
+                    onReauthorizationRequired = { account ->
+                        authorizationRecoveryCoordinator.requestForFailedPlayback(account)
                         closePlayer()
                     },
                     focusRestoreEpoch = windowFocusEpoch,

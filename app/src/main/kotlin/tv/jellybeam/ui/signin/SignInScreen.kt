@@ -93,6 +93,12 @@ fun SignInScreen(
         if (state.error != null) scrollState.scrollTo(scrollState.maxValue)
     }
 
+    // Reauthorization has no discovery list to land on, so its first action takes focus and the
+    // first D-pad press acts instead of waking focus.
+    LaunchedEffect(reauthorizationTarget) {
+        if (reauthorizationTarget != null) requestFocusUntilSuccess { quickConnectRequester.requestFocus() }
+    }
+
     // Only when there is a selectable row: with every result already saved, no row carries the
     // requester, and this would otherwise retry forever.
     val hasSelectableDiscoveredRow = state.discoveredServers.any { !it.alreadySaved }

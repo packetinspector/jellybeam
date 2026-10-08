@@ -146,15 +146,22 @@ fn grid_sort_order(sort: GridSort) -> String {
 fn append_grid_filters(sql: &mut String, filters: &GridFilters) {
     match filters.watched {
         WatchedFilter::Any => {}
-        // A Movie has no Episode rows, so the subquery is vacuously true for it.
-        WatchedFilter::Unwatched => sql.push_str(
-            " AND played = 0 AND playback_position_ticks = 0 AND NOT EXISTS (\
+        // docs/07 §1: judged by the card's displayed state, so filter and card agree; a Movie
+        // has no Episode rows, so the subquery is vacuously true for it.
+        WatchedFilter::Unwatched => sql.push_str(concat!(
+            " AND ",
+            crate::watch_grace::not_started_sql!(""),
+            " AND NOT EXISTS (\
              SELECT 1 FROM items e WHERE e.series_id = items.id AND e.item_type = 'Episode' \
-             AND (e.played = 1 OR e.playback_position_ticks > 0))",
-        ),
+             AND NOT ",
+            crate::watch_grace::not_started_sql!("e."),
+            ")"
+        )),
         WatchedFilter::HasUnwatched => sql.push_str(" AND COALESCE(unplayed_item_count, 0) > 0"),
         // A Series is `played` only when every episode is (server-computed).
-        WatchedFilter::Watched => sql.push_str(" AND played = 1"),
+        WatchedFilter::Watched => {
+            sql.push_str(concat!(" AND ", crate::watch_grace::watched_sql!("")))
+        }
     }
     if filters.genre.is_some() {
         sql.push_str(
@@ -757,10 +764,15 @@ pub(crate) fn next_up(conn: &Connection, limit: u32) -> Vec<CardRow> {
         None => return Vec::new(),
     };
     let ids: Vec<String> = ids.into_iter().take(limit as usize).collect();
+    cards_by_ids(conn, &ids)
+}
+
+/// The cards for `ids` in one primary-key lookup, in the order asked (`IN (...)` gives no
+/// ordering guarantee); an unknown id is simply absent.
+pub(crate) fn cards_by_ids(conn: &Connection, ids: &[String]) -> Vec<CardRow> {
     if ids.is_empty() {
         return Vec::new();
     }
-
     let placeholders = std::iter::repeat_n("?", ids.len())
         .collect::<Vec<_>>()
         .join(",");
@@ -771,11 +783,9 @@ pub(crate) fn next_up(conn: &Connection, limit: u32) -> Vec<CardRow> {
         rows.collect::<rusqlite::Result<Vec<_>>>()
     })();
     let mut rows = result.unwrap_or_else(|e| {
-        tracing::error!(error = %e, "next_up query failed");
+        tracing::error!(error = %e, "cards_by_ids query failed");
         Vec::new()
     });
-
-    // Reorder to match the server's priority order; `IN (...)` gives no ordering guarantee.
     let order: std::collections::HashMap<&str, usize> = ids
         .iter()
         .enumerate()
@@ -788,7 +798,7 @@ pub(crate) fn next_up(conn: &Connection, limit: u32) -> Vec<CardRow> {
 /// Scoped by `library_id` (see schema.rs), so two libraries sharing a `collection_type`
 /// don't show identical "Latest" rows (docs/07 §1). Implements Jellyfin's Latest-Media
 /// grouping for a `tvshows` view (one `CardRow` per series; see `latest_grouped_series`);
-/// every other collection type stays per-item. `hide_watched` adds `AND played = 0`;
+/// every other collection type stays per-item. `hide_watched` excludes displayed-watched rows (docs/07 §1);
 /// deliberately not threaded into `resume()`/`next_up()`, which are unwatched/in-progress by
 /// construction.
 pub(crate) fn latest(
@@ -820,7 +830,11 @@ pub(crate) fn latest(
     let placeholders = std::iter::repeat_n("?", item_types.len())
         .collect::<Vec<_>>()
         .join(",");
-    let played_filter = if hide_watched { " AND played = 0" } else { "" };
+    let played_filter = if hide_watched {
+        concat!(" AND NOT ", crate::watch_grace::watched_sql!(""))
+    } else {
+        ""
+    };
     // `limit` is bound rather than interpolated, matching every other query in this module.
     // `is_virtual = 0`: a virtual placeholder's `date_created` is its metadata-refresh time,
     // not a real media file's; unfiltered, minting hundreds at once would flood Latest.
@@ -856,7 +870,11 @@ fn latest_grouped_series(
     limit: u32,
     hide_watched: bool,
 ) -> Vec<CardRow> {
-    let played_filter = if hide_watched { " AND played = 0" } else { "" };
+    let played_filter = if hide_watched {
+        concat!(" AND NOT ", crate::watch_grace::watched_sql!(""))
+    } else {
+        ""
+    };
     // `is_virtual = 0` (see `latest`) also means a series whose only recent episodes are
     // virtual placeholders drops out of the grouping entirely, matching Jellyfin Web.
     let sql = format!(
@@ -1224,7 +1242,10 @@ mod tests {
     #[test]
     fn latest_grouped_series_query_groups_in_index_order() {
         let (_dir, conn) = open_test_db();
-        for played_filter in ["", " AND played = 0"] {
+        for played_filter in [
+            "",
+            concat!(" AND NOT ", crate::watch_grace::watched_sql!("")),
+        ] {
             let sql = format!(
                 "WITH grouped AS (\
                      SELECT series_id, MAX(date_created) AS newest_episode \
@@ -1362,6 +1383,29 @@ mod tests {
         let from_card_by_id = card_by_id(&conn, &child).expect("card_by_id should find it");
 
         assert_eq!(from_card_by_id, from_listing);
+    }
+
+    #[test]
+    fn cards_by_ids_keeps_the_order_asked_and_drops_unknown_ids() {
+        let (_dir, mut conn) = open_test_db();
+        let parent = uuid_n(1);
+        let (a, b, missing) = (uuid_n(2), uuid_n(3), uuid_n(4));
+        apply_upsert_items(
+            &mut conn,
+            &[
+                item_dto(&a, "Alpha", Some(&parent), BaseItemKind::Movie),
+                item_dto(&b, "Beta", Some(&parent), BaseItemKind::Movie),
+            ],
+        )
+        .expect("insert");
+
+        let ids = vec![b.clone(), missing, a.clone()];
+        let got: Vec<String> = cards_by_ids(&conn, &ids)
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(got, vec![b, a]);
+        assert!(cards_by_ids(&conn, &[]).is_empty());
     }
 
     #[test]
@@ -3328,8 +3372,8 @@ mod tests {
         );
     }
 
-    /// §2.2: `Watched` is a plain `played = 1` check (the server already computes a Series'
-    /// `played` from its episodes).
+    /// §2.2: `Watched` is server `played = 1` or the card's grace-watched state (the server
+    /// already computes a Series' `played` from its episodes).
     #[test]
     fn library_grid_watched_filter_returns_only_fully_played_rows() {
         let (_dir, mut conn) = open_test_db();
@@ -3343,6 +3387,122 @@ mod tests {
         filters.watched = WatchedFilter::Watched;
         let rows = library_grid(&conn, &parent, name_sort(), &filters, 0, 10);
         assert_eq!(names(&rows), vec!["Watched"]);
+    }
+
+    fn progress_dto(
+        n: u8,
+        name: &str,
+        kind: BaseItemKind,
+        position: i64,
+        runtime: i64,
+    ) -> BaseItemDto {
+        let mut dto = item_dto(&uuid_n(n), name, None, kind);
+        dto.run_time_ticks = Some(runtime);
+        dto.user_data = Some(user_data_with_progress(position, None));
+        dto
+    }
+
+    /// docs/07 §1: filters judge the displayed state, not the raw columns.
+    #[test]
+    fn library_grid_watched_filters_follow_the_displayed_state() {
+        let (_dir, mut conn) = open_test_db();
+        let parent = uuid_n(1);
+        let mut started = progress_dto(
+            2,
+            "Stopped Early",
+            BaseItemKind::Movie,
+            30 * 10_000_000,
+            120 * MIN,
+        );
+        let mut credits = progress_dto(3, "In Credits", BaseItemKind::Movie, 115 * MIN, 120 * MIN);
+        for dto in [&mut started, &mut credits] {
+            dto.parent_id = Some(uuid::Uuid::parse_str(&parent).expect("uuid"));
+        }
+        // An episode stopped 30 s in does not make its series "started".
+        let mut series = item_dto(
+            &uuid_n(4),
+            "Quiet Series",
+            Some(&parent),
+            BaseItemKind::Series,
+        );
+        series.run_time_ticks = None;
+        let mut ep = progress_dto(5, "Ep", BaseItemKind::Episode, 30 * 10_000_000, 44 * MIN);
+        ep.series_id = Some(uuid::Uuid::parse_str(&uuid_n(4)).expect("uuid"));
+        let mut resumed = item_dto(
+            &uuid_n(6),
+            "Resumed Series",
+            Some(&parent),
+            BaseItemKind::Series,
+        );
+        resumed.run_time_ticks = None;
+        let mut ep2 = progress_dto(7, "Ep2", BaseItemKind::Episode, 20 * MIN, 44 * MIN);
+        ep2.series_id = Some(uuid::Uuid::parse_str(&uuid_n(6)).expect("uuid"));
+        apply_upsert_items(&mut conn, &[started, credits, series, ep, resumed, ep2])
+            .expect("insert");
+
+        let mut filters = no_filters();
+        filters.watched = WatchedFilter::Unwatched;
+        let rows = library_grid(&conn, &parent, name_sort(), &filters, 0, 10);
+        assert_eq!(names(&rows), vec!["Quiet Series", "Stopped Early"]);
+
+        filters.watched = WatchedFilter::Watched;
+        let rows = library_grid(&conn, &parent, name_sort(), &filters, 0, 10);
+        assert_eq!(names(&rows), vec!["In Credits"]);
+    }
+
+    /// docs/07 §1: `hide_watched` drops an item the card shows watched, in both Latest branches.
+    #[test]
+    fn latest_hide_watched_drops_items_inside_the_end_grace() {
+        let (_dir, mut conn) = open_test_db();
+        conn.execute_batch(
+            "INSERT INTO views (id, name, collection_type, sort_index) VALUES ('mov', 'Movies', 'movies', 0); \
+             INSERT INTO views (id, name, collection_type, sort_index) VALUES ('shows', 'Shows', 'tvshows', 1);",
+        )
+        .expect("views");
+        let credits = progress_dto(1, "In Credits", BaseItemKind::Movie, 115 * MIN, 120 * MIN);
+        let early = progress_dto(
+            2,
+            "Stopped Early",
+            BaseItemKind::Movie,
+            30 * 10_000_000,
+            120 * MIN,
+        );
+        apply_upsert_items_scoped(&mut conn, &[credits, early], Some("mov")).expect("movies");
+
+        let series_done = uuid_n(3);
+        let series_open = uuid_n(4);
+        let mut ep_done = progress_dto(5, "Done Ep", BaseItemKind::Episode, 43 * MIN, 44 * MIN);
+        ep_done.series_id = Some(uuid::Uuid::parse_str(&series_done).expect("uuid"));
+        let mut ep_open = progress_dto(
+            6,
+            "Open Ep",
+            BaseItemKind::Episode,
+            30 * 10_000_000,
+            44 * MIN,
+        );
+        ep_open.series_id = Some(uuid::Uuid::parse_str(&series_open).expect("uuid"));
+        apply_upsert_items_scoped(
+            &mut conn,
+            &[
+                item_dto(&series_done, "Done Series", None, BaseItemKind::Series),
+                item_dto(&series_open, "Open Series", None, BaseItemKind::Series),
+                ep_done,
+                ep_open,
+            ],
+            Some("shows"),
+        )
+        .expect("shows");
+
+        let shown = |view: &str| {
+            let mut v: Vec<_> = latest(&conn, view, 10, true)
+                .into_iter()
+                .map(|r| r.name)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(shown("mov"), ["Stopped Early"]);
+        assert_eq!(shown("shows"), ["Open Series"]);
     }
 
     /// §2.2: `WatchedFilter::HasUnwatched` ("not finished") is

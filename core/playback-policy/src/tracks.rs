@@ -26,18 +26,30 @@ pub enum TrackKind {
     Subtitle,
 }
 
-/// The persistence key for one [`Track`]: its language code if present, else its title -- backend
-/// track ids aren't stable across items/relaunches, but lang/title usually is within a series.
+/// The persistence key for one [`Track`]: its normalized language code if present, else its title
+/// -- backend track ids aren't stable across items/relaunches, but lang/title usually is within a
+/// series.
 pub fn track_pref_key(track: &Track) -> Option<String> {
-    track.lang.clone().or_else(|| track.title.clone())
+    track
+        .lang
+        .as_deref()
+        .map(normalize_lang)
+        .or_else(|| track.title.clone())
 }
 
-/// Finds the first track of `kind` whose [`track_pref_key`] matches `key`, to re-apply a persisted
-/// per-series preference once real track ids are known.
+/// Finds the first track of `kind` matching a persisted per-series `key`, to re-apply it once real
+/// track ids are known. Languages compare normalized, so a key saved from a sidecar (`en`) matches
+/// a burn-in stream (`eng`) and keys saved before normalization still match.
 pub fn find_track_by_key(tracks: &[Track], kind: TrackKind, key: &str) -> Option<i64> {
     tracks
         .iter()
-        .find(|t| t.kind == kind && track_pref_key(t).as_deref() == Some(key))
+        .find(|t| {
+            t.kind == kind
+                && match &t.lang {
+                    Some(lang) => lang_matches(lang, key),
+                    None => t.title.as_deref() == Some(key),
+                }
+        })
         .map(|t| t.id)
 }
 
@@ -199,13 +211,15 @@ pub fn resolve_track_selection(
                     .unwrap_or(SubtitleDecision::Leave)
             }
             SubtitleMode::OnlyForced => {
+                // A transcode's audio track carries no language; the forced track already showing
+                // (a server burn-in) is then the best evidence, never a guess at another.
                 let forced = tracks.iter().find(|t| {
                     t.kind == TrackKind::Subtitle
                         && t.forced
-                        && t.lang
-                            .as_deref()
-                            .zip(effective_audio_lang.as_deref())
-                            .is_some_and(|(sl, al)| lang_matches(sl, al))
+                        && match effective_audio_lang.as_deref() {
+                            Some(al) => t.lang.as_deref().is_some_and(|sl| lang_matches(sl, al)),
+                            None => t.selected,
+                        }
                 });
                 forced
                     .map(|t| SubtitleDecision::Track(t.id))
@@ -469,5 +483,75 @@ mod tests {
         let decision = resolve_track_selection(&tracks, Some(&series_pref), &global);
         assert_eq!(decision.audio, Some(1));
         assert_eq!(decision.subtitle, SubtitleDecision::Track(4));
+    }
+
+    /// A series pref saved from one delivery's language form resolves against another's: sidecar
+    /// and Media3 rows carry 2-letter codes, burn-in rows the server's 3-letter ones.
+    #[test]
+    fn a_series_subtitle_pref_matches_across_language_code_forms() {
+        let global = LanguagePrefs::default();
+        for (saved_from, offered) in [("en", "eng"), ("eng", "en"), ("de", "ger"), ("deu", "ger")] {
+            let saved = track_pref_key(&track(TrackKind::Subtitle, 9, Some(saved_from)));
+            let series_pref = SeriesTrackPref {
+                audio: None,
+                subtitle: saved.clone(),
+            };
+            let tracks = vec![
+                track(TrackKind::Audio, 1, Some("jpn")),
+                track(TrackKind::Subtitle, -1003, Some("spa")),
+                track(TrackKind::Subtitle, -1002, Some(offered)),
+            ];
+            let decision = resolve_track_selection(&tracks, Some(&series_pref), &global);
+            assert_eq!(
+                decision.subtitle,
+                SubtitleDecision::Track(-1002),
+                "{saved_from} -> {offered}"
+            );
+            // A key saved before keys were normalized still matches.
+            let legacy = SeriesTrackPref {
+                audio: None,
+                subtitle: Some(saved_from.to_string()),
+            };
+            let decision = resolve_track_selection(&tracks, Some(&legacy), &global);
+            assert_eq!(decision.subtitle, SubtitleDecision::Track(-1002));
+        }
+    }
+
+    #[test]
+    fn a_title_key_matches_only_a_track_without_a_language() {
+        let mut titled = track(TrackKind::Subtitle, 2, None);
+        titled.title = Some("Signs".to_string());
+        let mut english = track(TrackKind::Subtitle, 3, Some("eng"));
+        english.title = Some("Signs".to_string());
+        assert_eq!(
+            find_track_by_key(&[english.clone(), titled], TrackKind::Subtitle, "Signs"),
+            Some(2)
+        );
+        assert_eq!(
+            find_track_by_key(&[english], TrackKind::Subtitle, "Signs"),
+            None
+        );
+    }
+
+    #[test]
+    fn only_forced_keeps_the_forced_track_showing_when_the_audio_language_is_unknown() {
+        let only_forced = LanguagePrefs {
+            subtitle_mode: SubtitleMode::OnlyForced,
+            ..LanguagePrefs::default()
+        };
+        let mut burned = track(TrackKind::Subtitle, -1002, Some("eng"));
+        burned.forced = true;
+        let mut other = track(TrackKind::Subtitle, -1003, Some("ger"));
+        other.forced = true;
+        let audio = track(TrackKind::Audio, 1, None);
+        for (selected, expected) in [
+            (true, SubtitleDecision::Track(-1002)),
+            (false, SubtitleDecision::Off),
+        ] {
+            burned.selected = selected;
+            let tracks = vec![audio.clone(), other.clone(), burned.clone()];
+            let decision = resolve_track_selection(&tracks, None, &only_forced);
+            assert_eq!(decision.subtitle, expected, "selected={selected}");
+        }
     }
 }

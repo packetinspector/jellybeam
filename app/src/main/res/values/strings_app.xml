@@ -8,6 +8,7 @@
     <string name="error_server_removed">That server is no longer available.</string>
     <string name="error_discover_not_set_up">Discover isn\'t set up yet. Connect it from Settings.</string>
     <string name="error_playback_session_stale">Playback session is no longer current.</string>
+    <string name="error_playback_account_changed">The account changed before playback could start.</string>
     <string name="error_invalid_server_address">That doesn\'t look like a server address. Enter it the way your browser shows it, like http://192.0.2.10:8096.</string>
     <string name="error_server_unreachable">Couldn\'t reach %1$s (%2$s). Check the address and port, and that the server is running.</string>
     <string name="error_unreachable_name_not_resolved">the name could not be resolved</string>

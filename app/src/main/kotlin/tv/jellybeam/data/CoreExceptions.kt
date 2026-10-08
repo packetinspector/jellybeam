@@ -30,6 +30,8 @@ fun CoreException.displayMessage(strings: UiStrings): String = when (this) {
     // docs/18-playback-quality.md §2 staleness guard; PlaybackViewModel catches this before
     // displayMessage() -- kept here only for exhaustiveness.
     is CoreException.StalePlaybackSession -> strings.get(R.string.error_playback_session_stale)
+    // docs/18 §2.1: the request was minted under a previous account.
+    is CoreException.AccountChanged -> strings.get(R.string.error_playback_account_changed)
     // docs/13-feature-list.md "sign-in": plain-English copy for signIn/reauthorizeSession/
     // quick-connect failures, no jargon or URLs of the user's own.
     is CoreException.InvalidServerAddress -> strings.get(R.string.error_invalid_server_address)
@@ -84,6 +86,7 @@ fun CoreException.diagLabel(): String = when (this) {
     is CoreException.InvalidSessionIndex -> "invalid_session_index"
     is CoreException.SeerrNotConfigured -> "seerr_not_configured"
     is CoreException.StalePlaybackSession -> "stale_playback_session"
+    is CoreException.AccountChanged -> "account_changed"
     is CoreException.InvalidServerAddress -> "invalid_server_address"
     is CoreException.ServerUnreachable -> "server_unreachable"
     is CoreException.HttpsNotOffered -> "https_not_offered"

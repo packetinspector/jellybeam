@@ -98,7 +98,7 @@ pub struct ViewSummary {
 
 /// Settings-panel-driven `/Shows/NextUp` filtering. `media-cache` can't depend on `app`, so
 /// the app pushes its current values down via [`Mirror::set_next_up_options`] instead of
-/// this reading `AppSettings` directly, the same shape `MirrorState::playback_active` uses.
+/// this reading `AppSettings` directly.
 /// `sync::refresh_next_up` reads the stored value fresh on every call, so a settings change
 /// takes effect on the next refresh without a dedicated "settings changed" signal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -157,7 +157,8 @@ pub(crate) struct MirrorState {
     /// Set by the app while a playback session is active; breadth syncs pause between pages
     /// while set, so bulk metadata doesn't compete with the stream mpv is buffering. Sync
     /// resumes where it left off when playback stops; WS deltas/reconcile probes are unaffected.
-    pub(crate) playback_active: std::sync::atomic::AtomicBool,
+    /// The app hands every mirror it opens the same flag, so one playback pauses them all.
+    pub(crate) playback_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Notified when `initial_sync_in_progress` flips back to `false`, so `bus_listener` can
     /// replay its buffer promptly even if the event bus goes quiet right after sync finishes.
     /// `Arc`'d separately so `bus_listener` can clone just this handle and drop its
@@ -212,7 +213,7 @@ impl MirrorState {
             reconcile_pending: std::sync::atomic::AtomicBool::new(false),
             delta_in_progress: std::sync::atomic::AtomicBool::new(false),
             delta_pending: std::sync::atomic::AtomicBool::new(false),
-            playback_active: std::sync::atomic::AtomicBool::new(false),
+            playback_active: std::sync::Arc::default(),
             initial_sync_done: std::sync::Arc::new(tokio::sync::Notify::new()),
             reconcile_after_sync: std::sync::atomic::AtomicBool::new(false),
             self_weak,
@@ -354,11 +355,12 @@ impl Mirror {
     ///
     /// `dir` is a directory, not a filename; per-server scoping is assumed already baked
     /// into it by the caller (one directory per server), and this just creates `mirror.db`
-    /// inside it.
+    /// inside it. While `playback_active` is set, its bulk sync yields to playback.
     pub async fn open(
         dir: std::path::PathBuf,
         client: jellyfin_api::JellyfinClient,
         bus: tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>,
+        playback_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Self, CacheError> {
         tokio::fs::create_dir_all(&dir)
             .await
@@ -388,8 +390,9 @@ impl Mirror {
         tokio::task::spawn_blocking(move || writer::run(conn, write_rx, writer_changes_tx));
         let (sync_activity_tx, _) = tokio::sync::watch::channel(SyncActivity::Idle);
 
-        let state = std::sync::Arc::new_cyclic(|weak| {
-            MirrorState::new(
+        let state = std::sync::Arc::new_cyclic(|weak| MirrorState {
+            playback_active,
+            ..MirrorState::new(
                 client,
                 writer::WriterHandle::new(write_tx),
                 read_pool,
@@ -434,13 +437,11 @@ impl Mirror {
         self.inner.sync_activity.subscribe()
     }
 
-    /// App-reported playback state: while `true`, breadth syncs pause between pages so bulk
-    /// metadata doesn't compete with the stream mpv is buffering. Idempotent; the app calls
-    /// it on every playback start/stop transition.
-    pub fn set_playback_active(&self, active: bool) {
+    /// The `playback_active` flag [`Self::open`] was handed: while set, bulk sync yields.
+    pub fn playback_active(&self) -> bool {
         self.inner
             .playback_active
-            .store(active, std::sync::atomic::Ordering::Release);
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Pushes the app's current Next Up filtering preferences into the sync engine; see
@@ -683,6 +684,11 @@ impl Mirror {
     /// `query::card_by_id`.
     pub fn card_by_id(&self, id: &str) -> Option<CardRow> {
         query::card_by_id(&self.inner.read_pool.acquire(), id)
+    }
+
+    /// [`Self::card_by_id`] for many ids in one statement, in the order asked; unknown ids are absent.
+    pub fn cards_by_ids(&self, ids: &[String]) -> Vec<CardRow> {
+        query::cards_by_ids(&self.inner.read_pool.acquire(), ids)
     }
 
     /// Full DTO for Detail view (blob parse allowed here).

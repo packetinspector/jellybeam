@@ -27,6 +27,62 @@ macro_rules! in_progress_sql {
 }
 pub(crate) use in_progress_sql;
 
+/// A card shows this row as never started: [`watch_state`]'s `NotStarted` and not `played`.
+/// `$p` is the column prefix (`""` or `"e."`); `not_started_sql_matches_watch_state` pins it.
+macro_rules! not_started_sql {
+    ($p:literal) => {
+        concat!(
+            "(",
+            $p,
+            "played = 0 AND (",
+            $p,
+            "playback_position_ticks <= 0 \
+             OR ",
+            $p,
+            "playback_position_ticks < CASE WHEN COALESCE(",
+            $p,
+            "runtime_ticks, 0) > 0 \
+                 THEN MIN(1200000000, ",
+            $p,
+            "runtime_ticks / 100 * 20) ELSE 1200000000 END))"
+        )
+    };
+}
+pub(crate) use not_started_sql;
+
+/// A card shows this row as watched: server `played`, or [`watch_state`]'s grace-`Watched`.
+/// `$p` is the column prefix; `watched_sql_matches_watch_state` pins it.
+macro_rules! watched_sql {
+    ($p:literal) => {
+        concat!(
+            "(",
+            $p,
+            "played = 1 OR (COALESCE(",
+            $p,
+            "runtime_ticks, 0) > 0 \
+             AND ",
+            $p,
+            "playback_position_ticks >= MIN(1200000000, ",
+            $p,
+            "runtime_ticks / 100 * 20) \
+             AND ",
+            $p,
+            "playback_position_ticks > 0 \
+             AND ",
+            $p,
+            "runtime_ticks - ",
+            $p,
+            "playback_position_ticks <= MIN(CASE WHEN ",
+            $p,
+            "item_type = 'Movie' \
+                 THEN 6000000000 ELSE 1200000000 END, ",
+            $p,
+            "runtime_ticks / 100 * 20)))"
+        )
+    };
+}
+pub(crate) use watched_sql;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchState {
     NotStarted,
@@ -215,6 +271,110 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every (type, runtime, position, played) the SQL macros are pinned over.
+    fn grid_cases() -> Vec<(&'static str, Option<i64>, i64)> {
+        let runtimes = [
+            None,
+            Some(0),
+            Some(MIN),
+            Some(9 * MIN),
+            Some(12 * MIN),
+            Some(44 * MIN),
+            Some(120 * MIN),
+        ];
+        let positions = [
+            -1,
+            0,
+            1,
+            MIN,
+            2 * MIN - 1,
+            2 * MIN,
+            7 * MIN,
+            8 * MIN,
+            42 * MIN,
+            110 * MIN - 1,
+            110 * MIN,
+            500 * MIN,
+        ];
+        let mut cases = Vec::new();
+        for item_type in ["Movie", "Episode", "Video"] {
+            for runtime in runtimes {
+                let edges = runtime.filter(|&rt| rt > 0).map_or(vec![], |rt| {
+                    let cap = |grace: i64| grace.min(rt / 100 * MAX_GRACE_PERCENT);
+                    let end = if item_type == "Movie" {
+                        MOVIE_END_GRACE_TICKS
+                    } else {
+                        END_GRACE_TICKS
+                    };
+                    [cap(START_GRACE_TICKS), rt - cap(end)]
+                        .into_iter()
+                        .flat_map(|edge| [edge - 1, edge, edge + 1])
+                        .collect()
+                });
+                for position in positions.into_iter().chain(edges) {
+                    cases.push((item_type, runtime, position));
+                }
+            }
+        }
+        cases
+    }
+
+    /// Evaluates a prefix-free macro body over the `grid_cases` and both `played` values.
+    fn check_macro(sql_predicate: &str, expect: impl Fn(&str, i64, Option<i64>, bool) -> bool) {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        let sql = format!(
+            "SELECT {sql_predicate} FROM (SELECT ?1 AS item_type, ?2 AS playback_position_ticks, \
+             ?3 AS runtime_ticks, ?4 AS played)"
+        );
+        for (item_type, runtime, position) in grid_cases() {
+            for played in [false, true] {
+                let sql_says: bool = conn
+                    .query_row(
+                        &sql,
+                        rusqlite::params![item_type, position, runtime, played],
+                        |row| row.get(0),
+                    )
+                    .expect("predicate");
+                assert_eq!(
+                    sql_says,
+                    expect(item_type, position, runtime, played),
+                    "{item_type} at {position} of {runtime:?}, played={played}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn not_started_sql_matches_watch_state() {
+        check_macro(not_started_sql!(""), |t, pos, rt, played| {
+            !played && watch_state(t, pos, rt) == WatchState::NotStarted
+        });
+    }
+
+    #[test]
+    fn watched_sql_matches_watch_state() {
+        check_macro(watched_sql!(""), |t, pos, rt, played| {
+            played || watch_state(t, pos, rt) == WatchState::Watched
+        });
+    }
+
+    #[test]
+    fn prefixed_macros_bind_to_the_alias() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        let sql = concat!(
+            "SELECT ",
+            not_started_sql!("e."),
+            ", ",
+            watched_sql!("e."),
+            " FROM (SELECT 'Movie' AS item_type, 0 AS playback_position_ticks, 0 AS played, \
+             NULL AS runtime_ticks) e"
+        );
+        let (not_started, watched): (bool, bool) = conn
+            .query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("predicate");
+        assert!(not_started && !watched);
     }
 
     #[test]

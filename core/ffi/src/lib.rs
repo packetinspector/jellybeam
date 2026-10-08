@@ -17,6 +17,7 @@ mod library_prefs;
 mod next_episode;
 mod object;
 mod persistence;
+mod person;
 mod seerr;
 mod seerr_types;
 mod session;
@@ -35,6 +36,7 @@ pub use error::CoreError;
 pub use glide::GlideDirection;
 pub use home::{ClassicHome, HomeLayout, HomeShelf, HomeSnapshot, ShelfSource};
 pub use object::{ChangeListener, JellybeamCore};
+pub use person::{PersonPage, TitleTmdbRef};
 pub use seerr_types::{
     SeerrActiveRequest, SeerrAuthMethod, SeerrAvailability, SeerrBrowseFilters, SeerrBrowseKind,
     SeerrCard, SeerrGenre, SeerrHome, SeerrHomeRow, SeerrMediaType, SeerrMovieDetail,
@@ -48,11 +50,12 @@ pub use settings::{
 };
 pub use still_watching::StillWatchingDecision;
 pub use types::{
-    AccountInfo, AudioSpatialKind, Card, ChangeEvent, ChapterInfoFfi, Decade, DeviceCaps,
-    EpisodeNeighbors, GridCounts, GridFilters, GridGroup, GridSort, GridSortField, ImageKind,
-    ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MediaSegmentKind, MediaStreamInfo,
-    MediaStreamKind, MirrorItemCounts, MirrorLibrary, MirrorStats, PersonInfo, PlayMethodFfi,
-    PlaybackOsdDetail, PlaybackPlan, QuickConnectSession, ServerDetails, ServerInfoSnapshot,
+    AccountIdentity, AccountInfo, AudioSpatialKind, Card, ChangeEvent, ChapterInfoFfi, Decade,
+    DeviceCaps, EmbeddedSubtitleFfi, EpisodeNeighbors, ExternalSubtitleFfi, FailedTrackFfi,
+    GridCounts, GridFilters, GridGroup, GridSort, GridSortField, ImageKind, ItemDetail,
+    LibraryGridPrefs, LiveSort, MediaSegment, MediaSegmentKind, MediaStreamInfo, MediaStreamKind,
+    MirrorItemCounts, MirrorLibrary, MirrorStats, PersonInfo, PlayMethodFfi, PlaybackOsdDetail,
+    PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails, ServerInfoSnapshot,
     SortOrder, StatusFilter, SubtitleActionFfi, TrackDecisionFfi, TrackInfo, TrackKindFfi,
     TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId, ViewSnapshot, WatchedFilter,
 };
@@ -250,7 +253,12 @@ pub fn mirror_smoke_test() -> String {
         Err(e) => return format!("mirror smoke test failed: could not start runtime: {e}"),
     };
 
-    let opened = rt.block_on(media_cache::Mirror::open(dir.clone(), client, bus_rx));
+    let opened = rt.block_on(media_cache::Mirror::open(
+        dir.clone(),
+        client,
+        bus_rx,
+        std::sync::Arc::default(),
+    ));
 
     // `mirror` must drop (closing the writer's mpsc channel) before `rt`:
     // the writer thread parked on rt's blocking pool only exits once every

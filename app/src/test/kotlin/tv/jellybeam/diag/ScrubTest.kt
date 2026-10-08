@@ -17,8 +17,8 @@ class ScrubTest {
 
     @Test
     fun apiKeyTokenAndPasswordValuesAreRedacted() {
-        val input = "api_key=abc123 token=xyz789 password=hunter2 ok"
-        assertEquals("api_key=<redacted> token=<redacted> password=<redacted> ok", Scrub.scrub(input))
+        val input = "api_key=abc123 ApiKey=def456 token=xyz789 password=hunter2 ok"
+        assertEquals("api_key=<redacted> ApiKey=<redacted> token=<redacted> password=<redacted> ok", Scrub.scrub(input))
     }
 
     @Test

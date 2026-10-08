@@ -12,6 +12,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -38,13 +39,23 @@ internal fun DiscoverMessage(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-internal fun DiscoverErrorMessage(text: String, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+internal fun DiscoverErrorMessage(
+    text: String,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+    retryFocusRequester: FocusRequester? = null,
+) {
     Column(
         modifier = modifier.padding(horizontal = DISCOVER_PAGE_MARGIN, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         BasicText(text = text, style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 16.sp))
-        SettingsChip(label = stringResource(R.string.discover_error_retry), selected = false, onSelect = onRetry)
+        SettingsChip(
+            label = stringResource(R.string.discover_error_retry),
+            selected = false,
+            onSelect = onRetry,
+            focusRequester = retryFocusRequester,
+        )
     }
 }
 

@@ -68,7 +68,7 @@ pub(crate) fn host_for_display(normalized_url: &str) -> String {
 /// surfaced.
 pub(crate) fn classify_sign_in_error(host: &str, err: jellyfin_api::ApiError) -> CoreError {
     match err {
-        jellyfin_api::ApiError::Unauthorized => CoreError::InvalidCredentials,
+        jellyfin_api::ApiError::Unauthorized { .. } => CoreError::InvalidCredentials,
         jellyfin_api::ApiError::Status { code, .. } => CoreError::NotJellyfinServer {
             host: host.to_string(),
             status: code,
@@ -205,8 +205,10 @@ mod tests {
 
     #[test]
     fn classify_unauthorized_is_invalid_credentials_not_expired_authorization() {
-        let err =
-            classify_sign_in_error("media.example.test", jellyfin_api::ApiError::Unauthorized);
+        let err = classify_sign_in_error(
+            "media.example.test",
+            jellyfin_api::ApiError::Unauthorized { owner: None },
+        );
         assert!(matches!(err, CoreError::InvalidCredentials));
     }
 

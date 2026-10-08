@@ -86,7 +86,7 @@ async fn wrong_password_is_unauthorized() {
     assert!(
         matches!(
             err,
-            jellyfin_api::ApiError::Unauthorized | jellyfin_api::ApiError::Status { .. }
+            jellyfin_api::ApiError::Unauthorized { .. } | jellyfin_api::ApiError::Status { .. }
         ),
         "unexpected error variant: {err:?}"
     );

@@ -1,5 +1,6 @@
 package tv.jellybeam.ui.common
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -46,6 +47,44 @@ class ChangeRefreshSchedulerTest {
             advanceTimeBy(5_000)
             runCurrent()
             assertEquals("no further event landed -- no further refresh", 1, refreshCount)
+        } finally {
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun `requestRefresh is served by the same loop, never overlapping an event refresh`() = runTest {
+        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+        val active = MutableStateFlow(true)
+        val gate = CompletableDeferred<Unit>()
+        var running = 0
+        var maxRunning = 0
+        var refreshCount = 0
+        val (scope, job) = newSchedulerScope()
+        val scheduler = ChangeRefreshScheduler(
+            scope, events, active,
+            refresh = {
+                running++
+                maxRunning = maxOf(maxRunning, running)
+                refreshCount++
+                if (refreshCount == 1) gate.await()
+                running--
+            },
+        )
+        try {
+            scheduler.requestRefresh()
+            runCurrent()
+            assertEquals("the request runs like an event", 1, refreshCount)
+
+            events.tryEmit(Unit)
+            runCurrent()
+            assertEquals("the event waits behind the held request", 1, refreshCount)
+
+            gate.complete(Unit)
+            advanceTimeBy(1_000)
+            runCurrent()
+            assertEquals("then the event's own refresh runs", 2, refreshCount)
+            assertEquals("one at a time", 1, maxRunning)
         } finally {
             job.cancel()
         }

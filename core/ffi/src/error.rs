@@ -16,9 +16,13 @@ pub enum CoreError {
     #[error("mirror not open")]
     MirrorNotOpen,
     /// The saved access token was rejected; kept distinct from a generic API
-    /// failure so Android can route straight into reauthorization.
+    /// failure so Android can route straight into reauthorization. `account`
+    /// names the Jellyfin account it was issued to (docs/18 §2.1); `None` when no token named
+    /// one: Seerr's, or a public call's.
     #[error("authorization expired")]
-    Unauthorized,
+    Unauthorized {
+        account: Option<crate::types::AccountIdentity>,
+    },
     /// A `jellyfin-api` call failed; `detail` is its `Display` text only.
     #[error("api error: {detail}")]
     Api { detail: String },
@@ -51,6 +55,10 @@ pub enum CoreError {
     /// playback already moved on, which is what it wants.
     #[error("playback session is no longer current")]
     StalePlaybackSession,
+    /// docs/18 §2.1: the playback request was minted under an account epoch that is no longer
+    /// current; distinct from [`Self::StalePlaybackSession`] so a missed epoch refresh is visible.
+    #[error("playback request belongs to a previous account")]
+    AccountChanged,
     /// docs/13 "sign-in": the entered address itself is unusable (empty,
     /// unsupported scheme, no host) -- caught before any request is sent.
     #[error("invalid server address: {detail}")]
@@ -116,7 +124,9 @@ pub enum UnreachableReason {
 impl From<jellyfin_api::ApiError> for CoreError {
     fn from(err: jellyfin_api::ApiError) -> Self {
         match err {
-            jellyfin_api::ApiError::Unauthorized => CoreError::Unauthorized,
+            jellyfin_api::ApiError::Unauthorized { owner } => CoreError::Unauthorized {
+                account: owner.map(Into::into),
+            },
             other => CoreError::Api {
                 detail: other.to_string(),
             },
@@ -137,7 +147,7 @@ impl From<media_cache::CacheError> for CoreError {
 impl From<seerr_api::SeerrError> for CoreError {
     fn from(err: seerr_api::SeerrError) -> Self {
         match err {
-            seerr_api::SeerrError::Unauthorized => CoreError::Unauthorized,
+            seerr_api::SeerrError::Unauthorized => CoreError::Unauthorized { account: None },
             seerr_api::SeerrError::Transport(msg) => CoreError::SeerrUnreachable {
                 reason: crate::signin::unreachable_reason(&msg),
             },
@@ -182,9 +192,23 @@ mod tests {
     }
 
     #[test]
-    fn api_unauthorized_maps_to_typed_authorization_error() {
-        let core_err: CoreError = jellyfin_api::ApiError::Unauthorized.into();
-        assert!(matches!(core_err, CoreError::Unauthorized));
+    fn api_unauthorized_maps_to_typed_authorization_error_naming_its_account() {
+        let owner = jellyfin_api::TokenOwner {
+            server_url: "http://a.test".to_string(),
+            user_id: "u-a".to_string(),
+        };
+        let core_err: CoreError =
+            jellyfin_api::ApiError::Unauthorized { owner: Some(owner) }.into();
+        let CoreError::Unauthorized { account } = core_err else {
+            panic!("expected Unauthorized, got {core_err:?}");
+        };
+        assert_eq!(
+            account,
+            Some(crate::types::AccountIdentity {
+                server_url: "http://a.test".to_string(),
+                user_id: "u-a".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -224,8 +248,12 @@ mod tests {
     #[test]
     fn jellyfin_core_preserves_typed_unauthorized_error() {
         let core_err: CoreError =
-            jellyfin_core::CoreError::Api(jellyfin_api::ApiError::Unauthorized).into();
-        assert!(matches!(core_err, CoreError::Unauthorized));
+            jellyfin_core::CoreError::Api(jellyfin_api::ApiError::Unauthorized { owner: None })
+                .into();
+        assert!(matches!(
+            core_err,
+            CoreError::Unauthorized { account: None }
+        ));
     }
 
     #[test]
@@ -259,7 +287,10 @@ mod tests {
     #[test]
     fn seerr_unauthorized_maps_to_typed_authorization_error() {
         let core_err: CoreError = seerr_api::SeerrError::Unauthorized.into();
-        assert!(matches!(core_err, CoreError::Unauthorized));
+        assert!(matches!(
+            core_err,
+            CoreError::Unauthorized { account: None }
+        ));
     }
 
     #[test]

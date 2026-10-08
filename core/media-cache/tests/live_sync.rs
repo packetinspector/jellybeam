@@ -79,9 +79,14 @@ async fn initial_sync_against_live_server_matches_corpus_counts() {
     let (_bus_tx, bus_rx) = tokio::sync::broadcast::channel::<BusEvent>(16);
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let mirror = Mirror::open(dir.path().to_path_buf(), client, bus_rx)
-        .await
-        .expect("open mirror");
+    let mirror = Mirror::open(
+        dir.path().to_path_buf(),
+        client,
+        bus_rx,
+        std::sync::Arc::default(),
+    )
+    .await
+    .expect("open mirror");
 
     // Views (Movies + Shows libraries) land first.
     let views = wait_for("views", 2, Duration::from_secs(15), || mirror.views().len()).await;

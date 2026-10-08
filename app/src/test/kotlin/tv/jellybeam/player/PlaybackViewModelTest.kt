@@ -30,13 +30,18 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.ChapterInfoFfi
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.EpisodeNeighbors
 import uniffi.jellybeam_core.ItemDetail
+import uniffi.jellybeam_core.EmbeddedSubtitleFfi
+import uniffi.jellybeam_core.ExternalSubtitleFfi
+import uniffi.jellybeam_core.FailedTrackFfi
 import uniffi.jellybeam_core.MediaSegment
 import uniffi.jellybeam_core.MediaSegmentKind
 import uniffi.jellybeam_core.OsdDetailSetting
@@ -66,13 +71,17 @@ private fun samplePlan(
     playMethod: PlayMethodFfi = PlayMethodFfi.DIRECT_PLAY,
     transcodeReason: String? = null,
     serverVerdict: String? = null,
+    externalSubtitles: List<ExternalSubtitleFfi> = emptyList(),
     transcodeFallbackAllowed: Boolean = false,
+    playSessionId: String = "session-1",
+    embeddedSubtitles: List<EmbeddedSubtitleFfi> = emptyList(),
+    burnedSubtitleIndex: Int? = null,
 ) = PlaybackPlan(
     itemId = itemId,
     itemName = itemName,
     url = "http://server/Videos/$itemId/stream?static=true&api_key=tok",
     mediaSourceId = mediaSourceId,
-    playSessionId = "session-1",
+    playSessionId = playSessionId,
     startPositionTicks = startPositionTicks,
     runtimeTicks = runtimeTicks,
     container = "mkv",
@@ -81,6 +90,9 @@ private fun samplePlan(
     parentIndexNumber = null,
     indexNumber = null,
     seriesId = seriesId,
+    externalSubtitles = externalSubtitles,
+    embeddedSubtitles = embeddedSubtitles,
+    burnedSubtitleIndex = burnedSubtitleIndex,
     playMethod = playMethod,
     transcodeReason = transcodeReason,
     serverVerdict = serverVerdict,
@@ -178,6 +190,7 @@ class PlaybackViewModelTest {
         startFromBeginning: Boolean = false,
         clock: Clock = Clock.SYSTEM,
         onStopReported: () -> Unit = {},
+        parseSidecar: suspend (String, String) -> SidecarCues? = { _, text -> sampleSidecarCues().takeIf { text == "ok" } },
     ): PlaybackViewModel =
         PlaybackViewModel(
             gateway,
@@ -188,6 +201,7 @@ class PlaybackViewModelTest {
             onStopReported = onStopReported,
             startFromBeginning = startFromBeginning,
             clock = clock,
+            parseSidecar = parseSidecar,
         ).also { viewModelsToClear += it }
 
     @After
@@ -316,8 +330,9 @@ class PlaybackViewModelTest {
 
     @Test
     fun `an expired token emits reauthorization instead of an unactionable finish message`() = runTest(timeout = TEST_TIMEOUT) {
+        val rejected = AccountIdentity(serverUrl = "http://a.test", userId = "u-a")
         val gateway = FakeCoreGateway(
-            preparePlaybackResult = CoreException.Unauthorized().asFailure(),
+            preparePlaybackResult = CoreException.Unauthorized(account = rejected).asFailure(),
         )
         val player = FakePlaybackPlayer()
 
@@ -325,7 +340,7 @@ class PlaybackViewModelTest {
         withSession(viewModel) {
             val event = viewModel.events.replayCache.firstOrNull()
 
-            assertTrue(event is PlaybackEvent.ReauthorizationRequired)
+            assertEquals("the rejected account travels with it", PlaybackEvent.ReauthorizationRequired(rejected), event)
             assertNull(player.loadedPlan)
             assertTrue(gateway.stopPlaybackCalls.isEmpty())
         }
@@ -493,6 +508,67 @@ class PlaybackViewModelTest {
             player.firePlayWhenReadyChanged(true)
 
             assertEquals(listOf(true, false), gateway.reportPausedCalls)
+        }
+    }
+
+    /** The session a renegotiation lands starts unpaused on the server; a viewer paused across it
+     * is reported paused to the new session. */
+    @Test
+    fun `a pause held across a renegotiation is reported to the landed session`() = runTest(timeout = TEST_TIMEOUT) {
+        val burned = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(assStream), burnedSubtitleIndex = 2)
+        val clean = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "clean", embeddedSubtitles = listOf(assStream))
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(burned),
+            prepareTranscodeFallbackResult = Result.success(clean),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, burned.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            player.playbackState = Player.STATE_READY
+            player.firePlayWhenReadyChanged(false)
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+            runCurrent()
+            assertFalse("a paused viewer stays paused across the reload", player.playWhenReady)
+            player.firePlayWhenReadyChanged(false) // the callback that setting fires on a real player
+
+            assertEquals(listOf(burned.playSessionId, "clean"), gateway.reportPausedSessionIds)
+            assertEquals(listOf(true, true), gateway.reportPausedCalls)
+        }
+    }
+
+    /** In a chained renegotiation the stream on screen belongs to the session the current attempt
+     * took over, so that is the one reports name. */
+    @Test
+    fun `reports during a chained renegotiation name the session it took over`() = runTest(timeout = TEST_TIMEOUT) {
+        val french = EmbeddedSubtitleFfi(index = 3, language = "fre", title = null, forced = false, default = false, codec = "ass")
+        val streams = listOf(assStream, french)
+        fun transcode(id: String, burned: Int?) =
+            samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = id, embeddedSubtitles = streams, burnedSubtitleIndex = burned)
+        val start = transcode("s0", 2)
+        val gates = List(2) { CompletableDeferred<Unit>() }
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(start)).apply {
+            prepareTranscodeFallbackResultsByCall[0] = Result.success(transcode("s1", 3))
+            prepareTranscodeFallbackResultsByCall[1] = Result.success(transcode("s2", null))
+            gates.forEachIndexed { call, gate -> prepareTranscodeFallbackGatesByCall[call] = gate }
+        }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, start.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            player.playbackState = Player.STATE_READY
+            viewModel.chooseSubtitle(burnableSubtitleId(3))
+            player.firePlayWhenReadyChanged(false)
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+            gates[0].complete(Unit)
+            runCurrent()
+            player.firePlayWhenReadyChanged(true)
+
+            assertEquals(listOf("s0", "s1"), gateway.reportPausedSessionIds)
+            gates[1].complete(Unit)
+            runCurrent()
         }
     }
 
@@ -927,6 +1003,33 @@ class PlaybackViewModelTest {
             assertEquals(listOf(170_000_000L), gateway.stopPlaybackCalls)
             assertEquals(listOf("ep-1"), gateway.preparePlaybackCalls) // never prepares ep-2
             assertEquals(PlaybackEvent.FinishToDetail("ep-2"), viewModel.events.replayCache.firstOrNull())
+        }
+    }
+
+    /** docs/18 §2.1: detail resolves ids on the browsed account, so a playback kept on another
+     * account stops without routing there.
+     */
+    @Test
+    fun `stillWatchingStop on a playback kept across a switch just finishes`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = episodePlan("ep-1")
+        val nextCard = testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan)),
+            nextEpisodeByItemId = mapOf("ep-1" to nextCard),
+            noteEpisodeFinishedDecisions = ArrayDeque(listOf(StillWatchingDecision.ASK_STILL_WATCHING)),
+        )
+        val player = FakePlaybackPlayer().apply { positionTicks = 170_000_000L }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            advanceOneTick()
+            gateway.parkedEpoch.value = 0uL
+            gateway.accountEpoch.value = 1uL
+            runCurrent()
+
+            viewModel.stillWatchingStop()
+
+            assertEquals(listOf(170_000_000L), gateway.stopPlaybackCalls)
+            assertEquals(listOf<PlaybackEvent>(PlaybackEvent.Finish), viewModel.events.replayCache)
         }
     }
 
@@ -1712,7 +1815,7 @@ class PlaybackViewModelTest {
         val trickplayResult = CompletableDeferred<TrickplayMetaFfi?>()
         // Delegation (`by fake`) forwards every other member, including the trickplay lookups.
         val gateway = object : CoreGateway by fake {
-            override suspend fun getTrickplay(itemId: String, mediaSourceId: String): TrickplayMetaFfi? =
+            override suspend fun getTrickplay(itemId: String, mediaSourceId: String, accountEpoch: ULong?): TrickplayMetaFfi? =
                 trickplayResult.await()
         }
         val player = FakePlaybackPlayer()
@@ -2715,6 +2818,140 @@ class PlaybackViewModelTest {
         }
     }
 
+    // -- docs/12 §9: unseekable files never seekTo (a seek would restart from 0:00) --
+
+    @Test
+    fun `an unseekable file refuses every seek path and raises the notice`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 200_000_000L)
+        val chapters = listOf(sampleChapter("Cold Open", 0L), sampleChapter("Act One", 100_000_000L))
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail(chapters = chapters))),
+        )
+        val player = FakePlaybackPlayer().apply { seekabilityValue = Seekability.UNSEEKABLE }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireRenderedFirstFrame()
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            assertEquals(Seekability.UNSEEKABLE, viewModel.state.value.seekability)
+
+            assertNull(viewModel.seek(10_000L))
+            assertEquals(0L, viewModel.tapSeek(10_000L))
+            assertNull(viewModel.jumpToChapter(forward = true))
+            assertNull(viewModel.skipSegment(sampleSegment(MediaSegmentKind.INTRO, 10_000_000L, 20_000_000L)))
+            viewModel.undoSkip(0L)
+            viewModel.jumpToChapterStart(100_000_000L)
+            viewModel.commitGlide(5_000L, endClamped = true)
+
+            assertTrue("no seekTo may reach the player", player.seekCalls.isEmpty())
+            assertEquals(0L, viewModel.positionTicks.value)
+            assertEquals(0, player.pauseCallCount)
+            assertEquals(PlaybackEvent.SeekUnavailable, viewModel.events.replayCache.first())
+            viewModel.noticeShown()
+            assertTrue("a shown notice is not replayed", viewModel.events.replayCache.isEmpty())
+        }
+    }
+
+    @Test
+    fun `openChaptersMenu is refused on an unseekable file with a notice`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 200_000_000L)
+        val chapters = listOf(sampleChapter("Cold Open", 0L), sampleChapter("Act One", 100_000_000L))
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail(chapters = chapters))),
+        )
+        val player = FakePlaybackPlayer().apply { seekabilityValue = Seekability.UNSEEKABLE }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireRenderedFirstFrame()
+            player.firePlaybackStateChanged(Player.STATE_READY)
+
+            viewModel.openChaptersMenu()
+
+            assertFalse(viewModel.state.value.chaptersMenuOpen)
+            assertEquals(PlaybackEvent.SeekUnavailable, viewModel.events.replayCache.first())
+            viewModel.noticeShown()
+
+            player.seekabilityValue = Seekability.SEEKABLE
+            viewModel.openChaptersMenu()
+            assertTrue(viewModel.state.value.chaptersMenuOpen)
+        }
+    }
+
+    @Test
+    fun `an unseekable file never auto-skips a segment`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val commercial = sampleSegment(MediaSegmentKind.COMMERCIAL, 50_000_000L, 100_000_000L)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            mediaSegmentsByItemId = mapOf(plan.itemId to listOf(commercial)),
+            settings = defaultTestSettings().copy(skipCommercial = SegmentAction.AUTO_SKIP),
+        )
+        val player = FakePlaybackPlayer().apply {
+            positionTicks = 60_000_000L
+            seekabilityValue = Seekability.UNSEEKABLE
+        }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            advanceOneTick()
+
+            assertTrue(player.seekCalls.isEmpty())
+            assertFalse(viewModel.events.replayCache.firstOrNull() is PlaybackEvent.AutoSkipped)
+        }
+    }
+
+    @Test
+    fun `a seekable file still seeks after READY`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 200_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            assertEquals(Seekability.SEEKABLE, viewModel.state.value.seekability)
+            viewModel.seek(10_000L)
+            assertEquals(listOf(10_000L), player.seekCalls)
+        }
+    }
+
+    @Test
+    fun `a resume an unseekable file can't honor raises the notice once`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(startPositionTicks = 1_800_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer().apply { seekabilityValue = Seekability.UNSEEKABLE }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            assertEquals(PlaybackEvent.SeekUnavailable, viewModel.events.replayCache.firstOrNull())
+            viewModel.noticeShown()
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            assertTrue("raised once per session", viewModel.events.replayCache.isEmpty())
+        }
+    }
+
+    @Test
+    fun `seeks are dropped quietly while seekability is still unknown`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 200_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer().apply { seekabilityValue = Seekability.UNKNOWN }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.firePlaybackStateChanged(Player.STATE_BUFFERING)
+            assertEquals(Seekability.UNKNOWN, viewModel.state.value.seekability)
+
+            assertNull(viewModel.seek(10_000L))
+            assertNull(viewModel.skipSegment(sampleSegment(MediaSegmentKind.INTRO, 10_000_000L, 20_000_000L)))
+            assertTrue("no seekTo while unknown", player.seekCalls.isEmpty())
+            assertFalse(viewModel.events.replayCache.firstOrNull() is PlaybackEvent.SeekUnavailable)
+
+            player.seekabilityValue = Seekability.SEEKABLE
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            viewModel.seek(10_000L)
+            assertEquals(listOf(10_000L), player.seekCalls)
+        }
+    }
+
     // -- osd-tier-2: skip intro/credits (docs/12 "Skip intro/credits") --
 
     @Test
@@ -2742,7 +2979,7 @@ class PlaybackViewModelTest {
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
             val outro = sampleSegment(MediaSegmentKind.OUTRO, 100_000_000L, 150_000_000L)
-            val before = viewModel.skipSegment(outro)
+            val before = checkNotNull(viewModel.skipSegment(outro))
 
             viewModel.undoSkip(before)
 
@@ -3141,9 +3378,10 @@ class PlaybackViewModelTest {
     fun `a retry resumes paused when the viewer had paused before the error`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan()
         val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
-        val player = FakePlaybackPlayer().apply { positionTicks = 10_000_000L; playWhenReady = false }
+        val player = FakePlaybackPlayer().apply { positionTicks = 10_000_000L }
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
+            player.pause() // the viewer, after the load resumed
             advanceOneTick() // last-known-good position becomes 10_000_000L
             player.fireError(networkError())
             advanceOneTick()
@@ -3278,6 +3516,7 @@ class PlaybackViewModelTest {
                             30_000_000L,
                             "Playback error: ${error.errorCodeName}",
                             plan.playSessionId,
+                            FailedTrackFfi.UNKNOWN,
                         ),
                     ),
                     gateway.prepareTranscodeFallbackCalls,
@@ -3368,6 +3607,7 @@ class PlaybackViewModelTest {
                             30_000_000L,
                             "Software video decoder OMX.google.h264.decoder -- no hardware decoder on this TV",
                             plan.playSessionId,
+                            FailedTrackFfi.VIDEO,
                         ),
                     ),
                     gateway.prepareTranscodeFallbackCalls,
@@ -3649,7 +3889,7 @@ class PlaybackViewModelTest {
         val neighborGate = CompletableDeferred<EpisodeNeighbors?>()
         val fake = FakeCoreGateway(preparePlaybackResultsByItemId = mapOf("ep-2" to Result.success(plan)))
         val gateway = object : CoreGateway by fake {
-            override suspend fun episodeNeighbors(itemId: String, seriesId: String): EpisodeNeighbors? = neighborGate.await()
+            override suspend fun episodeNeighbors(itemId: String, seriesId: String, accountEpoch: ULong?): EpisodeNeighbors? = neighborGate.await()
         }
         val player = FakePlaybackPlayer()
         val viewModel = buildViewModel(gateway, player, plan.itemId)
@@ -3773,7 +4013,10 @@ class PlaybackViewModelTest {
     @Test
     fun `openSpeedMenu opens itself and closes an already-open chapters menu`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan()
-        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail(chapters = listOf(sampleChapter("Cold Open", 0L))))),
+        )
         val player = FakePlaybackPlayer()
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
@@ -3981,6 +4224,17 @@ class PlaybackViewModelTest {
                 val japaneseId = TrackMapping.toId(1, 0)
                 viewModel.chooseAudio(japaneseId)
                 assertTrue("a non-default audio track is now selected", viewModel.state.value.nonDefaultTrackActive)
+                player.fireTracksChanged(Tracks.EMPTY) // a reconnect retry's, before the tracks return
+                assertTrue("an empty announcement says nothing", viewModel.state.value.nonDefaultTrackActive)
+                player.fireTracksChanged(
+                    Tracks(
+                        listOf(
+                            Tracks.Group(TrackGroup(englishFormat), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(false)),
+                            Tracks.Group(TrackGroup(japaneseFormat), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(true)),
+                        ),
+                    ),
+                )
+                assertTrue("the returning tracks still read the choice", viewModel.state.value.nonDefaultTrackActive)
 
                 val englishId = TrackMapping.toId(0, 0)
                 viewModel.chooseAudio(englishId)
@@ -4051,6 +4305,1470 @@ class PlaybackViewModelTest {
             assertEquals("Episode Two", viewModel.state.value.itemName)
 
             assertFalse("a fresh session starts with nothing resolved yet", viewModel.state.value.nonDefaultTrackActive)
+        }
+    }
+
+    // -- Sidecar subtitles (docs/18-playback-quality.md §3.2) --------------
+
+    private fun sampleSidecar(index: Int = 5) = ExternalSubtitleFfi(
+        index = index, codec = "srt", language = "eng", displayTitle = null, isDefault = false, isForced = false,
+    )
+
+    private val subtitlesOff = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.OFF, subtitleTrackId = null)
+
+    @Test
+    fun `choosing a sidecar drops embedded text, fetches it once, and shows its cues`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(seriesId = "series-1", externalSubtitles = listOf(sampleSidecar()))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan), externalSubtitleText = mapOf(5 to "ok"))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            val tracks = pickerTracks()
+            player.fireTracksChanged(tracks)
+            viewModel.openTrackPicker()
+            val sidecarId = ExternalSubtitles.idFor(5)
+            val row = viewModel.state.value.trackPicker!!.subtitleTracks.single { it.id == sidecarId }
+            assertEquals("en srt · External", row.meta)
+            assertTrue("nothing is fetched before the pick", gateway.fetchExternalSubtitleCalls.isEmpty())
+
+            viewModel.chooseSubtitle(sidecarId)
+
+            assertEquals(subtitlesOff, player.applyTrackDecisionCalls.last().first)
+            assertEquals(listOf("session-1" to 5), gateway.fetchExternalSubtitleCalls)
+            assertEquals("a loaded sidecar is remembered", 1, gateway.rememberTrackChoiceCalls.size)
+            assertNotNull(viewModel.state.value.sidecarCues)
+            assertTrue(viewModel.state.value.trackPicker!!.subtitleTracks.single { it.id == sidecarId }.selected)
+
+            val embeddedId = TrackMapping.toTrackInfos(tracks).single { it.kind == TrackKindFfi.SUBTITLE }.id
+            viewModel.chooseSubtitle(embeddedId)
+            assertNull(viewModel.state.value.sidecarCues)
+            assertEquals(embeddedId, player.applyTrackDecisionCalls.last().first.subtitleTrackId)
+
+            viewModel.chooseSubtitle(sidecarId)
+            assertNotNull(viewModel.state.value.sidecarCues)
+            assertEquals("a second pick reuses the parsed file", 1, gateway.fetchExternalSubtitleCalls.size)
+        }
+    }
+
+    @Test
+    fun `a sidecar that fails to load goes back to Off with a notice`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(seriesId = "series-1", externalSubtitles = listOf(sampleSidecar()))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan), externalSubtitleText = mapOf(5 to "malformed"))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.openTrackPicker()
+
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+
+            assertNull(viewModel.state.value.sidecarCues)
+            assertEquals(PlaybackEvent.SubtitleUnavailable, viewModel.events.replayCache.last())
+            val rows = viewModel.state.value.trackPicker!!.subtitleTracks
+            assertTrue("Off reads selected again", rows.first().selected)
+            assertEquals("en srt · External · Unavailable", rows.single { it.id == ExternalSubtitles.idFor(5) }.meta)
+            assertTrue("a broken file is never remembered for the series", gateway.rememberTrackChoiceCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a core panic while fetching a sidecar costs the track, not playback`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(externalSubtitles = listOf(sampleSidecar()))
+        val gateway = object : CoreGateway by FakeCoreGateway(preparePlaybackResult = Result.success(plan)) {
+            override suspend fun fetchExternalSubtitle(playSessionId: String, index: Int): String? =
+                throw IllegalStateException("panic")
+        }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+
+            assertNull(viewModel.state.value.sidecarCues)
+            assertEquals(PlaybackEvent.SubtitleUnavailable, viewModel.events.replayCache.last())
+        }
+    }
+
+    @Test
+    fun `a fallback to another media source drops its sidecar and re-picks the same language there`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true, externalSubtitles = listOf(sampleSidecar(5)))
+        val fallbackPlan = samplePlan(
+            mediaSourceId = "src-2",
+            playMethod = PlayMethodFfi.TRANSCODE,
+            externalSubtitles = listOf(sampleSidecar(5).copy(language = "fra"), sampleSidecar(7)),
+            playSessionId = "session-2",
+        )
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(fallbackPlan),
+            externalSubtitleText = mapOf(5 to "ok", 7 to "ok"),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+            val firstCues = viewModel.state.value.sidecarCues
+            viewModel.openTrackPicker()
+
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+
+            assertEquals("the re-pick fetches under the new session", listOf("session-1" to 5, "session-2" to 7), gateway.fetchExternalSubtitleCalls)
+            assertNull("the old source's rows can't be picked", viewModel.state.value.trackPicker)
+            assertNotNull(viewModel.state.value.sidecarCues)
+            assertTrue("the old source's cues are gone", viewModel.state.value.sidecarCues !== firstCues)
+        }
+    }
+
+    @Test
+    fun `a fallback on the same media source keeps the showing sidecar`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true, externalSubtitles = listOf(sampleSidecar(5)))
+        val fallbackPlan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, externalSubtitles = listOf(sampleSidecar(5)))
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(fallbackPlan),
+            externalSubtitleText = mapOf(5 to "ok"),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+            val cues = viewModel.state.value.sidecarCues
+
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+
+            assertSame(cues, viewModel.state.value.sidecarCues)
+            assertEquals(1, gateway.fetchExternalSubtitleCalls.size)
+        }
+    }
+
+    @Test
+    fun `a same-source fallback that stops listing a loaded sidecar keeps showing it`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true, externalSubtitles = listOf(sampleSidecar(5)))
+        val fallbackPlan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, externalSubtitles = emptyList())
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(fallbackPlan),
+            externalSubtitleText = mapOf(5 to "ok"),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+            val cues = viewModel.state.value.sidecarCues
+
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            player.fireTracksChanged(pickerTracks()) // the reloaded player announces its tracks
+
+            assertSame(cues, viewModel.state.value.sidecarCues)
+            viewModel.openTrackPicker()
+            assertTrue("its row stays, selected", viewModel.state.value.trackPicker!!.subtitleTracks.single { it.id == ExternalSubtitles.idFor(5) }.selected)
+        }
+    }
+
+    @Test
+    fun `stopping clears the sidecar so a stopped player never draws its first cue`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(externalSubtitles = listOf(sampleSidecar(5)))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan), externalSubtitleText = mapOf(5 to "ok"))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+            assertNotNull(viewModel.state.value.sidecarCues)
+
+            viewModel.stopPlaybackOnce()
+
+            assertNull(viewModel.state.value.sidecarCues)
+        }
+    }
+
+    @Test
+    fun `an open picker is rebuilt from the player's new tracks`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.openTrackPicker()
+            assertEquals(2, viewModel.state.value.trackPicker!!.subtitleTracks.size)
+
+            player.fireTracksChanged(Tracks(pickerTracks().groups.take(2)))
+
+            assertEquals(listOf(TRACK_PICKER_SUBTITLE_OFF_ID), viewModel.state.value.trackPicker!!.subtitleTracks.map { it.id })
+        }
+    }
+
+    @Test
+    fun `automatic selection can choose a sidecar`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(seriesId = "series-1", externalSubtitles = listOf(sampleSidecar()))
+        val decision = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = ExternalSubtitles.idFor(5))
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            resolveTracksResult = decision,
+            externalSubtitleText = mapOf(5 to "ok"),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+
+            assertTrue(gateway.resolveTracksCalls.single().tracks.any { it.id == ExternalSubtitles.idFor(5) })
+            assertTrue(player.applyTrackDecisionCalls.all { it.first.subtitleTrackId == null })
+            assertEquals(SubtitleActionFfi.OFF, player.applyTrackDecisionCalls.first().first.subtitleAction)
+            assertNotNull(viewModel.state.value.sidecarCues)
+        }
+    }
+
+    /** Distinct parsed cues per file text, so a test can tell whose result is showing. */
+    private fun cuesPerText(): Pair<MutableMap<String, SidecarCues>, suspend (String, String) -> SidecarCues?> {
+        val byText = mutableMapOf<String, SidecarCues>()
+        return byText to { _, text -> byText.getOrPut(text) { sampleSidecarCues() } }
+    }
+
+    private fun sidecarMeta(viewModel: PlaybackViewModel, index: Int): String? {
+        viewModel.openTrackPicker()
+        return viewModel.state.value.trackPicker!!.subtitleTracks.single { it.id == ExternalSubtitles.idFor(index) }.meta
+    }
+
+    @Test
+    fun `a pick made while another sidecar loads wins, and the first one's late result never shows`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(externalSubtitles = listOf(sampleSidecar(5), sampleSidecar(7).copy(language = "fra")))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan), externalSubtitleText = mapOf(5 to "five", 7 to "seven"))
+        val gate = CompletableDeferred<Unit>().also { gateway.externalSubtitleGates["session-1" to 5] = it }
+        val (cues, parse) = cuesPerText()
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId, parseSidecar = parse)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+            assertEquals("en srt · External · Loading…", sidecarMeta(viewModel, 5))
+
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(7))
+            assertSame(cues["seven"], viewModel.state.value.sidecarCues)
+            assertEquals("the abandoned load stops reading Loading", "en srt · External", sidecarMeta(viewModel, 5))
+
+            gate.complete(Unit)
+            runCurrent()
+
+            assertSame("the late file never replaces the pick", cues["seven"], viewModel.state.value.sidecarCues)
+            assertNull("its parse never ran", cues["five"])
+            assertFalse(viewModel.events.replayCache.any { it == PlaybackEvent.SubtitleUnavailable })
+        }
+    }
+
+    @Test
+    fun `a new session mid-fetch drops the old file's result, even at the same index`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan1 = samplePlan(itemId = "item-1", externalSubtitles = listOf(sampleSidecar(5)))
+        val plan2 = samplePlan(itemId = "item-2", externalSubtitles = listOf(sampleSidecar(5)), playSessionId = "session-2")
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("item-1" to Result.success(plan1), "item-2" to Result.success(plan2)),
+            externalSubtitleText = mapOf(5 to "ok"),
+        )
+        val gate = CompletableDeferred<Unit>().also { gateway.externalSubtitleGates["session-1" to 5] = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan1.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+
+            viewModel.replaceItem(plan2.itemId)
+            runCurrent()
+            assertEquals(plan2, player.loadedPlan)
+            gate.complete(Unit)
+            runCurrent()
+
+            assertNull("item-1's file never draws over item-2", viewModel.state.value.sidecarCues)
+            player.fireTracksChanged(pickerTracks())
+            assertEquals("item-2's row was never loaded or chosen", "en srt · External", sidecarMeta(viewModel, 5))
+            assertFalse(viewModel.state.value.trackPicker!!.subtitleTracks.single { it.id == ExternalSubtitles.idFor(5) }.selected)
+        }
+    }
+
+    @Test
+    fun `a new item never reuses the last item's parsed file at the same index`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan1 = samplePlan(itemId = "item-1", externalSubtitles = listOf(sampleSidecar(5)))
+        val plan2 = samplePlan(itemId = "item-2", externalSubtitles = listOf(sampleSidecar(5)), playSessionId = "session-2")
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("item-1" to Result.success(plan1), "item-2" to Result.success(plan2)),
+        ).apply { externalSubtitleTextBySession = mapOf(("session-1" to 5) to "one", ("session-2" to 5) to "two") }
+        val (cues, parse) = cuesPerText()
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan1.itemId, parseSidecar = parse)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+            assertSame(cues["one"], viewModel.state.value.sidecarCues)
+
+            viewModel.replaceItem(plan2.itemId)
+            runCurrent()
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+
+            assertEquals(listOf("session-1" to 5, "session-2" to 5), gateway.fetchExternalSubtitleCalls)
+            assertSame("item-2 shows its own file", cues["two"], viewModel.state.value.sidecarCues)
+        }
+    }
+
+    @Test
+    fun `a same-source fallback mid-fetch asks again under the new session`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true, externalSubtitles = listOf(sampleSidecar(5)))
+        val fallbackPlan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, externalSubtitles = listOf(sampleSidecar(5)), playSessionId = "session-2")
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(fallbackPlan),
+        ).apply {
+            // The core cleared session-1's sidecars when the fallback stopped it.
+            externalSubtitleTextBySession = mapOf(("session-1" to 5) to null, ("session-2" to 5) to "ok")
+        }
+        val gate = CompletableDeferred<Unit>().also { gateway.externalSubtitleGates["session-1" to 5] = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            assertEquals(fallbackPlan, player.loadedPlan)
+            gate.complete(Unit)
+            runCurrent()
+
+            assertEquals(listOf("session-1" to 5, "session-2" to 5), gateway.fetchExternalSubtitleCalls)
+            assertNotNull("the same file shows once the new session serves it", viewModel.state.value.sidecarCues)
+            assertFalse("the old session's refusal is not the file's failure", viewModel.events.replayCache.any { it == PlaybackEvent.SubtitleUnavailable })
+        }
+    }
+
+    /** A fallback whose negotiation is held open, with session-1's fetch already refused (the
+     * core retired its sidecars when the fallback stopped it). */
+    private fun refusedMidSwap(fallbackSourceId: String): Triple<FakeCoreGateway, CompletableDeferred<Unit>, CompletableDeferred<Unit>> {
+        val plan = samplePlan(seriesId = "series-1", transcodeFallbackAllowed = true, externalSubtitles = listOf(sampleSidecar(5)))
+        val fallbackPlan = samplePlan(
+            seriesId = "series-1",
+            mediaSourceId = fallbackSourceId,
+            playMethod = PlayMethodFfi.TRANSCODE,
+            externalSubtitles = listOf(sampleSidecar(5)),
+            playSessionId = "session-2",
+        )
+        val negotiation = CompletableDeferred<Unit>()
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(fallbackPlan),
+        ).apply {
+            prepareTranscodeFallbackGate = negotiation
+            externalSubtitleTextBySession = mapOf(("session-1" to 5) to null, ("session-2" to 5) to "ok")
+        }
+        val oldFetch = CompletableDeferred<Unit>().also { gateway.externalSubtitleGates["session-1" to 5] = it }
+        return Triple(gateway, oldFetch, negotiation)
+    }
+
+    @Test
+    fun `a refusal that lands before a same-source fallback finishes keeps the pick and asks the new session`() = runTest(timeout = TEST_TIMEOUT) {
+        val (gateway, oldFetch, negotiation) = refusedMidSwap(fallbackSourceId = "src-1")
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, "item-1")
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+
+            oldFetch.complete(Unit)
+            runCurrent()
+            assertFalse("the old session's refusal is not the file failing", viewModel.events.replayCache.any { it == PlaybackEvent.SubtitleUnavailable })
+            assertEquals("still chosen while the swap negotiates", "en srt · External · Loading…", sidecarMeta(viewModel, 5))
+
+            negotiation.complete(Unit)
+            runCurrent()
+
+            assertEquals(listOf("session-1" to 5, "session-2" to 5), gateway.fetchExternalSubtitleCalls)
+            assertNotNull(viewModel.state.value.sidecarCues)
+            assertEquals("the manual pick is still remembered once it loads", 1, gateway.rememberTrackChoiceCalls.size)
+        }
+    }
+
+    @Test
+    fun `a refusal that lands before a fallback to another source finishes re-picks the same language there`() = runTest(timeout = TEST_TIMEOUT) {
+        val (gateway, oldFetch, negotiation) = refusedMidSwap(fallbackSourceId = "src-2")
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, "item-1")
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+
+            oldFetch.complete(Unit)
+            runCurrent()
+            negotiation.complete(Unit)
+            runCurrent()
+
+            assertEquals(listOf("session-1" to 5, "session-2" to 5), gateway.fetchExternalSubtitleCalls)
+            assertNotNull(viewModel.state.value.sidecarCues)
+            assertFalse(viewModel.events.replayCache.any { it == PlaybackEvent.SubtitleUnavailable })
+        }
+    }
+
+    @Test
+    fun `Off chosen while a fallback negotiates wins over the refused pick`() = runTest(timeout = TEST_TIMEOUT) {
+        val (gateway, oldFetch, negotiation) = refusedMidSwap(fallbackSourceId = "src-1")
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, "item-1")
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            oldFetch.complete(Unit)
+            runCurrent()
+
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+            negotiation.complete(Unit)
+            runCurrent()
+            player.fireTracksChanged(pickerTracks()) // the reloaded player announces its tracks
+
+            assertEquals("never asked again", listOf("session-1" to 5), gateway.fetchExternalSubtitleCalls)
+            assertNull(viewModel.state.value.sidecarCues)
+            assertEquals("en srt · External", sidecarMeta(viewModel, 5))
+        }
+    }
+
+    @Test
+    fun `a fallback to another source mid-fetch never lets the old file land`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true, externalSubtitles = listOf(sampleSidecar(5)))
+        val fallbackPlan = samplePlan(
+            mediaSourceId = "src-2",
+            playMethod = PlayMethodFfi.TRANSCODE,
+            externalSubtitles = listOf(sampleSidecar(5)),
+            playSessionId = "session-2",
+        )
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(fallbackPlan),
+        ).apply { externalSubtitleTextBySession = mapOf(("session-1" to 5) to "old", ("session-2" to 5) to "new") }
+        val oldGate = CompletableDeferred<Unit>().also { gateway.externalSubtitleGates["session-1" to 5] = it }
+        val (cues, parse) = cuesPerText()
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId, parseSidecar = parse)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            runCurrent()
+            assertSame("the re-pick on the new source shows its own file", cues["new"], viewModel.state.value.sidecarCues)
+
+            oldGate.complete(Unit)
+            runCurrent()
+
+            assertSame(cues["new"], viewModel.state.value.sidecarCues)
+            assertNull("the old source's file was never parsed", cues["old"])
+        }
+    }
+
+    @Test
+    fun `a timeline change alone settles seekability and raises the resume notice`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(startPositionTicks = 1_800_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer().apply { seekabilityValue = Seekability.UNKNOWN }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            assertEquals(Seekability.UNKNOWN, viewModel.state.value.seekability)
+
+            player.seekabilityValue = Seekability.UNSEEKABLE
+            player.fireTimelineChanged()
+
+            assertEquals(Seekability.UNSEEKABLE, viewModel.state.value.seekability)
+            assertEquals(PlaybackEvent.SeekUnavailable, viewModel.events.replayCache.firstOrNull())
+        }
+    }
+
+    @Test
+    fun `a reconnect on an unseekable file restarts from zero and says so once`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer().apply {
+            seekabilityValue = Seekability.UNSEEKABLE
+            positionTicks = 33_000_000L
+        }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            advanceOneTick()
+
+            player.fireError(networkError())
+            assertEquals(PlaybackEvent.SeekUnavailable, viewModel.events.replayCache.lastOrNull())
+            viewModel.noticeShown()
+            advanceTimeBy(30_000L)
+            runCurrent()
+            assertEquals("a seek would restart anyway, so the retry asks for 0:00", 0L, player.retryAfterErrorCalls.first().first)
+
+            player.fireError(networkError())
+            advanceTimeBy(30_000L)
+            runCurrent()
+            assertTrue("only the first attempt raises the notice", viewModel.events.replayCache.isEmpty())
+            assertTrue(player.retryAfterErrorCalls.all { it.first == 0L })
+        }
+    }
+
+    private fun sampleSidecarCues(): SidecarCues =
+        SidecarCues.of(listOf(androidx.media3.extractor.text.CuesWithTiming(listOf(androidx.media3.common.text.Cue.Builder().setText("hi").build()), 0L, 1_000_000L)))!!
+
+    // -- docs/18 §2.1 request ownership: gated, both completion orders --------
+
+    private fun assertNoEvent(viewModel: PlaybackViewModel) = assertNull(viewModel.events.replayCache.firstOrNull())
+
+    @Test
+    fun `an initial prepare overtaken by a replacement never publishes, in either order and outcome`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val oldOutcomes = listOf(
+                Result.success(samplePlan(itemId = "item-1", playSessionId = "old")),
+                CoreException.StalePlaybackSession().asFailure(),
+                CoreException.Api("negotiation failed").asFailure(),
+                CoreException.Unauthorized(account = null).asFailure(),
+            )
+            for (oldFirst in listOf(true, false)) {
+                for (old in oldOutcomes) {
+                    val replacement = samplePlan(itemId = "item-2", itemName = "Replacement", playSessionId = "new")
+                    val gateway = FakeCoreGateway(
+                        preparePlaybackResultsByItemId = mapOf("item-1" to old, "item-2" to Result.success(replacement)),
+                    )
+                    val oldGate = CompletableDeferred<Unit>().also { gateway.preparePlaybackGates["item-1"] = it }
+                    val newGate = CompletableDeferred<Unit>().also { gateway.preparePlaybackGates["item-2"] = it }
+                    val player = FakePlaybackPlayer()
+                    val viewModel = buildViewModel(gateway, player, "item-1")
+                    withSession(viewModel) {
+                        viewModel.replaceItem("item-2")
+                        if (oldFirst) {
+                            oldGate.complete(Unit)
+                            runCurrent()
+                            newGate.complete(Unit)
+                        } else {
+                            newGate.complete(Unit)
+                            runCurrent()
+                            oldGate.complete(Unit)
+                        }
+                        runCurrent()
+
+                        val case = "oldFirst=$oldFirst old=$old"
+                        assertEquals(case, listOf(replacement), player.loadedPlans)
+                        assertNoEvent(viewModel)
+                        if (old.isSuccess) assertEquals(case, listOf("old"), gateway.abandonPlaybackSessionIds)
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `a stop while the first prepare negotiates retires it and abandons its plan`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val gate = CompletableDeferred<Unit>().also { gateway.preparePlaybackGates[plan.itemId] = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            viewModel.stopPlaybackOnce()
+            gate.complete(Unit)
+            runCurrent()
+
+            assertTrue(player.loadedPlans.isEmpty())
+            assertEquals(listOf(plan.playSessionId), gateway.abandonPlaybackSessionIds)
+            assertNoEvent(viewModel)
+        }
+    }
+
+    /** docs/18 §2.1: the stop names the session the fallback replaced, which the core ends the
+     * fallback through if it installed; abandoning it as well could race ahead of that stop. */
+    @Test
+    fun `a stop while a fallback negotiates never loads the fallback and leaves its ending to the stop`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true)
+        val fallback = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "fallback")
+        val gate = CompletableDeferred<Unit>()
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(fallback),
+        ).apply { prepareTranscodeFallbackGate = gate }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            viewModel.stopPlaybackOnce()
+            gate.complete(Unit)
+            runCurrent()
+
+            assertEquals(listOf(plan), player.loadedPlans)
+            assertEquals(listOf(plan.playSessionId), gateway.stopPlaybackSessionIds)
+            assertTrue("no abandon races the stop", gateway.abandonPlaybackSessionIds.isEmpty())
+            assertNoEvent(viewModel)
+        }
+    }
+
+    @Test
+    fun `a playback error after stop never starts a fallback`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(samplePlan(playMethod = PlayMethodFfi.TRANSCODE)),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            viewModel.stopPlaybackOnce()
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            runCurrent()
+
+            assertTrue(gateway.prepareTranscodeFallbackCalls.isEmpty())
+            assertNoEvent(viewModel)
+        }
+    }
+
+    @Test
+    fun `a playback error during a transition never starts a fallback`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan1 = samplePlan(itemId = "item-1", transcodeFallbackAllowed = true)
+        val plan2 = samplePlan(itemId = "item-2", playSessionId = "session-2")
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("item-1" to Result.success(plan1), "item-2" to Result.success(plan2)),
+            prepareTranscodeFallbackResult = Result.success(samplePlan(playMethod = PlayMethodFfi.TRANSCODE)),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan1.itemId)
+        withSession(viewModel) {
+            val gate = CompletableDeferred<Unit>().also { gateway.preparePlaybackGates["item-2"] = it }
+            viewModel.replaceItem("item-2")
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            gate.complete(Unit)
+            runCurrent()
+
+            assertTrue(gateway.prepareTranscodeFallbackCalls.isEmpty())
+            assertEquals(listOf(plan1, plan2), player.loadedPlans)
+        }
+    }
+
+    @Test
+    fun `a transition during a held fallback plays the new item in either completion order`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            for (fallbackFirst in listOf(true, false)) {
+                val plan1 = samplePlan(itemId = "item-1", transcodeFallbackAllowed = true)
+                val plan2 = samplePlan(itemId = "item-2", itemName = "Replacement", playSessionId = "session-2")
+                val fallback = samplePlan(itemId = "item-1", playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "fallback")
+                val fallbackGate = CompletableDeferred<Unit>()
+                val gateway = FakeCoreGateway(
+                    preparePlaybackResultsByItemId = mapOf("item-1" to Result.success(plan1), "item-2" to Result.success(plan2)),
+                    prepareTranscodeFallbackResult = Result.success(fallback),
+                ).apply { prepareTranscodeFallbackGate = fallbackGate }
+                val player = FakePlaybackPlayer()
+                val viewModel = buildViewModel(gateway, player, plan1.itemId)
+                withSession(viewModel) {
+                    player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+                    val newGate = CompletableDeferred<Unit>().also { gateway.preparePlaybackGates["item-2"] = it }
+                    viewModel.replaceItem("item-2")
+                    assertEquals("the stop names the old session before anything else runs", listOf(plan1.playSessionId), gateway.stopPlaybackSessionIds)
+                    if (fallbackFirst) {
+                        fallbackGate.complete(Unit)
+                        runCurrent()
+                        newGate.complete(Unit)
+                    } else {
+                        newGate.complete(Unit)
+                        runCurrent()
+                        fallbackGate.complete(Unit)
+                    }
+                    runCurrent()
+
+                    assertEquals("fallbackFirst=$fallbackFirst", listOf(plan1, plan2), player.loadedPlans)
+                    // The core ends an installed fallback through this stop (docs/18 §2.1), so a fallback
+                    // landing after it is never abandoned on top of it.
+                    if (fallbackFirst) assertFalse("fallback" in gateway.abandonPlaybackSessionIds)
+                    assertNoEvent(viewModel)
+                }
+            }
+        }
+
+    /** docs/18 §2.1: a transition's stop, once captured, reaches the core even if the view model is
+     * cleared first; it is what ends a fallback landing behind it. */
+    @Test
+    fun `a transition stop queued when the player is torn down still reaches the core`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan1 = samplePlan(itemId = "item-1", transcodeFallbackAllowed = true)
+        val fallback = samplePlan(itemId = "item-1", playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "fallback")
+        val fallbackGate = CompletableDeferred<Unit>()
+        val stopGate = CompletableDeferred<Unit>()
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("item-1" to Result.success(plan1), "item-2" to Result.success(samplePlan(itemId = "item-2", playSessionId = "session-2"))),
+            prepareTranscodeFallbackResult = Result.success(fallback),
+        ).apply { prepareTranscodeFallbackGate = fallbackGate }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan1.itemId)
+        withSession(viewModel) {
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            assertEquals("the fallback is negotiating", 1, gateway.prepareTranscodeFallbackCalls.size)
+            gateway.stopPlaybackGate = stopGate
+            viewModel.replaceItem("item-2")
+            assertEquals("the transition's stop is on its way to the core", 1, gateway.stopPlaybackEntered)
+            ViewModelStore().apply { put("playback", viewModel) }.clear()
+            stopGate.complete(Unit)
+            runCurrent()
+            fallbackGate.complete(Unit)
+            runCurrent()
+
+            assertEquals(listOf(plan1.playSessionId), gateway.stopPlaybackSessionIds)
+            assertFalse("a torn-down player starts nothing", "item-2" in gateway.preparePlaybackCalls)
+            assertFalse("the stop ends the landed fallback in the core", "fallback" in gateway.abandonPlaybackSessionIds)
+        }
+    }
+
+    @Test
+    fun `a plan landing during an account call waits for it, then loads or closes by the account`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            for (accountChanged in listOf(false, true)) {
+                val plan = samplePlan()
+                val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+                val gate = CompletableDeferred<Unit>().also { gateway.preparePlaybackGates[plan.itemId] = it }
+                val player = FakePlaybackPlayer()
+                val viewModel = buildViewModel(gateway, player, plan.itemId)
+                withSession(viewModel) {
+                    gateway.accountCallInFlight.value = true
+                    gate.complete(Unit)
+                    runCurrent()
+                    assertTrue("held while the account call runs", player.loadedPlans.isEmpty())
+
+                    if (accountChanged) gateway.accountEpoch.value = 1uL
+                    gateway.accountCallInFlight.value = false
+                    runCurrent()
+
+                    if (accountChanged) {
+                        assertTrue(player.loadedPlans.isEmpty())
+                        assertEquals(listOf(plan.playSessionId), gateway.abandonPlaybackSessionIds)
+                        assertEquals(PlaybackEvent.Finish, viewModel.events.replayCache.single())
+                    } else {
+                        assertEquals(listOf(plan), player.loadedPlans)
+                        assertNoEvent(viewModel)
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `steady playback survives an account call that leaves the epoch alone`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            gateway.accountCallInFlight.value = true // a sign-in attempt that then fails
+            runCurrent()
+            gateway.accountCallInFlight.value = false
+            runCurrent()
+
+            assertEquals(listOf(plan), player.loadedPlans)
+            assertTrue(gateway.abandonPlaybackSessionIds.isEmpty())
+            assertNoEvent(viewModel)
+        }
+    }
+
+    @Test
+    fun `an account change closes live playback`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            gateway.accountEpoch.value = 1uL
+            runCurrent()
+
+            assertEquals(PlaybackEvent.Finish, viewModel.events.replayCache.single())
+            assertEquals(listOf(plan.playSessionId), gateway.abandonPlaybackSessionIds)
+            assertTrue(gateway.stopPlaybackCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a switch keeps playback on its own account, next episode included`() = runTest(timeout = TEST_TIMEOUT) {
+        val nextCard = testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf(
+                "ep-1" to Result.success(episodePlan("ep-1")),
+                "ep-2" to Result.success(episodePlan("ep-2", itemName = "Episode Two")),
+                "other-1" to Result.success(samplePlan(itemId = "other-1", playSessionId = "session-other")),
+            ),
+            nextEpisodeByItemId = mapOf("ep-1" to nextCard),
+        )
+        val player = FakePlaybackPlayer().apply { positionTicks = 170_000_000L }
+        val viewModel = buildViewModel(gateway, player, "ep-1")
+        withSession(viewModel) {
+            advanceOneTick()
+            // The core kept this playback on its account (epoch 0) across the switch to epoch 1.
+            gateway.parkedEpoch.value = 0uL
+            gateway.accountEpoch.value = 1uL
+            runCurrent()
+
+            assertNoEvent(viewModel)
+            assertTrue(gateway.abandonPlaybackSessionIds.isEmpty())
+            viewModel.playNext()
+            runCurrent()
+            assertEquals(listOf(0uL, 0uL), gateway.playbackRequests.map { it.accountEpoch })
+            assertTrue(gateway.accountBoundCalls.isNotEmpty())
+            assertTrue("${gateway.accountBoundCalls}", gateway.accountBoundCalls.all { it.second == 0uL })
+
+            // A new Play from the account now browsed starts on it.
+            viewModel.replaceItem("other-1")
+            runCurrent()
+            assertEquals(1uL, gateway.playbackRequests.last().accountEpoch)
+            assertEquals(1uL, viewModel.accountEpoch)
+        }
+    }
+
+    /** docs/18 §2.1: removing the parked playback's account clears its epoch without moving the
+     * current one; the player closes all the same.
+     */
+    @Test
+    fun `removing the parked account closes playback kept across a switch`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val viewModel = buildViewModel(gateway, FakePlaybackPlayer(), plan.itemId)
+        withSession(viewModel) {
+            gateway.parkedEpoch.value = 0uL
+            gateway.accountEpoch.value = 1uL
+            runCurrent()
+            assertNoEvent(viewModel)
+
+            gateway.parkedEpoch.value = null
+            runCurrent()
+
+            assertEquals(PlaybackEvent.Finish, viewModel.events.replayCache.single())
+        }
+    }
+
+    @Test
+    fun `only the owning fallback asks for re-authorization`() = runTest(timeout = TEST_TIMEOUT) {
+        val rejected = AccountIdentity(serverUrl = "http://a.test", userId = "u-a")
+        for (owned in listOf(true, false)) {
+            val plan = samplePlan(transcodeFallbackAllowed = true)
+            val gate = CompletableDeferred<Unit>()
+            val gateway = FakeCoreGateway(
+                preparePlaybackResultsByItemId = mapOf(
+                    "item-1" to Result.success(plan),
+                    "item-2" to Result.success(samplePlan(itemId = "item-2", playSessionId = "session-2")),
+                ),
+                prepareTranscodeFallbackResult = CoreException.Unauthorized(account = rejected).asFailure(),
+            ).apply { prepareTranscodeFallbackGate = gate }
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, plan.itemId)
+            withSession(viewModel) {
+                player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+                if (!owned) viewModel.replaceItem("item-2")
+                gate.complete(Unit)
+                runCurrent()
+
+                val events = viewModel.events.replayCache
+                if (owned) {
+                    assertEquals(PlaybackEvent.ReauthorizationRequired(rejected), events.single())
+                } else {
+                    assertTrue("owned=false: $events", events.isEmpty())
+                }
+            }
+        }
+    }
+    // -- docs/18 §3.1 reload reapplication: a same-item fallback restores the choice ------
+
+    private fun format(mime: String, lang: String?, label: String? = null, forced: Boolean = false): Format =
+        Format.Builder().setSampleMimeType(mime).setLanguage(lang).setLabel(label)
+            .setSelectionFlags(if (forced) C.SELECTION_FLAG_FORCED else 0).build()
+
+    /** One group per (format, selected) pair, in order. */
+    private fun tracksOf(vararg tracks: Pair<Format, Boolean>): Tracks = Tracks(
+        tracks.map { (format, selected) -> Tracks.Group(TrackGroup(format), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(selected)) },
+    )
+
+    private val enAudio = format("audio/mp4a-latm", "eng", "English")
+    private val jaAudio = format("audio/mp4a-latm", "jpn")
+    private val enText = format("text/vtt", "eng", "English")
+
+    /** A same-source fallback, triggered after [before] was announced and [pick] ran; returns the
+     * player with the fallback plan loaded and nothing announced yet.
+     */
+    private suspend fun TestScope.reloadAfter(
+        before: Tracks,
+        resolveGate: CompletableDeferred<Unit>? = null,
+        autoDecision: TrackDecisionFfi? = null,
+        pick: (PlaybackViewModel) -> Unit = {},
+        fallbackSubtitles: List<EmbeddedSubtitleFfi> = emptyList(),
+        body: (FakePlaybackPlayer, FakeCoreGateway, PlaybackViewModel) -> Unit,
+    ) {
+        val plan = samplePlan(transcodeFallbackAllowed = true)
+        val fallback = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "fallback", embeddedSubtitles = fallbackSubtitles)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(fallback),
+        ).apply {
+            resolveTracksGate = resolveGate
+            autoDecision?.let { resolveTracksResult = it }
+        }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(before)
+            runCurrent()
+            pick(viewModel)
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            runCurrent()
+            assertEquals(fallback, player.loadedPlan)
+            body(player, gateway, viewModel)
+        }
+    }
+
+    @Test
+    fun `Off survives a fallback reload, before and after the new tracks`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to true, enText to true)
+        reloadAfter(before, pick = { it.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID) }) { player, gateway, _ ->
+            assertTrue("off at once, no track needed", player.textDisabled)
+            player.fireTracksChanged(tracksOf(enText to false, enAudio to true))
+            assertTrue(player.textDisabled)
+            assertEquals("no automatic resolution over a manual choice", 1, gateway.resolveTracksCalls.size)
+        }
+    }
+
+    @Test
+    fun `an embedded pick is found again on reordered tracks with a rewritten title`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to true, jaAudio to false, enText to false)
+        reloadAfter(before, pick = { it.chooseSubtitle(TrackMapping.toId(2, 0)) }) { player, _, _ ->
+            assertTrue("text stays off until matched", player.textDisabled)
+            val after = tracksOf(format("text/vtt", "en", "English (SRT)") to false, enAudio to true)
+            player.fireTracksChanged(after)
+
+            assertFalse(player.textDisabled)
+            assertEquals(0 to 0, player.selectedTextOverride(after))
+        }
+    }
+
+    @Test
+    fun `an ambiguous match leaves subtitles off rather than guessing`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to true, format("text/vtt", "eng", "Full") to false)
+        reloadAfter(before, pick = { it.chooseSubtitle(TrackMapping.toId(1, 0)) }) { player, _, _ ->
+            val after = tracksOf(enAudio to true, format("text/vtt", "en", "Signs") to false, format("text/vtt", "en", "SDH") to false)
+            player.fireTracksChanged(after)
+
+            assertTrue(player.textDisabled)
+            assertNull(player.selectedTextOverride(after))
+        }
+    }
+
+    @Test
+    fun `a pick survives empty and audio-only announcements and the audio choice comes back too`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to false, jaAudio to true, enText to false)
+        reloadAfter(before, pick = { it.chooseAudio(TrackMapping.toId(1, 0)); it.chooseSubtitle(TrackMapping.toId(2, 0)) }) { player, _, _ ->
+            player.fireTracksChanged(Tracks.EMPTY)
+            val audioOnly = tracksOf(enAudio to true, jaAudio to false)
+            player.fireTracksChanged(audioOnly)
+            assertEquals("audio restored by language", 1 to 0, player.selectedAudioOverride(audioOnly))
+            assertTrue("text still waiting, still off", player.textDisabled)
+
+            val full = tracksOf(enAudio to true, jaAudio to false, enText to false)
+            player.fireTracksChanged(full)
+            assertFalse(player.textDisabled)
+            assertEquals(2 to 0, player.selectedTextOverride(full))
+            assertEquals("the audio choice is untouched by the text announcement", 1 to 0, player.selectedAudioOverride(full))
+
+            val applied = player.applyTrackDecisionCalls.size
+            player.fireTracksChanged(full)
+            assertEquals("idempotent under its own callbacks", applied, player.applyTrackDecisionCalls.size)
+        }
+    }
+
+    @Test
+    fun `an audio pick while the subtitle is still being restored keeps the subtitle restoration`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to true, jaAudio to false, enText to false)
+        reloadAfter(before, pick = { it.chooseSubtitle(TrackMapping.toId(2, 0)) }) { player, _, viewModel ->
+            player.fireTracksChanged(tracksOf(enAudio to true, jaAudio to false))
+            viewModel.chooseAudio(TrackMapping.toId(1, 0))
+
+            val full = tracksOf(enAudio to false, jaAudio to true, enText to false)
+            player.fireTracksChanged(full)
+            assertFalse("the subtitle came back", player.textDisabled)
+            assertEquals(2 to 0, player.selectedTextOverride(full))
+        }
+    }
+
+    @Test
+    fun `a subtitle pick while the audio is still being restored keeps the audio restoration`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to false, jaAudio to true, enText to false)
+        reloadAfter(before, pick = { it.chooseAudio(TrackMapping.toId(1, 0)) }) { player, _, viewModel ->
+            player.fireTracksChanged(tracksOf(enText to false))
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+
+            val full = tracksOf(enText to false, enAudio to true, jaAudio to false)
+            player.fireTracksChanged(full)
+            assertEquals("the audio came back", 2 to 0, player.selectedAudioOverride(full))
+            assertTrue(player.textDisabled)
+        }
+    }
+
+    @Test
+    fun `a burn-in pick while the audio is still being restored keeps the audio restoration`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to false, jaAudio to true)
+        reloadAfter(before, pick = { it.chooseAudio(TrackMapping.toId(1, 0)) }, fallbackSubtitles = listOf(assStream)) { player, gateway, viewModel ->
+            gateway.prepareTranscodeFallbackGatesByCall[1] = CompletableDeferred() // the burn-in renegotiation stays pending
+            val french = format("text/vtt", "fre", "French") // delivered, so it hides no burn-in row
+            player.fireTracksChanged(tracksOf(french to false))
+            viewModel.chooseSubtitle(burnableSubtitleId(2))
+            assertEquals("the pick renegotiates", 2, gateway.prepareTranscodeFallbackCalls.size)
+
+            val full = tracksOf(french to false, enAudio to true, jaAudio to false)
+            player.fireTracksChanged(full)
+            assertEquals("the audio came back", 2 to 0, player.selectedAudioOverride(full))
+        }
+    }
+
+    @Test
+    fun `audio announced after the subtitle was restored leaves the subtitle on`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to false, jaAudio to true, enText to false)
+        reloadAfter(before, pick = { it.chooseAudio(TrackMapping.toId(1, 0)); it.chooseSubtitle(TrackMapping.toId(2, 0)) }) { player, _, _ ->
+            val textOnly = tracksOf(enText to false)
+            player.fireTracksChanged(textOnly)
+            assertFalse(player.textDisabled)
+
+            val full = tracksOf(enText to false, enAudio to true, jaAudio to false)
+            player.fireTracksChanged(full)
+            assertFalse("the subtitle stays on", player.textDisabled)
+            assertEquals(2 to 0, player.selectedAudioOverride(full))
+        }
+    }
+
+    @Test
+    fun `an automatic choice that already applied is kept as selected`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to true, enText to false)
+        val auto = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = TrackMapping.toId(1, 0))
+        reloadAfter(before, autoDecision = auto) { player, gateway, _ ->
+            val after = tracksOf(enAudio to true, enText to false)
+            player.fireTracksChanged(after)
+
+            assertFalse(player.textDisabled)
+            assertEquals(1 to 0, player.selectedTextOverride(after))
+            assertEquals("not re-decided", 1, gateway.resolveTracksCalls.size)
+        }
+    }
+
+    @Test
+    fun `an automatic choice still resolving re-resolves for the new load and the old answer is dropped`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val gate = CompletableDeferred<Unit>()
+            val before = tracksOf(enAudio to true, jaAudio to false, enText to false)
+            reloadAfter(before, resolveGate = gate) { player, gateway, _ ->
+                gateway.resolveTracksResult = TrackDecisionFfi(audioTrackId = TrackMapping.toId(1, 0), subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = null)
+                val after = tracksOf(enText to false, enAudio to true, jaAudio to false)
+                player.fireTracksChanged(after)
+                val appliedBefore = player.applyTrackDecisionCalls.size
+                gate.complete(Unit)
+                runCurrent()
+
+                assertEquals("resolved once per load", 2, gateway.resolveTracksCalls.size)
+                assertEquals("only the new load's answer applies", appliedBefore + 1, player.applyTrackDecisionCalls.size)
+                assertEquals(after, player.applyTrackDecisionCalls.last().second)
+            }
+        }
+    // -- docs/18 §3.1 negotiated subtitle choice: never burn in what the viewer turned off ------
+
+    private val assStream = EmbeddedSubtitleFfi(index = 2, language = "eng", title = null, forced = false, default = true, codec = "ass")
+
+    @Test
+    fun `a fallback names no subtitle stream when the viewer chose Off`() = runTest(timeout = TEST_TIMEOUT) {
+        val before = tracksOf(enAudio to true, enText to true)
+        reloadAfter(before, pick = { it.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID) }) { _, gateway, _ ->
+            val call = gateway.prepareTranscodeFallbackCalls.single()
+            assertEquals(NO_SUBTITLE_STREAM, call.subtitleStreamIndex)
+            assertEquals(FailedTrackFfi.UNKNOWN, call.failed)
+        }
+    }
+
+    @Test
+    fun `a choice changed while the fallback negotiates renegotiates before anything loads`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true, embeddedSubtitles = listOf(assStream))
+        val landed = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "landed", embeddedSubtitles = listOf(assStream))
+        val gate = CompletableDeferred<Unit>()
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(landed),
+        ).apply { prepareTranscodeFallbackGate = gate }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true, enText to false))
+            runCurrent()
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            viewModel.chooseSubtitle(TrackMapping.toId(1, 0)) // English, on the old player, mid-negotiation
+            gate.complete(Unit)
+            runCurrent()
+
+            val calls = gateway.prepareTranscodeFallbackCalls
+            assertEquals(listOf(NO_SUBTITLE_STREAM, 2), calls.map { it.subtitleStreamIndex })
+            assertEquals("renegotiated from the landed session", "landed", calls[1].playSessionId)
+            assertEquals("the copy policy is resent", calls[0].failed, calls[1].failed)
+            assertEquals("the first landing never loaded", listOf(plan, landed), player.loadedPlans)
+        }
+    }
+
+    /** docs/18 §3.1: however often the choice changes mid-negotiation, what finally loads never
+     * contradicts it; burned-in pixels can't be turned off after the fact. */
+    @Test
+    fun `a choice changed during every renegotiation never loads a contradicting burn-in`() = runTest(timeout = TEST_TIMEOUT) {
+        val french = EmbeddedSubtitleFfi(index = 3, language = "fre", title = null, forced = false, default = false, codec = "ass")
+        val streams = listOf(assStream, french)
+        fun transcode(id: String, burned: Int?) =
+            samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = id, embeddedSubtitles = streams, burnedSubtitleIndex = burned)
+        val start = transcode("s0", 2)
+        val gates = List(4) { CompletableDeferred<Unit>() }
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(start)).apply {
+            listOf(transcode("s1", 3), transcode("s2", null), transcode("s3", 2), transcode("s4", null))
+                .forEachIndexed { call, plan -> prepareTranscodeFallbackResultsByCall[call] = Result.success(plan) }
+            gates.forEachIndexed { call, gate -> prepareTranscodeFallbackGatesByCall[call] = gate }
+        }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, start.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            viewModel.chooseSubtitle(burnableSubtitleId(3))
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+            gates[0].complete(Unit)
+            runCurrent()
+            viewModel.chooseSubtitle(burnableSubtitleId(2))
+            gates[1].complete(Unit)
+            runCurrent()
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+            gates[2].complete(Unit)
+            runCurrent()
+            gates[3].complete(Unit)
+            runCurrent()
+
+            assertEquals(listOf(3, NO_SUBTITLE_STREAM, 2, NO_SUBTITLE_STREAM), gateway.prepareTranscodeFallbackCalls.map { it.subtitleStreamIndex })
+            assertEquals("only the last landing loads", listOf("s0", "s4"), player.loadedPlans.map { it.playSessionId })
+        }
+    }
+
+    @Test
+    fun `Off over a burned-in subtitle renegotiates without it, and the burned row reads selected`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val burnedPlan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(assStream), burnedSubtitleIndex = 2)
+            val clean = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "clean", embeddedSubtitles = listOf(assStream))
+            val gateway = FakeCoreGateway(
+                preparePlaybackResult = Result.success(burnedPlan),
+                prepareTranscodeFallbackResult = Result.success(clean),
+            )
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, burnedPlan.itemId)
+            withSession(viewModel) {
+                player.fireTracksChanged(tracksOf(enAudio to true))
+                runCurrent()
+                viewModel.openTrackPicker()
+                val rows = viewModel.state.value.trackPicker!!.subtitleTracks
+                assertEquals(listOf(false, true), rows.map { it.selected })
+                assertEquals(burnableSubtitleId(2), rows[1].id)
+
+                viewModel.chooseSubtitle(burnableSubtitleId(2))
+                assertTrue("picking the burned row changes nothing", gateway.prepareTranscodeFallbackCalls.isEmpty())
+
+                viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+                runCurrent()
+
+                val call = gateway.prepareTranscodeFallbackCalls.single()
+                assertEquals(NO_SUBTITLE_STREAM, call.subtitleStreamIndex)
+                assertNull("no fallback happened, so no copy is forbidden", call.failed)
+                assertEquals(listOf(burnedPlan, clean), player.loadedPlans)
+            }
+        }
+
+    @Test
+    fun `an automatic Off over a burned-in subtitle renegotiates, an automatic default does not`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val off = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.OFF, subtitleTrackId = null)
+            val leave = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = null)
+            for ((decision, renegotiates) in listOf(off to true, leave to false)) {
+                val burnedPlan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(assStream), burnedSubtitleIndex = 2)
+                val gateway = FakeCoreGateway(
+                    preparePlaybackResult = Result.success(burnedPlan),
+                    prepareTranscodeFallbackResult = Result.success(samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "clean")),
+                ).apply { resolveTracksResult = decision }
+                // A real suspension, as in production, so the resolution's own job is active when it applies.
+                val resolved = CompletableDeferred<Unit>().also { gateway.resolveTracksGate = it }
+                val player = FakePlaybackPlayer()
+                val viewModel = buildViewModel(gateway, player, burnedPlan.itemId)
+                withSession(viewModel) {
+                    player.fireTracksChanged(tracksOf(enAudio to true))
+                    runCurrent()
+                    resolved.complete(Unit)
+                    runCurrent()
+
+                    val calls = gateway.prepareTranscodeFallbackCalls
+                    if (renegotiates) {
+                        assertEquals(NO_SUBTITLE_STREAM, calls.single().subtitleStreamIndex)
+                    } else {
+                        assertTrue("the server's default stands: $calls", calls.isEmpty())
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `automatic resolution sees burn-in-only streams and burns in the one it picks`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val forced = EmbeddedSubtitleFfi(index = 3, language = "eng", title = null, forced = true, default = false, codec = "ass")
+            // (burned now, renegotiation expected): keeping a forced stream already burned in is a no-op.
+            for ((burned, renegotiates) in listOf(3 to false, null to true)) {
+                val plan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(forced), burnedSubtitleIndex = burned)
+                val gateway = FakeCoreGateway(
+                    preparePlaybackResult = Result.success(plan),
+                    prepareTranscodeFallbackResult = Result.success(samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "forced", embeddedSubtitles = listOf(forced), burnedSubtitleIndex = 3)),
+                ).apply {
+                    resolveTracksResult = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = burnableSubtitleId(3))
+                }
+                val resolved = CompletableDeferred<Unit>().also { gateway.resolveTracksGate = it }
+                val player = FakePlaybackPlayer()
+                val viewModel = buildViewModel(gateway, player, plan.itemId)
+                withSession(viewModel) {
+                    player.fireTracksChanged(tracksOf(enAudio to true))
+                    runCurrent()
+                    resolved.complete(Unit)
+                    runCurrent()
+
+                    val offered = gateway.resolveTracksCalls.single().tracks.single { it.kind == TrackKindFfi.SUBTITLE }
+                    assertEquals(burnableSubtitleId(3), offered.id)
+                    assertTrue(offered.isForced)
+                    assertEquals(subtitlesOff, player.applyTrackDecisionCalls.last().first)
+                    val calls = gateway.prepareTranscodeFallbackCalls
+                    if (renegotiates) {
+                        assertEquals(3, calls.single().subtitleStreamIndex)
+                    } else {
+                        assertTrue("the forced stream is already burned in: $calls", calls.isEmpty())
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `a default sidecar never shows over a burned-in subtitle`() = runTest(timeout = TEST_TIMEOUT) {
+        val sidecar = sampleSidecar().copy(isDefault = true)
+        val plan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(assStream), burnedSubtitleIndex = 2, externalSubtitles = listOf(sidecar))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan), externalSubtitleText = mapOf(5 to "ok"))
+        val resolved = CompletableDeferred<Unit>().also { gateway.resolveTracksGate = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            resolved.complete(Unit)
+            runCurrent()
+
+            assertTrue("the default sidecar stays unloaded", gateway.fetchExternalSubtitleCalls.isEmpty())
+            assertNull(viewModel.state.value.sidecarCues)
+            assertTrue(gateway.prepareTranscodeFallbackCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `the accent dot reads a burned-in subtitle like any other`() = runTest(timeout = TEST_TIMEOUT) {
+        val french = EmbeddedSubtitleFfi(index = 3, language = "fre", title = null, forced = false, default = false, codec = "ass")
+        // (pick, what the landed plan burns, dot once landed): a landing that burns something other
+        // than what was asked is what the dot follows.
+        val cases = listOf(
+            Triple(null, 2, false),
+            Triple(TRACK_PICKER_SUBTITLE_OFF_ID, null, true),
+            Triple(burnableSubtitleId(3), 3, true),
+            Triple(TRACK_PICKER_SUBTITLE_OFF_ID, 2, false),
+            Triple(burnableSubtitleId(3), 2, false),
+        )
+        for ((pick, burnedAfter, dotAfter) in cases) {
+            val streams = listOf(assStream, french)
+            val burnedPlan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = streams, burnedSubtitleIndex = 2)
+            val landed = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "landed", embeddedSubtitles = streams, burnedSubtitleIndex = burnedAfter)
+            val gate = CompletableDeferred<Unit>()
+            val gateway = FakeCoreGateway(
+                preparePlaybackResult = Result.success(burnedPlan),
+                prepareTranscodeFallbackResult = Result.success(landed),
+            ).apply { prepareTranscodeFallbackGate = gate }
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, burnedPlan.itemId)
+            withSession(viewModel) {
+                player.fireTracksChanged(tracksOf(enAudio to true))
+                runCurrent()
+                assertFalse("the server's default is burned in", viewModel.state.value.nonDefaultTrackActive)
+                if (pick != null) {
+                    viewModel.chooseSubtitle(pick)
+                    assertTrue("$pick, while it negotiates", viewModel.state.value.nonDefaultTrackActive)
+                    gate.complete(Unit)
+                    runCurrent()
+                    player.fireTracksChanged(tracksOf(enAudio to true))
+                    runCurrent()
+                    assertEquals("$pick landing on $burnedAfter", dotAfter, viewModel.state.value.nonDefaultTrackActive)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a stream only burn-in can show is offered while transcoding and picking it renegotiates`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val clean = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(assStream))
+            val burned = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "burned", embeddedSubtitles = listOf(assStream), burnedSubtitleIndex = 2)
+            val gateway = FakeCoreGateway(
+                preparePlaybackResult = Result.success(clean),
+                prepareTranscodeFallbackResult = Result.success(burned),
+            )
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, clean.itemId)
+            withSession(viewModel) {
+                player.fireTracksChanged(tracksOf(enAudio to true))
+                runCurrent()
+                viewModel.openTrackPicker()
+                val rows = viewModel.state.value.trackPicker!!.subtitleTracks
+                assertEquals(listOf(TRACK_PICKER_SUBTITLE_OFF_ID, burnableSubtitleId(2)), rows.map { it.id })
+                assertEquals(listOf(true, false), rows.map { it.selected })
+
+                viewModel.chooseSubtitle(burnableSubtitleId(2))
+                runCurrent()
+
+                assertEquals(2, gateway.prepareTranscodeFallbackCalls.single().subtitleStreamIndex)
+                assertEquals(listOf(clean, burned), player.loadedPlans)
+                assertTrue("text stays off on the player; the subtitle is in the video", player.textDisabled)
+            }
+        }
+
+    @Test
+    fun `a delivered text track is not offered twice and picking it never renegotiates`() = runTest(timeout = TEST_TIMEOUT) {
+        val srt = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "English", forced = false, default = false, codec = "srt")
+        val plan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(srt))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true, enText to false))
+            runCurrent()
+            viewModel.openTrackPicker()
+            assertEquals(2, viewModel.state.value.trackPicker!!.subtitleTracks.size)
+
+            viewModel.chooseSubtitle(TrackMapping.toId(1, 0))
+            runCurrent()
+
+            assertTrue(gateway.prepareTranscodeFallbackCalls.isEmpty())
+        }
+    }
+
+    // -- review fixes: a renegotiation in flight owns the session until it lands -------------
+
+    @Test
+    fun `a pick during a renegotiation waits for it, and stop names the session it retired`() = runTest(timeout = TEST_TIMEOUT) {
+        val burned = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(assStream), burnedSubtitleIndex = 2)
+        val clean = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "clean", embeddedSubtitles = listOf(assStream))
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(burned),
+            prepareTranscodeFallbackResult = Result.success(clean),
+        )
+        val first = CompletableDeferred<Unit>().also { gateway.prepareTranscodeFallbackGatesByCall[0] = it }
+        CompletableDeferred<Unit>().also { gateway.prepareTranscodeFallbackGatesByCall[1] = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, burned.itemId)
+        try {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+            viewModel.chooseSubtitle(burnableSubtitleId(2)) // changed mind mid-negotiation
+            player.fireError(PlaybackException("old stream died", null, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED))
+            runCurrent()
+            assertEquals("no second negotiation while one is in flight", 1, gateway.prepareTranscodeFallbackCalls.size)
+            assertNoEvent(viewModel)
+
+            first.complete(Unit)
+            runCurrent()
+            val calls = gateway.prepareTranscodeFallbackCalls
+            assertEquals(listOf(NO_SUBTITLE_STREAM, 2), calls.map { it.subtitleStreamIndex })
+            assertEquals("the landed session is renegotiated", "clean", calls[1].playSessionId)
+
+            viewModel.stopPlaybackOnce()
+            assertEquals("stop names the session the chained negotiation retires", listOf("clean"), gateway.stopPlaybackSessionIds)
+            assertEquals("nothing loaded mid-chain", listOf(burned), player.loadedPlans)
+        } finally {
+            viewModel.stopPlaybackOnce()
+        }
+    }
+
+    @Test
+    fun `a second pick away from the burned stream waits for the renegotiation in flight`() = runTest(timeout = TEST_TIMEOUT) {
+        val signs = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "Signs", forced = true, default = false, codec = "ass")
+        val burned = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(assStream, signs), burnedSubtitleIndex = 2)
+        val landed = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "signs", embeddedSubtitles = listOf(assStream, signs), burnedSubtitleIndex = 3)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(burned),
+            prepareTranscodeFallbackResult = Result.success(landed),
+        )
+        val first = CompletableDeferred<Unit>().also { gateway.prepareTranscodeFallbackGatesByCall[0] = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, burned.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+
+            viewModel.chooseSubtitle(burnableSubtitleId(3))
+            viewModel.openTrackPicker()
+            assertEquals(
+                "mid-negotiation the asked-for stream reads selected",
+                burnableSubtitleId(3),
+                viewModel.state.value.trackPicker!!.subtitleTracks.single { it.selected }.id,
+            )
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+            runCurrent()
+            assertEquals("the in-flight one re-checks on landing", listOf(3), gateway.prepareTranscodeFallbackCalls.map { it.subtitleStreamIndex })
+
+            first.complete(Unit)
+            runCurrent()
+            assertEquals(listOf(3, NO_SUBTITLE_STREAM), gateway.prepareTranscodeFallbackCalls.map { it.subtitleStreamIndex })
+            assertEquals("renegotiated from the landed session", "signs", gateway.prepareTranscodeFallbackCalls[1].playSessionId)
+        }
+    }
+
+    @Test
+    fun `the first request waits for the launch restore and carries its epoch`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val restored = CompletableDeferred<Unit>().also { gateway.accountRestored = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            runCurrent()
+            assertTrue("nothing prepared before the restore", gateway.preparePlaybackCalls.isEmpty())
+
+            gateway.accountEpoch.value = 1uL
+            restored.complete(Unit)
+            runCurrent()
+
+            assertEquals(1uL, gateway.playbackRequests.single().accountEpoch)
+            assertEquals(listOf(plan), player.loadedPlans)
+        }
+    }
+
+    @Test
+    fun `a negotiation still running when the next item starts is not inherited by it`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan1 = samplePlan(itemId = "item-1", transcodeFallbackAllowed = true)
+        val plan2 = samplePlan(itemId = "item-2", playSessionId = "session-2")
+        val gate = CompletableDeferred<Unit>()
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("item-1" to Result.success(plan1), "item-2" to Result.success(plan2)),
+            prepareTranscodeFallbackResult = Result.success(samplePlan(itemId = "item-1", playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "fallback")),
+        ).apply { prepareTranscodeFallbackGate = gate }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan1.itemId)
+        withSession(viewModel) {
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            viewModel.replaceItem("item-2")
+            runCurrent()
+            assertEquals(listOf(plan1, plan2), player.loadedPlans)
+
+            player.fireError(PlaybackException("item 2 fails", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            runCurrent()
+            assertTrue("item 2's own error is handled", viewModel.events.replayCache.single() is PlaybackEvent.FinishWithMessage)
+            assertEquals("item 1 was stopped by the session its negotiation retired", listOf("session-1"), gateway.stopPlaybackSessionIds)
+            assertEquals("item 2's failure ends item 2", "session-2", gateway.abandonPlaybackSessionIds.last())
+            gate.complete(Unit)
+            runCurrent()
         }
     }
 }

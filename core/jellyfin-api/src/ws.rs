@@ -129,11 +129,11 @@ pub(crate) async fn connect(
 
 /// Map a failed WebSocket handshake to an [`ApiError`]. A `401` during the upgrade means the token
 /// was rejected -- surfaced as [`ApiError::Unauthorized`], matching how the REST client's
-/// `check_status` treats the same status.
+/// `check_public_status` treats the same status.
 fn map_connect_error(e: tokio_tungstenite::tungstenite::Error) -> ApiError {
     if let tokio_tungstenite::tungstenite::Error::Http(response) = &e {
         if response.status() == tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED {
-            return ApiError::Unauthorized;
+            return ApiError::Unauthorized { owner: None };
         }
     }
     ApiError::Transport(describe_error_chain(&e))
@@ -204,7 +204,10 @@ mod tests {
             .body(None)
             .expect("builds a response with no body");
         let err = tokio_tungstenite::tungstenite::Error::Http(response);
-        assert!(matches!(map_connect_error(err), ApiError::Unauthorized));
+        assert!(matches!(
+            map_connect_error(err),
+            ApiError::Unauthorized { owner: None }
+        ));
     }
 
     #[test]

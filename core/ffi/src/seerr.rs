@@ -680,6 +680,72 @@ fn card_from_tv_details(details: &seerr_api::TvDetails, images: ImageContext<'_>
     )
 }
 
+/// Discover's per-kind cap on a person's credits (docs/14).
+const PERSON_CREDITS_PER_KIND: usize = 25;
+
+/// A person's credits as distinct cards, cast then crew, at most `per_kind` of each (docs/14).
+fn credit_cards<C, R>(
+    cast: &[C],
+    crew: &[R],
+    images: ImageContext<'_>,
+    per_kind: usize,
+) -> Vec<SeerrCard>
+where
+    C: std::ops::Deref<Target = seerr_api::MediaResult>,
+    R: std::ops::Deref<Target = seerr_api::MediaResult>,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut combined: Vec<SeerrCard> = Vec::new();
+    let mut push_distinct = |card: SeerrCard, taken: &mut usize| {
+        if seen.insert((
+            matches!(card.media_type, SeerrMediaType::Movie),
+            card.tmdb_id,
+        )) {
+            combined.push(card);
+            *taken += 1;
+        }
+    };
+    let mut taken = 0;
+    for credit in cast {
+        if taken == per_kind {
+            break;
+        }
+        if let Some(media_type) = media_type_from_str(credit.media_type.as_deref()) {
+            push_distinct(card_from_credit(credit, media_type, images), &mut taken);
+        }
+    }
+    taken = 0;
+    for credit in crew {
+        if taken == per_kind {
+            break;
+        }
+        if let Some(media_type) = media_type_from_str(credit.media_type.as_deref()) {
+            push_distinct(card_from_credit(credit, media_type, images), &mut taken);
+        }
+    }
+    combined
+}
+
+impl JellybeamCore {
+    /// [`Self::seerr_person`]'s credits alone and uncapped: one request, no person-details
+    /// dependency; the library person page caps after removing owned titles (docs/11 §Person page).
+    pub(crate) fn seerr_person_credit_cards(
+        &self,
+        person_id: i64,
+    ) -> Result<Vec<SeerrCard>, CoreError> {
+        let handle = self.require_seerr_handle()?;
+        let credits = self
+            .runtime()
+            .block_on(handle.client().person_combined_credits(person_id))?;
+        Ok(credit_cards(
+            &credits.cast,
+            &credits.crew,
+            handle.images(),
+            usize::MAX,
+        ))
+    }
+}
+
 /// `CreditCast`/`CreditCrew` both `Deref` to the shared `MediaResult` fields
 /// (seerr-api), so one card builder covers both.
 fn card_from_credit(
@@ -788,7 +854,7 @@ impl JellybeamCore {
     /// Returns the cached handle, or builds one from stored config (a
     /// network round trip -- the exception to `seerr_status`'s zero-network
     /// contract). `Err(SeerrNotConfigured)` when there's no saved connection.
-    fn require_seerr_handle(&self) -> Result<SeerrHandle, CoreError> {
+    pub(crate) fn require_seerr_handle(&self) -> Result<SeerrHandle, CoreError> {
         if let Some(handle) = self.lock_state().seerr.clone() {
             return Ok(handle);
         }
@@ -1323,36 +1389,12 @@ impl JellybeamCore {
         let details = details?;
         let credits = credits.unwrap_or_default();
         let images = handle.images();
-
-        let mut seen = std::collections::HashSet::new();
-        let mut combined: Vec<SeerrCard> = Vec::new();
-        let mut push_distinct = |card: SeerrCard, taken: &mut usize| {
-            if seen.insert((
-                matches!(card.media_type, SeerrMediaType::Movie),
-                card.tmdb_id,
-            )) {
-                combined.push(card);
-                *taken += 1;
-            }
-        };
-        let mut taken = 0;
-        for credit in credits.cast.iter() {
-            if taken == 25 {
-                break;
-            }
-            if let Some(media_type) = media_type_from_str(credit.media_type.as_deref()) {
-                push_distinct(card_from_credit(credit, media_type, images), &mut taken);
-            }
-        }
-        taken = 0;
-        for credit in credits.crew.iter() {
-            if taken == 25 {
-                break;
-            }
-            if let Some(media_type) = media_type_from_str(credit.media_type.as_deref()) {
-                push_distinct(card_from_credit(credit, media_type, images), &mut taken);
-            }
-        }
+        let combined = credit_cards(
+            &credits.cast,
+            &credits.crew,
+            images,
+            PERSON_CREDITS_PER_KIND,
+        );
 
         Ok(SeerrPersonCredits {
             name: details.name.unwrap_or_default(),

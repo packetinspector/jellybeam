@@ -222,9 +222,16 @@ internal fun FocusRestorer(
     selectedKey: () -> String? = { null },
     fallback: () -> FocusTarget?,
     tag: String = "",
+    /** A new value is a fresh landing (e.g. Retry): placement runs again even if [ready] never flips. */
+    reloadKey: Any? = null,
 ) {
     var wasTop by remember { mutableStateOf(isTop) }
-    LaunchedEffect(isTop, ready) {
+    var placedFor by remember { mutableStateOf(reloadKey) }
+    LaunchedEffect(isTop, ready, reloadKey) {
+        if (reloadKey != placedFor) {
+            placedFor = reloadKey
+            memory.seeded = false
+        }
         if (!isTop) {
             memory.frozen = true
             wasTop = false

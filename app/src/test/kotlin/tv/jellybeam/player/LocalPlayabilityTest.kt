@@ -2,12 +2,15 @@ package tv.jellybeam.player
 
 import androidx.media3.common.C
 import androidx.media3.common.Format
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.TrackGroup
 import androidx.media3.common.Tracks
+import androidx.media3.exoplayer.ExoPlaybackException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.jellybeam_core.FailedTrackFfi
 
 /** [LocalPlayability] is pure media3-common data-class plumbing; no Android
  * runtime/decoder/ExoPlayer needed, so fixtures build [Format]/[TrackGroup]/[Tracks] directly via
@@ -110,6 +113,37 @@ class LocalPlayabilityTest {
         assertEquals(
             "No decoder on this device for the video track (video/hevc)",
             LocalPlayability.unplayableReason(tracks),
+        )
+    }
+
+    // -- docs/18 §2: which track a failure is attributed to -----------
+
+    @Test
+    fun `an unplayable type is reported with its kind, video first`() {
+        val audioOnly = Tracks(listOf(group(C.FORMAT_HANDLED), group(C.FORMAT_UNSUPPORTED_TYPE, sampleMimeType = "audio/eac3")))
+        assertEquals(FailedTrackFfi.AUDIO, LocalPlayability.unplayable(audioOnly)?.first)
+        val both = Tracks(listOf(group(C.FORMAT_UNSUPPORTED_TYPE), group(C.FORMAT_UNSUPPORTED_TYPE, sampleMimeType = "audio/eac3")))
+        assertEquals(FailedTrackFfi.VIDEO, LocalPlayability.unplayable(both)?.first)
+    }
+
+    @Test
+    fun `a renderer error is attributed to its format's type, anything else is unknown`() {
+        fun rendererError(mime: String?) = ExoPlaybackException.createForRenderer(
+            IllegalStateException("decode"),
+            "renderer",
+            0,
+            format(mime),
+            C.FORMAT_HANDLED,
+            /* mediaPeriodId= */ null,
+            false,
+            PlaybackException.ERROR_CODE_DECODING_FAILED,
+        )
+        assertEquals(FailedTrackFfi.VIDEO, LocalPlayability.failedTrack(rendererError("video/hevc")))
+        assertEquals(FailedTrackFfi.AUDIO, LocalPlayability.failedTrack(rendererError("audio/eac3")))
+        assertEquals(FailedTrackFfi.UNKNOWN, LocalPlayability.failedTrack(rendererError(null)))
+        assertEquals(
+            FailedTrackFfi.UNKNOWN,
+            LocalPlayability.failedTrack(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED)),
         )
     }
 }

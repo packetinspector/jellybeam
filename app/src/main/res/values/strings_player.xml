@@ -52,6 +52,7 @@
     <string name="player_osd_transcode">Transcode</string>
     <string name="player_osd_ends">Ends %1$s</string>
     <string name="player_seek_flash_seconds">%1$ds</string>
+    <string name="player_seek_unavailable">This file doesn\'t support seeking</string>
     <string name="player_skip_toast">%1$s · Select to undo</string>
 
     <!-- Library info sheet. -->
@@ -94,6 +95,12 @@
     <string name="player_picker_audio">Audio</string>
     <string name="player_picker_subtitles">Subtitles</string>
     <string name="player_track_default_name">Track %1$d</string>
+    <string name="player_track_external">External</string>
+    <string name="player_track_external_meta">%1$s · External</string>
+    <string name="player_track_status_meta">%1$s · %2$s</string>
+    <string name="player_track_loading">Loading…</string>
+    <string name="player_track_unavailable">Unavailable</string>
+    <string name="player_subtitle_unavailable">These subtitles couldn\'t be loaded</string>
 
     <!-- Fatal playback errors shown as a toast. -->
     <string name="player_error_generic">Playback error: %1$s</string>

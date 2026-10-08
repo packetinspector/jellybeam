@@ -1,7 +1,10 @@
 package tv.jellybeam.player
 
+import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
+import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
 import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.TrackDecisionFfi
@@ -14,6 +17,9 @@ import uniffi.jellybeam_core.TrackDecisionFfi
 class FakePlaybackPlayer : PlaybackPlayer {
     var loadedPlan: PlaybackPlan? = null
         private set
+
+    /** Every plan [load]ed, in order. */
+    val loadedPlans = mutableListOf<PlaybackPlan>()
 
     /** The `tolerateMislabeledLevels` argument from the most recent [load] call, or `null` before
      * any call.
@@ -83,14 +89,24 @@ class FakePlaybackPlayer : PlaybackPlayer {
     override var isPlaying: Boolean = false
     override var playbackState: Int = Player.STATE_IDLE
 
+    /** Backing value for [seekability]; set UNSEEKABLE or UNKNOWN to model those files. */
+    var seekabilityValue: Seekability = Seekability.SEEKABLE
+
+    override val seekability: Seekability get() = seekabilityValue
+
     override fun load(
         plan: PlaybackPlan,
         tolerateMislabeledLevels: Boolean,
         audioDecoderPreferences: AudioDecoderPreferences,
     ) {
         loadedPlan = plan
+        loadedPlans += plan
+        // The real per-load reset (docs/18 §3.1), so a test sees what a reload does to text.
+        trackSelectionParameters = trackSelectionBaseline(trackSelectionParameters)
+        currentTracks = null
         lastTolerateMislabeledLevels = tolerateMislabeledLevels
         lastAudioDecoderPreferences = audioDecoderPreferences
+        playWhenReady = true // as PlayerHolder.load
     }
 
     override fun addListener(listener: Player.Listener) {
@@ -149,8 +165,29 @@ class FakePlaybackPlayer : PlaybackPlayer {
 
     val applyTrackDecisionCalls = mutableListOf<Pair<TrackDecisionFfi, Tracks>>()
 
+    /** The selection state [PlayerHolder] would hold, changed by the same pure functions. */
+    var trackSelectionParameters: TrackSelectionParameters = TrackSelectionParameters.Builder().build()
+        private set
+
+    val textDisabled: Boolean get() = C.TRACK_TYPE_TEXT in trackSelectionParameters.disabledTrackTypes
+
+    /** The (group, track) the text override selects in [tracks], or `null`. */
+    fun selectedTextOverride(tracks: Tracks): Pair<Int, Int>? = overrideIn(tracks, C.TRACK_TYPE_TEXT)
+
+    fun selectedAudioOverride(tracks: Tracks): Pair<Int, Int>? = overrideIn(tracks, C.TRACK_TYPE_AUDIO)
+
+    private fun overrideIn(tracks: Tracks, type: Int): Pair<Int, Int>? {
+        tracks.groups.forEachIndexed { groupIndex, group ->
+            if (group.mediaTrackGroup.type != type) return@forEachIndexed
+            val override = trackSelectionParameters.overrides[group.mediaTrackGroup] ?: return@forEachIndexed
+            return groupIndex to override.trackIndices.single()
+        }
+        return null
+    }
+
     override fun applyTrackDecision(decision: TrackDecisionFfi, tracks: Tracks) {
         applyTrackDecisionCalls.add(decision to tracks)
+        trackSelectionParameters = withTrackDecision(trackSelectionParameters, decision, tracks)
     }
 
     /** Updates [currentTracks] and fires every registered [Player.Listener]'s `onTracksChanged`. */
@@ -180,6 +217,11 @@ class FakePlaybackPlayer : PlaybackPlayer {
     fun firePlayWhenReadyChanged(playWhenReady: Boolean, reason: Int = Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
         this.playWhenReady = playWhenReady
         listeners.toList().forEach { it.onPlayWhenReadyChanged(playWhenReady, reason) }
+    }
+
+    /** Simulates `Player.Listener.onTimelineChanged` alone, with no state change beside it. */
+    fun fireTimelineChanged() {
+        listeners.toList().forEach { it.onTimelineChanged(Timeline.EMPTY, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE) }
     }
 
     fun fireError(error: PlaybackException) {

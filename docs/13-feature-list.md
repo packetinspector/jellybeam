@@ -39,7 +39,7 @@ the count, the active sort with its direction, and every active filter;
 Up from the top row opens a strip that pushes the grid down (sort by Name
 using the server's sort name, so leading articles are ignored and numbered
 titles run in natural order, Date added, Year, Runtime, Select flips direction; filter by a Watched chip
-that cycles Any / Unwatched / Watched, plus Has unwatched on TV Shows, by
+that cycles Any / Unwatched / Watched (judged by what the card shows, so a few seconds in still counts as unwatched and the last minutes count as watched), plus Has unwatched on TV Shows, by
 Genre, by Years by decade, and on TV Shows by Continuing / Ended; Reset;
 the strip closes as soon as focus leaves it); a permanent index rail on the right edge jumps
 the grid live by letter, month/year, decade, or duration band; everything
@@ -55,6 +55,10 @@ DTS:X suffix in the accent tier when the default track is object-based, read
 from the server's spatial-format field or, on servers that only say so in the
 stream profile, from there -- and a fixed-width cast row --
 nothing overlaps however long the title, synopsis, or a cast name runs);
+selecting a cast member opens a person page (portrait, name, birth and death
+details, biography, "In your library" with their movies and series, and --
+when Discover is connected -- "Not in your library" with their remaining
+credits, omitted silently if Discover is unreachable);
 collections are first-class: in the Collections library each collection is a
 stacked card (its poster, or the first member's, with the next two fanned
 behind it, an item-count badge, `N UNPLAYED` / `ALL WATCHED`
@@ -93,7 +97,12 @@ discovery, never a gate: manual URL stays primary; saved servers shown inert;
 a server whose published URL omits its port advertises a dead address, so each
 hit is probed and, on failure, replaced by the first reachable of `https://host`,
 `https://host:8920`, `http://host:8096` and the same on the responder's IP);
-multi-server/multi-account session persistence, instant account switching,
+multi-server/multi-account session persistence, instant account switching
+(a video keeps playing on its own server, next-up included, while you browse
+another, every server's library sync pausing until it ends; signing out of or
+removing its account stops it; an expired-token error prompts only for the
+account it came from while you are using it, never for the one you switched
+to),
 add-server, in-place password/Quick Connect reauthorization of expired saved
 accounts (preserving their mirror), automatic reauthorization routing when
 playback discovers an expired token, and confirmation-gated server removal
@@ -179,7 +188,7 @@ current chapter's start, or the previous chapter's when within 5s of it --
 OSD hidden or visible, never revealing it; a centre flash names the chapter);
 skip intro/credits/recap/preview/
 commercial with per-type Ask/Auto-skip/Off (commercial defaults to Auto-skip),
-Auto-skip shows an Undo toast; autoplay next episode with a countdown card whose
+Auto-skip shows an Undo toast (Select undoes it while the OSD is hidden; with the OSD up, Select acts on the focused control and Up focuses the skip pill); autoplay next episode with a countdown card whose
 depleting rule and "IN {n}" numeral count down per frame to the exact hand-over
 instant (dismissible, independent of OSD idle-fade); a "Still watching?" inactivity
 guard (configurable: off, after N episodes, or after N hours with no input) that
@@ -189,7 +198,7 @@ reset by any key press — Stop reports the finished episode normally, never sta
 marks the next one, and returns to its detail page;
 track selection
 (audio/subtitle) with per-series memory; subtitle mode Default/Always/
-OnlyForced/None; subtitle styling (size, vertical position, text color, bold,
+OnlyForced/None (OnlyForced keeps a burned-in forced track when a transcode hides the audio language; a remembered language matches whether the next episode ships it embedded, burned in or as a sidecar); subtitle styling (size, vertical position, text color, bold,
 background opacity, or Android's system caption style); skip back/forward length presets (5/10/15/30/60s, default 10/10);
 on-demand playback-stats sheet with live pipeline stats (video/audio/subtitle
 stream breakdown, buffered-ahead time, allocated buffer size, network estimate,
@@ -224,7 +233,7 @@ library-info and playback-stats sheets); playback speed control, 0.5–2x
 (Full mode, per-session only — not persisted across playback sessions),
 ENDS-aware; server-configured item and series names shown verbatim; exact
 stored video dimensions in playback stats plus crop-aware resolution tiers
-in the codec strip; silent one-step hidden-OSD Left/Right seeking using the
+in the codec strip; files that can't seek (e.g. MKV with no index) never restart from 0:00 on a seek -- skip buttons dim, a short "can't seek" notice shows, and skip pills, auto-skip and the Chapters button step aside; silent one-step hidden-OSD Left/Right seeking using the
 configured interval, with no chrome reveal or unused thumbnail work on a
 first press; holding Left/Right past 500ms enters hold-to-seek, a
 continuous accelerating glide (6x/30x/120x tiers, then a duration-scaled
@@ -285,7 +294,7 @@ one authenticated request at launch, on account switch and on return to the
 foreground (at most once a minute); the screen underneath
 is left alone while the prompt is up; Seerr's own sign-in failures never
 trigger it.
-<!-- verified: core/ffi/src/device_id.rs for_server; core/ffi/src/object.rs client_identity/saved_identity, install_authenticated_session; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt ffi()/noteCoreFailure; data/CoreExceptions.kt routesToReauthorization; player/PlaybackActivity.kt AuthorizationRecoveryCoordinator; MainActivity.kt authorizationRecoveryCoordinator collector, checkSession; core/ffi/src/object.rs validate_session -->
+<!-- verified: core/ffi/src/device_id.rs for_server; core/ffi/src/object.rs client_identity/saved_identity, install_authenticated_session, reauthorization_account; core/jellyfin-api/src/lib.rs JellyfinClient::check; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt ffi()/noteCoreFailure; data/CoreExceptions.kt routesToReauthorization; player/PlaybackActivity.kt AuthorizationRecoveryCoordinator; MainActivity.kt authorizationRecoveryCoordinator collector, checkSession; core/ffi/src/object.rs validate_session -->
 
 **Server compatibility** — support floor 10.11; the server's version is
 captured from `/System/Info/Public` at sign-in and persisted on the
@@ -423,7 +432,16 @@ public display.)*
   why instead of handing you a transcode. Transcoding is strictly opt-in:
   Auto keeps Direct Playing everything your TV's decoders can actually
   handle and transcodes only on local evidence, and a bitrate preset
-  transcodes everything at the rate you chose.
+  transcodes everything at the rate you chose. When a file fails to play
+  and Auto falls back to a transcode, the server re-encodes the track that
+  failed rather than handing the same stream back, and your subtitle and
+  audio choice carries over to the transcoded stream. Subtitles you turned
+  off are never burned into a transcode. While transcoding, subtitles that
+  can only be burned in (such as ASS) are still listed in the picker; the
+  one burned in shows selected, the tracks dot lights when it isn't the
+  file's default, and choosing Off or another track re-requests the stream
+  with the new choice; a paused video stays paused through the switch.
+  <!-- verified: core/jellyfin-core/src/device_profile.rs transcoding_profile(caps); core/ffi/src/object.rs fallback_options(); PlaybackViewModel choiceBeforeReload/armReapply/reapplyChoice -->
   <!-- verified: core/ffi/src/object.rs resolve_plan() (Direct Play mode: Transcode decision -> CoreError::WouldTranscode; Auto: up-front transcode only when tolerate_mislabeled_levels is off or the codec is outside android_direct_play_video_codecs, else attempt-anyway Direct Play; Cap: force_transcode negotiation); app/src/main/kotlin/tv/jellybeam/player/LocalPlayability.kt, SoftwareDecoder.kt + PlaybackViewModel.maybeFallBackToTranscode() are the runtime fallback triggers -->
 
 - Works with Jellyfin 10.11 through 12.x, including 12.0's default of
@@ -455,8 +473,16 @@ public display.)*
   Android clients can't show without a transcode. (ASS styling is
   simplified relative to a full libass renderer: text and basic styling
   render; elaborate typesetting is approximated. External sidecar files
-  are not loaded yet — see Planned.)
-  <!-- verified live on-device (embedded ASS rendering during Direct Play); Media3 DefaultSubtitleParserFactory includes SsaParser for demuxed application/x-ssa tracks; no SubtitleConfiguration wiring exists in app/ so external sidecars are never attached; device_profile.rs declares ass/ssa (like PGS/VobSub) as Embed+Encode, since an Encode-only format makes the server refuse Direct Play whenever it is the default or selected track -->
+  load too — see the next item.)
+  <!-- verified live on-device (embedded ASS rendering during Direct Play); Media3 DefaultSubtitleParserFactory includes SsaParser for demuxed application/x-ssa tracks; device_profile.rs declares ass/ssa (like PGS/VobSub) as Embed+Encode, since an Encode-only format makes the server refuse Direct Play whenever it is the default or selected track -->
+- External subtitle files (.srt/.vtt/.ttml next to the media) appear in
+  the subtitle picker beside the embedded tracks, tagged External, without
+  leaving Direct Play, and join auto-selection and per-series memory. A
+  file loads only when chosen, so playback starts just as fast, and
+  choosing or switching never rebuffers the video. While it loads the row
+  reads Loading…; a missing or malformed file reads Unavailable, puts
+  subtitles back to Off with a short notice, and never interrupts the video.
+  <!-- verified: core/ffi/src/types.rs external_subtitles_of (IsExternal only) + SessionSidecars; core/ffi/src/object.rs fetch_external_subtitle; app/src/main/kotlin/tv/jellybeam/player/ExternalSubtitles.kt + SidecarCues.kt + PlaybackViewModel.showSidecar + PlaybackScreen sidecar feed + TrackChoiceText.kt; docs/18 §3.2 -->
 - Pure-black letterbox bars — no washed-out gray edges on OLED panels
   during scope/widescreen content.
   <!-- verified: app/src/main/kotlin/tv/jellybeam/player/PlaybackScreen.kt Color.Black background + setBackgroundColor/setShutterBackgroundColor BLACK, three-layer letterbox -->
@@ -622,9 +648,6 @@ public display.)*
 
 ## Planned
 
-- External subtitle sidecar loading (.srt/.ass files next to the media —
-  today only embedded tracks play; needs SubtitleConfiguration wiring in
-  the player load path plus the server's delivery URL).
 - Trailer button on detail pages (needs a RemoteTrailers/LocalTrailers
   FFI path; the action row has its slot at position three).
 - Byte-level preload (buffering actual media bytes ahead of Play, not just

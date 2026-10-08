@@ -112,9 +112,9 @@ WHERE clauses, ANDed:
 
 | Filter | SQL |
 |---|---|
-| `watched = Unwatched` | `played = 0 AND playback_position_ticks = 0 AND NOT EXISTS (SELECT 1 FROM items e WHERE e.series_id = items.id AND e.item_type = 'Episode' AND (e.played = 1 OR e.playback_position_ticks > 0))` — "never started". Movies have no episode rows, so the subquery is vacuously true for them. |
+| `watched = Unwatched` | The row is displayed never-started and not `played` (`not_started_sql!`), and no Episode of it (`e.series_id = items.id`) is started or played — docs/07 §1's start grace, so a position under 2 min counts as never started. Movies have no episode rows, so the subquery is vacuously true for them. |
 | `watched = HasUnwatched` | `COALESCE(unplayed_item_count, 0) > 0` — "not finished"; distinct from `Unwatched`, which is "not started". |
-| `watched = Watched` | `played = 1` — a Series is `Played` only when every episode is. |
+| `watched = Watched` | `played = 1` or the row's position is inside docs/07 §1's end grace (`watched_sql!`) — what its card shows; a Series is `Played` only when every episode is. |
 | `genre = Some(g)` | `EXISTS (SELECT 1 FROM item_genres g WHERE g.item_id = items.id AND g.genre = ?)` |
 | `decade` | `production_year BETWEEN 2020 AND 2029` etc.; `Older` = `production_year < 1980`. A NULL year never matches a decade. |
 | `status` | `series_status = 'Continuing'` / `'Ended'` |

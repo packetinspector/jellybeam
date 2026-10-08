@@ -60,6 +60,7 @@ fun Screen.entryIdentity(): String = when (this) {
     Screen.Home -> "home"
     is Screen.Library -> "library-${view.id}"
     is Screen.Detail -> "detail-${card.id}"
+    is Screen.Person -> "person-$personId"
     Screen.Search -> "search"
     Screen.Settings -> "settings"
     Screen.Discover -> "discover"
@@ -80,4 +81,7 @@ fun Screen.entryIdentity(): String = when (this) {
  * - IDENTITY makes [replace] correct: same index, different [Screen] produces a different
  *   key, so Compose disposes the old subtree (ViewModel included) and mounts a fresh one.
  */
-fun NavBackStack.entryKeys(): List<String> = entries.mapIndexed { index, screen -> "$index:${screen.entryIdentity()}" }
+fun NavBackStack.entryKeys(): List<String> = entries.mapIndexed { index, screen -> screen.entryKey(index) }
+
+/** One entry's [entryKeys] key, given its stack [index]. */
+fun Screen.entryKey(index: Int): String = "$index:${entryIdentity()}"

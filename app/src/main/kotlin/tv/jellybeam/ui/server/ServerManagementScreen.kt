@@ -57,26 +57,16 @@ fun ServerManagementScreen(
     onRemove: (UInt) -> Unit,
     onClose: () -> Unit,
 ) {
-    var selectedIndex by remember { mutableStateOf<UInt?>(null) }
+    var selected by remember { mutableStateOf<AccountInfo?>(null) }
     var confirmingRemoval by remember { mutableStateOf(false) }
-    var removalStarted by remember { mutableStateOf(false) }
-
-    LaunchedEffect(removingIndex, error) {
-        if (removingIndex != null) {
-            removalStarted = true
-        } else if (removalStarted && error == null) {
-            selectedIndex = null
-            confirmingRemoval = false
-            removalStarted = false
-        }
-    }
+    val selectedIndex = selectedAccountIndex(accounts, selected)
 
     BackHandler {
         when {
             removingIndex != null -> Unit
+            selectedIndex == null -> onClose()
             confirmingRemoval -> confirmingRemoval = false
-            selectedIndex != null -> selectedIndex = null
-            else -> onClose()
+            else -> selected = null
         }
     }
 
@@ -84,34 +74,46 @@ fun ServerManagementScreen(
         modifier = Modifier.fillMaxSize().background(JellybeamTheme.Notte),
         contentAlignment = Alignment.Center,
     ) {
-        val selected = selectedIndex?.toInt()?.let(accounts::getOrNull)
-        if (selected != null && confirmingRemoval) {
+        if (selectedIndex == null) {
+            ServerList(
+                accounts = accounts,
+                activeAccountIndex = activeAccountIndex,
+                onSelect = { index ->
+                    selected = accounts.getOrNull(index.toInt())
+                    confirmingRemoval = false
+                },
+                onClose = onClose,
+            )
+        } else if (confirmingRemoval) {
             RemoveConfirmation(
-                account = selected,
+                account = accounts[selectedIndex.toInt()],
                 isActive = selectedIndex == activeAccountIndex,
                 removing = removingIndex != null,
                 error = error,
                 onCancel = { confirmingRemoval = false },
-                onConfirm = { onRemove(selectedIndex!!) },
-            )
-        } else if (selected != null) {
-            AccountActions(
-                account = selected,
-                isActive = selectedIndex == activeAccountIndex,
-                onReauthorize = { onReauthorize(selectedIndex!!) },
-                onRemove = { confirmingRemoval = true },
-                onCancel = { selectedIndex = null },
+                onConfirm = { onRemove(selectedIndex) },
             )
         } else {
-            ServerList(
-                accounts = accounts,
-                activeAccountIndex = activeAccountIndex,
-                onSelect = { selectedIndex = it },
-                onClose = onClose,
+            AccountActions(
+                account = accounts[selectedIndex.toInt()],
+                isActive = selectedIndex == activeAccountIndex,
+                onReauthorize = { onReauthorize(selectedIndex) },
+                onRemove = { confirmingRemoval = true },
+                onCancel = { selected = null },
             )
         }
     }
 }
+
+/** Where [account] sits in this list now, matched by server and user; -1 once it is gone. */
+internal fun List<AccountInfo>.indexOfAccount(account: AccountInfo): Int =
+    indexOfFirst { it.serverUrl == account.serverUrl && it.userId == account.userId }
+
+/** The [selected] account's index in [accounts] now, or `null` once it is gone: a removal shifts
+ * the list, so a selection held by position would land on the next account, Remove still focused.
+ */
+internal fun selectedAccountIndex(accounts: List<AccountInfo>, selected: AccountInfo?): UInt? =
+    selected?.let(accounts::indexOfAccount)?.takeIf { it >= 0 }?.toUInt()
 
 @Composable
 private fun AccountActions(

@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 /// HLS/TS video codecs the transcoder falls back to (VideoToolbox hardware-encodes both).
-const TRANSCODE_VIDEO_CODECS: &str = "h264,hevc";
+/// docs/18 §2: transcode targets, kept only when this device decodes them (H.264 always).
+const TRANSCODE_VIDEO_CODECS: &[VideoCodec] = &[VideoCodec::H264, VideoCodec::Hevc];
 const TRANSCODE_AUDIO_CODECS: &str = "aac,ac3";
 /// 5.1 baseline for the transcoded fallback stream; direct play keeps the source's real layout.
 const TRANSCODE_MAX_AUDIO_CHANNELS: &str = "6";
@@ -229,11 +230,20 @@ fn clamp_to_i32(bitrate: u32) -> i32 {
     bitrate.min(i32::MAX as u32) as i32
 }
 
-fn transcoding_profile() -> TranscodingProfile {
+/// The HLS transcode target. Its video codecs are what this device decodes: the server copies a
+/// source whose codec is listed, so an undecodable one listed here comes back unchanged.
+fn transcoding_profile(caps: &AndroidTvCaps) -> TranscodingProfile {
+    let decodable = android_direct_play_video_codecs(caps);
+    let video_codec = TRANSCODE_VIDEO_CODECS
+        .iter()
+        .filter(|codec| **codec == VideoCodec::H264 || decodable.contains(codec))
+        .map(|codec| codec.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     TranscodingProfile {
         container: Some("ts".to_string()),
         kind: Some(DlnaProfileType::Video),
-        video_codec: Some(TRANSCODE_VIDEO_CODECS.to_string()),
+        video_codec: Some(video_codec),
         audio_codec: Some(TRANSCODE_AUDIO_CODECS.to_string()),
         protocol: Some(MediaStreamProtocol::Hls),
         estimate_content_length: false,
@@ -395,7 +405,7 @@ const ANDROID_WEBVTT_SUBTITLE_FORMATS: &[&str] = &["vtt", "webvtt"];
 const ANDROID_BITMAP_SUBTITLE_FORMATS: &[&str] = &["pgssub", "dvdsub"];
 
 /// ASS/SSA: Media3's SSA parser renders them embedded (simplified styling, no libass); Encode
-/// covers transcodes. No sidecar, since Direct Play never attaches external files.
+/// covers transcodes. No `External`: docs/18 §3.2 never parses an ASS sidecar.
 const ANDROID_ASS_SUBTITLE_FORMATS: &[&str] = &["ass", "ssa"];
 
 /// Builds Jellybeam TV's device profile for the given probed capabilities (named "Jellybeam TV" so
@@ -417,7 +427,7 @@ pub fn android_tv_profile(
         max_static_music_bitrate: None,
         direct_play_profiles: vec![android_direct_play_profile(caps)],
         // HLS/ts fallback, reached only when direct play/stream both fail.
-        transcoding_profiles: vec![transcoding_profile()],
+        transcoding_profiles: vec![transcoding_profile(caps)],
         container_profiles: Vec::new(),
         codec_profiles: android_codec_profiles(caps, tolerate_mislabeled_levels),
         subtitle_profiles: android_subtitle_profiles(),
@@ -620,6 +630,31 @@ fn android_subtitle_profiles() -> Vec<SubtitleProfile> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn transcode_targets_are_only_codecs_this_device_decodes() {
+        let target = |caps: &AndroidTvCaps| {
+            android_json(caps, true)["TranscodingProfiles"][0]["VideoCodec"]
+                .as_str()
+                .expect("test assertion")
+                .to_string()
+        };
+        let floor = AndroidTvCaps {
+            max_streaming_bitrate: None,
+            video: vec![],
+        };
+        assert_eq!(
+            target(&floor),
+            "h264",
+            "an undecodable HEVC must be encoded, never copied"
+        );
+        let hevc = AndroidTvCaps {
+            max_streaming_bitrate: None,
+            video: vec![hevc_caps(&["main"], Some(153))],
+        };
+        assert_eq!(target(&hevc), "h264,hevc");
+    }
+
     use super::*;
 
     // -- Android TV (Jellybeam TV) profile --

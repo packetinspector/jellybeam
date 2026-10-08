@@ -18,11 +18,12 @@ use crate::library_prefs::LibraryGridPrefsFile;
 use crate::settings::{PlaybackQuality, Settings};
 use crate::track_prefs::TrackPrefsFile;
 use crate::types::{
-    AccountInfo, Card, ChangeEvent, CollectionInfo, DeviceCaps, EpisodeNeighbors, GridCounts,
-    GridFilters, GridGroup, GridSort, ImageKind, ItemDetail, LibraryGridPrefs, LiveSort,
-    MediaSegment, MirrorItemCounts, MirrorLibrary, MirrorStats, PlayMethodFfi, PlaybackOsdDetail,
-    PlaybackPlan, QuickConnectSession, ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus,
-    TrackDecisionFfi, TrackInfo, TrackKindFfi, TrickplayMetaFfi, ViewSnapshot,
+    AccountIdentity, AccountInfo, Card, ChangeEvent, CollectionInfo, DeviceCaps, EpisodeNeighbors,
+    FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort, ImageKind, ItemDetail,
+    LibraryGridPrefs, LiveSort, MediaSegment, MirrorItemCounts, MirrorLibrary, MirrorStats,
+    PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan, PlaybackRequest, QuickConnectSession,
+    ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus, TrackDecisionFfi, TrackInfo,
+    TrackKindFfi, TrickplayMetaFfi, ViewSnapshot,
 };
 use crate::{device_id, library_prefs, session, settings, signin, track_prefs};
 
@@ -84,6 +85,226 @@ impl LocalProgressCheckpoint {
 /// populates it: long enough to cover a dwell-then-press, short enough that
 /// stale resume/server state is unlikely -- not a long-lived cache.
 const PRELOAD_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// docs/18 §2.1: playback ownership. A request is admitted under the lock, and only the admitted
+/// claim may install; a failed request's claim is inert, since the next admission replaces it.
+#[derive(Default)]
+struct PlaybackOwner {
+    /// Highest admitted [`PlaybackRequest::seq`]; an equal or lower one is refused.
+    highest_seq: u64,
+    /// The admitted request still allowed to install, cleared by install, revocation and reset.
+    claim: Option<PlaybackClaim>,
+    /// Advanced by every account reset; a request minted under another epoch is refused.
+    account_epoch: u64,
+    /// The session a pending fallback took over. It keeps reporting (and its stream keeps
+    /// playing) until the claim resolves, so it is stopped where the viewer actually left it.
+    retiring: Option<Retiring>,
+    /// The session the installed one replaced: a stop sent before the caller learned the new id
+    /// still names it, and ends the installed session where the viewer left.
+    installed_replaces: Option<String>,
+    /// The epoch of the newest admitted request: the account the newest playback plays on.
+    playing_epoch: Option<u64>,
+    /// The account a live playback kept across an account change, with the epoch its own requests
+    /// still carry (next-up included, which stops before it prepares); cleared when a playback on
+    /// the current account installs or its own account is left.
+    parked: Option<ParkedAccount>,
+}
+
+impl PlaybackOwner {
+    /// docs/18 §2.1: whether the newest playback is the parked one, so leaving its account ends
+    /// it; a parked account whose playback a newer one replaced is only dropped.
+    fn parked_plays(&self) -> bool {
+        self.parked
+            .as_ref()
+            .is_some_and(|parked| self.playing_epoch == Some(parked.epoch))
+    }
+}
+
+/// [`PlaybackOwner::parked`].
+struct ParkedAccount {
+    epoch: u64,
+    account: SessionAccount,
+}
+
+impl ParkedAccount {
+    /// Whether it is the saved account `mirror_dir` names.
+    fn is_account(&self, mirror_dir: Option<&str>) -> bool {
+        self.account.mirror_dir.as_deref() == mirror_dir
+    }
+
+    /// Its account, as installed now when that is the same saved account again (a re-sign-in's
+    /// fresh token, a switch back).
+    /// A field the installed one lacks (a mirror still opening after a switch back) stays its own.
+    fn resolve(&self, state: &State) -> SessionAccount {
+        if self.account.mirror_dir.is_some() && self.is_account(state.mirror_dir.as_deref()) {
+            self.account.refreshed_by(SessionAccount::of(state))
+        } else {
+            self.account.clone()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlaybackClaim {
+    seq: u64,
+    /// The account epoch it was minted under, which names the account it installs on.
+    epoch: u64,
+    /// [`PlaybackOwner::playing_epoch`] before it was admitted, restored if it fails.
+    prior_playing_epoch: Option<u64>,
+    /// The session a fallback took over on admission, so stopping or abandoning it revokes.
+    retires: Option<String>,
+}
+
+/// [`PlaybackOwner::retiring`]: the claim it belongs to and the fallback's position, where the
+/// replacement takes over. Its stream keeps playing until then, and its own reports keep arriving.
+struct Retiring {
+    seq: u64,
+    session: jellyfin_core::ReportingSession,
+    ticks: i64,
+    /// The latest position reported for it since the fallback took it.
+    reported: Option<i64>,
+}
+
+impl Retiring {
+    /// Where the viewer is: its final position when it ends without a replacement taking over.
+    fn left_at(&self) -> i64 {
+        self.reported.unwrap_or(self.ticks)
+    }
+}
+
+/// The account a taken session belongs to, read under the lock that took it, so its final writes
+/// (mirror position, mark-played) never reach an account that replaced it.
+#[derive(Clone)]
+struct SessionAccount {
+    mirror: Option<media_cache::Mirror>,
+    client: Option<jellyfin_api::JellyfinClient>,
+    /// Which saved account this is, so removing it can end its playback.
+    mirror_dir: Option<String>,
+}
+
+impl SessionAccount {
+    /// `newer` where it has a field, else this one's: an account mid-switch has a client before
+    /// its mirror opens.
+    fn refreshed_by(&self, newer: Self) -> Self {
+        Self {
+            mirror: newer.mirror.or_else(|| self.mirror.clone()),
+            client: newer.client.or_else(|| self.client.clone()),
+            mirror_dir: newer.mirror_dir.or_else(|| self.mirror_dir.clone()),
+        }
+    }
+
+    fn of(state: &State) -> Self {
+        Self {
+            mirror: state.mirror.clone(),
+            client: state.client.clone(),
+            mirror_dir: state.mirror_dir.clone(),
+        }
+    }
+}
+
+/// The core's [`State`], reachable only through [`StateGuard`] so no lock can skip its release.
+pub(crate) struct SharedState(Mutex<State>);
+
+impl SharedState {
+    fn lock(&self) -> StateGuard<'_> {
+        StateGuard(self.0.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+/// What [`JellybeamCore::prepare_playback`] read under the lock that admitted its claim.
+struct AdmittedPlay {
+    client: jellyfin_api::JellyfinClient,
+    mirror: media_cache::Mirror,
+    caps: jellyfin_core::AndroidTvCaps,
+    tolerate_mislabeled_levels: bool,
+    quality: PlaybackQuality,
+    cached: Option<PreloadCache>,
+    joinable_task: Option<tokio::task::JoinHandle<()>>,
+    stale_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// [`SharedState::lock`]'s guard. Releasing it re-derives the shared sync-yield flag from the
+/// playback state it leaves (docs/18 §2.1), so no path can end a playback with sync paused.
+pub(crate) struct StateGuard<'a>(std::sync::MutexGuard<'a, State>);
+
+impl std::ops::Deref for StateGuard<'_> {
+    type Target = State;
+
+    fn deref(&self) -> &State {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for StateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        &mut self.0
+    }
+}
+
+impl Drop for StateGuard<'_> {
+    fn drop(&mut self) {
+        let live = JellybeamCore::playback_live_locked(&self.0);
+        self.0
+            .playback_active
+            .store(live, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Which account boundary [`JellybeamCore::reset_account_state_locked`] is crossing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccountChange {
+    /// Sign-in, switch, restore: a live playback keeps its own account (docs/18 §2.1).
+    Replace,
+    /// Sign-out or removal of the active account: ends playback that belongs to it.
+    Leave,
+}
+
+/// The session a pending fallback took over, if `play_session_id` names it.
+fn retiring_session_locked<'a>(
+    state: &'a mut State,
+    play_session_id: &str,
+) -> Option<&'a mut Retiring> {
+    state
+        .playback_owner
+        .retiring
+        .as_mut()
+        .filter(|retiring| retiring.session.context().play_session_id == play_session_id)
+}
+
+/// The installed session if `play_session_id` names it; anything else is a lost race, ignored.
+fn installed_session_locked<'a>(
+    state: &'a mut State,
+    play_session_id: &str,
+) -> Option<&'a mut jellyfin_core::ReportingSession> {
+    let session = state
+        .reporting
+        .as_mut()
+        .filter(|session| session.context().play_session_id == play_session_id);
+    if session.is_none() {
+        tracing::debug!(
+            play_session_id,
+            "progress report for a session that is not installed; ignoring"
+        );
+    }
+    session
+}
+
+/// What [`JellybeamCore::take_session_or_revoke_locked`] took for a stop/abandon.
+enum Taken {
+    /// The installed session.
+    Active(jellyfin_core::ReportingSession),
+    /// A pending fallback's retired session, with the fallback's position.
+    Retired(jellyfin_core::ReportingSession, i64),
+}
+
+/// What [`JellybeamCore::reset_account_state_locked`] hands out to dispose of outside the lock.
+struct AccountReset {
+    preload_task: Option<tokio::task::JoinHandle<()>>,
+    reporting: Option<jellyfin_core::ReportingSession>,
+    retiring: Option<Retiring>,
+    /// The outgoing account, so its sessions' final writes stay with it.
+    account: SessionAccount,
+}
 
 /// One-slot cache of a focus-dwell preload's negotiation result. Only ever
 /// holds a [`ResolvedPlan::DirectPlay`] outcome (docs/18-playback-quality.md
@@ -238,14 +459,14 @@ pub(crate) struct State {
     /// it; a background task may publish only while its captured generation
     /// is still current.
     preload_generation: u64,
-    /// Monotonic ownership token for [`Self::reporting`], bumped whenever it
-    /// changes hands. `prepare_playback`/`prepare_transcode_fallback`
-    /// negotiate with the state lock released, so each records this
-    /// generation before releasing the lock and re-checks it before
-    /// installing its own session (docs/18-playback-quality.md §2's fallback
-    /// race) -- a mismatch means a newer call already moved `reporting` on,
-    /// so the stale one must not clobber it.
-    playback_generation: u64,
+    /// docs/18 §2.1: which playback request may install the next reporting session.
+    playback_owner: PlaybackOwner,
+    /// docs/18 §2.1: the sync-yield flag every mirror this core opens shares, kept equal to
+    /// [`JellybeamCore::playback_live_locked`] by [`StateGuard`].
+    playback_active: Arc<std::sync::atomic::AtomicBool>,
+    /// docs/18 §3.2: the installed session's sidecar URLs for
+    /// [`JellybeamCore::fetch_external_subtitle`]; cleared with the account.
+    sidecars: Option<crate::types::SessionSidecars>,
     /// The sole speculative worker, bounding focus-driven negotiation to one
     /// active server request regardless of cancelled coroutines unwinding late.
     preload_task: Option<tokio::task::JoinHandle<()>>,
@@ -283,7 +504,7 @@ pub(crate) struct State {
 /// Extra (non-default) `Fields` [`JellybeamCore::live_children`] requests --
 /// kept byte-for-byte the same as `media-cache::sync::item_fields()` (private
 /// to a non-`pub` module, so not reusable from here). Keep in sync by hand.
-fn live_children_fields() -> Vec<String> {
+pub(crate) fn live_children_fields() -> Vec<String> {
     [
         "Overview",
         "OriginalTitle",
@@ -324,7 +545,7 @@ pub struct JellybeamCore {
     // declaration order, so this alone drops `state` first; the explicit
     // `Drop` impl below additionally handles the listener task's own
     // `Mirror` clone (not a struct field, so declaration order misses it).
-    state: Arc<Mutex<State>>,
+    state: Arc<SharedState>,
     /// Serializes every read-modify-write of the on-disk session list
     /// across every mutating site -- without this, a version refresh that
     /// loaded the list before a concurrent sign-out/switch/remove could write
@@ -386,12 +607,12 @@ impl JellybeamCore {
 
         let (bus_tx, _bus_rx) = tokio::sync::broadcast::channel::<jellyfin_core::BusEvent>(16);
 
-        let state = Arc::new(Mutex::new(State {
+        let state = Arc::new(SharedState(Mutex::new(State {
             settings: loaded_settings,
             track_prefs: loaded_track_prefs,
             library_grid_prefs: loaded_library_grid_prefs,
             ..State::default()
-        }));
+        })));
         let session_lock = Arc::new(Mutex::new(()));
 
         // docs/13 Server compatibility -- periodic poll (backstop
@@ -609,8 +830,24 @@ impl JellybeamCore {
             jellyfin_api::JellyfinClient::from_token(&saved.server_url, identity, &saved.token)
                 .with_user_id(&saved.user_id);
 
-        let preload_task = {
+        let reset = {
             let mut state = self.lock_state();
+            // docs/18 §2.1: restoring the account already installed (a recreated Activity, a failed
+            // switch) is not an account change, so live playback and its caches stay.
+            if state
+                .client
+                .as_ref()
+                .is_some_and(|installed| installed.same_account(&client))
+                && state.mirror_dir.as_deref() == Some(saved.mirror_dir.as_str())
+            {
+                return Some(AccountInfo {
+                    server_url: saved.server_url,
+                    user_id: saved.user_id,
+                    user_name: saved.user_name,
+                });
+            }
+            // First, while `state` still holds the outgoing account.
+            let reset = Self::reset_account_state_locked(&mut state, AccountChange::Replace);
             state.client = Some(client);
             state.mirror_dir = Some(saved.mirror_dir.clone());
             // docs/13 Server compatibility -- seeded offline from
@@ -618,9 +855,9 @@ impl JellybeamCore {
             // answer before the refresh below reaches the network.
             state.server_version = saved.server_version.as_deref().and_then(|v| v.parse().ok());
             state.server_name = saved.server_name.clone();
-            Self::reset_account_state_locked(&mut state)
+            reset
         };
-        Self::abort_task(preload_task);
+        self.dispose_account_reset(reset);
         self.spawn_server_version_refresh();
 
         Some(AccountInfo {
@@ -676,7 +913,12 @@ impl JellybeamCore {
     /// extra round trip -- see [`host_from_server_url`]. Same read-only,
     /// tolerant-load contract as [`Self::current_account`]; `None` if nobody
     /// is signed in or the URL has no parseable host.
-    pub fn server_display_name(&self) -> Option<String> {
+    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
+    pub fn server_display_name(&self, account_epoch: Option<u64>) -> Option<String> {
+        if let Some(epoch) = account_epoch.filter(|&epoch| epoch != self.account_epoch()) {
+            let client = self.read_account(Some(epoch)).ok()?.client?;
+            return host_from_server_url(client.base_url());
+        }
         let saved = session::load(&self.data_dir)?;
         host_from_server_url(&saved.server_url)
     }
@@ -782,8 +1024,10 @@ impl JellybeamCore {
                 info.has_pending_restart,
                 info.has_update_available,
             ),
-            Err(jellyfin_api::ApiError::Unauthorized)
-            | Err(jellyfin_api::ApiError::Status { code: 403, .. }) => {
+            Err(
+                jellyfin_api::ApiError::Unauthorized { .. }
+                | jellyfin_api::ApiError::Status { code: 403, .. },
+            ) => {
                 let info = self.runtime.block_on(client.refresh_public_system_info())?;
                 (
                     false,
@@ -825,29 +1069,27 @@ impl JellybeamCore {
     /// first becomes active on disk but its client is deliberately **not**
     /// installed -- Kotlin decides what to show next.
     pub fn sign_out(&self) {
-        let (client, mirror, task, bundle, preload_task) = {
+        let (client, mirror, task, bundle, reset) = {
             let mut state = self.lock_state();
+            // First, while `mirror_dir` still names the account leaving.
+            let reset = Self::reset_account_state_locked(&mut state, AccountChange::Leave);
             state.mirror_dir = None;
             // Cleared alongside `client`, same as every other per-session
             // cache -- otherwise `server_version`/`server_at_least` would
             // keep answering from a dead session until the next sign-in.
             state.server_version = None;
             state.server_name = None;
-            let preload_task = Self::reset_account_state_locked(&mut state);
             (
                 state.client.take(),
                 state.mirror.take(),
                 state.listener_task.take(),
                 state.event_bus.take(),
-                preload_task,
+                reset,
             )
         };
-        Self::abort_task(preload_task);
+        self.dispose_account_reset(reset);
         self.stop_task(task);
         self.stop_event_bus(bundle);
-        if let Some(mirror) = &mirror {
-            mirror.set_playback_active(false);
-        }
         drop(mirror);
         drop(client);
         // Routed through `session_lock` so a `refresh_server_version_once`
@@ -904,22 +1146,19 @@ impl JellybeamCore {
             list.sessions[ix].clone()
         };
 
-        let (old_mirror, old_task, old_bundle, preload_task) = {
+        let (old_mirror, old_task, old_bundle, reset) = {
             let mut state = self.lock_state();
-            let preload_task = Self::reset_account_state_locked(&mut state);
+            let reset = Self::reset_account_state_locked(&mut state, AccountChange::Replace);
             (
                 state.mirror.take(),
                 state.listener_task.take(),
                 state.event_bus.take(),
-                preload_task,
+                reset,
             )
         };
-        Self::abort_task(preload_task);
+        self.dispose_account_reset(reset);
         self.stop_task(old_task);
         self.stop_event_bus(old_bundle);
-        if let Some(old_mirror) = &old_mirror {
-            old_mirror.set_playback_active(false);
-        }
         drop(old_mirror);
 
         let identity = Self::saved_identity(&target);
@@ -973,35 +1212,49 @@ impl JellybeamCore {
         };
 
         if removed_active {
-            let (client, mirror, task, bundle, reporting, preload_task) = {
+            let (client, mirror, task, bundle, reset) = {
                 let mut state = self.lock_state();
+                // First, while `mirror_dir` still names the account leaving.
+                let reset = Self::reset_account_state_locked(&mut state, AccountChange::Leave);
                 state.mirror_dir = None;
                 // Cleared alongside `client` -- same reasoning as
                 // `sign_out`'s own comment on this field.
                 state.server_version = None;
                 state.server_name = None;
-                state.local_progress_checkpoint.reset();
-                let preload_task = Self::reset_account_state_locked(&mut state);
                 (
                     state.client.take(),
                     state.mirror.take(),
                     state.listener_task.take(),
                     state.event_bus.take(),
-                    state.reporting.take(),
-                    preload_task,
+                    reset,
                 )
             };
-            Self::abort_task(preload_task);
-            if let Some(reporting) = reporting {
-                reporting.abandon();
-            }
+            self.dispose_account_reset(reset);
             self.stop_task(task);
             self.stop_event_bus(bundle);
-            if let Some(mirror) = &mirror {
-                mirror.set_playback_active(false);
-            }
             drop(mirror);
             drop(client);
+        } else {
+            // docs/18 §2.1: removing the account a parked playback plays on ends that playback.
+            let ended = {
+                let mut state = self.lock_state();
+                let owner = &mut state.playback_owner;
+                let parked_on_removed = owner
+                    .parked
+                    .as_ref()
+                    .is_some_and(|parked| parked.is_account(Some(&removed.mirror_dir)));
+                if !parked_on_removed {
+                    None
+                } else if owner.parked_plays() {
+                    Some(Self::end_playback_locked(&mut state))
+                } else {
+                    owner.parked = None;
+                    None
+                }
+            };
+            if let Some(ended) = ended {
+                self.dispose_account_reset(ended);
+            }
         }
 
         self.remove_mirror_dir_if_safe(&removed.mirror_dir);
@@ -1213,6 +1466,18 @@ impl JellybeamCore {
         Ok(mirror.card_by_id(&canonical_item_id).map(Card::from))
     }
 
+    /// [`Self::card_by_id`] for many ids in one call: the known cards in the order asked, unknown
+    /// ids dropped. Backs a screen re-reading the cards it already shows (docs/11 §Person page).
+    pub fn cards_by_ids(&self, item_ids: Vec<String>) -> Result<Vec<Card>, CoreError> {
+        let mirror = self.require_mirror()?;
+        let ids: Vec<String> = item_ids.iter().map(|id| canonicalize_item_id(id)).collect();
+        Ok(mirror
+            .cards_by_ids(&ids)
+            .into_iter()
+            .map(Card::from)
+            .collect())
+    }
+
     pub fn item_count(&self) -> i64 {
         self.require_mirror().map(|m| m.item_count()).unwrap_or(0)
     }
@@ -1241,17 +1506,18 @@ impl JellybeamCore {
             .unwrap_or(SyncStatus::Idle)
     }
 
+    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
     pub fn image_url(
         &self,
         item_id: String,
         kind: ImageKind,
         tag: String,
         max_width: u32,
+        account_epoch: Option<u64>,
     ) -> Result<String, CoreError> {
         let client = self
-            .lock_state()
+            .read_account(account_epoch)?
             .client
-            .clone()
             .ok_or(CoreError::NotSignedIn)?;
         Ok(client.image_url(&item_id, kind.into(), &tag, max_width))
     }
@@ -1266,13 +1532,15 @@ impl JellybeamCore {
     /// [`crate::trickplay_locate`]'s result. `media_source_id` is not
     /// threaded through: the server resolves the tile sheet from `item_id` +
     /// `width` alone for the common single-source case.
+    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
     pub fn trickplay_tile_url(
         &self,
         item_id: String,
         width: u32,
         image_index: u32,
+        account_epoch: Option<u64>,
     ) -> Option<String> {
-        let client = self.lock_state().client.clone()?;
+        let client = self.read_account(account_epoch).ok()?.client?;
         Some(client.trickplay_tile_url(&item_id, width, image_index, None))
     }
 
@@ -1282,11 +1550,15 @@ impl JellybeamCore {
     /// §8b). `MediaSources` is requested explicitly -- without it the server
     /// omits media sources and both fields come back `None` regardless.
     /// Deliberately narrow: full detail belongs to [`Self::get_item_detail`].
-    pub fn get_playback_osd_detail(&self, item_id: String) -> Result<PlaybackOsdDetail, CoreError> {
+    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
+    pub fn get_playback_osd_detail(
+        &self,
+        item_id: String,
+        account_epoch: Option<u64>,
+    ) -> Result<PlaybackOsdDetail, CoreError> {
         let client = self
-            .lock_state()
+            .read_account(account_epoch)?
             .client
-            .clone()
             .ok_or(CoreError::NotSignedIn)?;
 
         let dto = self.runtime.block_on(async {
@@ -1324,11 +1596,15 @@ impl JellybeamCore {
     /// Requires a signed-in client ([`CoreError::NotSignedIn`]), no open
     /// mirror. Errors ([`CoreError::Api`]) rather than degrading to a
     /// default, unlike [`Self::get_media_segments`]: worth surfacing.
-    pub fn get_item_detail(&self, item_id: String) -> Result<ItemDetail, CoreError> {
+    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
+    pub fn get_item_detail(
+        &self,
+        item_id: String,
+        account_epoch: Option<u64>,
+    ) -> Result<ItemDetail, CoreError> {
         let client = self
-            .lock_state()
+            .read_account(account_epoch)?
             .client
-            .clone()
             .ok_or(CoreError::NotSignedIn)?;
 
         let dto = self.runtime.block_on(async {
@@ -1442,8 +1718,13 @@ impl JellybeamCore {
     /// unlike [`Self::get_item_detail`]: not signed in, a 404 (older server),
     /// or any other error all degrade to an empty list -- a markers fetch
     /// failing must never block or error out playback.
-    pub fn get_media_segments(&self, item_id: String) -> Vec<MediaSegment> {
-        let Some(client) = self.lock_state().client.clone() else {
+    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
+    pub fn get_media_segments(
+        &self,
+        item_id: String,
+        account_epoch: Option<u64>,
+    ) -> Vec<MediaSegment> {
+        let Some(client) = self.read_account(account_epoch).ok().and_then(|a| a.client) else {
             return Vec::new();
         };
         self.runtime
@@ -1468,12 +1749,14 @@ impl JellybeamCore {
     /// Fails open to `None`, same non-fatal contract as
     /// [`Self::get_media_segments`]: not signed in, an older server, a
     /// transport hiccup, or genuinely no manifest all look identical here.
+    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
     pub fn get_trickplay(
         &self,
         item_id: String,
         media_source_id: String,
+        account_epoch: Option<u64>,
     ) -> Option<TrickplayMetaFfi> {
-        let client = self.lock_state().client.clone()?;
+        let client = self.read_account(account_epoch).ok()?.client?;
         let trickplay_by_source = self
             .runtime
             .block_on(client.get_items(&jellyfin_api::ItemQuery {
@@ -1489,6 +1772,35 @@ impl JellybeamCore {
             .trickplay;
         playback_policy::trickplay::resolve_trickplay_meta(&trickplay_by_source, &media_source_id)
             .map(TrickplayMetaFfi::from)
+    }
+
+    /// docs/18 §3.2: sidecar `index`'s text for `play_session_id`; `None` on a stale session, an
+    /// unknown index or any failure, logged by class only (the URL carries the token).
+    pub fn fetch_external_subtitle(&self, play_session_id: String, index: i32) -> Option<String> {
+        let (client, url) = {
+            let state = self.lock_state();
+            let url = state
+                .sidecars
+                .as_ref()?
+                .url_for(&play_session_id, index)?
+                .to_string();
+            (Self::playback_account_locked(&state).client?, url)
+        };
+        // Built inside the runtime: tokio's timer panics when created outside one.
+        let fetched = self.runtime.block_on(async {
+            tokio::time::timeout(
+                crate::types::SUBTITLE_FETCH_TIMEOUT,
+                client.fetch_delivery_text(&url, crate::types::SUBTITLE_MAX_BYTES),
+            )
+            .await
+        });
+        let kind = match fetched {
+            Ok(Ok(text)) => return Some(text),
+            Ok(Err(err)) => crate::types::subtitle_failure_kind(&err),
+            Err(_) => "timeout",
+        };
+        tracing::warn!(index, kind, "sidecar subtitle fetch failed");
+        None
     }
 
     /// Registers (or replaces) the change listener. If a mirror is already
@@ -1639,44 +1951,35 @@ impl JellybeamCore {
         &self,
         item_id: String,
         start_from_beginning: bool,
+        request: PlaybackRequest,
     ) -> Result<PlaybackPlan, CoreError> {
-        let (
-            client,
-            mirror,
-            caps,
-            tolerate_mislabeled_levels,
-            quality,
-            cached,
-            joinable_task,
-            stale_task,
-            attempt,
-        ) = {
+        let (admitted, claim) = {
             let mut state = self.lock_state();
-            let client = state.client.clone().ok_or(CoreError::NotSignedIn)?;
-            let mirror = state.mirror.clone().ok_or(CoreError::MirrorNotOpen)?;
+            // docs/18 §2.1: a playback kept across an account change goes on with its own account.
+            let account = Self::account_for_epoch_locked(&state, request.account_epoch)?;
+            let on_current = request.account_epoch == state.playback_owner.account_epoch;
+            let client = account.client.ok_or(CoreError::NotSignedIn)?;
+            let mirror = account.mirror.ok_or(CoreError::MirrorNotOpen)?;
             let caps = state.caps.clone();
             let tolerate_mislabeled_levels = state.settings.tolerate_mislabeled_levels;
             let quality = state.settings.playback_quality;
-            // docs/18-playback-quality.md §2: `playback_generation` is
-            // captured before the network negotiation (state lock released)
-            // so the install step can detect a newer session having already
-            // taken over `state.reporting` meanwhile.
-            let attempt = state.playback_generation;
+            let claim = Self::admit_playback_request(&mut state, request, None)?;
 
             // Single-use regardless of match: a slot for a different item is
             // stale the moment a real call arrives for THIS item -- no
             // reason to keep it for a hypothetical future call.
-            let cached = state
-                .preload_cache
-                .take()
-                .filter(|c| c.is_fresh_for(state.preload_generation, &item_id, Instant::now()));
+            // Preloads negotiate on the current account only.
+            let cached = state.preload_cache.take().filter(|c| {
+                on_current && c.is_fresh_for(state.preload_generation, &item_id, Instant::now())
+            });
 
             // A preload already negotiating THIS item is joined below rather
             // than aborted, so Play reuses its in-flight handshake instead
             // of renegotiating from zero. Anything else (a different item,
             // or nothing in flight) is stale the instant a real call
             // arrives, exactly as before.
-            let same_item = cached.is_none()
+            let same_item = on_current
+                && cached.is_none()
                 && state.preload_target_item_id.as_deref() == Some(item_id.as_str());
             let joinable_task = if same_item {
                 state.preload_task.take()
@@ -1694,7 +1997,7 @@ impl JellybeamCore {
             };
             state.preload_target_item_id = None;
             state.preload_pending = None;
-            (
+            let admitted = AdmittedPlay {
                 client,
                 mirror,
                 caps,
@@ -1703,109 +2006,15 @@ impl JellybeamCore {
                 cached,
                 joinable_task,
                 stale_task,
-                attempt,
-            )
+            };
+            (admitted, claim)
         };
-        // Abort is deliberately not awaited: Play must enter its own
-        // critical path immediately. The generation gate already prevents
-        // the cancelled task from publishing even mid-poll.
-        Self::abort_task(stale_task);
-
-        // Same-item join: block on the negotiation already talking to the
-        // server, then consume whatever it published -- the same single-use
-        // read a fresh cache hit would do, just delayed instead of skipped.
-        // A miss (the target changed underneath it, or it resolved to a
-        // Transcode plan, which is never cached) falls through to a normal
-        // negotiation below exactly like an expired cache entry would.
-        let cached = if let Some(task) = joinable_task {
-            let _ = self.runtime.block_on(task);
-            let mut state = self.lock_state();
-            state
-                .preload_cache
-                .take()
-                .filter(|c| c.is_fresh_for(state.preload_generation, &item_id, Instant::now()))
-        } else {
-            cached
-        };
-
-        let dto = self.fetch_item_dto(&client, &mirror, &item_id)?;
-        refuse_if_virtual(&item_id, &dto)?;
-
-        let item_name = dto.name.clone().unwrap_or_default();
-        let item_type = dto
-            .type_
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "Unknown".to_string());
-        let series_id = dto.series_id.map(|id| id.to_string());
-        let series_name = dto.series_name.clone();
-        let parent_index_number = dto.parent_index_number;
-        let index_number = dto.index_number;
-        let start_ticks = resolved_start_ticks(start_from_beginning, &dto);
-
-        let profile =
-            build_android_profile_for_quality(&caps, tolerate_mislabeled_levels, &quality);
-
-        // Outro timing and trickplay never touch this critical path: Kotlin
-        // derives Outro start from its own fire-and-forgotten
-        // `get_media_segments` call, and fetches trickplay separately via
-        // [`Self::get_trickplay`]. `get_playback_info` + `decide_playback`
-        // (skipped on a preload cache hit) are the only network-needing
-        // steps left here.
-        let (source, url, play_session_id, play_method, transcode_reason, server_verdict) = self
-            .negotiate_playback_source(
-                &client,
-                &item_id,
-                &caps,
-                tolerate_mislabeled_levels,
-                quality,
-                &profile,
-                start_ticks,
-                cached,
-            )?;
-
-        let media_source_id = source.id.clone().unwrap_or_default();
-        let report_play_method = match play_method {
-            PlayMethodFfi::DirectPlay => jellyfin_api::ReportPlayMethod::DirectPlay,
-            PlayMethodFfi::Transcode => jellyfin_api::ReportPlayMethod::Transcode,
-        };
-        let ctx = jellyfin_core::ReportContext {
-            item_id: item_id.clone(),
-            media_source_id: media_source_id.clone(),
-            play_session_id: play_session_id.clone(),
-            play_method: report_play_method,
-        };
-        // Started fresh every call, cache hit or not -- a preload never
-        // starts a reporting session. `ReportingSession::start` spawns its
-        // background actor via `tokio::spawn` internally, needing a runtime
-        // context; a cache hit reaches here without entering an async block,
-        // so `self.runtime.enter()` provides that context explicitly.
-        let _runtime_guard = self.runtime.enter();
-        let session = jellyfin_core::ReportingSession::start(client.clone(), ctx);
-        drop(_runtime_guard);
-        let plan = PlaybackPlan {
-            item_id: item_id.clone(),
-            item_name,
-            url,
-            media_source_id,
-            play_session_id,
-            play_method,
-            transcode_reason,
-            server_verdict,
-            transcode_fallback_allowed: quality != PlaybackQuality::DirectPlay,
-            start_position_ticks: start_ticks.unwrap_or(0),
-            runtime_ticks: source.run_time_ticks,
-            container: source.container.clone(),
-            item_type,
-            series_name,
-            parent_index_number,
-            index_number,
-            series_id,
-        };
-
-        self.install_prepared_session(attempt, session)?;
-        mirror.set_playback_active(true); // see `Mirror::set_playback_active`'s own doc comment
-
-        Ok(plan)
+        // A failed negotiation undoes its admission (docs/18 §2.1).
+        let result = self.negotiate_admitted(item_id, start_from_beginning, admitted, &claim);
+        if result.is_err() {
+            self.release_claim(&claim);
+        }
+        result
     }
 
     /// Focus-dwell preload (`Settings::preload_on_focus`, default on):
@@ -1826,9 +2035,12 @@ impl JellybeamCore {
     /// `prepare_playback` aborts any unfinished speculation first, and each
     /// request's generation is checked before publishing, so a cancellation,
     /// account swap, or profile change can never be undone by a late response.
-    pub fn preload_playback(&self, item_id: String) {
+    /// `account_epoch` names the player's account; a preload only ever runs on the current one.
+    pub fn preload_playback(&self, item_id: String, account_epoch: Option<u64>) {
         let mut state = self.lock_state();
-        if !state.settings.preload_on_focus {
+        if !state.settings.preload_on_focus
+            || account_epoch.is_some_and(|epoch| epoch != state.playback_owner.account_epoch)
+        {
             return;
         }
         let Some(client) = state.client.clone() else {
@@ -1897,27 +2109,27 @@ impl JellybeamCore {
     /// checkpoint is genuinely durable if killed right after; called on
     /// Dispatchers.IO, never Media3's playback thread.
     ///
-    /// A no-op (`tracing::warn!`) when no `prepare_playback` call has
-    /// succeeded since the last stop/abandon -- never an error.
-    pub fn report_position(&self, ticks: i64) {
+    /// Only for the session `play_session_id` names: the installed one, or one a pending fallback
+    /// took over (whose stream still plays); a report queued before a stop never reaches another.
+    pub fn report_position(&self, play_session_id: String, ticks: i64) {
         let checkpoint = {
             let mut state = self.lock_state();
-            let item_id = match state.reporting.as_mut() {
-                Some(session) => {
-                    session.on_position(ticks);
-                    session.context().item_id.clone()
-                }
-                None => {
-                    tracing::warn!("report_position called with no active reporting session");
-                    return;
-                }
+            if let Some(retiring) = retiring_session_locked(&mut state, &play_session_id) {
+                retiring.session.on_position(ticks);
+                retiring.reported = Some(ticks);
+                return;
+            }
+            let Some(session) = installed_session_locked(&mut state, &play_session_id) else {
+                return;
             };
+            session.on_position(ticks);
+            let item_id = session.context().item_id.clone();
 
             if state
                 .local_progress_checkpoint
                 .should_commit(ticks, Instant::now())
             {
-                state.mirror.clone().map(|mirror| {
+                Self::playback_account_locked(&state).mirror.map(|mirror| {
                     // Acquired while `state` is still held: see the field's
                     // ordering comment for the stop/checkpoint race this
                     // closes; no path acquires these in the opposite order.
@@ -1945,12 +2157,16 @@ impl JellybeamCore {
         }
     }
 
-    /// Forwards a pause/resume edge to the active reporting session, if any.
-    /// See [`Self::report_position`] for the no-active-session contract.
-    pub fn report_paused(&self, paused: bool) {
-        match self.lock_state().reporting.as_mut() {
-            Some(session) => session.on_pause(paused),
-            None => tracing::warn!("report_paused called with no active reporting session"),
+    /// Forwards a pause/resume edge to the installed session `play_session_id` names, as
+    /// [`Self::report_position`].
+    pub fn report_paused(&self, play_session_id: String, paused: bool) {
+        let mut state = self.lock_state();
+        if let Some(retiring) = retiring_session_locked(&mut state, &play_session_id) {
+            retiring.session.on_pause(paused);
+            return;
+        }
+        if let Some(session) = installed_session_locked(&mut state, &play_session_id) {
+            session.on_pause(paused);
         }
     }
 
@@ -1965,36 +2181,23 @@ impl JellybeamCore {
     /// *different* session became active; a `play_session_id` mismatch is a
     /// lost race, logged at `debug`, returning without touching state.
     pub fn stop_playback(&self, play_session_id: String, position_ticks: i64) {
-        let (session, mirror) = {
+        let (session, account) = {
             let mut state = self.lock_state();
-            let is_current = state
-                .reporting
-                .as_ref()
-                .is_some_and(|active| active.context().play_session_id == play_session_id);
-            if !is_current {
-                tracing::debug!(
-                    play_session_id = %play_session_id,
-                    "stop_playback: play_session_id no longer names the active reporting \
-                     session -- a lost race is expected here, not a caller bug; ignoring"
-                );
-                return;
-            }
-            state.local_progress_checkpoint.reset();
-            let session = state
-                .reporting
-                .take()
-                .expect("is_current just proved this is Some");
-            // See `playback_generation`'s own doc comment: taking the
-            // active session here counts as it "changing hands" (to
-            // nothing), same as a fresh install.
-            state.playback_generation = state.playback_generation.wrapping_add(1);
-            (session, state.mirror.clone())
+            // A retired session is stopped here too: this is where the viewer actually left it.
+            let session = match Self::take_session_or_revoke_locked(&mut state, &play_session_id) {
+                Some(Taken::Active(session) | Taken::Retired(session, _)) => session,
+                None => return,
+            };
+            (session, Self::playback_account_locked(&state))
         };
 
-        if let Some(mirror) = &mirror {
-            mirror.set_playback_active(false);
-        }
-        self.stop_session_and_sync_mirror(session, position_ticks, mirror);
+        Self::stop_session_and_sync_mirror(
+            &self.runtime,
+            &self.playback_write,
+            session,
+            position_ticks,
+            account,
+        );
     }
 
     /// Auto/Cap-mode local-failure transcode fallback
@@ -2004,35 +2207,37 @@ impl JellybeamCore {
     /// refuses outright with [`CoreError::WouldTranscode`], touching neither
     /// network nor session.
     ///
-    /// Otherwise: ends the session (via
-    /// [`Self::stop_session_and_sync_mirror`]), re-negotiates with
+    /// Otherwise: parks the session in `retiring` (ended once: at install,
+    /// stop, abandon, a failed negotiation or an account reset), re-negotiates with
     /// `force_transcode: true` and `StartTimeTicks = position_ticks`,
     /// accepted via [`transcode_url_from_decision`] (`None` ->
     /// `NoPlayableSource`). One fallback per item; a transcode that then
     /// fails is a plain fatal error.
     ///
-    /// `play_session_id` fixes a race: this negotiates with the state lock
-    /// released, so a concurrent [`Self::prepare_playback`] for a different
-    /// item could install its own session first. Guarded twice -- up front (a
-    /// mismatch returns [`CoreError::StalePlaybackSession`] untouched) and
-    /// again via [`State::playback_generation`] after negotiation (a
-    /// mismatch abandons the freshly negotiated session). Kotlin ignores
-    /// that error: playback already moved on.
-    #[allow(clippy::too_many_lines)]
+    /// docs/18 §2.1: `play_session_id` must still name the active session (else
+    /// [`CoreError::StalePlaybackSession`], untouched), and `request` claims ownership while the
+    /// lock is released; a newer request, a stop/abandon of `play_session_id`, or an account reset
+    /// revokes it, and the negotiated session is then never started.
+    // Exported flat: uniffi records would add a type per call for no reader's benefit.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub fn prepare_transcode_fallback(
         &self,
         item_id: String,
         position_ticks: i64,
         reason: String,
         play_session_id: String,
+        failed: Option<FailedTrackFfi>,
+        subtitle_stream_index: Option<i32>,
+        request: PlaybackRequest,
     ) -> Result<PlaybackPlan, CoreError> {
-        let (client, mirror, caps, tolerate_mislabeled_levels, quality, session, generation) = {
+        let (client, mirror, caps, tolerate_mislabeled_levels, quality, media_source_id, claim) = {
             let mut state = self.lock_state();
             if state.settings.playback_quality == PlaybackQuality::DirectPlay {
                 return Err(CoreError::WouldTranscode { reasons: reason });
             }
-            let client = state.client.clone().ok_or(CoreError::NotSignedIn)?;
-            let mirror = state.mirror.clone().ok_or(CoreError::MirrorNotOpen)?;
+            let account = Self::account_for_epoch_locked(&state, request.account_epoch)?;
+            let client = account.client.ok_or(CoreError::NotSignedIn)?;
+            let mirror = account.mirror.ok_or(CoreError::MirrorNotOpen)?;
             let caps = state.caps.clone();
             let tolerate_mislabeled_levels = state.settings.tolerate_mislabeled_levels;
             let quality = state.settings.playback_quality;
@@ -2043,107 +2248,126 @@ impl JellybeamCore {
             if !is_still_current {
                 return Err(CoreError::StalePlaybackSession);
             }
+            let claim = Self::admit_playback_request(&mut state, request, Some(play_session_id))?;
             state.local_progress_checkpoint.reset();
             let session = state
                 .reporting
                 .take()
                 .expect("is_still_current just proved this is Some");
-            let generation = state.playback_generation;
+            // Its sidecars go now: the replacement brings its own, and a session that is only
+            // retiring must not be fetched from.
+            state.sidecars = None;
+            let media_source_id = session.context().media_source_id.clone();
+            // docs/18 §2.1: it keeps reporting until the claim resolves, so it ends where the
+            // viewer left it -- at install, at a stop that revokes the claim, or when superseded.
+            state.playback_owner.retiring = Some(Retiring {
+                seq: claim.seq,
+                session,
+                ticks: position_ticks,
+                reported: None,
+            });
             (
                 client,
                 mirror,
                 caps,
                 tolerate_mislabeled_levels,
                 quality,
-                session,
-                generation,
+                media_source_id,
+                claim,
             )
         };
+        let result = (|| -> Result<PlaybackPlan, CoreError> {
+            let dto = self.fetch_item_dto(&client, &mirror, &item_id)?;
+            let item_name = dto.name.clone().unwrap_or_default();
+            let item_type = dto
+                .type_
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+            let series_id = dto.series_id.map(|id| id.to_string());
+            let series_name = dto.series_name.clone();
+            let parent_index_number = dto.parent_index_number;
+            let index_number = dto.index_number;
 
-        mirror.set_playback_active(false); // resumed once the new session installs
-        self.stop_session_and_sync_mirror(session, position_ticks, Some(mirror.clone()));
+            let profile =
+                build_android_profile_for_quality(&caps, tolerate_mislabeled_levels, &quality);
 
-        let dto = self.fetch_item_dto(&client, &mirror, &item_id)?;
-        let item_name = dto.name.clone().unwrap_or_default();
-        let item_type = dto
-            .type_
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "Unknown".to_string());
-        let series_id = dto.series_id.map(|id| id.to_string());
-        let series_name = dto.series_name.clone();
-        let parent_index_number = dto.parent_index_number;
-        let index_number = dto.index_number;
+            let (play_session_id, decision) = self.negotiate_playback_info(
+                &client,
+                &item_id,
+                &profile,
+                Some(position_ticks),
+                fallback_options(media_source_id, failed, subtitle_stream_index),
+            )?;
+            // See [`transcode_url_from_decision`]'s own doc comment for exactly
+            // which two decision shapes this accepts (a codec-blind source's
+            // `DirectPlay` decision included).
+            let (source, url) = transcode_url_from_decision(&client, &item_id, decision)
+                .ok_or(jellyfin_core::CoreError::NoPlayableSource)?;
 
-        let profile =
-            build_android_profile_for_quality(&caps, tolerate_mislabeled_levels, &quality);
+            let media_source_id = source.id.clone().unwrap_or_default();
+            let ctx = jellyfin_core::ReportContext {
+                item_id: item_id.clone(),
+                media_source_id: media_source_id.clone(),
+                play_session_id: play_session_id.clone(),
+                play_method: jellyfin_api::ReportPlayMethod::Transcode,
+            };
+            let (sidecars, sidecar_tracks) =
+                Self::session_sidecars(&client, &source, &play_session_id);
+            self.install_claimed_session(&claim, &client, ctx, sidecars)?;
 
-        let (play_session_id, decision) = self.negotiate_playback_info(
-            &client,
-            &item_id,
-            &profile,
-            Some(position_ticks),
-            jellyfin_api::PlaybackInfoOptions {
-                force_transcode: true,
-            },
-        )?;
-        // See [`transcode_url_from_decision`]'s own doc comment for exactly
-        // which two decision shapes this accepts (a codec-blind source's
-        // `DirectPlay` decision included).
-        let (source, url) = transcode_url_from_decision(&client, &item_id, decision)
-            .ok_or(jellyfin_core::CoreError::NoPlayableSource)?;
+            let burned_subtitle_index = crate::types::burned_subtitle_index(&url);
+            let plan = PlaybackPlan {
+                item_id: item_id.clone(),
+                item_name,
+                url,
+                media_source_id,
+                play_session_id,
+                play_method: PlayMethodFfi::Transcode,
+                transcode_reason: Some(reason),
+                server_verdict: None,
+                // Always `true` here -- the `DirectPlay`-mode refusal above
+                // already returned for the one value that would make this `false`.
+                transcode_fallback_allowed: quality != PlaybackQuality::DirectPlay,
+                start_position_ticks: position_ticks,
+                runtime_ticks: source.run_time_ticks,
+                container: source.container.clone(),
+                item_type,
+                series_name,
+                parent_index_number,
+                index_number,
+                series_id,
+                external_subtitles: sidecar_tracks,
+                embedded_subtitles: crate::types::embedded_subtitles_of(&source),
+                burned_subtitle_index,
+            };
 
-        let media_source_id = source.id.clone().unwrap_or_default();
-        let ctx = jellyfin_core::ReportContext {
-            item_id: item_id.clone(),
-            media_source_id: media_source_id.clone(),
-            play_session_id: play_session_id.clone(),
-            play_method: jellyfin_api::ReportPlayMethod::Transcode,
-        };
-        let _runtime_guard = self.runtime.enter();
-        let new_session = jellyfin_core::ReportingSession::start(client.clone(), ctx);
-        drop(_runtime_guard);
-
-        // Re-check ownership after the network round trip: a mismatch means
-        // a newer prepare/stop/abandon call already moved `state.reporting`
-        // on, so the just-negotiated session is discarded.
-        let previous = {
-            let mut state = self.lock_state();
-            if state.playback_generation != generation {
-                new_session.abandon();
-                return Err(CoreError::StalePlaybackSession);
+            Ok(plan)
+        })();
+        if result.is_err() {
+            self.release_claim(&claim);
+            // A fallback that never installs releases what it took, if it still holds it.
+            let released = {
+                let mut state = self.lock_state();
+                let account = Self::playback_account_locked(&state);
+                let owner = &mut state.playback_owner;
+                if owner.retiring.as_ref().is_some_and(|r| r.seq == claim.seq) {
+                    owner.retiring.take().map(|retiring| (retiring, account))
+                } else {
+                    None
+                }
+            };
+            if let Some((retiring, account)) = released {
+                let ticks = retiring.left_at();
+                Self::stop_session_and_sync_mirror(
+                    &self.runtime,
+                    &self.playback_write,
+                    retiring.session,
+                    ticks,
+                    account,
+                );
             }
-            let previous = Self::install_reporting_session(&mut state, new_session);
-            state.local_progress_checkpoint.reset();
-            previous
-        };
-        if let Some(previous) = previous {
-            previous.abandon();
         }
-        mirror.set_playback_active(true);
-
-        let plan = PlaybackPlan {
-            item_id: item_id.clone(),
-            item_name,
-            url,
-            media_source_id,
-            play_session_id,
-            play_method: PlayMethodFfi::Transcode,
-            transcode_reason: Some(reason),
-            server_verdict: None,
-            // Always `true` here -- the `DirectPlay`-mode refusal above
-            // already returned for the one value that would make this `false`.
-            transcode_fallback_allowed: quality != PlaybackQuality::DirectPlay,
-            start_position_ticks: position_ticks,
-            runtime_ticks: source.run_time_ticks,
-            container: source.container.clone(),
-            item_type,
-            series_name,
-            parent_index_number,
-            index_number,
-            series_id,
-        };
-
-        Ok(plan)
+        result
     }
 
     /// Discards the active reporting session, *if it is still the one named
@@ -2154,30 +2378,76 @@ impl JellybeamCore {
     /// away. A mismatch is a lost race, logged at `debug`, and returns
     /// without touching state.
     pub fn abandon_playback(&self, play_session_id: String) {
-        let session = {
+        let (taken, account) = {
             let mut state = self.lock_state();
-            let is_current = state
-                .reporting
-                .as_ref()
-                .is_some_and(|active| active.context().play_session_id == play_session_id);
-            if !is_current {
-                tracing::debug!(
-                    play_session_id = %play_session_id,
-                    "abandon_playback: play_session_id no longer names the active reporting \
-                     session -- a lost race is expected here, not a caller bug; ignoring"
-                );
-                return;
-            }
-            state.local_progress_checkpoint.reset();
-            let session = state
-                .reporting
-                .take()
-                .expect("is_current just proved this is Some");
-            // See `playback_generation`'s own doc comment.
-            state.playback_generation = state.playback_generation.wrapping_add(1);
-            session
+            let taken = Self::take_session_or_revoke_locked(&mut state, &play_session_id);
+            (taken, Self::playback_account_locked(&state))
         };
-        session.abandon();
+        match taken {
+            Some(Taken::Active(session)) => session.abandon(),
+            // It played, so it keeps the position the fallback recorded for it.
+            Some(Taken::Retired(session, ticks)) => {
+                Self::stop_session_and_sync_mirror(
+                    &self.runtime,
+                    &self.playback_write,
+                    session,
+                    ticks,
+                    account,
+                );
+            }
+            None => {}
+        }
+    }
+
+    /// docs/18 §2.1: the epoch a [`PlaybackRequest`] must carry; Kotlin re-reads it after every
+    /// account call.
+    pub fn account_epoch(&self) -> u64 {
+        self.lock_state().playback_owner.account_epoch
+    }
+
+    /// docs/18 §2.1: the epoch a live playback kept across an account change still owns
+    /// playback under, beside [`Self::account_epoch`]; Kotlin re-reads it after every account call.
+    pub fn parked_account_epoch(&self) -> Option<u64> {
+        self.lock_state()
+            .playback_owner
+            .parked
+            .as_ref()
+            .map(|parked| parked.epoch)
+    }
+
+    /// docs/18 §2.1: the saved account to re-authorize for a token rejected for `rejected` -- while
+    /// the app uses it (browsed, or a playback runs or negotiates on it), or, for the player's own
+    /// `failed_playback` (its teardown already ended the playback), while it is saved. A playback
+    /// that ended keeps its account for next-up only, and an account switched away from is checked
+    /// again on the way back to it, so `None` otherwise.
+    pub fn reauthorization_account(
+        &self,
+        rejected: AccountIdentity,
+        failed_playback: bool,
+    ) -> Option<AccountInfo> {
+        let in_use: Vec<String> = {
+            let state = self.lock_state();
+            let owner = &state.playback_owner;
+            let running = Self::playback_live_locked(&state) || owner.claim.is_some();
+            let playing = owner
+                .parked
+                .as_ref()
+                .filter(|_| running && owner.parked_plays())
+                .and_then(|parked| parked.account.mirror_dir.clone());
+            state.mirror_dir.iter().cloned().chain(playing).collect()
+        };
+        session::load_list(&self.data_dir)
+            .sessions
+            .into_iter()
+            .find(|saved| {
+                saved.server_url == rejected.server_url && saved.user_id == rejected.user_id
+            })
+            .filter(|saved| failed_playback || in_use.contains(&saved.mirror_dir))
+            .map(|saved| AccountInfo {
+                server_url: saved.server_url,
+                user_id: saved.user_id,
+                user_name: saved.user_name,
+            })
     }
 
     /// Credits-aware next-up: for an `Episode` in the mirror, the next
@@ -2206,25 +2476,28 @@ impl JellybeamCore {
     /// mirror is always tried first; a live series query is used only when
     /// the mirror cannot place the current item at all, restoring controls
     /// for externally launched/fresh items without routine network load.
+    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
     pub fn episode_neighbors(
         &self,
         item_id: String,
         series_id: String,
+        account_epoch: Option<u64>,
     ) -> Option<EpisodeNeighbors> {
+        let account = self.read_account(account_epoch).ok()?;
         // Intent/deep-link ids commonly arrive as 32 compact hex digits,
         // while Jellyfin DTO UUIDs stringify with hyphens. Use one canonical
         // spelling for mirror keys/server params/response match, or a
         // successful adjacent-episode response is discarded.
         let canonical_item_id = canonicalize_item_id(&item_id);
-        if let Ok(mirror) = self.require_mirror() {
+        if let Some(mirror) = &account.mirror {
             if let Some(neighbors) =
-                crate::next_episode::episode_neighbors(&mirror, &canonical_item_id)
+                crate::next_episode::episode_neighbors(mirror, &canonical_item_id)
             {
                 return Some(neighbors);
             }
         }
 
-        let client = self.lock_state().client.clone()?;
+        let client = account.client?;
         let mut episodes = self
             .runtime
             .block_on(client.get_adjacent_episodes(
@@ -2613,10 +2886,38 @@ type NegotiatedSource = (
 );
 
 impl JellybeamCore {
+    /// docs/18 §3.2: `source`'s sidecars for [`Self::fetch_external_subtitle`], installed with
+    /// the session they belong to ([`Self::install_reporting_session`]), and their descriptors
+    /// for the plan.
+    fn session_sidecars(
+        client: &jellyfin_api::JellyfinClient,
+        source: &jellyfin_api::models::MediaSourceInfo,
+        play_session_id: &str,
+    ) -> (
+        Option<crate::types::SessionSidecars>,
+        Vec<crate::types::ExternalSubtitleFfi>,
+    ) {
+        let sources = crate::types::external_subtitles_of(source, |u| client.delivery_url(u));
+        let tracks = sources.iter().map(|s| s.track.clone()).collect();
+        let sidecars = (!sources.is_empty()).then(|| crate::types::SessionSidecars {
+            play_session_id: play_session_id.to_string(),
+            sources,
+        });
+        (sidecars, tracks)
+    }
+
     /// `pub(crate)` so `seerr.rs`'s sibling `impl JellybeamCore` block can
     /// read/write `State::seerr` the same way every method in this file does.
-    pub(crate) fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    /// The signed-in client, cloned out of the state lock; `NotSignedIn` before sign-in.
+    pub(crate) fn require_client(&self) -> Result<jellyfin_api::JellyfinClient, CoreError> {
+        self.lock_state()
+            .client
+            .clone()
+            .ok_or(CoreError::NotSignedIn)
+    }
+
+    pub(crate) fn lock_state(&self) -> StateGuard<'_> {
+        self.state.lock()
     }
 
     /// `pub(crate)` accessor for `seerr.rs`'s config-store path; see
@@ -2646,11 +2947,265 @@ impl JellybeamCore {
     /// invalidates any in-flight preload -- shared by every path that signs
     /// in, switches, or removes an account, so none of them can leave a
     /// previous account's cache readable under the new one.
-    fn reset_account_state_locked(state: &mut State) -> Option<tokio::task::JoinHandle<()>> {
+    /// Called before the caller replaces the client or mirror: it captures the outgoing account.
+    /// docs/18 §2.1: the epoch advances either way; a live playback is parked on its own account,
+    /// unless `change` leaves the account it plays on, which ends it.
+    fn reset_account_state_locked(state: &mut State, change: AccountChange) -> AccountReset {
+        let outgoing = SessionAccount::of(state);
         state.seerr = None;
         state.collections = None;
         state.is_admin = None;
-        Self::invalidate_preload_locked(state)
+        let owner = &state.playback_owner;
+        // The newest playback is on the outgoing account, or on a parked one that came back.
+        let playing_here = owner.playing_epoch == Some(owner.account_epoch);
+        let parked_here = owner
+            .parked
+            .as_ref()
+            .is_some_and(|parked| parked.is_account(outgoing.mirror_dir.as_deref()));
+        let parked_plays = owner.parked_plays();
+        let preload_task = Self::invalidate_preload_locked(state);
+        let leaving = change == AccountChange::Leave;
+        let mut reset = if leaving && (playing_here || parked_here && parked_plays) {
+            Self::end_playback_locked(state)
+        } else {
+            let owner = &mut state.playback_owner;
+            if playing_here {
+                // A newer playback than any parked one: it alone keeps its account.
+                owner.parked = Some(ParkedAccount {
+                    epoch: owner.account_epoch,
+                    account: outgoing,
+                });
+            } else if leaving && parked_here {
+                owner.parked = None;
+            } else if let Some(parked) = owner.parked.as_mut().filter(|_| parked_here) {
+                // The parked account is leaving again: keep its freshest client (a re-sign-in's).
+                parked.account = parked.account.refreshed_by(outgoing);
+            }
+            AccountReset {
+                preload_task: None,
+                reporting: None,
+                retiring: None,
+                account: Self::playback_account_locked(state),
+            }
+        };
+        reset.preload_task = preload_task;
+        state.playback_owner.account_epoch = state.playback_owner.account_epoch.wrapping_add(1);
+        reset
+    }
+
+    /// docs/18 §2.1: ends the live playback -- its claim, sessions and sidecars -- for disposal
+    /// outside the lock with the account they belong to.
+    fn end_playback_locked(state: &mut State) -> AccountReset {
+        let account = Self::playback_account_locked(state);
+        let owner = &mut state.playback_owner;
+        owner.claim = None;
+        owner.installed_replaces = None;
+        owner.parked = None;
+        owner.playing_epoch = None;
+        let retiring = owner.retiring.take();
+        state.sidecars = None;
+        state.local_progress_checkpoint.reset();
+        AccountReset {
+            preload_task: None,
+            reporting: state.reporting.take(),
+            retiring,
+            account,
+        }
+    }
+
+    /// docs/18 §2.1: whether a stream plays -- an installed session, or the one a fallback took
+    /// over -- which every account's sync yields to. A negotiation alone streams nothing yet.
+    fn playback_live_locked(state: &State) -> bool {
+        state.reporting.is_some() || state.playback_owner.retiring.is_some()
+    }
+
+    /// docs/18 §2.1: a negotiation that fails undoes its admission if it still holds its claim,
+    /// so a playback that never started neither owns playback nor gets parked by a switch.
+    fn release_claim(&self, claim: &PlaybackClaim) {
+        let mut state = self.lock_state();
+        let owner = &mut state.playback_owner;
+        if owner.claim.as_ref() == Some(claim) {
+            owner.claim = None;
+            owner.playing_epoch = claim.prior_playing_epoch;
+        }
+    }
+
+    /// [`Self::prepare_playback`] once `claim` is admitted: negotiates and installs its session.
+    fn negotiate_admitted(
+        &self,
+        item_id: String,
+        start_from_beginning: bool,
+        admitted: AdmittedPlay,
+        claim: &PlaybackClaim,
+    ) -> Result<PlaybackPlan, CoreError> {
+        let AdmittedPlay {
+            client,
+            mirror,
+            caps,
+            tolerate_mislabeled_levels,
+            quality,
+            cached,
+            joinable_task,
+            stale_task,
+        } = admitted;
+        // Abort is deliberately not awaited: Play must enter its own
+        // critical path immediately. The generation gate already prevents
+        // the cancelled task from publishing even mid-poll.
+        Self::abort_task(stale_task);
+
+        // Same-item join: block on the negotiation already talking to the
+        // server, then consume whatever it published -- the same single-use
+        // read a fresh cache hit would do, just delayed instead of skipped.
+        // A miss (the target changed underneath it, or it resolved to a
+        // Transcode plan, which is never cached) falls through to a normal
+        // negotiation below exactly like an expired cache entry would.
+        let cached = if let Some(task) = joinable_task {
+            let _ = self.runtime.block_on(task);
+            let mut state = self.lock_state();
+            state
+                .preload_cache
+                .take()
+                .filter(|c| c.is_fresh_for(state.preload_generation, &item_id, Instant::now()))
+        } else {
+            cached
+        };
+
+        let dto = self.fetch_item_dto(&client, &mirror, &item_id)?;
+        refuse_if_virtual(&item_id, &dto)?;
+
+        let item_name = dto.name.clone().unwrap_or_default();
+        let item_type = dto
+            .type_
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let series_id = dto.series_id.map(|id| id.to_string());
+        let series_name = dto.series_name.clone();
+        let parent_index_number = dto.parent_index_number;
+        let index_number = dto.index_number;
+        let start_ticks = resolved_start_ticks(start_from_beginning, &dto);
+
+        let profile =
+            build_android_profile_for_quality(&caps, tolerate_mislabeled_levels, &quality);
+
+        // Outro timing and trickplay never touch this critical path: Kotlin
+        // derives Outro start from its own fire-and-forgotten
+        // `get_media_segments` call, and fetches trickplay separately via
+        // [`Self::get_trickplay`]. `get_playback_info` + `decide_playback`
+        // (skipped on a preload cache hit) are the only network-needing
+        // steps left here.
+        let (source, url, play_session_id, play_method, transcode_reason, server_verdict) = self
+            .negotiate_playback_source(
+                &client,
+                &item_id,
+                &caps,
+                tolerate_mislabeled_levels,
+                quality,
+                &profile,
+                start_ticks,
+                cached,
+            )?;
+
+        let media_source_id = source.id.clone().unwrap_or_default();
+        let report_play_method = match play_method {
+            PlayMethodFfi::DirectPlay => jellyfin_api::ReportPlayMethod::DirectPlay,
+            PlayMethodFfi::Transcode => jellyfin_api::ReportPlayMethod::Transcode,
+        };
+        let ctx = jellyfin_core::ReportContext {
+            item_id: item_id.clone(),
+            media_source_id: media_source_id.clone(),
+            play_session_id: play_session_id.clone(),
+            play_method: report_play_method,
+        };
+        // Started fresh every call, cache hit or not -- a preload never starts a reporting session.
+        let (sidecars, sidecar_tracks) = Self::session_sidecars(&client, &source, &play_session_id);
+        self.install_claimed_session(claim, &client, ctx, sidecars)?;
+        let burned_subtitle_index = crate::types::burned_subtitle_index(&url);
+        let plan = PlaybackPlan {
+            item_id: item_id.clone(),
+            item_name,
+            url,
+            media_source_id,
+            play_session_id,
+            play_method,
+            transcode_reason,
+            server_verdict,
+            transcode_fallback_allowed: quality != PlaybackQuality::DirectPlay,
+            start_position_ticks: start_ticks.unwrap_or(0),
+            runtime_ticks: source.run_time_ticks,
+            container: source.container.clone(),
+            item_type,
+            series_name,
+            parent_index_number,
+            index_number,
+            series_id,
+            external_subtitles: sidecar_tracks,
+            embedded_subtitles: crate::types::embedded_subtitles_of(&source),
+            burned_subtitle_index,
+        };
+
+        Ok(plan)
+    }
+
+    /// The account the live playback's sessions belong to: the parked one, else the current.
+    fn playback_account_locked(state: &State) -> SessionAccount {
+        state
+            .playback_owner
+            .parked
+            .as_ref()
+            .map_or_else(|| SessionAccount::of(state), |parked| parked.resolve(state))
+    }
+
+    /// docs/18 §2.1: the account a request minted under `epoch` plays on -- the current one, or
+    /// the parked one its playback kept; any other epoch is [`CoreError::AccountChanged`].
+    fn account_for_epoch_locked(state: &State, epoch: u64) -> Result<SessionAccount, CoreError> {
+        if epoch == state.playback_owner.account_epoch {
+            return Ok(SessionAccount::of(state));
+        }
+        state
+            .playback_owner
+            .parked
+            .as_ref()
+            .filter(|parked| parked.epoch == epoch)
+            .map(|parked| parked.resolve(state))
+            .ok_or(CoreError::AccountChanged)
+    }
+
+    /// [`Self::account_for_epoch_locked`] for a player read; `None` is the current account.
+    fn read_account(&self, epoch: Option<u64>) -> Result<SessionAccount, CoreError> {
+        let state = self.lock_state();
+        match epoch {
+            None => Ok(SessionAccount::of(&state)),
+            Some(epoch) => Self::account_for_epoch_locked(&state, epoch),
+        }
+    }
+
+    /// Outside the lock: aborts the preload and ends the outgoing sessions with the same final
+    /// writes as a stop (report, mirror, mark-played), to the outgoing account. The installed one
+    /// ends at its last reported position (at most a second old); with none reported yet it is
+    /// abandoned instead, since a Stopped at 0 would overwrite the resume point.
+    fn dispose_account_reset(&self, reset: AccountReset) {
+        Self::abort_task(reset.preload_task);
+        let end = |session, ticks| {
+            Self::stop_session_and_sync_mirror(
+                &self.runtime,
+                &self.playback_write,
+                session,
+                ticks,
+                reset.account.clone(),
+            );
+        };
+        if let Some(retiring) = reset.retiring {
+            let ticks = retiring.left_at();
+            end(retiring.session, ticks);
+        }
+        match reset.reporting {
+            Some(session) if session.last_position() > 0 => {
+                let ticks = session.last_position();
+                end(session, ticks);
+            }
+            Some(session) => session.abandon(),
+            None => {}
+        }
     }
 
     fn abort_task(task: Option<tokio::task::JoinHandle<()>>) {
@@ -2662,11 +3217,11 @@ impl JellybeamCore {
     /// Drains one active request followed by at most the latest replacement
     /// target; a focus change can replace `preload_pending` again but never
     /// creates a second network worker.
-    async fn run_preload_worker(shared_state: Arc<Mutex<State>>, mut request: PreloadRequest) {
+    async fn run_preload_worker(shared_state: Arc<SharedState>, mut request: PreloadRequest) {
         loop {
             let generation = request.generation;
             let cache = Self::build_preload_cache(&request).await;
-            let mut state = shared_state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = shared_state.lock();
             if state.preload_generation == generation {
                 state.preload_task = None;
                 state.preload_target_item_id = None;
@@ -2762,49 +3317,131 @@ impl JellybeamCore {
         }
     }
 
-    /// Installs `session` as the active reporting session and bumps
-    /// `playback_generation` in the same locked step, so the two can never
-    /// drift. Returns whatever session was previously active; the caller
-    /// abandons it.
-    fn install_reporting_session(
+    /// docs/18 §2.1: admits `request` as the playback owner. A request from another account epoch
+    /// is refused as [`CoreError::AccountChanged`]; one not newer than the last admitted as stale.
+    /// `retires` names the session a fallback stopped, so a late stop/abandon of it can revoke.
+    fn admit_playback_request(
         state: &mut State,
-        session: jellyfin_core::ReportingSession,
-    ) -> Option<jellyfin_core::ReportingSession> {
-        state.playback_generation = state.playback_generation.wrapping_add(1);
-        state.reporting.replace(session)
+        request: PlaybackRequest,
+        retires: Option<String>,
+    ) -> Result<PlaybackClaim, CoreError> {
+        let owner = &mut state.playback_owner;
+        let parked_epoch = owner.parked.as_ref().map(|parked| parked.epoch);
+        if request.account_epoch != owner.account_epoch
+            && Some(request.account_epoch) != parked_epoch
+        {
+            tracing::warn!(
+                request_epoch = request.account_epoch,
+                current_epoch = owner.account_epoch,
+                "playback request from a previous account epoch refused"
+            );
+            return Err(CoreError::AccountChanged);
+        }
+        if request.seq <= owner.highest_seq {
+            return Err(CoreError::StalePlaybackSession);
+        }
+        owner.highest_seq = request.seq;
+        let claim = PlaybackClaim {
+            seq: request.seq,
+            epoch: request.account_epoch,
+            prior_playing_epoch: owner.playing_epoch.replace(request.account_epoch),
+            retires,
+        };
+        owner.claim = Some(claim.clone());
+        Ok(claim)
     }
 
-    /// docs/18-playback-quality.md §2: guards
-    /// [`Self::prepare_playback`]'s install step against a session that
-    /// finished negotiation late, after a newer call already took over
-    /// `State::reporting`. `attempt` is the generation captured before
-    /// releasing the lock; if it's no longer current, `session` is
-    /// `abandon()`-ed and this returns
-    /// [`CoreError::StalePlaybackSession`] without touching state. On a
-    /// match, installs via [`Self::install_reporting_session`] and resets
-    /// `local_progress_checkpoint`.
-    ///
-    /// Factored out so it can be unit-tested directly with a generation
-    /// bumped in between, without reproducing real network interleaving.
-    fn install_prepared_session(
+    /// docs/18 §2.1: installs a reporting session for `claim` if it is still the owner, starting
+    /// it only then (a refused negotiation never sends Start). The sidecars go in with it, and any
+    /// session still installed is abandoned outside the lock.
+    fn install_claimed_session(
         &self,
-        attempt: u64,
-        session: jellyfin_core::ReportingSession,
+        claim: &PlaybackClaim,
+        client: &jellyfin_api::JellyfinClient,
+        ctx: jellyfin_core::ReportContext,
+        sidecars: Option<crate::types::SessionSidecars>,
     ) -> Result<(), CoreError> {
-        let previous = {
+        let (previous, retired, account) = {
             let mut state = self.lock_state();
-            if state.playback_generation != attempt {
-                drop(state);
-                session.abandon();
+            if state.playback_owner.claim.as_ref() != Some(claim) {
                 return Err(CoreError::StalePlaybackSession);
             }
+            state.playback_owner.claim = None;
+            state.playback_owner.installed_replaces = claim.retires.clone();
+            let retired = state.playback_owner.retiring.take();
+            // `ReportingSession::start` spawns its actor and needs a runtime context, which a
+            // preload cache hit never entered.
+            let session = {
+                let _runtime_guard = self.runtime.enter();
+                jellyfin_core::ReportingSession::start(client.clone(), ctx)
+            };
             state.local_progress_checkpoint.reset();
-            Self::install_reporting_session(&mut state, session)
+            // The sidecars live and die with the session (docs/18 §3.2): one install, one clear.
+            state.sidecars = sidecars;
+            // What it replaces belongs to the playback before it; a claim on the current account
+            // starts a playback of its own, so nothing is parked any more.
+            let account = Self::playback_account_locked(&state);
+            if claim.epoch == state.playback_owner.account_epoch {
+                state.playback_owner.parked = None;
+            }
+            (state.reporting.replace(session), retired, account)
         };
         if let Some(previous) = previous {
             previous.abandon();
         }
+        // The replacement is reporting now, so a session a fallback took over ends -- this claim's
+        // at its position, a superseded claim's as soon as something newer plays.
+        if let Some(retired) = retired {
+            // Its own replacement takes over at the fallback's position; anything newer replaces it
+            // wherever the viewer left it.
+            let ticks = if retired.seq == claim.seq {
+                retired.ticks
+            } else {
+                retired.left_at()
+            };
+            Self::stop_session_and_sync_mirror(
+                &self.runtime,
+                &self.playback_write,
+                retired.session,
+                ticks,
+                account,
+            );
+        }
         Ok(())
+    }
+
+    /// docs/18 §2.1: takes the reporting session if `play_session_id` names it or the session it
+    /// replaced; otherwise revokes a pending fallback that retired that session. Never touches a
+    /// newer request's claim.
+    fn take_session_or_revoke_locked(state: &mut State, play_session_id: &str) -> Option<Taken> {
+        let is_current = state.reporting.as_ref().is_some_and(|active| {
+            active.context().play_session_id == play_session_id
+                || state.playback_owner.installed_replaces.as_deref() == Some(play_session_id)
+        });
+        if !is_current {
+            let owner = &mut state.playback_owner;
+            if owner
+                .claim
+                .as_ref()
+                .is_some_and(|claim| claim.retires.as_deref() == Some(play_session_id))
+            {
+                owner.claim = None;
+                return owner.retiring.take().map(|retiring| {
+                    let ticks = retiring.left_at();
+                    Taken::Retired(retiring.session, ticks)
+                });
+            } else {
+                tracing::debug!(
+                    play_session_id = %play_session_id,
+                    "play_session_id names neither the active session nor a pending fallback -- \
+                     a lost race is expected here, not a caller bug; ignoring"
+                );
+            }
+            return None;
+        }
+        state.local_progress_checkpoint.reset();
+        state.sidecars = None;
+        state.reporting.take().map(Taken::Active)
     }
 
     /// Shared by [`Self::stop_playback`] and
@@ -2817,13 +3454,16 @@ impl JellybeamCore {
     /// `block_on`'d: Kotlin no longer waits for that HTTP round trip before
     /// starting the next item's negotiation. The mirror write below is still
     /// `block_on`'d: a same-item resume must read back the position this
-    /// call is committing.
+    /// call is committing. It takes no `&self`: everything it writes comes from `account`, never
+    /// from the current state, which may already belong to another account.
     fn stop_session_and_sync_mirror(
-        &self,
+        runtime: &tokio::runtime::Runtime,
+        playback_write: &Mutex<()>,
         session: jellyfin_core::ReportingSession,
         position_ticks: i64,
-        mirror: Option<media_cache::Mirror>,
+        account: SessionAccount,
     ) {
+        let SessionAccount { mirror, client, .. } = account;
         let item_id = session.context().item_id.clone();
         // The server recounts an episode's season/series only once the
         // Stopped report lands, and its `UserDataChanged` event omits the
@@ -2838,12 +3478,14 @@ impl JellybeamCore {
         // docs/07 §1: stopping in the credits is a finished watch, so the
         // server marks it played (after Stopped, which would otherwise keep
         // the position) and Next Up moves on.
-        let mark_client = finished.then(|| self.lock_state().client.clone()).flatten();
+        let mark_client = client.filter(|_| finished);
         let stop = session.stop(position_ticks);
         let scope_mirror = mirror.clone();
         let mark_id = item_id.clone();
-        self.runtime.spawn(async move {
-            stop.await;
+        runtime.spawn(async move {
+            // Waits for the Stopped to land, retries included: one arriving later would restore
+            // the position mark-played cleared, and a recount before it reads the old counts.
+            stop.await.settled().await;
             if let Some(client) = mark_client {
                 match client.mark_played(&mark_id).await {
                     Ok(data) => {
@@ -2862,11 +3504,8 @@ impl JellybeamCore {
         });
 
         if let Some(mirror) = mirror {
-            let _write_guard = self
-                .playback_write
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let committed = self.runtime.block_on(mirror.apply_local_user_data_and_wait(
+            let _write_guard = playback_write.lock().unwrap_or_else(|e| e.into_inner());
+            let committed = runtime.block_on(mirror.apply_local_user_data_and_wait(
                 &item_id,
                 position_ticks,
                 finished.then_some(true),
@@ -2987,6 +3626,7 @@ impl JellybeamCore {
                     start_ticks,
                     jellyfin_api::PlaybackInfoOptions {
                         force_transcode: true,
+                        ..Default::default()
                     },
                 )?;
                 let (source, url) = transcode_url_from_decision(client, item_id, decision)
@@ -3212,8 +3852,10 @@ impl JellybeamCore {
             persisted
         };
 
-        let (old_mirror, old_task, old_bundle, old_reporting, listener, preload_task) = {
+        let (old_mirror, old_task, old_bundle, listener, reset) = {
             let mut state = self.lock_state();
+            // First, while `state` still holds the outgoing account.
+            let reset = Self::reset_account_state_locked(&mut state, AccountChange::Replace);
             state.client = Some(client);
             state.mirror_dir = Some(persisted.mirror_dir.clone());
             // docs/13 Server compatibility -- seeded from
@@ -3225,33 +3867,23 @@ impl JellybeamCore {
                 .as_deref()
                 .and_then(|v| v.parse().ok());
             state.server_name = persisted.server_name.clone();
-            state.local_progress_checkpoint.reset();
-            let preload_task = Self::reset_account_state_locked(&mut state);
             let old_mirror = state.mirror.replace(candidate_mirror.clone());
             let old_task = state.listener_task.take();
             let old_bundle = state.event_bus.replace(candidate_bundle);
-            let old_reporting = state.reporting.take();
             (
                 old_mirror,
                 old_task,
                 old_bundle,
-                old_reporting,
                 state.listener.clone(),
-                preload_task,
+                reset,
             )
         };
-        Self::abort_task(preload_task);
-        if let Some(reporting) = old_reporting {
-            reporting.abandon();
-        }
+        self.dispose_account_reset(reset);
         self.stop_task(old_task);
         // Retires whatever bus/forwarder a previous session on this same
         // `JellybeamCore` had running, so a re-entry never leaves a prior
         // reconnect loop running alongside the new one.
         self.stop_event_bus(old_bundle);
-        if let Some(old_mirror) = &old_mirror {
-            old_mirror.set_playback_active(false);
-        }
         drop(old_mirror);
         if let Some(listener) = listener {
             let task = self.spawn_listener_task(candidate_mirror, listener);
@@ -3337,10 +3969,14 @@ impl JellybeamCore {
             Some((bus_handle, bus_forwarder))
         };
 
-        match self
-            .runtime
-            .block_on(media_cache::Mirror::open(dir, client, bundle_rx))
-        {
+        // Read first: a guard in the `match` scrutinee would hold the state lock across the open.
+        let playback_active = self.lock_state().playback_active.clone();
+        match self.runtime.block_on(media_cache::Mirror::open(
+            dir,
+            client,
+            bundle_rx,
+            playback_active,
+        )) {
             Ok(mirror) => {
                 let (handle, forwarder) = real_bus.unzip();
                 Ok((
@@ -3440,7 +4076,7 @@ impl JellybeamCore {
     /// `RecvError::Closed` ends the whole task.
     fn spawn_server_version_reconnect_watch(
         mut bus_rx: tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>,
-        state: Arc<Mutex<State>>,
+        state: Arc<SharedState>,
         data_dir: PathBuf,
         session_lock: Arc<Mutex<()>>,
         runtime: &tokio::runtime::Runtime,
@@ -3458,11 +4094,11 @@ impl JellybeamCore {
                     event = bus_rx.recv() => {
                         match event {
                             Ok(jellyfin_core::BusEvent::Connected) => {
-                                state.lock().unwrap_or_else(|e| e.into_inner()).bus_connected = true;
+                                state.lock().bus_connected = true;
                                 Self::refresh_active_client_server_version(&state, &data_dir, &session_lock).await;
                             }
                             Ok(jellyfin_core::BusEvent::Disconnected) => {
-                                state.lock().unwrap_or_else(|e| e.into_inner()).bus_connected = false;
+                                state.lock().bus_connected = false;
                             }
                             Ok(_) => {}
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -3478,15 +4114,11 @@ impl JellybeamCore {
     /// [`Self::spawn_server_version_reconnect_watch`]: refresh only if a
     /// client is currently installed, against whichever client is active now.
     async fn refresh_active_client_server_version(
-        state: &Arc<Mutex<State>>,
+        state: &Arc<SharedState>,
         data_dir: &Path,
         session_lock: &Arc<Mutex<()>>,
     ) {
-        let client = state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .client
-            .clone();
+        let client = state.lock().client.clone();
         if let Some(client) = client {
             Self::refresh_server_version_once(
                 client,
@@ -3526,7 +4158,7 @@ impl JellybeamCore {
     async fn refresh_server_version_once(
         client: jellyfin_api::JellyfinClient,
         data_dir: PathBuf,
-        state: Arc<Mutex<State>>,
+        state: Arc<SharedState>,
         session_lock: Arc<Mutex<()>>,
     ) {
         // Every install site sets a user id; a client with none has no
@@ -3576,7 +4208,7 @@ impl JellybeamCore {
         version: Option<String>,
         server_name: Option<String>,
         data_dir: PathBuf,
-        state: Arc<Mutex<State>>,
+        state: Arc<SharedState>,
         session_lock: Arc<Mutex<()>>,
     ) {
         let Some(user_id) = client.user_id().map(str::to_string) else {
@@ -3629,7 +4261,7 @@ impl JellybeamCore {
         }
 
         let (version_changed, listener) = {
-            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = state.lock();
             let still_active = state.client.as_ref().is_some_and(|active| {
                 active.base_url() == server_url && active.user_id() == Some(user_id.as_str())
             });
@@ -3735,7 +4367,7 @@ impl JellybeamCore {
 
 impl Drop for JellybeamCore {
     fn drop(&mut self) {
-        let (mirror, client, task, bundle, preload_task, reporting) = {
+        let (mirror, client, task, bundle, preload_task, reporting, parked) = {
             let mut state = self.lock_state();
             (
                 state.mirror.take(),
@@ -3744,8 +4376,11 @@ impl Drop for JellybeamCore {
                 state.event_bus.take(),
                 state.preload_task.take(),
                 state.reporting.take(),
+                state.playback_owner.parked.take(),
             )
         };
+        // The parked account's mirror drops with the current one, before the runtime.
+        drop(parked);
         // A dropped `JellybeamCore` (app process teardown) is not the place to
         // block on a final network round trip -- `abandon` (sync, no I/O)
         // just stops the reporting task's background work, safe regardless
@@ -4120,6 +4755,28 @@ fn resolve_plan(
     }
 }
 
+/// docs/18 §2: the fallback's negotiation -- a forced transcode of the same source that never copies
+/// the stream type that `failed` (an unattributed failure is treated as video, the usual culprit;
+/// `None` is a renegotiation with no failure) and carries the viewer's subtitle stream (§3.1).
+fn fallback_options(
+    media_source_id: String,
+    failed: Option<FailedTrackFfi>,
+    subtitle_stream_index: Option<i32>,
+) -> jellyfin_api::PlaybackInfoOptions {
+    let (video_copy, audio_copy) = match failed {
+        Some(FailedTrackFfi::Video | FailedTrackFfi::Unknown) => (Some(false), None),
+        Some(FailedTrackFfi::Audio) => (None, Some(false)),
+        None => (None, None),
+    };
+    jellyfin_api::PlaybackInfoOptions {
+        force_transcode: true,
+        media_source_id: Some(media_source_id).filter(|id| !id.is_empty()),
+        allow_video_stream_copy: video_copy,
+        allow_audio_stream_copy: audio_copy,
+        subtitle_stream_index,
+    }
+}
+
 /// Accepts either shape of a forced-transcode `PlaybackInfo` negotiation's
 /// [`jellyfin_core::PlaybackDecision`] (docs/18-playback-quality.md §2): a
 /// genuine `Transcode` decision, or a codec-blind `DirectPlay` decision
@@ -4166,6 +4823,64 @@ fn cap_transcode_reason(max_bps: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// (highest admitted seq, current claim, account epoch).
+    fn owner_view(core: &JellybeamCore) -> (u64, Option<PlaybackClaim>, u64) {
+        let owner = &core.lock_state().playback_owner;
+        (owner.highest_seq, owner.claim.clone(), owner.account_epoch)
+    }
+
+    /// Admits the next request directly, as a prepare would before negotiating.
+    fn admit(core: &JellybeamCore) -> PlaybackClaim {
+        let request = core.next_request();
+        JellybeamCore::admit_playback_request(&mut core.lock_state(), request, None)
+            .expect("the next request is admitted")
+    }
+
+    impl JellybeamCore {
+        /// Kotlin's ownership check: the current epoch, or the parked one.
+        fn owns_playback(&self, epoch: u64) -> bool {
+            epoch == self.account_epoch() || self.parked_account_epoch() == Some(epoch)
+        }
+
+        /// The request a Kotlin caller would mint next: one past the highest admitted seq, under
+        /// the current account epoch.
+        fn next_request(&self) -> PlaybackRequest {
+            let state = self.lock_state();
+            PlaybackRequest {
+                seq: state.playback_owner.highest_seq + 1,
+                account_epoch: state.playback_owner.account_epoch,
+            }
+        }
+
+        fn prepare_playback_now(
+            &self,
+            item_id: String,
+            start_from_beginning: bool,
+        ) -> Result<PlaybackPlan, CoreError> {
+            let request = self.next_request();
+            self.prepare_playback(item_id, start_from_beginning, request)
+        }
+
+        fn prepare_transcode_fallback_now(
+            &self,
+            item_id: String,
+            position_ticks: i64,
+            reason: String,
+            play_session_id: String,
+        ) -> Result<PlaybackPlan, CoreError> {
+            let request = self.next_request();
+            self.prepare_transcode_fallback(
+                item_id,
+                position_ticks,
+                reason,
+                play_session_id,
+                Some(FailedTrackFfi::Video),
+                None,
+                request,
+            )
+        }
+    }
+
     use super::*;
 
     fn core_in_tempdir() -> (tempfile::TempDir, Arc<JellybeamCore>) {
@@ -4249,6 +4964,7 @@ mod tests {
                 ImageKind::Primary,
                 "tag".to_string(),
                 200,
+                None,
             )
             .expect_err("no client yet");
         assert!(matches!(err, CoreError::NotSignedIn));
@@ -4300,7 +5016,7 @@ mod tests {
     #[test]
     fn server_display_name_with_nothing_saved_returns_none() {
         let (_dir, core) = core_in_tempdir();
-        assert!(core.server_display_name().is_none());
+        assert!(core.server_display_name(None).is_none());
     }
 
     #[test]
@@ -4318,7 +5034,10 @@ mod tests {
         };
         session::add_or_update(dir.path(), saved).expect("seed a session file");
 
-        assert_eq!(core.server_display_name(), Some("shelf.test".to_string()));
+        assert_eq!(
+            core.server_display_name(None),
+            Some("shelf.test".to_string())
+        );
     }
 
     #[test]
@@ -4348,7 +5067,7 @@ mod tests {
     fn prepare_playback_before_sign_in_is_not_signed_in() {
         let (_dir, core) = core_in_tempdir();
         let err = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect_err("no client yet");
         assert!(matches!(err, CoreError::NotSignedIn));
     }
@@ -4358,7 +5077,7 @@ mod tests {
         // Same precondition gate regardless of the new flag's value.
         let (_dir, core) = core_in_tempdir();
         let err = core
-            .prepare_playback("item-1".to_string(), true)
+            .prepare_playback_now("item-1".to_string(), true)
             .expect_err("no client yet");
         assert!(matches!(err, CoreError::NotSignedIn));
     }
@@ -4367,7 +5086,7 @@ mod tests {
     fn get_item_detail_before_sign_in_is_not_signed_in() {
         let (_dir, core) = core_in_tempdir();
         let err = core
-            .get_item_detail("item-1".to_string())
+            .get_item_detail("item-1".to_string(), None)
             .expect_err("no client yet");
         assert!(matches!(err, CoreError::NotSignedIn));
     }
@@ -4376,7 +5095,7 @@ mod tests {
     fn get_playback_osd_detail_before_sign_in_is_not_signed_in() {
         let (_dir, core) = core_in_tempdir();
         let err = core
-            .get_playback_osd_detail("item-1".to_string())
+            .get_playback_osd_detail("item-1".to_string(), None)
             .expect_err("no client yet");
         assert!(matches!(err, CoreError::NotSignedIn));
     }
@@ -4539,7 +5258,9 @@ mod tests {
     fn get_media_segments_before_sign_in_degrades_to_empty() {
         let (_dir, core) = core_in_tempdir();
         // No client at all -- must fail open (empty list), never panic.
-        assert!(core.get_media_segments("item-1".to_string()).is_empty());
+        assert!(core
+            .get_media_segments("item-1".to_string(), None)
+            .is_empty());
     }
 
     #[test]
@@ -4560,7 +5281,7 @@ mod tests {
         assert!(core.restore_session().is_some());
 
         let err = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect_err("mirror never opened");
         assert!(matches!(err, CoreError::MirrorNotOpen));
     }
@@ -4606,8 +5327,8 @@ mod tests {
         // No prepare_playback ever succeeded: stop/abandon must be silent
         // no-ops (docs/18-playback-quality.md §2), any string exercises the
         // same mismatch path.
-        core.report_position(1234);
-        core.report_paused(true);
+        core.report_position("none".to_string(), 1234);
+        core.report_paused("none".to_string(), true);
         core.abandon_playback("no-active-session".to_string());
         // stop_playback with no mirror open must still return, not panic.
         core.stop_playback("no-active-session".to_string(), 0);
@@ -4622,9 +5343,9 @@ mod tests {
         let (_dir, core, mock) = core_signed_in_against_mock(item_json, direct_play_json);
 
         let plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("initial Direct Play negotiation");
-        let generation_before = core.lock_state().playback_generation;
+        let owner_before = owner_view(&core);
 
         core.stop_playback("not-the-active-session".to_string(), 999);
 
@@ -4639,9 +5360,11 @@ mod tests {
             .as_ref()
             .expect("the real active session must be untouched by the rejected stop");
         assert_eq!(session.context().play_session_id, plan.play_session_id);
+        drop(state);
         assert_eq!(
-            state.playback_generation, generation_before,
-            "a rejected stop must not bump the generation"
+            owner_view(&core),
+            owner_before,
+            "a rejected stop leaves ownership alone"
         );
     }
 
@@ -4652,9 +5375,9 @@ mod tests {
         let (_dir, core, _mock) = core_signed_in_against_mock(item_json, direct_play_json);
 
         let plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("initial Direct Play negotiation");
-        let generation_before = core.lock_state().playback_generation;
+        let owner_before = owner_view(&core);
 
         core.abandon_playback("not-the-active-session".to_string());
 
@@ -4664,9 +5387,11 @@ mod tests {
             .as_ref()
             .expect("the real active session must be untouched by the rejected abandon");
         assert_eq!(session.context().play_session_id, plan.play_session_id);
+        drop(state);
         assert_eq!(
-            state.playback_generation, generation_before,
-            "a rejected abandon must not bump the generation"
+            owner_view(&core),
+            owner_before,
+            "a rejected abandon leaves ownership alone"
         );
     }
 
@@ -6251,6 +6976,16 @@ mod tests {
             self.routes
                 .request_bodies_containing("POST", "/PlaybackInfo")
         }
+
+        /// Holds the `hit_index`-th (zero-based) `PlaybackInfo` reply until the gate opens.
+        fn hold_playback_info(&self, hit_index: usize) -> Gate {
+            self.routes.gate("POST", "/PlaybackInfo", hit_index)
+        }
+
+        /// Start reports received, one per reporting session the core started.
+        fn start_reports(&self) -> usize {
+            self.routes.hit_count("POST", "/Sessions/Playing")
+        }
     }
 
     /// Builds an `/Items` + `/PlaybackInfo` fixture pair for one `MediaSource`.
@@ -6426,7 +7161,7 @@ mod tests {
         let (item_json, playback_json) = direct_play_fixture();
         let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_json);
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_preload_idle(&core);
         assert_eq!(
             mock.playback_info_hit_count(),
@@ -6439,7 +7174,7 @@ mod tests {
         );
 
         let plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("a fresh cache entry should be consumed, not refetched");
         assert_eq!(plan.item_id, "item-1");
         assert_eq!(
@@ -6462,7 +7197,7 @@ mod tests {
         let (item_json, playback_json) = direct_play_fixture();
         let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_json);
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_preload_idle(&core);
         assert_eq!(mock.playback_info_hit_count(), 1);
 
@@ -6475,7 +7210,7 @@ mod tests {
         }
 
         let plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("an expired cache entry should still fall through to a fresh fetch");
         assert_eq!(plan.item_id, "item-1");
         assert_eq!(
@@ -6494,9 +7229,9 @@ mod tests {
             Duration::from_millis(200),
         );
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_playback_info_hits(&mock, 1);
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         std::thread::sleep(Duration::from_millis(30));
 
         assert_eq!(
@@ -6523,10 +7258,10 @@ mod tests {
             Duration::from_millis(150),
         );
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_playback_info_hits(&mock, 1);
-        core.preload_playback("item-2".to_string());
-        core.preload_playback("item-3".to_string());
+        core.preload_playback("item-2".to_string(), None);
+        core.preload_playback("item-3".to_string(), None);
         wait_for_playback_info_hits(&mock, 2);
         wait_for_preload_idle(&core);
         std::thread::sleep(Duration::from_millis(175));
@@ -6554,10 +7289,10 @@ mod tests {
             Duration::from_millis(150),
         );
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_playback_info_hits(&mock, 1);
         let plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("prepare_playback should join the in-flight preload for the same item");
         assert_eq!(plan.item_id, "item-1");
         assert_eq!(
@@ -6590,10 +7325,10 @@ mod tests {
             Duration::from_millis(150),
         );
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_playback_info_hits(&mock, 1);
         let plan = core
-            .prepare_playback("item-2".to_string(), false)
+            .prepare_playback_now("item-2".to_string(), false)
             .expect("the real prepare owns a fresh successful negotiation");
         assert_eq!(plan.item_id, "item-2");
         assert_eq!(
@@ -6612,7 +7347,7 @@ mod tests {
     }
 
     #[test]
-    fn session_restore_aborts_in_flight_preload_and_late_completion_cannot_repopulate_cache() {
+    fn an_account_change_aborts_in_flight_preload_and_late_completion_cannot_repopulate_cache() {
         let (item_json, playback_json) = direct_play_fixture();
         let (_dir, core, mock) = core_signed_in_against_mock_with_delay(
             item_json,
@@ -6620,9 +7355,9 @@ mod tests {
             Duration::from_millis(150),
         );
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_playback_info_hits(&mock, 1);
-        assert!(core.restore_session().is_some());
+        change_account(&core);
         std::thread::sleep(Duration::from_millis(175));
 
         let state = core.lock_state();
@@ -6634,7 +7369,7 @@ mod tests {
     fn profile_setting_change_discards_a_completed_preload() {
         let (item_json, playback_json) = direct_play_fixture();
         let (_dir, core, _mock) = core_signed_in_against_mock(item_json, playback_json);
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_preload_idle(&core);
         assert!(core.lock_state().preload_cache.is_some());
 
@@ -6653,7 +7388,7 @@ mod tests {
         settings.preload_on_focus = false;
         core.set_settings(settings);
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
 
         assert_eq!(
             mock.playback_info_hit_count(),
@@ -6667,7 +7402,7 @@ mod tests {
     fn preload_playback_before_sign_in_is_a_silent_no_op() {
         let (_dir, core) = core_in_tempdir();
         // Must not panic; there is no `Result` to surface an error through.
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         assert!(core.lock_state().preload_cache.is_none());
     }
 
@@ -6687,7 +7422,7 @@ mod tests {
         session::add_or_update(dir.path(), saved).expect("seed a session file");
         assert!(core.restore_session().is_some());
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         assert!(core.lock_state().preload_cache.is_none());
     }
 
@@ -6756,7 +7491,7 @@ mod tests {
         let (item_json, playback_info_json) = transcode_fixture();
         let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_info_json);
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_preload_idle(&core);
 
         assert_eq!(
@@ -6772,7 +7507,7 @@ mod tests {
         // prepare_playback runs its own uncached negotiation as if preload
         // had never run.
         let err = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect_err("Direct Play mode refuses a Transcode decision outright");
         assert!(matches!(err, CoreError::WouldTranscode { .. }));
         assert_eq!(mock.playback_info_hit_count(), 2);
@@ -6788,7 +7523,7 @@ mod tests {
         settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
         core.set_settings(settings);
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
 
         assert_eq!(
             mock.playback_info_hit_count(),
@@ -6809,7 +7544,7 @@ mod tests {
         core.set_settings(settings);
 
         let plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("Cap mode always produces a plan, never WouldTranscode");
 
         assert_eq!(mock.playback_info_hit_count(), 1);
@@ -6839,7 +7574,7 @@ mod tests {
         core.set_settings(settings);
 
         let plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("Cap mode always produces a plan");
         assert_eq!(
             plan.transcode_reason.as_deref(),
@@ -6859,7 +7594,7 @@ mod tests {
         settings.playback_quality = PlaybackQuality::Auto;
         core.set_settings(settings);
 
-        core.preload_playback("item-1".to_string());
+        core.preload_playback("item-1".to_string(), None);
         wait_for_preload_idle(&core);
         assert_eq!(
             mock.playback_info_hit_count(),
@@ -6880,7 +7615,7 @@ mod tests {
         );
 
         let plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("Cap mode always produces a plan, not an error");
         assert_eq!(
             mock.playback_info_hit_count(),
@@ -6909,7 +7644,7 @@ mod tests {
         // No active session exists, so `play_session_id` is unreachable --
         // the DirectPlay-mode refusal returns first.
         let err = core
-            .prepare_transcode_fallback(
+            .prepare_transcode_fallback_now(
                 "item-1".to_string(),
                 50_000_000,
                 "decoder error".to_string(),
@@ -6940,14 +7675,13 @@ mod tests {
         core.set_settings(settings);
 
         let first_plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("initial Direct Play negotiation");
         assert_eq!(first_plan.play_method, PlayMethodFfi::DirectPlay);
         assert_eq!(mock.playback_info_hit_count(), 1);
-        let generation_after_prepare_playback = core.lock_state().playback_generation;
 
         let fallback_plan = core
-            .prepare_transcode_fallback(
+            .prepare_transcode_fallback_now(
                 "item-1".to_string(),
                 12_345_678,
                 "decoder error".to_string(),
@@ -6956,12 +7690,10 @@ mod tests {
             .expect("Auto mode should negotiate a real transcode");
 
         assert_eq!(mock.playback_info_hit_count(), 2);
-        // A successful install always bumps `playback_generation`, exactly
-        // like every other session handoff.
         assert_eq!(
-            core.lock_state().playback_generation,
-            generation_after_prepare_playback.wrapping_add(1),
-            "installing the fallback's fresh session must bump the generation"
+            core.lock_state().playback_owner.claim,
+            None,
+            "an install consumes its claim"
         );
         assert_eq!(fallback_plan.play_method, PlayMethodFfi::Transcode);
         assert_eq!(
@@ -7016,11 +7748,11 @@ mod tests {
         core.set_settings(settings);
 
         let first_plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("initial Direct Play negotiation");
 
         let err = core
-            .prepare_transcode_fallback(
+            .prepare_transcode_fallback_now(
                 "item-1".to_string(),
                 1_000_000,
                 "decoder error".to_string(),
@@ -7029,6 +7761,43 @@ mod tests {
             .expect_err("a DirectPlay decision from a forced negotiation must error");
         assert!(matches!(err, CoreError::Api { .. }));
         assert_eq!(mock.playback_info_hit_count(), 2);
+    }
+
+    /// docs/18 §3.2: a fallback stops the old session on its way in, so a fallback that then
+    /// fails leaves no session and must leave no sidecars either; the old id can't fetch.
+    #[test]
+    fn a_failed_transcode_fallback_leaves_no_sidecars_behind_for_the_stopped_session() {
+        let (item_json, direct_play_json) = direct_play_fixture();
+        let (_dir, core, _mock) = core_signed_in_against_mock_with_responses(
+            item_json,
+            vec![direct_play_json.clone(), direct_play_json],
+            Duration::ZERO,
+        );
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Auto;
+        core.set_settings(settings);
+        let first_plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("initial Direct Play negotiation");
+        core.lock_state().sidecars = Some(test_sidecars(&first_plan.play_session_id));
+
+        core.prepare_transcode_fallback_now(
+            "item-1".to_string(),
+            1_000_000,
+            "decoder error".to_string(),
+            first_plan.play_session_id.clone(),
+        )
+        .expect_err("a DirectPlay decision from a forced negotiation must error");
+
+        let state = core.lock_state();
+        assert!(state.reporting.is_none(), "the old session was stopped");
+        assert!(state.sidecars.is_none(), "and its sidecars went with it");
+        drop(state);
+        assert!(
+            core.fetch_external_subtitle(first_plan.play_session_id, 3)
+                .is_none(),
+            "the stopped session's id fetches nothing"
+        );
     }
 
     /// A codec-blind source with a `TranscodingUrl` still produces a
@@ -7048,12 +7817,12 @@ mod tests {
         core.set_settings(settings);
 
         let first_plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("initial Direct Play negotiation");
         assert_eq!(mock.playback_info_hit_count(), 1);
 
         let fallback_plan = core
-            .prepare_transcode_fallback(
+            .prepare_transcode_fallback_now(
                 "item-1".to_string(),
                 5_000_000,
                 "decoder error".to_string(),
@@ -7087,7 +7856,7 @@ mod tests {
         core.set_settings(settings);
 
         let first_plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("initial Direct Play negotiation");
         assert_eq!(mock.playback_info_hit_count(), 1);
         assert_ne!(
@@ -7096,7 +7865,7 @@ mod tests {
         );
 
         let err = core
-            .prepare_transcode_fallback(
+            .prepare_transcode_fallback_now(
                 "item-1".to_string(),
                 10_000_000,
                 "decoder error".to_string(),
@@ -7146,14 +7915,14 @@ mod tests {
         core.set_settings(settings);
 
         let first_plan = core
-            .prepare_playback("item-1".to_string(), false)
+            .prepare_playback_now("item-1".to_string(), false)
             .expect("initial Direct Play negotiation for item A");
         assert_eq!(mock.playback_info_hit_count(), 1);
 
         let core_for_fallback = Arc::clone(&core);
         let fallback_session_id = first_plan.play_session_id.clone();
         let fallback_handle = std::thread::spawn(move || {
-            core_for_fallback.prepare_transcode_fallback(
+            core_for_fallback.prepare_transcode_fallback_now(
                 "item-1".to_string(),
                 20_000_000,
                 "decoder error".to_string(),
@@ -7165,9 +7934,11 @@ mod tests {
         // is guaranteed the third arrival.
         wait_for_playback_info_hits(&mock, 2);
 
-        let second_plan = core.prepare_playback("item-2".to_string(), false).expect(
-            "a different item's prepare_playback must succeed while A's fallback negotiates",
-        );
+        let second_plan = core
+            .prepare_playback_now("item-2".to_string(), false)
+            .expect(
+                "a different item's prepare_playback must succeed while A's fallback negotiates",
+            );
         assert_eq!(second_plan.play_method, PlayMethodFfi::DirectPlay);
         assert_eq!(mock.playback_info_hit_count(), 3);
 
@@ -7210,19 +7981,20 @@ mod tests {
         );
 
         let core_for_a = Arc::clone(&core);
-        let a_handle =
-            std::thread::spawn(move || core_for_a.prepare_playback("item-1".to_string(), false));
+        let a_handle = std::thread::spawn(move || {
+            core_for_a.prepare_playback_now("item-1".to_string(), false)
+        });
 
         // Blocks until A's request has reached the mock, so B is guaranteed
         // the second arrival.
         wait_for_playback_info_hits(&mock, 1);
 
         let b_plan = core
-            .prepare_playback("item-2".to_string(), false)
+            .prepare_playback_now("item-2".to_string(), false)
             .expect("a different item's prepare_playback must succeed while A's negotiates");
         assert_eq!(b_plan.play_method, PlayMethodFfi::DirectPlay);
         assert_eq!(mock.playback_info_hit_count(), 2);
-        let generation_after_b = core.lock_state().playback_generation;
+        let owner_after_b = owner_view(&core);
 
         let a_result = a_handle.join().expect("thread A must not panic");
         assert!(
@@ -7241,16 +8013,18 @@ mod tests {
             "the stale A completion must not have clobbered item B's session"
         );
         assert_eq!(session.context().item_id, "item-2");
+        drop(state);
         assert_eq!(
-            state.playback_generation, generation_after_b,
-            "a rejected install must not bump the generation again"
+            owner_view(&core),
+            owner_after_b,
+            "a refused install leaves ownership alone"
         );
     }
 
     /// `install_prepared_session` unit-tested directly: a stale `attempt`
     /// must reject and abandon the session, never install it.
     #[test]
-    fn install_prepared_session_rejects_a_stale_attempt_and_abandons_the_session() {
+    fn install_claimed_session_refuses_a_claim_that_is_no_longer_the_owner() {
         let (dir, core) = core_in_tempdir();
         let client = jellyfin_api::JellyfinClient::from_token(
             "http://example.invalid",
@@ -7263,31 +8037,80 @@ mod tests {
             play_session_id: "attempt-a".to_string(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
         };
-        let attempt = core.lock_state().playback_generation;
-        let session = {
-            let _guard = core.runtime.enter();
-            jellyfin_core::ReportingSession::start(client, ctx)
-        };
+        let older = admit(&core);
+        let _newer = admit(&core);
 
-        // Bumping the generation alone reproduces the guard without a
-        // second real session (two `lock_state()` calls to avoid a
-        // same-statement double-lock deadlock).
-        {
-            let mut state = core.lock_state();
-            state.playback_generation = state.playback_generation.wrapping_add(1);
-        }
-
-        let result = core.install_prepared_session(attempt, session);
+        let result =
+            core.install_claimed_session(&older, &client, ctx, Some(test_sidecars("attempt-a")));
         assert!(
             matches!(result, Err(CoreError::StalePlaybackSession)),
-            "a stale attempt must be rejected, got {result:?}"
+            "a superseded claim must be refused, got {result:?}"
         );
+        let state = core.lock_state();
         assert!(
-            core.lock_state().reporting.is_none(),
+            state.reporting.is_none(),
             "a rejected session must never be installed"
         );
+        assert!(state.sidecars.is_none(), "nor its sidecars");
+        drop(state);
 
         let _dir = dir; // keep the tempdir alive for the duration of this test
+    }
+
+    /// docs/18 §3.2: the sidecars are installed with their session and leave with it, so a fetch
+    /// for a stopped session finds nothing to fetch.
+    #[test]
+    fn sidecars_are_installed_with_the_session_and_cleared_when_it_is_abandoned() {
+        let (dir, core) = core_in_tempdir();
+        let client = jellyfin_api::JellyfinClient::from_token(
+            "http://example.invalid",
+            core.client_identity("http://example.test"),
+            "tok",
+        );
+        let ctx = jellyfin_core::ReportContext {
+            item_id: "item-1".to_string(),
+            media_source_id: "ms-1".to_string(),
+            play_session_id: "attempt-a".to_string(),
+            play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+        };
+        let claim = admit(&core);
+        core.install_claimed_session(&claim, &client, ctx, Some(test_sidecars("attempt-a")))
+            .expect("the current claim installs");
+        assert!(
+            core.lock_state()
+                .sidecars
+                .as_ref()
+                .is_some_and(|s| s.url_for("attempt-a", 3).is_some()),
+            "installed with the session"
+        );
+
+        core.abandon_playback("attempt-a".to_string());
+        assert!(core.lock_state().reporting.is_none());
+        assert!(
+            core.lock_state().sidecars.is_none(),
+            "cleared with the session"
+        );
+
+        let _dir = dir;
+    }
+
+    fn test_sidecars(play_session_id: &str) -> crate::types::SessionSidecars {
+        crate::types::SessionSidecars {
+            play_session_id: play_session_id.to_string(),
+            sources: vec![crate::types::ExternalSubtitleSource {
+                url:
+                    "http://example.invalid/Videos/item-1/ms-1/Subtitles/3/0/Stream.srt?ApiKey=tok"
+                        .to_string(),
+                track: crate::types::ExternalSubtitleFfi {
+                    index: 3,
+                    codec: "srt".to_string(),
+                    language: None,
+                    display_title: None,
+                    is_default: false,
+                    is_forced: false,
+                },
+            }],
+        }
     }
 
     #[test]
@@ -7358,12 +8181,1422 @@ mod tests {
         assert!(core.lock_state().preload_cache.is_none());
     }
 
+    /// docs/18 §2: the fallback renegotiates the same source and never asks for a copy of the
+    /// stream type that failed, so the server re-encodes it.
+    #[test]
+    fn a_fallback_names_its_source_and_forbids_copying_the_failed_stream() {
+        let cases = [
+            (Some(FailedTrackFfi::Video), Some(false), None, Some(-1)),
+            (Some(FailedTrackFfi::Unknown), Some(false), None, Some(2)),
+            (Some(FailedTrackFfi::Audio), None, Some(false), None),
+            (None, None, None, Some(-1)),
+        ];
+        for (failed, video_copy, audio_copy, subtitle) in cases {
+            let (_dir, core, mock) =
+                auto_core(vec![direct_play_fixture().1, transcode_fixture().1]);
+            let a = core
+                .prepare_playback_now("item-1".to_string(), false)
+                .expect("A plays");
+            let request = core.next_request();
+            core.prepare_transcode_fallback(
+                "item-1".to_string(),
+                0,
+                "decoder error".to_string(),
+                a.play_session_id,
+                failed,
+                subtitle,
+                request,
+            )
+            .expect("the fallback negotiates");
+
+            let body = &mock.playback_info_bodies()[1];
+            let flag = |value: Option<bool>| {
+                value.map_or(serde_json::Value::Null, serde_json::Value::Bool)
+            };
+            assert_eq!(body["MediaSourceId"], a.media_source_id, "{failed:?}");
+            assert_eq!(body["AllowVideoStreamCopy"], flag(video_copy), "{failed:?}");
+            assert_eq!(body["AllowAudioStreamCopy"], flag(audio_copy), "{failed:?}");
+            let index = subtitle.map_or(serde_json::Value::Null, serde_json::Value::from);
+            assert_eq!(body["SubtitleStreamIndex"], index, "{failed:?}");
+        }
+    }
+
+    // ---- docs/18 §2.1 playback ownership: every ordering below is driven by gates ----
+
+    /// A real account change: the saved account re-authenticates with a new credential, which goes
+    /// through the same reset as any sign-in.
+    fn change_account(core: &JellybeamCore) {
+        let target = session::load(core.data_dir()).expect("a saved account");
+        let client = jellyfin_api::JellyfinClient::from_token(
+            &target.server_url,
+            core.client_identity("http://example.test"),
+            "new-token",
+        )
+        .with_user_id(&target.user_id);
+        core.install_reauthenticated_session(
+            0,
+            target,
+            client,
+            authentication_result("new-token", "renamed-user"),
+        )
+        .expect("same user refreshes its credential");
+    }
+
+    /// Switches to a second saved account on another server; returns its list index.
+    fn switch_to_other_account(core: &JellybeamCore) -> u32 {
+        let other = seed_session(core.data_dir(), "http://other-server.invalid", "u-other");
+        let index = index_of(core, &other);
+        core.switch_session(index).expect("switches");
+        index
+    }
+
+    /// Signed in against the mock in Auto mode, so a fallback may negotiate.
+    fn auto_core(
+        playback_info_responses: Vec<serde_json::Value>,
+    ) -> (tempfile::TempDir, Arc<JellybeamCore>, PlaybackMockServer) {
+        let (item_json, _) = direct_play_fixture();
+        let (dir, core, mock) = core_signed_in_against_mock_with_responses_and_delays(
+            item_json,
+            playback_info_responses,
+            Vec::new(),
+        );
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Auto;
+        core.set_settings(settings);
+        (dir, core, mock)
+    }
+
+    fn spawn_prepare(
+        core: &Arc<JellybeamCore>,
+        item_id: &str,
+    ) -> std::thread::JoinHandle<Result<PlaybackPlan, CoreError>> {
+        let core = Arc::clone(core);
+        let item_id = item_id.to_string();
+        std::thread::spawn(move || core.prepare_playback_now(item_id, false))
+    }
+
+    fn spawn_fallback(
+        core: &Arc<JellybeamCore>,
+        play_session_id: &str,
+    ) -> std::thread::JoinHandle<Result<PlaybackPlan, CoreError>> {
+        let core = Arc::clone(core);
+        let play_session_id = play_session_id.to_string();
+        std::thread::spawn(move || {
+            core.prepare_transcode_fallback_now(
+                "item-1".to_string(),
+                20_000_000,
+                "decoder error".to_string(),
+                play_session_id,
+            )
+        })
+    }
+
+    fn join(
+        handle: std::thread::JoinHandle<Result<PlaybackPlan, CoreError>>,
+    ) -> Result<PlaybackPlan, CoreError> {
+        handle.join().expect("the playback thread must not panic")
+    }
+
+    fn active_play_session_id(core: &JellybeamCore) -> Option<String> {
+        core.lock_state()
+            .reporting
+            .as_ref()
+            .map(|session| session.context().play_session_id.clone())
+    }
+
+    /// Exactly `expected` sessions ever sent Start. The short settle is the only way to observe
+    /// an absent request; a started actor sends Start at once on loopback.
+    fn assert_start_reports(mock: &PlaybackMockServer, expected: usize) {
+        wait_until(
+            || mock.start_reports() >= expected,
+            "Start reports to arrive",
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            mock.start_reports(),
+            expected,
+            "only sessions that were installed may ever send Start"
+        );
+    }
+
+    #[test]
+    fn stopping_or_abandoning_the_session_a_fallback_retired_revokes_the_fallback() {
+        for abandon in [false, true] {
+            let (_dir, core, mock) =
+                auto_core(vec![direct_play_fixture().1, transcode_fixture().1]);
+            let a = core
+                .prepare_playback_now("item-1".to_string(), false)
+                .expect("A plays");
+            let held = mock.hold_playback_info(1);
+            let fallback = spawn_fallback(&core, &a.play_session_id);
+            wait_for_playback_info_hits(&mock, 2);
+
+            if abandon {
+                core.abandon_playback(a.play_session_id.clone());
+            } else {
+                core.stop_playback(a.play_session_id.clone(), 0);
+            }
+            held.open();
+
+            let result = join(fallback);
+            assert!(
+                matches!(result, Err(CoreError::StalePlaybackSession)),
+                "abandon={abandon}: a revoked fallback is stale, got {result:?}"
+            );
+            assert_eq!(active_play_session_id(&core), None, "abandon={abandon}");
+            assert!(core.lock_state().sidecars.is_none(), "abandon={abandon}");
+            assert_start_reports(&mock, 1);
+        }
+    }
+
+    /// Final positions reported for `play_session_id`, in arrival order.
+    fn stopped_positions(mock: &PlaybackMockServer, play_session_id: &str) -> Vec<i64> {
+        mock.routes
+            .request_bodies_containing("POST", "/Sessions/Playing/Stopped")
+            .iter()
+            .filter(|body| body["PlaySessionId"] == play_session_id)
+            .filter_map(|body| body["PositionTicks"].as_i64())
+            .collect()
+    }
+
+    /// docs/18 §2.1: the session a fallback took over keeps reporting until the claim resolves, and
+    /// each way the claim resolves ends it at the right position, exactly once.
+    #[test]
+    fn a_retired_session_ends_once_where_the_viewer_left_it() {
+        // (how the fallback resolves, expected final position of the retired session)
+        enum Resolve {
+            Installs,
+            ViewerStops,
+            Abandoned,
+            NegotiationFails,
+            NewerRequest,
+            AccountChanges,
+        }
+        let fallback_ticks = 20_000_000;
+        let reported_ticks = 23_000_000; // its stream plays on while the fallback negotiates
+        let exit_ticks = 27_000_000;
+        for (resolve, expected) in [
+            (Resolve::Installs, fallback_ticks),
+            (Resolve::ViewerStops, exit_ticks),
+            (Resolve::Abandoned, reported_ticks),
+            (Resolve::NegotiationFails, reported_ticks),
+            (Resolve::NewerRequest, reported_ticks),
+            (Resolve::AccountChanges, reported_ticks),
+        ] {
+            let negotiated = match resolve {
+                Resolve::NegotiationFails => {
+                    serde_json::json!({ "MediaSources": [], "PlaySessionId": "x" })
+                }
+                _ => transcode_fixture().1,
+            };
+            let (_dir, core, mock) = auto_core(vec![
+                direct_play_fixture().1,
+                negotiated,
+                second_item_direct_play_fixture().1,
+            ]);
+            let a = core
+                .prepare_playback_now("item-1".to_string(), false)
+                .expect("A plays");
+            let held = mock.hold_playback_info(1);
+            let fallback = spawn_fallback(&core, &a.play_session_id);
+            wait_for_playback_info_hits(&mock, 2);
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                stopped_positions(&mock, &a.play_session_id).is_empty(),
+                "A keeps reporting while the fallback negotiates"
+            );
+            core.report_position(a.play_session_id.clone(), reported_ticks);
+
+            match resolve {
+                Resolve::ViewerStops => core.stop_playback(a.play_session_id.clone(), exit_ticks),
+                Resolve::Abandoned => core.abandon_playback(a.play_session_id.clone()),
+                Resolve::NewerRequest => {
+                    join(spawn_prepare(&core, "item-2")).expect("C installs");
+                }
+                Resolve::AccountChanges => core.sign_out(),
+                Resolve::Installs | Resolve::NegotiationFails => {}
+            }
+            if matches!(resolve, Resolve::NewerRequest | Resolve::AccountChanges) {
+                // Ended at once, not whenever the superseded fallback's negotiation returns.
+                wait_until(
+                    || !stopped_positions(&mock, &a.play_session_id).is_empty(),
+                    "the retired session to end while its fallback is still negotiating",
+                );
+            }
+            held.open();
+            let _ = join(fallback);
+
+            wait_until(
+                || !stopped_positions(&mock, &a.play_session_id).is_empty(),
+                "the retired session's final report",
+            );
+            std::thread::sleep(Duration::from_millis(150));
+            assert_eq!(
+                stopped_positions(&mock, &a.play_session_id),
+                vec![expected],
+                "{} final position",
+                match resolve {
+                    Resolve::Installs => "install",
+                    Resolve::ViewerStops => "viewer stop",
+                    Resolve::Abandoned => "abandon",
+                    Resolve::NegotiationFails => "failed negotiation",
+                    Resolve::NewerRequest => "newer request",
+                    Resolve::AccountChanges => "account change",
+                }
+            );
+        }
+    }
+
+    /// docs/18 §2.1: a stop the caller sent before it learned the fallback's id still names the
+    /// session the fallback replaced, and ends the installed fallback where the viewer left it.
+    #[test]
+    fn a_stop_naming_the_replaced_session_ends_the_installed_fallback() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1, transcode_fixture().1]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let b = join(spawn_fallback(&core, &a.play_session_id)).expect("the fallback installs");
+        assert_eq!(
+            active_play_session_id(&core),
+            Some(b.play_session_id.clone())
+        );
+
+        let exit_ticks = 27_000_000;
+        core.stop_playback(a.play_session_id.clone(), exit_ticks);
+        core.abandon_playback(b.play_session_id.clone()); // the caller disposing what it never adopted
+
+        assert_eq!(active_play_session_id(&core), None);
+        wait_until(
+            || !stopped_positions(&mock, &b.play_session_id).is_empty(),
+            "the installed fallback's final report",
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            stopped_positions(&mock, &b.play_session_id),
+            vec![exit_ticks]
+        );
+        assert_eq!(
+            stopped_positions(&mock, &a.play_session_id).len(),
+            1,
+            "A ended once, at install"
+        );
+    }
+
+    #[test]
+    fn a_newer_prepare_outranks_a_pending_fallback_in_either_completion_order() {
+        for fallback_first in [true, false] {
+            let (_dir, core, mock) = auto_core(vec![
+                direct_play_fixture().1,
+                transcode_fixture().1,
+                second_item_direct_play_fixture().1,
+            ]);
+            let a = core
+                .prepare_playback_now("item-1".to_string(), false)
+                .expect("A plays");
+            let held_fallback = mock.hold_playback_info(1);
+            let held_c = mock.hold_playback_info(2);
+            let fallback = spawn_fallback(&core, &a.play_session_id);
+            wait_for_playback_info_hits(&mock, 2);
+            let c = spawn_prepare(&core, "item-2");
+            wait_for_playback_info_hits(&mock, 3);
+
+            let (fallback_result, c_result) = if fallback_first {
+                held_fallback.open();
+                let f = join(fallback);
+                held_c.open();
+                (f, join(c))
+            } else {
+                held_c.open();
+                let c = join(c);
+                held_fallback.open();
+                (join(fallback), c)
+            };
+
+            assert!(
+                matches!(fallback_result, Err(CoreError::StalePlaybackSession)),
+                "fallback_first={fallback_first}: got {fallback_result:?}"
+            );
+            let c_plan = c_result.expect("the newest request installs");
+            assert_eq!(active_play_session_id(&core), Some(c_plan.play_session_id));
+            assert_start_reports(&mock, 2);
+        }
+    }
+
+    /// A delayed stop of the session a fallback retired, landing after a newer request claimed,
+    /// must not revoke that newer request.
+    #[test]
+    fn a_late_stop_of_the_retired_session_does_not_revoke_a_newer_prepare() {
+        let (_dir, core, mock) = auto_core(vec![
+            direct_play_fixture().1,
+            transcode_fixture().1,
+            second_item_direct_play_fixture().1,
+        ]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let held_fallback = mock.hold_playback_info(1);
+        let held_c = mock.hold_playback_info(2);
+        let fallback = spawn_fallback(&core, &a.play_session_id);
+        wait_for_playback_info_hits(&mock, 2);
+        let c = spawn_prepare(&core, "item-2");
+        wait_for_playback_info_hits(&mock, 3);
+
+        core.stop_playback(a.play_session_id, 0);
+        held_fallback.open();
+        held_c.open();
+
+        assert!(matches!(
+            join(fallback),
+            Err(CoreError::StalePlaybackSession)
+        ));
+        let c_plan = join(c).expect("C still installs");
+        assert_eq!(active_play_session_id(&core), Some(c_plan.play_session_id));
+    }
+
+    /// Stopping an installed session retires it without revoking a newer pending prepare.
+    #[test]
+    fn stopping_the_installed_session_keeps_a_pending_prepare() {
+        let (_dir, core, mock) = auto_core(vec![
+            direct_play_fixture().1,
+            second_item_direct_play_fixture().1,
+        ]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let held_c = mock.hold_playback_info(1);
+        let c = spawn_prepare(&core, "item-2");
+        wait_for_playback_info_hits(&mock, 2);
+
+        core.stop_playback(a.play_session_id, 0);
+        assert_eq!(active_play_session_id(&core), None, "A is retired at once");
+        held_c.open();
+
+        let c_plan = join(c).expect("C installs");
+        assert_eq!(active_play_session_id(&core), Some(c_plan.play_session_id));
+    }
+
+    /// A stop naming a session from two sessions ago is not the fallback's retired session.
+    #[test]
+    fn a_stop_for_an_older_session_does_not_revoke_a_pending_fallback() {
+        let (_dir, core, mock) = auto_core(vec![
+            direct_play_fixture().1,
+            second_item_direct_play_fixture().1,
+            transcode_fixture().1,
+        ]);
+        let older = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("the older session plays");
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A replaces it");
+        assert_ne!(older.play_session_id, a.play_session_id);
+        let held = mock.hold_playback_info(2);
+        let fallback = spawn_fallback(&core, &a.play_session_id);
+        wait_for_playback_info_hits(&mock, 3);
+
+        core.stop_playback(older.play_session_id, 0);
+        held.open();
+
+        let plan = join(fallback).expect("the fallback still installs");
+        assert_eq!(active_play_session_id(&core), Some(plan.play_session_id));
+    }
+
+    #[test]
+    fn the_newest_of_two_prepares_wins_in_either_completion_order() {
+        for older_first in [true, false] {
+            let (_dir, core, mock) = auto_core(vec![
+                direct_play_fixture().1,
+                second_item_direct_play_fixture().1,
+            ]);
+            let held_older = mock.hold_playback_info(0);
+            let held_newer = mock.hold_playback_info(1);
+            let older = spawn_prepare(&core, "item-1");
+            wait_for_playback_info_hits(&mock, 1);
+            let newer = spawn_prepare(&core, "item-2");
+            wait_for_playback_info_hits(&mock, 2);
+
+            let (older_result, newer_result) = if older_first {
+                held_older.open();
+                let o = join(older);
+                held_newer.open();
+                (o, join(newer))
+            } else {
+                held_newer.open();
+                let n = join(newer);
+                held_older.open();
+                (join(older), n)
+            };
+
+            assert!(
+                matches!(older_result, Err(CoreError::StalePlaybackSession)),
+                "older_first={older_first}: got {older_result:?}"
+            );
+            let newer_plan = newer_result.expect("the newest request installs");
+            assert_eq!(
+                active_play_session_id(&core),
+                Some(newer_plan.play_session_id)
+            );
+            assert_start_reports(&mock, 1);
+        }
+    }
+
+    #[test]
+    fn a_newer_prepare_that_fails_does_not_revive_the_older_one() {
+        let no_sources = serde_json::json!({ "MediaSources": [], "PlaySessionId": "unused" });
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1, no_sources]);
+        let held_older = mock.hold_playback_info(0);
+        let held_newer = mock.hold_playback_info(1);
+        let older = spawn_prepare(&core, "item-1");
+        wait_for_playback_info_hits(&mock, 1);
+        let newer = spawn_prepare(&core, "item-2");
+        wait_for_playback_info_hits(&mock, 2);
+
+        held_newer.open();
+        let newer_result = join(newer);
+        assert!(
+            newer_result.is_err() && !matches!(newer_result, Err(CoreError::StalePlaybackSession)),
+            "the newer request fails on its own, got {newer_result:?}"
+        );
+        held_older.open();
+
+        assert!(matches!(join(older), Err(CoreError::StalePlaybackSession)));
+        assert_eq!(active_play_session_id(&core), None);
+        assert_start_reports(&mock, 0);
+    }
+
+    #[test]
+    fn a_request_that_is_not_newer_than_the_last_admitted_is_refused_before_the_network() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1]);
+        let request = core.next_request();
+        core.prepare_playback("item-1".to_string(), false, request)
+            .expect("first use plays");
+
+        let again = core.prepare_playback("item-1".to_string(), false, request);
+
+        assert!(matches!(again, Err(CoreError::StalePlaybackSession)));
+        assert_eq!(mock.playback_info_hit_count(), 1);
+    }
+
+    /// docs/18 §2.1: viewer order, not native arrival order, decides -- an older request that
+    /// reaches Rust after a newer one is refused before it negotiates.
+    #[test]
+    fn an_older_request_arriving_after_a_newer_one_is_refused() {
+        let (_dir, core, mock) = auto_core(vec![second_item_direct_play_fixture().1]);
+        let older = core.next_request();
+        let newer = PlaybackRequest {
+            seq: older.seq + 1,
+            ..older
+        };
+        core.prepare_playback("item-2".to_string(), false, newer)
+            .expect("the newer request plays");
+
+        let result = core.prepare_playback("item-1".to_string(), false, older);
+
+        assert!(
+            matches!(result, Err(CoreError::StalePlaybackSession)),
+            "got {result:?}"
+        );
+        assert_eq!(
+            mock.playback_info_hit_count(),
+            1,
+            "the older never negotiated"
+        );
+    }
+
+    /// Minted before an account change, admitted after it: refused, even when the account
+    /// changes back (A -> B -> A).
+    #[test]
+    fn a_request_minted_under_a_previous_account_is_refused_at_admission() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1]);
+        let request = core.next_request();
+        change_account(&core);
+        change_account(&core);
+
+        let result = core.prepare_playback("item-1".to_string(), false, request);
+
+        assert!(
+            matches!(result, Err(CoreError::AccountChanged)),
+            "got {result:?}"
+        );
+        assert_eq!(mock.playback_info_hit_count(), 0, "never negotiated");
+    }
+
+    /// docs/18 §2.1: switching accounts while a playback negotiates lets it install and play on
+    /// the account it started on.
+    #[test]
+    fn a_switch_during_negotiation_installs_on_the_playing_account() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1]);
+        let held = mock.hold_playback_info(0);
+        let prepare = spawn_prepare(&core, "item-1");
+        wait_for_playback_info_hits(&mock, 1);
+
+        switch_to_other_account(&core);
+        held.open();
+
+        let plan = join(prepare).expect("installs on its own account");
+        assert_eq!(active_play_session_id(&core), Some(plan.play_session_id));
+        assert_start_reports(&mock, 1);
+    }
+
+    /// docs/18 §2.1: a playback outlives a switch to another account; its reports, its own
+    /// requests and its final writes stay with the account it plays on.
+    #[test]
+    fn a_switch_keeps_playback_on_its_own_account() {
+        let (_dir, core, mock) = auto_core(vec![
+            direct_play_fixture().1,
+            second_item_direct_play_fixture().1,
+        ]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let playing_epoch = core.account_epoch();
+
+        let other = switch_to_other_account(&core);
+
+        assert_ne!(core.account_epoch(), playing_epoch);
+        assert!(core.owns_playback(playing_epoch));
+        assert_eq!(
+            active_play_session_id(&core),
+            Some(a.play_session_id.clone())
+        );
+        // Next-up stops the episode before it prepares the next one, under the playing epoch, which
+        // negotiates with the mock's account.
+        core.stop_playback(a.play_session_id.clone(), 30_000_000);
+        let next = core
+            .prepare_playback(
+                "item-2".to_string(),
+                false,
+                PlaybackRequest {
+                    seq: core.next_request().seq,
+                    account_epoch: playing_epoch,
+                },
+            )
+            .expect("next item plays on the same account");
+        assert_eq!(mock.playback_info_hit_count(), 2);
+        core.stop_playback(next.play_session_id.clone(), 33_000_000);
+        wait_until(
+            || stopped_positions(&mock, &next.play_session_id) == vec![33_000_000],
+            "Stopped reaches the playing account's server",
+        );
+        assert!(
+            core.owns_playback(playing_epoch),
+            "kept until its account is left"
+        );
+
+        core.remove_session(1 - other)
+            .expect("removes the playing account");
+        assert!(!core.owns_playback(playing_epoch));
+    }
+
+    /// docs/18 §2.1: a playback started on the browsed account after the parked one ended takes
+    /// over the parking, so switching again while it negotiates keeps it rather than the old one.
+    #[test]
+    fn a_newer_playback_takes_over_the_parking_on_the_next_switch() {
+        let (_dir, core, mock) = auto_core(vec![
+            direct_play_fixture().1,
+            second_item_direct_play_fixture().1,
+        ]);
+        let first = session::load_list(core.data_dir()).sessions[0].clone();
+        let other = seed_session(core.data_dir(), &first.server_url, "u-b");
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let a_epoch = core.account_epoch();
+        core.switch_session(index_of(&core, &other))
+            .expect("browses B");
+        core.open_mirror().expect("B's mirror, as Kotlin opens it");
+        assert_eq!(
+            core.reauthorization_account(identity_of(&first), false)
+                .map(|account| account.user_id),
+            Some(first.user_id.clone()),
+            "a dead token on A re-authorizes A"
+        );
+        assert_eq!(
+            core.reauthorization_account(identity_of(&other), false)
+                .map(|account| account.user_id),
+            Some(other.user_id.clone()),
+            "the browsed account"
+        );
+        core.stop_playback(a.play_session_id, 30_000_000);
+
+        let held = mock.hold_playback_info(1);
+        let b_epoch = core.account_epoch();
+        let b = spawn_prepare(&core, "item-2");
+        wait_for_playback_info_hits(&mock, 2);
+        core.switch_session(index_of(&core, &first))
+            .expect("back to A");
+        assert!(
+            core.owns_playback(b_epoch),
+            "B's negotiation still owns playback"
+        );
+        held.open();
+
+        let plan = join(b).expect("B installs");
+        assert_eq!(active_play_session_id(&core), Some(plan.play_session_id));
+        assert!(core.owns_playback(b_epoch));
+    }
+
+    /// docs/18 §2.1: switching back to the playing account resolves its parked mirror until Kotlin
+    /// reopens the installed one, so next-up in that window still negotiates.
+    #[test]
+    fn a_switch_back_keeps_the_playing_mirror_until_it_reopens() {
+        let (_dir, core, _mock) = auto_core(vec![
+            direct_play_fixture().1,
+            second_item_direct_play_fixture().1,
+        ]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let a_epoch = core.account_epoch();
+        let other = switch_to_other_account(&core);
+        core.switch_session(1 - other)
+            .expect("back to A, mirror not reopened yet");
+        assert!(core.lock_state().mirror.is_none());
+
+        core.stop_playback(a.play_session_id, 30_000_000);
+        core.prepare_playback(
+            "item-2".to_string(),
+            false,
+            PlaybackRequest {
+                seq: core.next_request().seq,
+                account_epoch: a_epoch,
+            },
+        )
+        .expect("next-up negotiates with the parked mirror");
+    }
+
+    /// docs/18 §2.1: an account stays parked after its playback stops (next-up may follow), but
+    /// removing it then ends nothing -- a newer playback negotiating on the browsed account installs.
+    #[test]
+    fn removing_an_account_whose_playback_ended_leaves_the_newer_playback_alone() {
+        let (_dir, core, mock) = auto_core(vec![
+            direct_play_fixture().1,
+            second_item_direct_play_fixture().1,
+        ]);
+        let first = session::load_list(core.data_dir()).sessions[0].clone();
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        core.stop_playback(a.play_session_id, 30_000_000);
+        seed_session(core.data_dir(), &first.server_url, "u-b");
+        core.switch_session(1).expect("browses B");
+        reopen_mirror(&core);
+        assert!(
+            core.parked_account_epoch().is_some(),
+            "A stays parked for next-up"
+        );
+
+        let held = mock.hold_playback_info(1);
+        let b = spawn_prepare(&core, "item-2");
+        wait_for_playback_info_hits(&mock, 2);
+        core.remove_session(0).expect("removes A");
+        held.open();
+
+        let plan = join(b).expect("B's playback installs");
+        assert_eq!(active_play_session_id(&core), Some(plan.play_session_id));
+        assert_eq!(core.parked_account_epoch(), None);
+    }
+
+    /// docs/18 §2.1: a negotiation in flight across a switch parks its account; once it fails,
+    /// signing out of that account drops the parking instead of keeping it for a signed-out one.
+    #[test]
+    fn signing_out_of_an_account_parked_by_a_failed_negotiation_drops_it() {
+        let (item_json, playback_info_json) = transcode_fixture();
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_info_json);
+        let held = mock.hold_playback_info(0);
+        let a = spawn_prepare(&core, "item-1");
+        wait_for_playback_info_hits(&mock, 1);
+        let other = switch_to_other_account(&core);
+        assert!(
+            core.parked_account_epoch().is_some(),
+            "its negotiation was in flight"
+        );
+        held.open();
+        join(a).expect_err("Direct Play mode refuses a Transcode decision outright");
+
+        core.switch_session(1 - other).expect("back to A");
+        core.sign_out();
+
+        assert_eq!(core.parked_account_epoch(), None);
+    }
+
+    /// Opens the browsed account's mirror as Kotlin does after a switch, returning a handle to it.
+    fn reopen_mirror(core: &JellybeamCore) -> media_cache::Mirror {
+        core.open_mirror()
+            .expect("opens, as Kotlin does after a switch");
+        core.lock_state().mirror.clone().expect("just opened")
+    }
+
+    /// docs/18 §2.1: every mirror -- the playing account's, the browsed one, any opened since --
+    /// yields its sync exactly while a stream plays, whichever path ends it. Each row runs on a
+    /// core where A plays; `other` is the index B gets once browsed.
+    #[test]
+    fn sync_yields_exactly_while_a_stream_plays() {
+        type Path = fn(&JellybeamCore, String) -> Vec<media_cache::Mirror>;
+        let rows: [(&str, Path, bool); 14] = [
+            ("plays on A", |_, _| Vec::new(), true),
+            (
+                "stop",
+                |core, id| {
+                    core.stop_playback(id, 30_000_000);
+                    Vec::new()
+                },
+                false,
+            ),
+            (
+                "abandon",
+                |core, id| {
+                    core.abandon_playback(id);
+                    Vec::new()
+                },
+                false,
+            ),
+            (
+                "sign out of A",
+                |core, _| {
+                    core.sign_out();
+                    Vec::new()
+                },
+                false,
+            ),
+            (
+                "browse B",
+                |core, _| {
+                    switch_to_other_account(core);
+                    vec![reopen_mirror(core)]
+                },
+                true,
+            ),
+            (
+                "browse B, stop",
+                |core, id| {
+                    switch_to_other_account(core);
+                    let browsed = reopen_mirror(core);
+                    core.stop_playback(id, 30_000_000);
+                    vec![browsed]
+                },
+                false,
+            ),
+            (
+                "browse B, abandon",
+                |core, id| {
+                    switch_to_other_account(core);
+                    let browsed = reopen_mirror(core);
+                    core.abandon_playback(id);
+                    vec![browsed]
+                },
+                false,
+            ),
+            (
+                "browse B, remove A",
+                |core, _| {
+                    let other = switch_to_other_account(core);
+                    let browsed = reopen_mirror(core);
+                    core.remove_session(1 - other).expect("removes A");
+                    vec![browsed]
+                },
+                false,
+            ),
+            (
+                "browse B, remove B",
+                |core, _| {
+                    let other = switch_to_other_account(core);
+                    let browsed = reopen_mirror(core);
+                    core.remove_session(other).expect("removes B");
+                    vec![browsed]
+                },
+                true,
+            ),
+            (
+                "browse B, sign out of B",
+                |core, _| {
+                    switch_to_other_account(core);
+                    let browsed = reopen_mirror(core);
+                    core.sign_out();
+                    vec![browsed]
+                },
+                true,
+            ),
+            (
+                "browse B, then C",
+                |core, _| {
+                    switch_to_other_account(core);
+                    let browsed = reopen_mirror(core);
+                    seed_session(core.data_dir(), "http://third-server.invalid", "u-third");
+                    core.switch_session(2).expect("browses C");
+                    vec![browsed, reopen_mirror(core)]
+                },
+                true,
+            ),
+            (
+                "browse B, back to A",
+                |core, _| {
+                    let other = switch_to_other_account(core);
+                    let browsed = reopen_mirror(core);
+                    core.switch_session(1 - other).expect("back to A");
+                    vec![browsed, reopen_mirror(core)]
+                },
+                true,
+            ),
+            (
+                "browse B, back to A, stop",
+                |core, id| {
+                    let other = switch_to_other_account(core);
+                    let browsed = reopen_mirror(core);
+                    core.switch_session(1 - other).expect("back to A");
+                    let reopened = reopen_mirror(core);
+                    core.stop_playback(id, 30_000_000);
+                    vec![browsed, reopened]
+                },
+                false,
+            ),
+            (
+                "browse B, back to A, sign out of A",
+                |core, _| {
+                    let other = switch_to_other_account(core);
+                    let browsed = reopen_mirror(core);
+                    core.switch_session(1 - other).expect("back to A");
+                    let reopened = reopen_mirror(core);
+                    core.sign_out();
+                    vec![browsed, reopened]
+                },
+                false,
+            ),
+        ];
+        let wrong: Vec<&str> = rows
+            .into_iter()
+            .filter(|(_, path, plays)| {
+                let (_dir, core, _mock) = auto_core(vec![direct_play_fixture().1]);
+                let plan = core
+                    .prepare_playback_now("item-1".to_string(), false)
+                    .expect("A plays");
+                let playing = core.lock_state().mirror.clone().expect("A's mirror");
+                let mut held = path(&core, plan.play_session_id);
+                held.push(playing);
+                held.iter().any(|mirror| mirror.playback_active() != *plays)
+            })
+            .map(|(name, _, _)| name)
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "rows with a mirror yielding wrongly: {wrong:?}"
+        );
+    }
+
+    /// docs/18 §2.1: a negotiation that fails streams nothing, so no mirror yields to it, and it
+    /// is undone: a switch after it parks nothing.
+    #[test]
+    fn a_failed_negotiation_neither_pauses_sync_nor_gets_parked() {
+        let (item_json, playback_info_json) = transcode_fixture();
+        let (_dir, core, _mock) = core_signed_in_against_mock(item_json, playback_info_json);
+        core.prepare_playback_now("item-1".to_string(), false)
+            .expect_err("Direct Play mode refuses a Transcode decision outright");
+        let opened = core.lock_state().mirror.clone().expect("A's mirror");
+        assert!(core.lock_state().playback_owner.claim.is_none());
+
+        switch_to_other_account(&core);
+        let browsed = reopen_mirror(&core);
+
+        assert_eq!(core.parked_account_epoch(), None);
+        assert!(!opened.playback_active());
+        assert!(!browsed.playback_active());
+    }
+
+    /// docs/18 §2.1: a negotiation that fails on the browsed account leaves the playback still
+    /// running on its own account parked there across the next switch.
+    #[test]
+    fn a_failed_negotiation_on_the_browsed_account_keeps_the_playing_one_parked() {
+        let (_dir, core, _mock) = auto_core(vec![direct_play_fixture().1]);
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let a_epoch = core.account_epoch();
+        switch_to_other_account(&core);
+        reopen_mirror(&core);
+        core.prepare_playback_now("item-2".to_string(), false)
+            .expect_err("B's server is unreachable");
+
+        seed_session(core.data_dir(), "http://third-server.invalid", "u-third");
+        core.switch_session(2).expect("browses C");
+
+        assert_eq!(core.parked_account_epoch(), Some(a_epoch));
+        assert!(core.owns_playback(a_epoch));
+        core.stop_playback(plan.play_session_id, 30_000_000);
+        assert_eq!(
+            core.lock_state()
+                .client
+                .as_ref()
+                .map(|client| client.base_url().to_string()),
+            Some("http://third-server.invalid".to_string()),
+            "C stays browsed"
+        );
+    }
+
+    /// The identity a 401 from `saved`'s client carries.
+    fn identity_of(saved: &session::SessionFile) -> AccountIdentity {
+        AccountIdentity {
+            server_url: saved.server_url.clone(),
+            user_id: saved.user_id.clone(),
+        }
+    }
+
+    /// `saved`'s index in the on-disk list now.
+    fn index_of(core: &JellybeamCore, saved: &session::SessionFile) -> u32 {
+        let list = session::load_list(core.data_dir());
+        let index = list
+            .sessions
+            .iter()
+            .position(|other| other.mirror_dir == saved.mirror_dir)
+            .expect("saved");
+        u32::try_from(index).expect("small")
+    }
+
+    /// A plays item-1, then B is browsed; returns A's plan and the epoch A's requests carry.
+    fn a_plays_then_browses_b(
+        core: &JellybeamCore,
+        b: &session::SessionFile,
+    ) -> (PlaybackPlan, u64) {
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let a_epoch = core.account_epoch();
+        core.switch_session(index_of(core, b)).expect("browses B");
+        (plan, a_epoch)
+    }
+
+    /// A request on A's kept epoch, as next-up mints it.
+    fn a_request(core: &JellybeamCore, a_epoch: u64) -> PlaybackRequest {
+        PlaybackRequest {
+            seq: core.next_request().seq,
+            account_epoch: a_epoch,
+        }
+    }
+
+    /// docs/18 §2.1: a call's rejected token re-authorizes its account only while the app uses it
+    /// -- browsed, or a playback runs or negotiates on it. A playback that ended (stopped,
+    /// abandoned, failed) keeps its account for next-up only, so a late 401 from it prompts nobody;
+    /// the player's own 401 still re-authorizes its account after its teardown, while it is saved.
+    /// Each row starts with A signed in and B and C saved; the flags are whether a call's 401 from
+    /// A and from B prompts, and whether A's failed playback does. C (saved, unused) and a
+    /// never-saved identity never prompt from a call; a never-saved one never from a playback.
+    #[test]
+    fn a_401_reauthorizes_its_account_only_while_it_is_in_use() {
+        type Setup = fn(&JellybeamCore, &session::SessionFile, &session::SessionFile);
+        let rows: [(&str, Setup, bool, bool, bool); 13] = [
+            ("browsing A", |_, _, _| {}, true, false, true),
+            (
+                "playing on A",
+                |core, _, _| {
+                    core.prepare_playback_now("item-1".to_string(), false)
+                        .expect("A plays");
+                },
+                true,
+                false,
+                true,
+            ),
+            (
+                "A plays on, browsing B",
+                |core, _, b| {
+                    a_plays_then_browses_b(core, b);
+                },
+                true,
+                true,
+                true,
+            ),
+            (
+                "A plays on, back on A",
+                |core, a, b| {
+                    a_plays_then_browses_b(core, b);
+                    core.switch_session(index_of(core, a)).expect("back on A");
+                },
+                true,
+                false,
+                true,
+            ),
+            (
+                "A stopped, browsing B",
+                |core, _, b| {
+                    let (plan, _) = a_plays_then_browses_b(core, b);
+                    core.stop_playback(plan.play_session_id, 30_000_000);
+                },
+                false,
+                true,
+                true,
+            ),
+            (
+                "A abandoned, browsing B",
+                |core, _, b| {
+                    let (plan, _) = a_plays_then_browses_b(core, b);
+                    core.abandon_playback(plan.play_session_id);
+                },
+                false,
+                true,
+                true,
+            ),
+            (
+                "A stopped, back on A",
+                |core, a, b| {
+                    let (plan, _) = a_plays_then_browses_b(core, b);
+                    core.stop_playback(plan.play_session_id, 30_000_000);
+                    core.switch_session(index_of(core, a)).expect("back on A");
+                },
+                true,
+                false,
+                true,
+            ),
+            (
+                "A's next-up negotiating after its stop, browsing B",
+                |core, _, b| {
+                    let (plan, a_epoch) = a_plays_then_browses_b(core, b);
+                    core.stop_playback(plan.play_session_id, 30_000_000);
+                    let request = a_request(core, a_epoch);
+                    JellybeamCore::admit_playback_request(&mut core.lock_state(), request, None)
+                        .expect("next-up is admitted on A");
+                },
+                true,
+                true,
+                true,
+            ),
+            (
+                "A's next-up failed to negotiate, browsing B",
+                |core, _, b| {
+                    let (plan, a_epoch) = a_plays_then_browses_b(core, b);
+                    core.stop_playback(plan.play_session_id, 30_000_000);
+                    let request = a_request(core, a_epoch);
+                    let claim = JellybeamCore::admit_playback_request(
+                        &mut core.lock_state(),
+                        request,
+                        None,
+                    )
+                    .expect("next-up is admitted on A");
+                    core.release_claim(&claim);
+                },
+                false,
+                true,
+                true,
+            ),
+            (
+                "A's fallback failed, browsing B",
+                |core, _, b| {
+                    let (plan, a_epoch) = a_plays_then_browses_b(core, b);
+                    core.prepare_transcode_fallback(
+                        "item-1".to_string(),
+                        1_000_000,
+                        "decoder error".to_string(),
+                        plan.play_session_id,
+                        None,
+                        None,
+                        a_request(core, a_epoch),
+                    )
+                    .expect_err("a forced negotiation answered with Direct Play fails");
+                },
+                false,
+                true,
+                true,
+            ),
+            (
+                "a newer playback on B replaces A's",
+                |core, _, b| {
+                    a_plays_then_browses_b(core, b);
+                    admit(core);
+                },
+                false,
+                true,
+                true,
+            ),
+            (
+                "A removed while it plays on",
+                |core, a, b| {
+                    a_plays_then_browses_b(core, b);
+                    core.remove_session(index_of(core, a)).expect("removes A");
+                },
+                false,
+                true,
+                false,
+            ),
+            (
+                "signed out of B while A plays on",
+                |core, _, b| {
+                    a_plays_then_browses_b(core, b);
+                    core.sign_out();
+                },
+                true,
+                false,
+                true,
+            ),
+        ];
+        let wrong: Vec<String> = rows
+            .into_iter()
+            .filter_map(|(name, setup, a_call, b_call, a_failed)| {
+                let (_dir, core, _mock) =
+                    auto_core(vec![direct_play_fixture().1, direct_play_fixture().1]);
+                let a = session::load_list(core.data_dir()).sessions[0].clone();
+                let b = seed_session(core.data_dir(), "http://other-server.invalid", "u-other");
+                let c = seed_session(core.data_dir(), "http://third-server.invalid", "u-third");
+                setup(&core, &a, &b);
+                let prompts = |rejected: AccountIdentity, failed_playback: bool| {
+                    core.reauthorization_account(rejected, failed_playback)
+                        .map(|account| account.user_id)
+                };
+                let never_saved = AccountIdentity {
+                    server_url: a.server_url.clone(),
+                    user_id: "u-never".to_string(),
+                };
+                let got = (
+                    prompts(identity_of(&a), false),
+                    prompts(identity_of(&b), false),
+                    prompts(identity_of(&c), false),
+                    prompts(never_saved.clone(), false),
+                    prompts(identity_of(&a), true),
+                    prompts(never_saved, true),
+                );
+                let want = (
+                    a_call.then(|| a.user_id.clone()),
+                    b_call.then(|| b.user_id.clone()),
+                    None,
+                    None,
+                    a_failed.then(|| a.user_id.clone()),
+                    None,
+                );
+                (got != want).then(|| format!("{name}: got {got:?}, want {want:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// docs/18 §2.1: a parked account that comes back and re-signs in leaves again with its fresh
+    /// token, so the playback's next calls authenticate.
+    #[test]
+    fn a_parked_account_leaves_again_with_its_fresh_token() {
+        let (_dir, core, _mock) = auto_core(vec![direct_play_fixture().1]);
+        core.prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let playing_epoch = core.account_epoch();
+        let other = switch_to_other_account(&core);
+        core.switch_session(1 - other).expect("switches back");
+        change_account(&core);
+
+        core.switch_session(other).expect("switches away again");
+
+        let url = core
+            .image_url(
+                "item-1".to_string(),
+                ImageKind::Primary,
+                "tag".to_string(),
+                100,
+                Some(playing_epoch),
+            )
+            .expect("the parked account builds it");
+        assert!(url.contains("ApiKey=new-token"), "{url}");
+    }
+
+    /// Signing out of the account that plays stops the installed session at its last position, so
+    /// it keeps its resume point, and clears the sidecars with it.
+    #[test]
+    fn signing_out_stops_the_installed_session_at_its_last_position() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        core.report_position(a.play_session_id, 42_000_000);
+
+        core.sign_out();
+
+        assert_eq!(active_play_session_id(&core), None);
+        assert!(core.lock_state().sidecars.is_none());
+        wait_until(
+            || {
+                mock.routes
+                    .request_bodies_containing("POST", "/Sessions/Playing/Stopped")
+                    .iter()
+                    .any(|body| body["PositionTicks"] == 42_000_000)
+            },
+            "Stopped at the last reported position",
+        );
+    }
+
+    /// A progress report names its session: one for another session (queued before a stop, or
+    /// from an outgoing session) never moves the installed one.
+    #[test]
+    fn a_progress_report_for_another_session_is_ignored() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        core.report_position("an-earlier-session".to_string(), 42_000_000);
+        core.report_position(a.play_session_id.clone(), 10_000_000);
+        core.report_position("an-earlier-session".to_string(), 99_000_000);
+
+        core.sign_out();
+
+        wait_until(
+            || !stopped_positions(&mock, &a.play_session_id).is_empty(),
+            "the installed session's final report",
+        );
+        assert_eq!(
+            stopped_positions(&mock, &a.play_session_id),
+            vec![10_000_000]
+        );
+    }
+
+    #[test]
+    fn signing_out_before_any_position_never_reports_a_stop_at_zero() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1]);
+        core.prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        assert_start_reports(&mock, 1);
+
+        core.sign_out();
+
+        assert_eq!(active_play_session_id(&core), None);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            mock.routes
+                .request_bodies_containing("POST", "/Sessions/Playing/Stopped")
+                .len(),
+            0,
+            "a Stopped at 0 would overwrite the item's resume point"
+        );
+    }
+
+    /// docs/18 §2.1: restoring the account that is already installed is not an account change.
+    #[test]
+    fn restoring_the_installed_account_leaves_playback_alone() {
+        let (_dir, core, _mock) = auto_core(vec![direct_play_fixture().1]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let owner_before = owner_view(&core);
+
+        assert!(core.restore_session().is_some());
+
+        assert_eq!(owner_view(&core), owner_before, "no epoch change");
+        assert_eq!(active_play_session_id(&core), Some(a.play_session_id));
+    }
+
+    /// Every account path advances the epoch; only leaving the account that plays (signing out of
+    /// it, removing it, active or parked) ends the playback with its claim and sidecars. Removing
+    /// an account that isn't active is not an account change.
+    #[test]
+    fn only_leaving_the_playing_account_ends_playback() {
+        #[derive(PartialEq)]
+        enum Expect {
+            Ends,
+            Keeps,
+            Untouched,
+        }
+        type AccountPath = fn(&JellybeamCore, session::SessionFile);
+        let paths: [(&str, AccountPath, Expect); 6] = [
+            ("sign_out", |core, _| core.sign_out(), Expect::Ends),
+            (
+                "switch",
+                |core, _| {
+                    core.switch_session(0).expect("switches");
+                },
+                Expect::Keeps,
+            ),
+            (
+                "remove active",
+                |core, _| {
+                    core.remove_session(1).expect("removes");
+                },
+                Expect::Ends,
+            ),
+            (
+                "remove other",
+                |core, _| {
+                    core.remove_session(0).expect("removes");
+                },
+                Expect::Untouched,
+            ),
+            (
+                "switch, then remove the playing account",
+                |core, _| {
+                    core.switch_session(0).expect("switches");
+                    core.remove_session(1).expect("removes");
+                },
+                Expect::Ends,
+            ),
+            (
+                "reauthenticate",
+                |core, target| {
+                    let client = jellyfin_api::JellyfinClient::from_token(
+                        &target.server_url,
+                        core.client_identity("http://example.test"),
+                        "new-token",
+                    )
+                    .with_user_id(&target.user_id);
+                    core.install_reauthenticated_session(
+                        1,
+                        target,
+                        client,
+                        authentication_result("new-token", "renamed-user"),
+                    )
+                    .expect("same user refreshes its credential");
+                },
+                Expect::Keeps,
+            ),
+        ];
+        for (name, path, expect) in paths {
+            let (dir, core) = core_in_tempdir();
+            seed_session(dir.path(), "http://server-a.test", "u1");
+            let active = seed_session(dir.path(), "http://server-b.test", "u2");
+            core.restore_session().expect("account u2 is active");
+            let client = jellyfin_api::JellyfinClient::from_token(
+                "http://example.invalid",
+                core.client_identity("http://example.test"),
+                "tok",
+            );
+            let ctx = jellyfin_core::ReportContext {
+                item_id: "item-1".to_string(),
+                media_source_id: "ms-1".to_string(),
+                play_session_id: "attempt-a".to_string(),
+                play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+            };
+            let claim = admit(&core);
+            core.install_claimed_session(&claim, &client, ctx, Some(test_sidecars("attempt-a")))
+                .expect("installs");
+            let _pending = admit(&core);
+            let (_, _, epoch_before) = owner_view(&core);
+
+            path(&core, active);
+
+            let (_, claim_after, epoch_after) = owner_view(&core);
+            let (has_session, has_sidecars) = {
+                let state = core.lock_state();
+                (state.reporting.is_some(), state.sidecars.is_some())
+            };
+            match expect {
+                Expect::Ends => {
+                    assert_ne!(epoch_after, epoch_before, "{name}: epoch");
+                    assert_eq!(claim_after, None, "{name}: pending claim revoked");
+                    assert!(!has_session, "{name}: session ended");
+                    assert!(!has_sidecars, "{name}: sidecars cleared");
+                    assert!(!core.owns_playback(epoch_before), "{name}: closed");
+                }
+                Expect::Keeps => {
+                    assert_ne!(epoch_after, epoch_before, "{name}: epoch");
+                    assert!(claim_after.is_some(), "{name}: pending claim kept");
+                    assert!(has_session && has_sidecars, "{name}: session kept");
+                    assert!(core.owns_playback(epoch_before), "{name}: still owns");
+                }
+                Expect::Untouched => {
+                    assert_eq!(epoch_after, epoch_before, "{name}: epoch");
+                    assert!(claim_after.is_some(), "{name}: pending claim kept");
+                    assert!(has_session, "{name}: session kept");
+                }
+            }
+        }
+    }
+
     /// (method, path, required query substring, status, body): see
     /// [`RouteMockServer::route_with_query`].
     type QueryRoute = (String, String, String, u16, String);
     /// (method, required path substring, responses, delays): see
     /// [`RouteMockServer::route_script`].
     type ScriptedRoute = (String, String, Vec<serde_json::Value>, Vec<Duration>);
+    /// (method, path substring, hit index, gate): see [`RouteMockServer::gate`].
+    type GatedReply = (String, String, usize, Arc<tokio::sync::Semaphore>);
 
     /// The state a [`RouteMockServer`]'s connection handler shares with the
     /// struct's own accessors, held as one `Arc` so `serve` only ever clones
@@ -7382,6 +9615,9 @@ mod tests {
         /// request matching the same method+substring regardless of the id
         /// in between.
         scripted: Mutex<Vec<ScriptedRoute>>,
+        /// A scripted arrival replies only once its gate is opened, so a test orders completions
+        /// without timing.
+        gates: Mutex<Vec<GatedReply>>,
         hits: Mutex<std::collections::HashMap<String, usize>>,
         /// Every request's ("METHOD path", parsed JSON body) in arrival
         /// order, for callers that need either an exact-path or a
@@ -7390,6 +9626,15 @@ mod tests {
         /// "METHOD full-target" (query string included) in arrival order,
         /// so a test can tell apart requests that collapse to the same key.
         log: Mutex<Vec<String>>,
+    }
+
+    /// A held mock reply; see [`RouteMockServer::gate`].
+    struct Gate(Arc<tokio::sync::Semaphore>);
+
+    impl Gate {
+        fn open(&self) {
+            self.0.add_permits(1);
+        }
     }
 
     /// Small loopback HTTP mock serving both plain signed-in-but-mirror-less
@@ -7476,6 +9721,19 @@ mod tests {
                     delays
                 },
             ));
+        }
+
+        /// Holds the `hit_index`-th (zero-based) scripted `method` arrival whose path contains
+        /// `path_substring` until the returned gate is opened.
+        fn gate(&self, method: &str, path_substring: &str, hit_index: usize) -> Gate {
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            unlock(&self.shared.gates).push((
+                method.to_string(),
+                path_substring.to_string(),
+                hit_index,
+                gate.clone(),
+            ));
+            Gate(gate)
         }
 
         /// Index of the first logged request whose target contains
@@ -7589,6 +9847,17 @@ mod tests {
             if !delay.is_zero() {
                 tokio::time::sleep(*delay).await;
             }
+        }
+        let gate = scripted_hit_index.and_then(|hit_index| {
+            unlock(&shared.gates)
+                .iter()
+                .find(|(m, needle, index, _)| {
+                    *m == method && path.contains(needle.as_str()) && *index == hit_index
+                })
+                .map(|(.., gate)| gate.clone())
+        });
+        if let Some(gate) = gate {
+            let _ = gate.acquire().await;
         }
 
         let configured = query_configured
@@ -7946,7 +10215,19 @@ mod tests {
         let err = core
             .validate_session()
             .expect_err("a revoked token must not validate");
-        assert!(matches!(err, CoreError::Unauthorized));
+        let CoreError::Unauthorized {
+            account: Some(rejected),
+        } = err
+        else {
+            panic!("a revoked token names its account, got {err:?}");
+        };
+        let signed_in = session::load_list(core.data_dir()).sessions[0].clone();
+        assert_eq!(
+            core.reauthorization_account(rejected, false)
+                .map(|account| account.user_id),
+            Some(signed_in.user_id),
+            "the 401's account is the signed-in one, as saved"
+        );
         assert_eq!(
             mock.hit_count("GET", "/Users/Me"),
             2,
@@ -8068,7 +10349,7 @@ mod tests {
             "initial sync to seed the episode",
         );
         let plan = core
-            .prepare_playback(EP1_ID.to_string(), false)
+            .prepare_playback_now(EP1_ID.to_string(), false)
             .expect("Direct Play negotiation");
         let scope_fetches_before = mock.hit_count_containing("GET", SERIES_ID);
         let next_up_before = mock.hit_count("GET", "/Shows/NextUp");
@@ -8151,7 +10432,7 @@ mod tests {
         );
 
         let plan = core
-            .prepare_playback(MOVIE_ID.to_string(), false)
+            .prepare_playback_now(MOVIE_ID.to_string(), false)
             .expect("Direct Play negotiation");
         core.stop_playback(plan.play_session_id, 60 * MIN);
         wait_until(
@@ -8161,7 +10442,7 @@ mod tests {
         assert_eq!(mock.hit_count("POST", &played_path), 0);
 
         let plan = core
-            .prepare_playback(MOVIE_ID.to_string(), false)
+            .prepare_playback_now(MOVIE_ID.to_string(), false)
             .expect("Direct Play negotiation");
         core.stop_playback(plan.play_session_id, 115 * MIN);
         wait_until(
@@ -8175,6 +10456,76 @@ mod tests {
             .expect("movie row");
         assert!(card.played);
         assert_eq!(card.position_ticks, 0);
+    }
+
+    /// docs/07 §1: mark played waits for the Stopped to land, however slow, so a late Stopped
+    /// can't restore the position it cleared.
+    #[test]
+    fn end_grace_mark_played_waits_for_a_slow_stopped_report() {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000030";
+
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        mock.route("GET", "/UserViews", 200, user_views_json(VIEW_ID, "movies"));
+        mock.route(
+            "GET",
+            "/Items",
+            200,
+            serde_json::json!({
+                "Items": [{
+                    "Id": MOVIE_ID, "Name": "Sample Movie", "Type": "Movie",
+                    "RunTimeTicks": 120 * MIN,
+                    "UserData": {"Key": "k", "Played": false}
+                }],
+                "TotalRecordCount": 1
+            }),
+        );
+        let played_path = format!("/UserPlayedItems/{MOVIE_ID}");
+        mock.route(
+            "POST",
+            &played_path,
+            200,
+            user_item_data_json(Some(true), None),
+        );
+        let (_, playback_info_json) = direct_play_fixture();
+        mock.route_script("POST", "/PlaybackInfo", vec![playback_info_json], vec![]);
+        mock.route_script(
+            "POST",
+            "/Sessions/Playing/Stopped",
+            vec![serde_json::json!({})],
+            vec![],
+        );
+        let stopped = mock.gate("POST", "/Sessions/Playing/Stopped", 0);
+
+        core.open_mirror()
+            .expect("open_mirror against a loopback server");
+        wait_until(
+            || {
+                core.card_by_id(MOVIE_ID.to_string())
+                    .ok()
+                    .flatten()
+                    .is_some()
+            },
+            "initial sync to seed the movie",
+        );
+
+        let plan = core
+            .prepare_playback_now(MOVIE_ID.to_string(), false)
+            .expect("Direct Play negotiation");
+        core.stop_playback(plan.play_session_id, 115 * MIN);
+        wait_until(
+            || mock.hit_count_containing("POST", "/Sessions/Playing/Stopped") == 1,
+            "the Stopped report to arrive",
+        );
+        // Well past the 100 ms stop-ack window.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(mock.hit_count("POST", &played_path), 0);
+
+        stopped.open();
+        wait_until(
+            || mock.hit_count("POST", &played_path) == 1,
+            "the end-grace mark played",
+        );
     }
 
     #[test]
