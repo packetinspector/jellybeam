@@ -16,11 +16,14 @@ import coil.Coil
 import coil.EventListener
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.decode.DataSource
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import coil.request.ErrorResult
 import coil.request.ImageRequest
 import coil.request.SuccessResult
+import coil.transition.CrossfadeTransition
+import coil.transition.Transition
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.LaunchWarmup
 import tv.jellybeam.data.RealCoreGateway
@@ -299,7 +302,20 @@ private const val IMAGE_MEMORY_CACHE_MAX_PERCENT = 0.20
 /** docs/07 §6's "Image fade 150ms" -- promised by `CardArt.kt`'s own doc comment but never actually
  * wired into a Coil config until this one.
  */
-private const val IMAGE_CROSSFADE_MS = 150
+internal const val IMAGE_CROSSFADE_MS = 150
+
+/** docs/07: only art fetched over the network cross-fades in; a disk or memory hit appears at once. */
+internal fun fadesIn(source: DataSource): Boolean = source == DataSource.NETWORK
+
+/** [fadesIn] as Coil's transition. Compose animates only a [CrossfadeTransition]; NONE draws at once. */
+private fun networkOnlyCrossfade(durationMs: Int): Transition.Factory =
+    Transition.Factory { target, result ->
+        if (result is SuccessResult && fadesIn(result.dataSource)) {
+            CrossfadeTransition(target, result, durationMs)
+        } else {
+            Transition.Factory.NONE.create(target, result)
+        }
+    }
 
 class JellybeamApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
@@ -326,7 +342,7 @@ class JellybeamApp : Application(), ImageLoaderFactory {
      */
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
-            .crossfade(IMAGE_CROSSFADE_MS)
+            .transitionFactory(networkOnlyCrossfade(IMAGE_CROSSFADE_MS))
             .bitmapConfig(Bitmap.Config.RGB_565)
             .respectCacheHeaders(false)
             .memoryCache {

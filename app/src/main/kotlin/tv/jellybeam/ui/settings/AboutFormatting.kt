@@ -84,3 +84,24 @@ object AboutFormatting {
         else -> false
     }
 }
+
+/**
+ * The scroll position the About pane settles on for a focus request whose default target is
+ * [defaultTargetPx]: 0 or at least [headerBottomPx], never the band between, so the brand header
+ * is never half-clipped. A band target at or past [currentScrollPx] snaps down to the header's
+ * bottom, one behind it snaps to 0; everything is clamped to [maxScrollPx]. An unmeasured header
+ * (0) passes the default through.
+ */
+internal fun aboutSnapScrollTarget(currentScrollPx: Int, defaultTargetPx: Int, headerBottomPx: Int, maxScrollPx: Int): Int {
+    val target = defaultTargetPx.coerceIn(0, maxScrollPx.coerceAtLeast(0))
+    if (headerBottomPx <= 0 || target <= 0 || target >= headerBottomPx) return target
+    return if (target >= currentScrollPx) headerBottomPx.coerceAtMost(maxScrollPx.coerceAtLeast(0)) else 0
+}
+
+/**
+ * Trailing space the About pane needs so its scroll range is 0 or at least [headerBottomPx]:
+ * a range of 1..headerBottom-1 could only ever leave the brand header half-clipped. [maxScrollWithoutSlackPx]
+ * is the range without that space.
+ */
+internal fun aboutBottomSlackPx(maxScrollWithoutSlackPx: Int, headerBottomPx: Int): Int =
+    if (headerBottomPx <= 0 || maxScrollWithoutSlackPx <= 0 || maxScrollWithoutSlackPx >= headerBottomPx) 0 else headerBottomPx - maxScrollWithoutSlackPx

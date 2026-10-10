@@ -21,7 +21,7 @@ Shelves beyond the first two mount progressively, one per frame, once initial fo
 Hero: item = shelves[0].items[0]. Full-bleed backdrop (own tag, else ancestor), 42% viewport height, min 320px. Eyebrow = series name (episodes only); title = item name; metadata = `"S{s} E{e} · {runtime} · {year}"` (episode) / `"{year}"` (movie). Resume + "More Info" buttons.
 
 Card sizes:
-- Resume shelves (Continue Watching, Next Up): mixed-aspect single row, row height solved so 5.5 cards fit (`RESUME_CARDS_ACROSS = 5.5` — 5 visible + bleed). Episodes 16:9, movies 2:3 at the same height. Width clamp [180, 320]px. With the Home setting "Posters for Continue Watching & Next Up" (`home_resume_posters`, default off) both shelves draw the Latest poster cells instead: series poster for episodes, progress bar, S·E tag.
+- Resume shelves (Continue Watching, Next Up): uniform 16:9 single row (movies draw their backdrop, never a stretched poster), row height solved so 6.5 cards fit across the shelf (`CardFormatting.resumeCardWidthDp`, clamp [172, 280]dp). The Home setting "Resume art" (`home_resume_art`, docs/09) picks the art: `Episode` (default) the episode's own still, then the parent backdrop (`resumeArtSource`); `SeriesThumb` the series' 16:9 Thumb (`ParentThumbItemId`/`ParentThumbImageTag`), else the series backdrop, else the placeholder, never the episode's still (a non-episode uses its own Thumb, else its backdrop); `Poster` both shelves draw the Latest poster cells instead: series poster for episodes, progress bar, S·E tag. Both non-default modes are spoiler-free.
 - Favorites and Latest shelves: uniform 2:3 poster, `CELL_WIDTH = 160`px.
 
 Poster-slot image requests are bucketed to the nearest of a small fixed set of server widths (`CardFormatting.bucketedImageWidth`) rather than each surface's exact drawn size, so Home's POSTER shelf, the library grid, and Detail's hero-poster placeholder key all share one 240-wide rendition instead of fragmenting the server's resize cache.
@@ -30,7 +30,7 @@ Card text:
 - Poster card: 2 fixed lines — title 14px/Medium 1-line ellipsis; metadata 12px (year). Title `TEXT_PRIMARY` focused / `TEXT_SECONDARY` unfocused; metadata `TEXT_SECONDARY`/`TEXT_TERTIARY`. Lines reserve height even when empty (cards bottom-align).
 - Resume card: 3 fixed lines (52px total: 20+16+16) — title / series name (episodes, 60% opacity) / `"S{s} E{e} · {remaining} left"` (drop missing halves, never "S? E?").
 
-Progress bar: 3px, inside the art's bottom edge. `fraction = position_ticks/runtime_ticks` clamped 0..1; shown only if runtime present AND position > 0 (`watch_progress`, cards.rs:484-488). Fill = accent; track = accent @30%.
+Progress bar: 3px, inside the art's bottom edge. `fraction = position_ticks/runtime_ticks` clamped 0..1; shown only if runtime present AND position > 0 (`CardFormatting.watchProgress`). Fill = accent; track = accent @30%.
 
 Badges: unplayed-count only for Series/Season/BoxSet, accent pill, count > 0. Watched Movie/Episode (played, not mid-progress) gets a checkmark badge (~20px, top-right, black scrim + white check) — never both. No "unwatched" mark.
 
@@ -38,17 +38,18 @@ Every card-derived value above (art source, progress bar, badge, timing label, a
 
 ## 2. Card details
 
-- Episode title format: `"E{n} · {name}"` (cards.rs:1154 — NOT "{n}. {name}"). Bare name if no index_number.
+- Episode title format: `"E{n} · {name}"` (`CardFormatting.episodeTitle` — NOT "{n}. {name}"). Bare name if no index_number.
 - Series-name line on resume-shelf episode cards, and on poster cards for episodes and seasons.
 - Poster card lines (`CardFormatting.posterLines`): an episode reads `"E{n} · {name}"` over `"{series} · S{s}"` and carries an `"S{s} E{e}"` tag bottom-left on its art, because a poster episode shows its series' poster; a season reads its server name over the series name; everything else is title over year.
 - Collection card (library grid, BoxSet items): the front poster with up to two more fanned behind it, offset up-right and dimmer, inside the normal poster cell (the front shrinks to make room; grid columns and focus behavior are unchanged, and the ring/scale belong to the front poster). The front is the collection's own poster, else member 0; the layers behind are the next members. Members are read lazily per visible card from the mirror and cached per library screen (re-read when a member changes), so the grid never waits on them. Badge = the number of items in the collection, watched or not, shown once members load; caption is the server name over a mono `N UNPLAYED` / `ALL WATCHED` line, counted as the collection page counts unwatched members (the server's episode-level count only until members load). Home rows keep the plain poster.
 - Watched state = checkmark badge only; focus = ring only; never combined, no watched-dimming.
 - Virtual episodes (`is_virtual`): art at 40% opacity; status line `"Airs {abbrev date}"` if premiere_date parseable and future, else `"Missing"`; no runtime; no play affordance (navigation still allowed).
-- Poster (2:3) art fallback (`poster_art_source`, cards.rs:211-224): own primary_tag ONLY if item_type != Episode → (series_id, series_primary_tag) → placeholder.
-- 16:9 art fallback (`rail_art_source`, cards.rs:277-288): own primary_tag → (parent_backdrop_item_id, parent_backdrop_tag) → placeholder.
+- Poster (2:3) art fallback (`CardFormatting.posterArtSource`): own primary_tag ONLY if item_type != Episode → (series_id, series_primary_tag) → placeholder.
+- 16:9 art fallback (`CardFormatting.railArtSource`): own primary_tag → (parent_backdrop_item_id, parent_backdrop_tag) → placeholder.
+- Series-thumb art (`CardFormatting.seriesThumbArtSource`, Continue Watching / Next Up only): an episode reads (parent_thumb_item_id, parent_thumb_tag, kind Thumb) → (parent_backdrop_item_id, parent_backdrop_tag) → placeholder, never its own primary_tag; any other item reads its own thumb_tag → `backdropArtSource`. The parent thumb columns come from the server's `ParentThumbItemId`/`ParentThumbImageTag` (mirror schema v17).
 - Missing-artwork placeholder: static SURFACE_PANEL box with the item NAME centered in small tertiary text (never initials/blank). Pre-texture loading placeholder: flat SURFACE_RAISED + skeleton pulse (0.85↔1.0 opacity, 2s), no text. The pulse stops once failed image requests exhaust their retries and resumes if a later foreground return triggers another load.
 - An empty Home keeps a focusable explanatory message so Left can open the drawer before the first titles arrive, after sync failure, or when every shelf is hidden. The normal focus-memory path restores this target on drawer close and transfers to content when it arrives.
-- Blurhash: interim only — texture (150ms cross-fade) → blurhash → pulsing flat. The interim chain stays hidden for the first 250 ms of a load, so art that arrives from cache fades straight in over the background instead of flashing flat → blurhash → art.
+- Blurhash: interim only — texture → blurhash → pulsing flat. Art fetched over the network cross-fades in (150ms); art from the disk or memory cache appears at once with no fade, except a full-bleed detail backdrop, which also fades in from disk (popping in at that size reads as a flash). The interim chain stays hidden for the first 250 ms of a load, so cached art never flashes flat → blurhash → art.
 - Failed load: Coil never retries a request that ended in error, so a card would keep its blurhash for as long as the screen lives; `CardArtImage` retries with backoff (2 s, 4 s, 8 s, three attempts) and once more, with a fresh attempt budget, when the app returns to the foreground. The blurhash stays up meanwhile; nothing is re-requested for a card that succeeded.
 
 ## 3. Library grid
@@ -153,7 +154,7 @@ Play/Resume plays it.
 | FOCUS_SIBLING_DIM | 0.5 | not shipped, ring alone carries focus (§4) |
 | PROGRESS_HEIGHT | 3px | |
 | Focus anim | 180ms in / 240ms out, bezier(0.2,0,0,1) | |
-| Image fade | 150ms | |
+| Image fade | 150ms, network loads only | |
 | Skeleton pulse | 2s, 0.85↔1.0 | |
 | Fetch widths | poster 320 / backdrop 1280 / thumb 400 | |
 | Accent | PISTACCHIO #A8CB6B only | ring, progress, badge, primary button |

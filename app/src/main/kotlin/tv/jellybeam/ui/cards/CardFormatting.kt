@@ -9,6 +9,7 @@ import tv.jellybeam.i18n.AppLocale
 import tv.jellybeam.i18n.UiStrings
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
+import uniffi.jellybeam_core.ResumeArt
 
 /** Pure Kotlin ports of the card-text formatting rules in `docs/07-home-browse-behavior.md` §1-2,
  * free of any Compose/Android dependency so they're plain-JVM-testable.
@@ -214,12 +215,40 @@ object CardFormatting {
     }
 
     /**
-     * [Card] art source for a Continue-Watching/Next-Up tile. Deviates from docs/07 §1's
-     * mixed-aspect row: the resume shelf is uniform 16:9, so a movie uses [backdropArtSource]
-     * (never stretches a poster) rather than [posterArtSource]; episodes still use [railArtSource].
+     * docs/07 §1 "series thumb" chain for a 16:9 resume slot: an episode shows its series' Thumb,
+     * else the series backdrop, else [ArtSource.None] -- never the episode's own Primary, which
+     * is the spoiler. A non-episode shows its own Thumb, else [backdropArtSource].
      */
-    fun resumeArtSource(card: Card): ArtSource =
-        if (card.itemType == "Episode") railArtSource(card) else backdropArtSource(card)
+    fun seriesThumbArtSource(card: Card): ArtSource {
+        if (card.itemType == "Episode") {
+            val thumbId = card.parentThumbItemId
+            val thumbTag = card.parentThumbTag
+            if (thumbId != null && thumbTag != null) {
+                return ArtSource.Fallback(thumbId, thumbTag, ImageKind.THUMB)
+            }
+            val backdropId = card.parentBackdropItemId
+            val backdropTag = card.parentBackdropTag
+            return if (backdropId != null && backdropTag != null) {
+                ArtSource.Fallback(backdropId, backdropTag, ImageKind.BACKDROP)
+            } else {
+                ArtSource.None
+            }
+        }
+        card.thumbTag?.let { return ArtSource.Own(card.id, it, ImageKind.THUMB) }
+        return backdropArtSource(card)
+    }
+
+    /**
+     * [Card] art source for a Continue-Watching/Next-Up tile (docs/07 §1): the resume shelf is
+     * uniform 16:9, so a movie uses [backdropArtSource] (never stretches a poster) rather than
+     * [posterArtSource]. [ResumeArt.SERIES_THUMB] takes [seriesThumbArtSource]; otherwise
+     * episodes use [railArtSource] ([ResumeArt.POSTER] draws a PosterCard, not this chain).
+     */
+    fun resumeArtSource(card: Card, art: ResumeArt): ArtSource = when {
+        art == ResumeArt.SERIES_THUMB -> seriesThumbArtSource(card)
+        card.itemType == "Episode" -> railArtSource(card)
+        else -> backdropArtSource(card)
+    }
 
     /**
      * §9's resume/next-up sizing: 16:9 episode-card width fitting 6.5 across `shelfWidthDp`,

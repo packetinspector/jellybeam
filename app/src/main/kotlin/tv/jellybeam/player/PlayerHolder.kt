@@ -5,6 +5,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -24,7 +26,37 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.upstream.DefaultAllocator
+import androidx.media3.common.VideoSize
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import tv.jellybeam.player.ass.AssAwareSubtitleParserFactory
+import tv.jellybeam.player.ass.AssExtractorsFactory
+import tv.jellybeam.player.ass.AttachmentsBlock
+import tv.jellybeam.player.ass.ItemBoundMediaSourceFactory
+import tv.jellybeam.player.ass.ItemScopedFontSink
+import tv.jellybeam.player.ass.RangeReader
+import tv.jellybeam.player.ass.assVideoColour
+import tv.jellybeam.player.ass.SubtitleCues
+import tv.jellybeam.player.ass.rangeHeader
+import tv.jellybeam.player.ass.servedRangeLength
+import tv.jellybeam.player.ass.spanningSamples
+import tv.jellybeam.player.ass.fontsToFetch
+import tv.jellybeam.player.ass.attachedFonts
+import tv.jellybeam.player.ass.ASS_CHOICE_GRACE_MS
+import tv.jellybeam.player.ass.ASS_FONT_WAIT_MS
+import tv.jellybeam.player.ass.assFramesHeld
+import tv.jellybeam.player.ass.AssFontFetch
+import tv.jellybeam.player.ass.assFontFetchTransition
+import tv.jellybeam.player.ass.assFontTimers
+import tv.jellybeam.player.ass.embeddedRawSsaAfter
+import tv.jellybeam.player.ass.AssOverlayView
+import tv.jellybeam.player.ass.AssTextRenderer
+import tv.jellybeam.player.ass.PlainSsaRenderer
+import tv.jellybeam.player.ass.shouldSendPosition
+import tv.jellybeam.player.ass.assLineLiftPercent
+import tv.jellybeam.player.ass.isRawSsa
+import uniffi.jellybeam_core.AssOverlay
+import uniffi.jellybeam_core.AssSample
 import tv.jellybeam.AppGraph
 import tv.jellybeam.i18n.AndroidUiStrings
 import tv.jellybeam.perf.PerfLog
@@ -39,6 +71,10 @@ import uniffi.jellybeam_core.TrackDecisionFfi
 /** [SeekSerializer]'s validation logging on device (docs/18-playback-quality.md §5) -- numbers
  * only, never titles. */
 private const val SEEK_LOG_TAG = "JellybeamSeek"
+private const val ASS_PERF_PERIOD_MS = 2_000L
+
+/** How often a styled sidecar's overlay is sent the position; [shouldSendPosition] thins it further. */
+private const val ASS_SIDECAR_CLOCK_MS = 40L
 
 /** `player.state`'s `state` tag (docs/21 §2.1) -- [Player]'s four playback states by name. */
 private fun playerStateName(playbackState: Int): String = when (playbackState) {
@@ -67,6 +103,7 @@ interface PlaybackPlayer {
         plan: PlaybackPlan,
         tolerateMislabeledLevels: Boolean = true,
         audioDecoderPreferences: AudioDecoderPreferences = AudioDecoderPreferences(),
+        fullAssStyling: Boolean = false,
     )
 
     fun addListener(listener: Player.Listener)
@@ -157,7 +194,16 @@ interface PlaybackPlayer {
      * `init` and clear it in `onCleared`; `null` is the valid "nobody is listening" state.
      */
     var onVideoDecoderInitialized: ((String) -> Unit)?
+
+    /** docs/18 §3.2: where ASS sidecar [index] loads styled; null with full styling off, so it is read as plain cues. */
+    fun assSidecarTarget(index: Int): AssSidecarTarget? = null
+
+    /** Main thread: draws the loaded [target] on the overlay in place of any earlier one; null hides it. */
+    fun showAssSidecar(target: AssSidecarTarget?) = Unit
 }
+
+/** A styled ASS sidecar's overlay track: [key] within overlay item [item] (docs/18 §3.2). */
+data class AssSidecarTarget(val overlay: AssOverlay, val key: String, val item: ULong)
 
 /**
  * docs/18 §3.1: the per-item track-selection reset [PlayerHolder.load] applies to [current] before
@@ -384,6 +430,118 @@ class PlayerHolder(
     @Volatile
     private var audioDecoderPreferences: AudioDecoderPreferences = AudioDecoderPreferences()
 
+    /** Settings > Subtitles "Full styling for styled subtitles": read by the extractor and renderers at load. */
+    @Volatile
+    private var fullAssStyling: Boolean = false
+
+    /** The Rust ASS overlay (one render thread, idle until a styled track shows); null if it failed to start. */
+    private var assOverlay: AssOverlay? = null
+
+    private var assOverlayView: AssOverlayView? = null
+
+    /** Guards the item generation bump with the writes that depend on it; declared before [assFonts], which captures it. */
+    private val assItemLock = Any()
+
+    /** Delivers an extractor's findings only into the item whose media source it came from ([ItemScopedFontSink]). */
+    private val assFonts = ItemScopedFontSink(
+        generation = { assItemGeneration.get() },
+        lock = assItemLock,
+        wants = { fullAssStyling && assOverlay != null },
+        onAttachments = { block ->
+            synchronized(assAttachments) {
+                if (assAttachments.none { it.offset == block.offset }) assAttachments += block
+            }
+            seekTimeoutHandler.post { maybeFetchAssFonts() }
+        },
+        onCues = { cues, timecodeScaleNs ->
+            assCues = cues to timecodeScaleNs
+            seekTimeoutHandler.post { maybeFetchSpanningLines() }
+        },
+    )
+
+    /** This item's SSA Cues and time scale, from the extractor's loader thread (docs/13). */
+    @Volatile
+    private var assCues: Pair<SubtitleCues, Long>? = null
+
+    /** Main thread: the newest (track, media time) whose earlier-starting lines are still to fetch. */
+    private var assLinesWanted: Pair<String, Long>? = null
+
+    /** Each spanning-lines fetch takes a number; a newer seek or item stops the older one between reads. */
+    private val assLinesRequest = AtomicLong(0L)
+
+    /** This item's attachments blocks, recorded by the extractor's loader thread. */
+    private val assAttachments = mutableListOf<AttachmentsBlock>()
+
+    /** Main thread: this item's font fetch; written only by [setAssFontFetch], which also holds the overlay's frames (docs/13). */
+    private var assFontFetch = AssFontFetch.IDLE
+
+    /** Each font fetch takes a number; one stopped because its track stopped showing ends between reads. */
+    private val assFontsRequest = AtomicLong(0L)
+
+    /** This item's fonts already handed to the overlay, by offset, so a restarted fetch skips them. */
+    private val assFontsFetched: MutableSet<Long> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+
+    /** Main thread: [ASS_FONT_WAIT_MS] passed, so the overlay shows with whatever fonts arrived; per item. */
+    private var assFontWaitExpired = false
+
+    private val assFontWaitRunnable = Runnable {
+        assFontWaitExpired = true
+        applyAssOverlayState()
+    }
+
+    /** Main thread: this item's subtitle choice is known, so fonts may be fetched; Media3's default pick before it isn't one. */
+    private var assChoiceSettled = false
+
+    /** Main thread: [assChoiceGraceRunnable] has been armed for this item. */
+    private var assGraceArmed = false
+
+    /** A choice that never arrives (failed resolve, left default, sidecar pick) settles after [ASS_CHOICE_GRACE_MS]. */
+    private val assChoiceGraceRunnable = Runnable {
+        assChoiceSettled = true
+        maybeFetchAssFonts()
+    }
+
+    /**
+     * Bumps the item generation and resets the overlay under [assItemLock], which the font fetch
+     * also holds across its check-then-send, so an old item's font can't be queued after the reset.
+     * Every per-item ASS field resets here, after the bump, and extractor sinks bound at an earlier setMediaItem drop writes from before it ([ItemScopedFontSink]), so no stale thread can refill one.
+     */
+    private fun beginAssItem() {
+        // Main thread: the item's sidecar script goes with it, so nothing feeds it a clock.
+        assSidecar = null
+        seekTimeoutHandler.removeCallbacks(assSidecarClock)
+        synchronized(assItemLock) {
+            assItemGeneration.incrementAndGet()
+            assFontCall?.cancel()
+            assLinesRequest.incrementAndGet()
+            assLinesCall?.cancel()
+            assOverlay?.beginItem()
+        }
+        synchronized(assAttachments) { assAttachments.clear() }
+        assFontsFetched.clear()
+        assCues = null
+        assLinesWanted = null
+        assTrackShowing = false
+        assChoiceSettled = false
+        assGraceArmed = false
+        assFontWaitExpired = false
+        seekTimeoutHandler.removeCallbacks(assChoiceGraceRunnable)
+        setAssFontFetch(AssFontFetch.IDLE)
+    }
+
+    /** The font range request in flight, cancelled with its item so zapping doesn't keep downloading. */
+    @Volatile
+    private var assFontCall: okhttp3.Call? = null
+
+    /** The spanning-lines range request in flight, cancelled with its item or by a newer seek. */
+    @Volatile
+    private var assLinesCall: okhttp3.Call? = null
+
+    /** [load]'s generation and URL, for a font fetch that must not land on a later item. */
+    private val assItemGeneration = AtomicLong(0L)
+    @Volatile
+    private var assItemUrl: String? = null
+
     // DefaultRenderersFactory is still @UnstableApi in 1.9.0; scoped to just this builder.
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun buildPlayer(): ExoPlayer {
@@ -396,6 +554,18 @@ class PlayerHolder(
             appContext,
             tolerateMislabeledLevels = { tolerateMislabeledLevels },
             audioDecoderPreferences = { audioDecoderPreferences },
+            ssaRenderers = { output, looper ->
+                val outputHandler = Handler(looper)
+                listOf(
+                    AssTextRenderer({ assOverlay }, { fullAssStyling }) { key, mediaUs ->
+                        seekTimeoutHandler.post {
+                            assLinesWanted = key to mediaUs
+                            maybeFetchSpanningLines()
+                        }
+                    },
+                    PlainSsaRenderer(output) { outputHandler.post(it) },
+                )
+            },
         ).apply {
             setEnableDecoderFallback(true)
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
@@ -407,11 +577,19 @@ class PlayerHolder(
         // drain -- every reopen (trailer seek, resume seek, out-of-buffer skip) paid it.
         val pendingCall = ThreadLocal<Call?>()
         val httpDataSourceFactory = OkHttpDataSource.Factory(TrackingCallFactory(httpClient, pendingCall))
-        val mediaSourceFactory = DefaultMediaSourceFactory(appContext)
-            .setDataSourceFactory(CancelingDataSourceFactory(httpDataSourceFactory, pendingCall))
-            // Media3's DefaultLoadErrorHandlingPolicy gives up after ~3 fast retries, not enough to
-            // ride out a 10-20s Wi-Fi stall; LoadRetryPolicy's longer runway replaces it
-            .setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+        assOverlay = runCatching { AssOverlay() }
+            .onFailure { Log.w(SEEK_LOG_TAG, "ASS overlay unavailable", it) }
+            .getOrNull()
+        val cancelingDataSourceFactory = CancelingDataSourceFactory(httpDataSourceFactory, pendingCall)
+        // One factory per item, so each item's extractors bind its generation at setMediaItem (docs/13).
+        val mediaSourceFactory = ItemBoundMediaSourceFactory(assFonts) { sink ->
+            DefaultMediaSourceFactory(appContext, AssExtractorsFactory(sink))
+                .setSubtitleParserFactory(AssAwareSubtitleParserFactory())
+                .setDataSourceFactory(cancelingDataSourceFactory)
+                // Media3's DefaultLoadErrorHandlingPolicy gives up after ~3 fast retries, not enough to
+                // ride out a 10-20s Wi-Fi stall; LoadRetryPolicy's longer runway replaces it
+                .setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+        }
 
         // Media3's default bufferForPlaybackMs=2500 makes every Direct Play wait 2.5s regardless of
         // LAN speed; lowering it (and bufferForPlaybackAfterRebufferMs) cuts that. minBufferMs/
@@ -449,6 +627,7 @@ class PlayerHolder(
                 addListener(object : Player.Listener {
                     override fun onTracksChanged(tracks: Tracks) {
                         trackSnapshot = tracks
+                        onAssTracks(tracks)
                         if (!tracksMarked) {
                             tracksMarked = true
                             PerfLog.markPlayback("exo.tracks")
@@ -492,6 +671,12 @@ class PlayerHolder(
                         }
                     }
 
+                    override fun onVideoSizeChanged(videoSize: VideoSize) {
+                        if (videoSize.width > 0 && videoSize.height > 0) {
+                            assOverlay?.setVideoSize(videoSize.width, videoSize.height)
+                        }
+                    }
+
                     override fun onSurfaceSizeChanged(width: Int, height: Int) {
                         if (!surfaceReadyMarked && width > 0 && height > 0) {
                             surfaceReadyMarked = true
@@ -523,7 +708,9 @@ class PlayerHolder(
                         droppedFrames: Int,
                         elapsedMs: Long,
                     ) {
-                        droppedVideoFrames.addAndGet(droppedFrames.toLong())
+                        val total = droppedVideoFrames.addAndGet(droppedFrames.toLong())
+                        // docs/10: dropped frames for every playback, styled overlay or not.
+                        if (PerfLog.enabled) PerfLog.line("perf playback dropped=$droppedFrames total=$total")
                     }
 
                     // docs/18 §1's 3rd local-evidence signal. `this@PlayerHolder.` is load-bearing:
@@ -572,8 +759,14 @@ class PlayerHolder(
         plan: PlaybackPlan,
         tolerateMislabeledLevels: Boolean,
         audioDecoderPreferences: AudioDecoderPreferences,
+        fullAssStyling: Boolean,
     ) {
         loadErrorHandlingPolicy.resetForNewPlayback()
+        this.fullAssStyling = fullAssStyling
+        // A new item starts with no styled track, fonts or overlay frame from the last one.
+        beginAssItem()
+        assItemUrl = plan.url
+        assOverlayView?.visibility = assOverlayVisibility()
         // docs/18 §3.1: this is a process-wide singleton, so a previous item's applyTrackDecision
         // state would otherwise silently carry over; this is what makes SubtitleActionFfi.LEAVE
         // mean "this item's own default", not "whatever the previous item left".
@@ -663,8 +856,20 @@ class PlayerHolder(
     override fun hasExhaustedLoadRetryBudget(): Boolean = loadErrorHandlingPolicy.hasExhaustedRetryBudget()
 
     /** Attaches the shared player to [playerView] -- call from e.g. `AndroidView`'s `factory`. */
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     fun attach(playerView: PlayerView) {
         playerView.player = player
+        val overlay = assOverlay ?: return
+        val frame = playerView.findViewById<AspectRatioFrameLayout>(androidx.media3.ui.R.id.exo_content_frame) ?: return
+        if (assOverlayView?.parent === frame) return
+        (assOverlayView?.parent as? ViewGroup)?.removeView(assOverlayView)
+        assOverlayView = AssOverlayView(playerView.context, overlay).also { view ->
+            view.visibility = assOverlayVisibility()
+            // Directly above the video, below Media3's SubtitleView: a SurfaceView clears the window
+            // under it, so anywhere later in the frame it erases PGS and every other Media3 cue.
+            val index = frame.indexOfChild(playerView.videoSurfaceView) + 1
+            frame.addView(view, index, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
     }
 
     /**
@@ -673,9 +878,266 @@ class PlayerHolder(
      * view can't null out someone else's attachment.
      */
     fun detach(playerView: PlayerView) {
+        val frame = playerView.findViewById<ViewGroup>(androidx.media3.ui.R.id.exo_content_frame)
+        assOverlayView?.takeIf { it.parent === frame }?.let { view ->
+            frame.removeView(view)
+            assOverlayView = null
+        }
         if (playerView.player === player) {
             playerView.player = null
         }
+    }
+
+    /** Whether the Rust overlay draws a chosen track: raw SSA with full styling on (else PlainSsaRenderer has it), or a sidecar. */
+    private var assTrackShowing = false
+
+    /** Main thread: the styled sidecar on the overlay (docs/18 §3.2); [assSidecarClock] feeds it the position. */
+    private var assSidecar: AssSidecarTarget? = null
+    private var assSidecarSentUs = Long.MIN_VALUE
+    private var assSidecarSentPlaying = false
+
+    /** No renderer reads a sidecar, so its clock comes from the player, as [AssTextRenderer] sends it. */
+    private val assSidecarClock: Runnable = object : Runnable {
+        override fun run() {
+            val overlay = assOverlay ?: return
+            if (assSidecar == null) return
+            val us = player.currentPosition * 1000
+            val playing = player.isPlaying
+            if (shouldSendPosition(assSidecarSentUs, assSidecarSentPlaying, us, playing)) {
+                overlay.setPosition(us, playing)
+                assSidecarSentUs = us
+                assSidecarSentPlaying = playing
+            }
+            seekTimeoutHandler.postDelayed(this, ASS_SIDECAR_CLOCK_MS)
+        }
+    }
+
+    override fun assSidecarTarget(index: Int): AssSidecarTarget? {
+        val overlay = assOverlay?.takeIf { fullAssStyling } ?: return null
+        return AssSidecarTarget(overlay, "sidecar:$index", overlay.item())
+    }
+
+    override fun showAssSidecar(target: AssSidecarTarget?) {
+        val overlay = assOverlay ?: return
+        // A target from an earlier item names a script the overlay already freed.
+        val next = target?.takeIf { it.overlay === overlay && it.item == overlay.item() }
+        if (next == assSidecar) return
+        assSidecar?.let { overlay.unselect(it.key) }
+        assSidecar = next
+        seekTimeoutHandler.removeCallbacks(assSidecarClock)
+        if (next != null) {
+            overlay.select(next.key)
+            assSidecarSentUs = Long.MIN_VALUE
+            assSidecarClock.run()
+        }
+        onAssTracks(player.currentTracks)
+    }
+
+    /** Main thread: fetches fonts once a styled track is chosen, and shows the overlay only while one is. */
+    private fun onAssTracks(tracks: Tracks) {
+        if (assOverlay == null) return
+        tracks.groups.firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.isSelected }
+            ?.let { group -> (0 until group.length).firstOrNull(group::isTrackSelected)?.let(group::getTrackFormat) }
+            ?.let(::assVideoColour)
+            ?.let { assOverlay?.setVideoColour(it.matrix, it.fullRange, it.hdr, it.height) }
+        refreshAssState(embeddedRawSsaSelected(tracks))
+    }
+
+    private fun embeddedRawSsaSelected(tracks: Tracks): Boolean = tracks.groups.any { group ->
+        group.type == C.TRACK_TYPE_TEXT &&
+            (0 until group.length).any { i -> group.isTrackSelected(i) && isRawSsa(group.getTrackFormat(i)) }
+    }
+
+    /** Main thread: [embedded] says whether a raw SSA track is the embedded one playing, now or once a decision applies. */
+    private fun refreshAssState(embedded: Boolean) {
+        if (assOverlay == null) return
+        val showing = fullAssStyling && (embedded || assSidecar != null)
+        assTrackShowing = showing
+        maybeFetchAssFonts()
+        maybeFetchSpanningLines()
+        seekTimeoutHandler.removeCallbacks(assPerfRunnable)
+        if (showing && PerfLog.enabled) seekTimeoutHandler.postDelayed(assPerfRunnable, ASS_PERF_PERIOD_MS)
+    }
+
+    /**
+     * The overlay view is shown for the whole item whenever full styling is on: a SurfaceView turned
+     * visible mid-playback gets no surface until something else redraws, so choosing or leaving a
+     * styled track, and the font wait, blank it in Rust instead (`select`, `holdFrames`).
+     */
+    private fun assOverlayVisibility(): Int = if (fullAssStyling) View.VISIBLE else View.GONE
+
+    /** Applies the font wait to the overlay's frames (docs/09). */
+    private fun applyAssOverlayState() {
+        assOverlay?.holdFrames(assFramesHeld(assFontFetch, assFontWaitExpired))
+    }
+
+    /**
+     * Main thread: once a styled track shows, its choice is settled and the extractor has jumped over
+     * the file's attachments, finds their fonts with a short read per attachment and range-reads them
+     * on a background thread while playback runs, so no font byte is read before the first frame
+     * (docs/13). It stops once no styled track shows, and starts again when one does
+     * ([assFontFetchTransition]).
+     */
+    private fun maybeFetchAssFonts() {
+        val overlay = assOverlay ?: return
+        val blocks = synchronized(assAttachments) { assAttachments.toList() }
+        val url = assItemUrl
+        val transition = assFontFetchTransition(assFontFetch, assTrackShowing, blocks.isNotEmpty(), assChoiceSettled, hasUrl = url != null)
+        // Every real transition changes the state, so an unchanged one is a no-op.
+        if (transition.next == assFontFetch) return
+        if (transition.endRequest) {
+            // Between reads, its request in flight cancelled; a stop from the wait has neither.
+            assFontsRequest.incrementAndGet()
+            assFontCall?.cancel()
+        }
+        setAssFontFetch(transition.next)
+        if (!transition.startThread || url == null) return
+        val generation = assItemGeneration.get()
+        val request = assFontsRequest.incrementAndGet()
+        val current = { assItemGeneration.get() == generation && assFontsRequest.get() == request }
+        kotlin.concurrent.thread(name = "ass-font-fetch", isDaemon = true) {
+            try {
+                val limits = overlay.fontLimits()
+                val reader = RangeReader { offset, length ->
+                    fetchRange(url, offset, length, exact = false, { registerFontCall(it, current) }, current)
+                }
+                val locations = blocks
+                    .flatMap { attachedFonts(it, reader, limits.maxFontBytes.toLong(), current) }
+                    .distinctBy { it.offset }
+                for (location in fontsToFetch(locations, limits.totalBytes.toLong())) {
+                    if (!current()) return@thread
+                    if (location.offset in assFontsFetched) continue
+                    val bytes = fetchRange(url, location.offset, location.size, exact = true, { registerFontCall(it, current) }, current)
+                    if (!current()) break
+                    if (bytes == null) {
+                        // Attachments are independent ranges: one bad or failed font doesn't cost the rest.
+                        Log.w(SEEK_LOG_TAG, "ASS font fetch failed for ${location.name}")
+                        continue
+                    }
+                    synchronized(assItemLock) {
+                        if (current() && location.offset !in assFontsFetched) {
+                            overlay.addFont(location.name, bytes)
+                            assFontsFetched += location.offset
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                // Class only: a message can carry the server's URL.
+                Log.w(SEEK_LOG_TAG, "ASS font fetch ended: ${t.javaClass.simpleName}")
+            } finally {
+                // Every exit ends the fetch, so the hold can't outlive a thread that died.
+                seekTimeoutHandler.post { if (current()) setAssFontFetch(AssFontFetch.DONE) }
+            }
+        }
+    }
+
+    /**
+     * The only writer of [assFontFetch]: sets the font wait and choice grace timers and applies the
+     * overlay's hold, so every transition holds or releases the frames the same way (docs/13).
+     */
+    private fun setAssFontFetch(next: AssFontFetch) {
+        val timers = assFontTimers(assFontFetch, next, assFontWaitExpired, assGraceArmed)
+        assFontFetch = next
+        if (timers.cancelWait) seekTimeoutHandler.removeCallbacks(assFontWaitRunnable)
+        if (timers.armWait) seekTimeoutHandler.postDelayed(assFontWaitRunnable, ASS_FONT_WAIT_MS)
+        if (timers.armGrace) {
+            assGraceArmed = true
+            seekTimeoutHandler.postDelayed(assChoiceGraceRunnable, ASS_CHOICE_GRACE_MS)
+        }
+        applyAssOverlayState()
+    }
+
+    /**
+     * Records the font request's call for whoever cancels it, unless the fetch is no longer current. Under
+     * [assItemLock] so a stale thread can't overwrite a newer fetch's call; [fetchRange]'s recheck cancels
+     * a call this skips.
+     */
+    private fun registerFontCall(call: okhttp3.Call, current: () -> Boolean) {
+        synchronized(assItemLock) { if (current()) assFontCall = call }
+    }
+
+    /**
+     * Up to [size] bytes of the item at [offset] (exactly [size] when [exact]), or null. It checks the
+     * range served and reads at most one byte past it, so a 206 with a larger body is never buffered.
+     * The call is handed to [register] so whoever ends its use (the next item, a newer seek) can cancel it.
+     */
+    private fun fetchRange(
+        url: String,
+        offset: Long,
+        size: Int,
+        exact: Boolean,
+        register: (okhttp3.Call) -> Unit,
+        stillWanted: () -> Boolean,
+    ): ByteArray? = runCatching {
+        val request = okhttp3.Request.Builder().url(url).header("Range", rangeHeader(offset, size)).build()
+        val call = httpClient.newCall(request).also(register)
+        // The canceller moves the state on, then cancels the registered call; checking after
+        // registering means one of the two always sees the other, and a call [register] skipped as stale dies here.
+        if (!stillWanted()) call.cancel()
+        call.execute().use { r ->
+            val body = r.body
+            val served = servedRangeLength(r.header("Content-Range"), offset, size)
+            if (r.code != 206 || body == null || served == null || exact && served != size) return@use null
+            val source = body.source()
+            if (source.request(served + 1L)) return@use null
+            source.readByteArray().takeIf { it.size == served }
+        }
+    }.getOrNull()
+
+    /**
+     * Main thread: once a styled track shows, reads the lines that began before the newest start, seek
+     * or track switch and still show (docs/13), from the Cues; a newer one supersedes it.
+     */
+    private fun maybeFetchSpanningLines() {
+        val overlay = assOverlay ?: return
+        if (!assTrackShowing) return
+        val (key, mediaUs) = assLinesWanted ?: return
+        val (cues, scaleNs) = assCues ?: return
+        val url = assItemUrl ?: return
+        val track = key.toIntOrNull() ?: return
+        assLinesWanted = null
+        val generation = assItemGeneration.get()
+        val request = assLinesRequest.incrementAndGet()
+        assLinesCall?.cancel()
+        val current = { assItemGeneration.get() == generation && assLinesRequest.get() == request }
+        kotlin.concurrent.thread(name = "ass-lines-fetch", isDaemon = true) {
+            // The scan walks every cue, up to MAX_SUBTITLE_CUES, so it stays off the main thread.
+            val wanted = cues.spanning(track, mediaUs)
+            val reader = RangeReader { offset, length ->
+                fetchRange(url, offset, length, exact = false, { assLinesCall = it }, current)
+            }
+            val samples = spanningSamples(wanted, scaleNs, reader, current)
+            synchronized(assItemLock) {
+                if (current()) overlay.addSamples(key, samples.map { (timeUs, bytes) -> AssSample(timeUs, bytes) })
+            }
+        }
+    }
+
+    /** docs/10: one gated line every [ASS_PERF_PERIOD_MS] while a styled track shows. */
+    private val assPerfRunnable: Runnable = object : Runnable {
+        override fun run() {
+            val s = assOverlay?.stats() ?: return
+            PerfLog.line(
+                "perf ass frames=${s.framesDrawn} lastMs=${"%.1f".format(s.lastFrameMs)} " +
+                    "p90Ms=${"%.1f".format(s.windowP90Ms)} quality=${s.quality} " +
+                    "size=${s.renderWidth}x${s.renderHeight} fontBytes=${s.fontBytes} " +
+                    "eventsSkipped=${s.eventsSkipped} refused=${s.framesRefused} " +
+                    "inputRefused=${s.inputRefusals} renderBytes=${s.renderMemoryBytes} " +
+                    "renderPeak=${s.renderPeakBytes} maxWork=${s.maxFrameWork} " +
+                    "droppedVideo=${droppedVideoFrames.get()}",
+            )
+            if (assTrackShowing) seekTimeoutHandler.postDelayed(this, ASS_PERF_PERIOD_MS)
+        }
+    }
+
+    private var assLineLift = 0.0
+
+    /** docs/12 §16: raises bottom ASS dialogue over the OSD, as plain subtitles are; sent only on change. */
+    fun setAssOsdVisible(osdVisible: Boolean) {
+        val lift = assLineLiftPercent(osdVisible)
+        if (lift == assLineLift) return
+        assLineLift = lift
+        assOverlay?.setLineLift(lift)
     }
 
     override fun addListener(listener: Player.Listener) = player.addListener(listener)
@@ -827,6 +1289,10 @@ class PlayerHolder(
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     override fun stopAndClear() {
+        // A font fetch or wait still running must not land fonts or re-show the overlay after stop.
+        // The overlay view stays visible but blank: hiding it would make a retry in this activity
+        // show it again mid-session, which leaves it without a surface; detach() removes it on exit.
+        beginAssItem()
         resetSeeks("stop")
         // docs/18 §5.2: an armed-but-never-landed resume must not seek/restore a future load.
         disarmResumeSeek()
@@ -851,6 +1317,11 @@ class PlayerHolder(
      * out-of-range/missing override on one never prevents the other from applying.
      */
     override fun applyTrackDecision(decision: TrackDecisionFfi, tracks: Tracks) {
-        player.trackSelectionParameters = withTrackDecision(player.trackSelectionParameters, decision, tracks)
+        val params = withTrackDecision(player.trackSelectionParameters, decision, tracks)
+        player.trackSelectionParameters = params
+        // Every decision path lands here, so the item's subtitle choice is known: fonts may fetch for the
+        // track it leaves showing. Media3 reports that track later, and not at all when it equals the default.
+        assChoiceSettled = true
+        refreshAssState(embeddedRawSsaAfter(params, embeddedRawSsaSelected(player.currentTracks)))
     }
 }

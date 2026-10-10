@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,9 +39,15 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.foundation.focusGroup
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.toRect
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.node.LayoutAwareModifierNode
+import androidx.compose.ui.node.ModifierNodeElement
+import androidx.compose.ui.relocation.BringIntoViewModifierNode
+import androidx.compose.ui.relocation.bringIntoView
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -71,38 +78,56 @@ internal val LocalSettingsFocusMemory = compositionLocalOf<FocusMemory?> { null 
  */
 internal val LocalSettingsRowKey = compositionLocalOf<String?> { null }
 
-/** docs/15-focus-and-selection.md §3 "Section switch inside Settings": the one row/chip that owns
- * initial focus when the pane's `focusProperties { enter }` fires. [key] is matched against each
- * row/chip's own key; a null [key] means the first row (or selected chip) to mount claims it, so
- * Right from the rail lands on the first row and never on Compose's spatially nearest one.
- * [attachedCount] keeps an unattached requester away from `enter`.
- */
-internal class SettingsPaneEntryTarget(val key: String?, val requester: FocusRequester) {
-    private var claimedKey: String? = null
-    var attachedCount: Int = 0
+/** One pane row/chip that can carry the pane entry (see [SettingsPaneEntryTarget]). */
+internal data class PaneEntryRow(val key: String, val canClaim: Boolean)
 
-    /** Whether [rowKey] carries [requester]; with a null [key] the first caller with [canClaim] does. */
-    fun claims(rowKey: String, canClaim: Boolean): Boolean {
-        if (key != null) return key == rowKey
-        if (claimedKey == null && canClaim) claimedKey = rowKey
-        return claimedKey == rowKey
+/** docs/15-focus-and-selection.md §3: the recorded last-focused row wins if it is composed, else
+ * none (a stale key never falls back to a different row); with nothing recorded, the first row
+ * that [PaneEntryRow.canClaim] (chips claim only when selected).
+ */
+internal fun resolvePaneEntryKey(recorded: String?, rows: List<PaneEntryRow>): String? =
+    if (recorded != null) recorded.takeIf { r -> rows.any { it.key == r } } else rows.firstOrNull { it.canClaim }?.key
+
+/** docs/15-focus-and-selection.md §3 "Section switch inside Settings": the one row/chip that owns
+ * initial focus when the pane's `focusProperties { enter }` fires. One instance per section, so a
+ * focus move never invalidates readers: [recordedKey] is read only when `enter` resolves, and each
+ * row registers its own requester outside composition.
+ */
+internal class SettingsPaneEntryTarget(private val recordedKey: () -> String?) {
+    private class Slot(val row: PaneEntryRow, val requester: FocusRequester)
+
+    private val slots = LinkedHashMap<String, Slot>()
+
+    fun register(row: PaneEntryRow, requester: FocusRequester) {
+        slots[row.key] = Slot(row, requester)
+    }
+
+    fun unregister(key: String, requester: FocusRequester) {
+        if (slots[key]?.requester === requester) slots.remove(key)
+    }
+
+    /** The attached requester `enter` should hand focus to, or null to leave it to the default. */
+    fun resolve(): FocusRequester? {
+        val key = resolvePaneEntryKey(recordedKey(), slots.values.map { it.row }) ?: return null
+        return slots[key]?.requester
     }
 }
 
-/** Attaches the pane entry [target]'s requester to this row/chip when it is the entry target,
- * tracking attachment so the pane never hands an unattached requester to the focus system.
- * [canClaim] gates only a first-mount claim (chips claim only when selected). */
+/** Registers this row/chip as a pane-entry candidate under its own requester, so the pane's
+ * `enter` can pick it by key without any composition-time read of the recorded key.
+ * [canClaim] gates only the nothing-recorded case (chips claim only when selected). */
 @Composable
 internal fun Modifier.paneEntry(target: SettingsPaneEntryTarget?, rowKey: String, canClaim: Boolean = true): Modifier {
-    val entry = target?.takeIf { it.claims(rowKey, canClaim) }
-    DisposableEffect(entry) {
-        if (entry != null) entry.attachedCount++
-        onDispose { if (entry != null) entry.attachedCount-- }
+    val requester = remember { FocusRequester() }
+    DisposableEffect(target, rowKey, canClaim) {
+        target?.register(PaneEntryRow(rowKey, canClaim), requester)
+        onDispose { target?.unregister(rowKey, requester) }
     }
-    return if (entry != null) focusRequester(entry.requester) else this
+    return if (target != null) focusRequester(requester) else this
 }
 
-internal val LocalSettingsPaneEntryKey = compositionLocalOf<SettingsPaneEntryTarget?> { null }
+// Static: the target is stable per section, and a section switch recomposes the whole pane anyway.
+internal val LocalSettingsPaneEntryKey = staticCompositionLocalOf<SettingsPaneEntryTarget?> { null }
 
 /** The retained layer's focus gate (see [tv.jellybeam.MainActivity]), for a section that must place
  * focus itself after the focused control left composition. */
@@ -453,18 +478,16 @@ internal fun ChipFieldRow(label: String, description: String, key: String, modif
         animationSpec = tween(SETTINGS_DESCRIPTION_FADE_MS),
         label = "chipFieldRowDescriptionAlpha",
     )
-    // A focused chip only scrolls its own bounds into view, leaving the last row's ring and
-    // description below the pane edge; reveal the whole row instead.
-    val rowIntoView = remember { BringIntoViewRequester() }
-    LaunchedEffect(chipsHaveFocus) { if (chipsHaveFocus) rowIntoView.bringIntoView() }
 
     // Label + chips on one line, description on a full-width line beneath (a 12sp sentence never
     // fits the 170dp label column). Row height is fixed; only description alpha moves with focus.
     Column(
         modifier = modifier
-            .bringIntoViewRequester(rowIntoView)
             .fillMaxWidth()
             .height(SETTINGS_CHIP_ROW_HEIGHT)
+            // A focused chip would scroll only its own bounds, leaving the last row's ring and
+            // description below the pane edge; one request widened to the row avoids a second scroll.
+            .then(WholeRowBringIntoView)
             .background(JellybeamTheme.SurfaceRaised, RoundedCornerShape(ROW_CORNER))
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
@@ -513,6 +536,30 @@ internal fun ChipFieldRow(label: String, description: String, key: String, modif
             style = settingsDescriptionStyle(),
         )
     }
+}
+
+/** Widens a child's bring-into-view request to this node's full bounds before passing it up, so
+ * the enclosing scrollable runs one scroll that shows the whole row. */
+private class WholeRowBringIntoViewNode : Modifier.Node(), BringIntoViewModifierNode, LayoutAwareModifierNode {
+    private var size = IntSize.Zero
+
+    override fun onRemeasured(size: IntSize) {
+        this.size = size
+    }
+
+    override suspend fun bringIntoView(childCoordinates: LayoutCoordinates, boundsProvider: () -> Rect?) {
+        bringIntoView { size.toSize().toRect() }
+    }
+}
+
+private object WholeRowBringIntoView : ModifierNodeElement<WholeRowBringIntoViewNode>() {
+    override fun create() = WholeRowBringIntoViewNode()
+
+    override fun update(node: WholeRowBringIntoViewNode) = Unit
+
+    override fun hashCode() = 0
+
+    override fun equals(other: Any?) = other === this
 }
 
 /**

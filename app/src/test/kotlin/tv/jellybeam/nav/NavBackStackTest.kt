@@ -277,4 +277,17 @@ class NavBackStackTest {
         assertEquals("person-p1", Screen.Person("p1", "Sample Person").entryIdentity())
         assertEquals("person-p1", Screen.Person("p1", "Renamed").entryIdentity())
     }
+
+    // ---- drawer picks ------------------------------------------------------
+
+    @Test
+    fun `a drawer pick pushes from Home, replaces off Home, and Home resets`() {
+        val movies = Screen.Library(ViewSnapshot(id = "movies", name = "Movies", kind = ViewKind.LIBRARY))
+        val shows = Screen.Library(ViewSnapshot(id = "shows", name = "Shows", kind = ViewKind.LIBRARY))
+        val home = NavBackStack.of(Screen.Home)
+        val onMovies = home.forDrawerPick(movies)
+        assertEquals(listOf(Screen.Home, movies), onMovies.entries)
+        assertEquals(listOf(Screen.Home, shows), onMovies.forDrawerPick(shows).entries)
+        assertEquals(listOf(Screen.Home), onMovies.push(Screen.Search).forDrawerPick(Screen.Home).entries)
+    }
 }

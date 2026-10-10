@@ -43,6 +43,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,6 +73,7 @@ import tv.jellybeam.nav.Screen
 import tv.jellybeam.nav.diagName
 import tv.jellybeam.nav.entryKey
 import tv.jellybeam.nav.entryKeys
+import tv.jellybeam.nav.forDrawerPick
 import tv.jellybeam.nav.isHomeRooted
 import tv.jellybeam.nav.resolveStartupView
 import tv.jellybeam.nav.screenForLibraryCard
@@ -836,7 +838,10 @@ private fun JellybeamRoot(
                 // concurrently with openMirror instead of queuing a third
                 // sequential IO-dispatch hop behind it. views() DOES need
                 // the mirror, so it stays after the openMirror await.
-                val settingsDeferred = async { runCatching { gateway.getSettings() } }
+                // A cold start already read it with the prefetch.
+                val settingsDeferred = async {
+                    warm?.settings?.let { Result.success(it) } ?: runCatching { gateway.getSettings() }
+                }
 
                 // Fail open (docs/05): a stale/revoked token only surfaces once
                 // openMirror's own sync actually hits the server -- if it
@@ -866,7 +871,7 @@ private fun JellybeamRoot(
                 // shape as the openMirror call above.
                 val startupView = runCatching {
                     val settings = settingsDeferred.await().getOrThrow()
-                    val views = gateway.views()
+                    val views = warm?.views ?: gateway.views()
                     resolveStartupView(settings.startupScreenViewId, views)
                 }.getOrNull()
 
@@ -1074,25 +1079,36 @@ private fun JellybeamRoot(
 
             val current = stack.current
 
+            // Stable navigation callbacks: each reads the live back stack when invoked, so a push
+            // never hands the retained layers new lambdas (and HomeHostArgs stays equal).
+            val latestNavigate = rememberUpdatedState(::navigate)
+            val go: ((NavBackStack) -> NavBackStack) -> Unit = remember {
+                { change ->
+                    val live = backStack
+                    if (live != null) latestNavigate.value(change(live))
+                }
+            }
+            val openDetail: (Card) -> Unit = remember { { card -> go { it.pushDetail(card) } } }
+
             // Drawer-driven navigation: "Home" always resets to the root; anything else pushes
             // one level deeper from Home, but replaces the top entry when already on a
             // Library/Search, so hopping between libraries doesn't pile up a back-stack.
-            fun navigateFromDrawer(screen: Screen) {
-                val newStack = when {
-                    screen == Screen.Home -> NavBackStack.of(Screen.Home)
-                    current == Screen.Home -> stack.push(screen)
-                    else -> stack.replace(screen)
-                }
-                navigate(newStack)
+            val navigateFromDrawer: (Screen) -> Unit = remember {
+                { screen -> go { it.forDrawerPick(screen) } }
             }
 
             // docs/14-seerr-discover.md, "Go to library" action: [itemId] is a real Jellyfin id
             // already in the local mirror. Fails open rather than navigating to a broken Detail
             // page: no matching item is indistinguishable here from a transient network failure.
-            fun openDiscoverLibraryItem(itemId: String) {
-                composableScope.launch {
-                    val card = resolveLibraryCard(gateway, itemId)
-                    if (card != null) navigate(stack.pushDetail(card))
+            val openDiscoverLibraryItem: (String) -> Unit = remember {
+                { itemId ->
+                    // Only onto the stack it was asked from: a Back, drawer pick or account reset
+                    // during the lookup drops it.
+                    val origin = backStack
+                    composableScope.launch {
+                        val card = resolveLibraryCard(gateway, itemId)
+                        if (card != null && backStack === origin) openDetail(card)
+                    }
                 }
             }
 
@@ -1122,7 +1138,7 @@ private fun JellybeamRoot(
                                 Screen.Home -> NavDrawerHost(
                                     currentScreen = Screen.Home,
                                     libraries = drawerViews,
-                                    onNavigate = ::navigateFromDrawer,
+                                    onNavigate = navigateFromDrawer,
                                     isTop = isTop,
                                     focusGate = focusGate,
                                     accounts = accounts,
@@ -1136,7 +1152,7 @@ private fun JellybeamRoot(
                                     HomeHost(
                                         layout = homeLayout,
                                         args = HomeHostArgs(
-                                            onOpenDetail = { card -> navigate(stack.pushDetail(card)) },
+                                            onOpenDetail = openDetail,
                                             isTop = isTop,
                                             focusGate = focusGate,
                                         ),
@@ -1149,7 +1165,7 @@ private fun JellybeamRoot(
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
-                                        onNavigate = ::navigateFromDrawer,
+                                        onNavigate = navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
                                         accounts = accounts,
@@ -1168,7 +1184,7 @@ private fun JellybeamRoot(
                                                 // mark the genuine Detail case.
                                                 val screen = screenForLibraryCard(card)
                                                 if (screen is Screen.Detail) PerfLog.markDetailPush()
-                                                navigate(stack.push(screen))
+                                                go { it.push(screen) }
                                             },
                                             isTop = isTop,
                                             focusGate = focusGate,
@@ -1177,9 +1193,9 @@ private fun JellybeamRoot(
                                 }
 
                                 Screen.Search -> SearchScreen(
-                                    onOpenDetail = { card -> navigate(stack.pushDetail(card)) },
+                                    onOpenDetail = openDetail,
                                     onOpenDiscoverDetail = { mediaType, tmdbId ->
-                                        navigate(stack.push(Screen.DiscoverDetail(mediaType, tmdbId)))
+                                        go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                     },
                                     discoverConfigured = discoverConfigured,
                                     isTop = isTop,
@@ -1191,7 +1207,7 @@ private fun JellybeamRoot(
                                 Screen.Settings -> NavDrawerHost(
                                     currentScreen = Screen.Settings,
                                     libraries = drawerViews,
-                                    onNavigate = ::navigateFromDrawer,
+                                    onNavigate = navigateFromDrawer,
                                     isTop = isTop,
                                     focusGate = focusGate,
                                     accounts = accounts,
@@ -1206,7 +1222,7 @@ private fun JellybeamRoot(
                                         isTop = isTop,
                                         focusGate = focusGate,
                                         onSeerrConfigChanged = { seerrEpoch++ },
-                                        onReportProblem = { navigate(stack.push(Screen.Report)) },
+                                        onReportProblem = { go { it.push(Screen.Report) } },
                                     )
                                 }
 
@@ -1216,7 +1232,7 @@ private fun JellybeamRoot(
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
-                                        onNavigate = ::navigateFromDrawer,
+                                        onNavigate = navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
                                         accounts = accounts,
@@ -1238,15 +1254,12 @@ private fun JellybeamRoot(
                                                 // non-episode card still pushes.
                                                 val stayingOnSiblingEpisode = entry.card.itemType == EPISODE_ITEM_TYPE &&
                                                     card.itemType == EPISODE_ITEM_TYPE
-                                                val newStack = if (stayingOnSiblingEpisode) {
-                                                    stack.replaceDetail(card)
-                                                } else {
-                                                    stack.pushDetail(card)
+                                                go { live ->
+                                                    if (stayingOnSiblingEpisode) live.replaceDetail(card) else live.pushDetail(card)
                                                 }
-                                                navigate(newStack)
                                             },
                                             onOpenPerson = { person ->
-                                                person.id?.let { navigate(stack.push(Screen.Person(it, person.name.orEmpty()))) }
+                                                person.id?.let { personId -> go { it.push(Screen.Person(personId, person.name.orEmpty())) } }
                                             },
                                         )
                                     }
@@ -1259,7 +1272,7 @@ private fun JellybeamRoot(
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
-                                        onNavigate = ::navigateFromDrawer,
+                                        onNavigate = navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
                                         accounts = accounts,
@@ -1275,9 +1288,9 @@ private fun JellybeamRoot(
                                             personName = entry.name,
                                             isTop = isTop,
                                             focusGate = focusGate,
-                                            onOpenDetail = { card -> navigate(stack.pushDetail(card)) },
+                                            onOpenDetail = openDetail,
                                             onOpenDiscoverDetail = { mediaType, tmdbId ->
-                                                navigate(stack.push(Screen.DiscoverDetail(mediaType, tmdbId)))
+                                                go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                             },
                                         )
                                     }
@@ -1288,7 +1301,7 @@ private fun JellybeamRoot(
                                 Screen.Discover -> NavDrawerHost(
                                     currentScreen = Screen.Discover,
                                     libraries = drawerViews,
-                                    onNavigate = ::navigateFromDrawer,
+                                    onNavigate = navigateFromDrawer,
                                     isTop = isTop,
                                     focusGate = focusGate,
                                     accounts = accounts,
@@ -1303,13 +1316,13 @@ private fun JellybeamRoot(
                                         isTop = isTop,
                                         focusGate = focusGate,
                                         onOpenGrid = { kind, title, genreId, genreName ->
-                                            navigate(stack.push(Screen.DiscoverGrid(kind, title, genreId, genreName)))
+                                            go { it.push(Screen.DiscoverGrid(kind, title, genreId, genreName)) }
                                         },
                                         onOpenDetail = { mediaType, tmdbId ->
-                                            navigate(stack.push(Screen.DiscoverDetail(mediaType, tmdbId)))
+                                            go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                         },
-                                        onOpenSearch = { navigate(stack.push(Screen.DiscoverSearch)) },
-                                        onOpenMyRequests = { navigate(stack.push(Screen.DiscoverRequests)) },
+                                        onOpenSearch = { go { it.push(Screen.DiscoverSearch) } },
+                                        onOpenMyRequests = { go { it.push(Screen.DiscoverRequests) } },
                                     )
                                 }
 
@@ -1319,7 +1332,7 @@ private fun JellybeamRoot(
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
-                                        onNavigate = ::navigateFromDrawer,
+                                        onNavigate = navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
                                         accounts = accounts,
@@ -1338,7 +1351,7 @@ private fun JellybeamRoot(
                                             isTop = isTop,
                                             focusGate = focusGate,
                                             onOpenDetail = { mediaType, tmdbId ->
-                                                navigate(stack.push(Screen.DiscoverDetail(mediaType, tmdbId)))
+                                                go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                             },
                                         )
                                     }
@@ -1350,7 +1363,7 @@ private fun JellybeamRoot(
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
-                                        onNavigate = ::navigateFromDrawer,
+                                        onNavigate = navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
                                         accounts = accounts,
@@ -1367,10 +1380,10 @@ private fun JellybeamRoot(
                                             isTop = isTop,
                                             focusGate = focusGate,
                                             onOpenDetail = { mediaType, tmdbId ->
-                                                navigate(stack.push(Screen.DiscoverDetail(mediaType, tmdbId)))
+                                                go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                             },
-                                            onOpenPerson = { personId -> navigate(stack.push(Screen.DiscoverPerson(personId))) },
-                                            onGoToLibrary = ::openDiscoverLibraryItem,
+                                            onOpenPerson = { personId -> go { it.push(Screen.DiscoverPerson(personId)) } },
+                                            onGoToLibrary = openDiscoverLibraryItem,
                                         )
                                     }
                                 }
@@ -1381,7 +1394,7 @@ private fun JellybeamRoot(
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
-                                        onNavigate = ::navigateFromDrawer,
+                                        onNavigate = navigateFromDrawer,
                                         isTop = isTop,
                                         focusGate = focusGate,
                                         accounts = accounts,
@@ -1397,7 +1410,7 @@ private fun JellybeamRoot(
                                             isTop = isTop,
                                             focusGate = focusGate,
                                             onOpenDetail = { mediaType, tmdbId ->
-                                                navigate(stack.push(Screen.DiscoverDetail(mediaType, tmdbId)))
+                                                go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                             },
                                         )
                                     }
@@ -1406,7 +1419,7 @@ private fun JellybeamRoot(
                                 Screen.DiscoverRequests -> NavDrawerHost(
                                     currentScreen = Screen.DiscoverRequests,
                                     libraries = drawerViews,
-                                    onNavigate = ::navigateFromDrawer,
+                                    onNavigate = navigateFromDrawer,
                                     isTop = isTop,
                                     focusGate = focusGate,
                                     accounts = accounts,
@@ -1421,7 +1434,7 @@ private fun JellybeamRoot(
                                         isTop = isTop,
                                         focusGate = focusGate,
                                         onOpenDetail = { mediaType, tmdbId ->
-                                            navigate(stack.push(Screen.DiscoverDetail(mediaType, tmdbId)))
+                                            go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                         },
                                     )
                                 }
@@ -1431,14 +1444,14 @@ private fun JellybeamRoot(
                                     isTop = isTop,
                                     focusGate = focusGate,
                                     onOpenDetail = { mediaType, tmdbId ->
-                                        navigate(stack.push(Screen.DiscoverDetail(mediaType, tmdbId)))
+                                        go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                     },
                                 )
 
                                 // docs/21 §1.2: drawer-less like Search/DiscoverSearch (Back
                                 // pops, no library rail); pushed from Settings › Troubleshooting
                                 // or the post-crash dialog.
-                                Screen.Report -> ReportScreen(onExit = { navigate(stack.pop()) }, isTop = isTop, focusGate = focusGate)
+                                Screen.Report -> ReportScreen(onExit = { go { it.pop() } }, isTop = isTop, focusGate = focusGate)
 
                                 // Unreachable: SignIn never appears on a Home-rooted stack.
                                 Screen.SignIn -> Unit

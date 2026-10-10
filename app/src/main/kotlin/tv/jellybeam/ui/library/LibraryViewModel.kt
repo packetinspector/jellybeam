@@ -185,6 +185,9 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
      */
     private var generation = 0
 
+    /** Bumped by every [refresh]'s items publish, so only the newest refresh publishes its summary. */
+    private var refreshSeq = 0
+
     /**
      * Serializes [loadNextPage] against [ensureLoadedThrough]: a rail jump waits for an in-flight
      * next-page load rather than bailing early, so [IndexRail]'s post-jump focus lookup always
@@ -280,9 +283,14 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
 
     private suspend fun readGrid(sort: GridSort, filters: GridFilters, requested: Int): GridRead {
         val items = gateway.libraryGrid(view.id, sort, filters, 0u, requested.toUInt())
+        val (counts, groups) = readSummary(sort, filters)
+        return GridRead(requested, items, counts, groups)
+    }
+
+    private suspend fun readSummary(sort: GridSort, filters: GridFilters): Pair<GridCounts?, List<GridGroup>?> {
         val counts = gateway.libraryGridCounts(view.id, filters)
         val groups = gateway.libraryGridGroups(view.id, sort, filters)
-        return GridRead(requested, items, counts, groups)
+        return counts to groups
     }
 
     /** Per-field null-retaining merge of [read] into this state (see [GridRead]); callers compose
@@ -301,17 +309,18 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
      * (docs/16 §4.6). Used by [init]'s first load and [changeRefreshScheduler]; never by a
      * sort/filter intent, which drops the old prefix instead (see [requery]).
      *
-     * Takes [pagingMutex] for its whole body, same as [loadNextPage]/[ensureLoadedThrough], to
-     * close both the refresh-vs-page and refresh-vs-refresh races. [requery] deliberately does not
-     * take it, since a sort/filter intent must not wait behind a slow refresh -- [generation] lets
-     * its result win instead.
+     * Holds [pagingMutex] only for the items read and publish, which closes the refresh-vs-page and
+     * refresh-vs-refresh races; counts, groups and genres are read after it is released so they
+     * never block [loadNextPage] or a rail jump, and publish one frame after the items. [requery]
+     * deliberately does not take it, since a sort/filter intent must not wait behind a slow
+     * refresh -- [generation] lets its result win instead.
      *
      * Not fixed here: items/counts/groups/genres remain separate, non-transactional reads that can
      * straddle an intervening commit -- self-heals on the next change event/refresh.
      */
     private suspend fun refresh(reloadGenres: Boolean = false) {
-        pagingMutex.withLock {
-            if (view.kind.isLive) {
+        if (view.kind.isLive) {
+            pagingMutex.withLock {
                 // Live listing has no mirror behind it: always re-pulled from the top.
                 val page = runCatching {
                     gateway.liveChildren(view.id, 0u, PAGE_SIZE.toUInt(), liveSortFor(view.kind))
@@ -321,25 +330,50 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
                     return@withLock
                 }
                 _state.update { it.copy(isLoading = false, items = page, hasMore = page.size == PAGE_SIZE, isLoadingMore = false) }
-                return@withLock
             }
-            val myGeneration = generation
-            val current = _state.value
+            return
+        }
+        // The mutex covers only the items read + publish; summary/genres reads run outside it so
+        // they never block loadNextPage or a rail jump.
+        var myGeneration = 0
+        var mySeq = 0
+        var current = _state.value
+        var stale = false
+        pagingMutex.withLock {
+            myGeneration = generation
+            mySeq = ++refreshSeq
+            current = _state.value
             val requested = maxOf(PAGE_SIZE, current.items.size)
-            val read = readGrid(current.sort, current.filters, requested)
-            val genres = if (reloadGenres) gateway.libraryGenres(view.id) else current.genres
-            val itemTypes = if (reloadGenres && view.isFavorites) gateway.favoriteItemTypes() else current.itemTypes
+            val items = gateway.libraryGrid(view.id, current.sort, current.filters, 0u, requested.toUInt())
             if (myGeneration != generation) {
-                // A newer intent's requery() already holds the correct results; touch nothing but
-                // this stale fetch's own loading flags.
+                stale = true
                 _state.update { it.copy(isLoading = false, isLoadingMore = false) }
                 return@withLock
             }
-            // Same fail-soft reasoning as the live branch, via a null result instead of a thrown
-            // exception (see [GridRead]'s null-vs-empty contract).
-            _state.update { it.applying(read).copy(isLoading = false, isLoadingMore = false, genres = genres, itemTypes = itemTypes) }
-            if (reloadGenres && isStaleItemTypeFilter(current.filters.itemType, itemTypes)) setItemType(null)
+            _state.update {
+                it.copy(
+                    items = items ?: it.items,
+                    hasMore = items?.let { page -> page.size == requested } ?: it.hasMore,
+                    isLoading = false,
+                    isLoadingMore = false,
+                )
+            }
         }
+        if (stale) return
+        val (counts, groups) = readSummary(current.sort, current.filters)
+        val genres = if (reloadGenres) gateway.libraryGenres(view.id) else current.genres
+        val itemTypes = if (reloadGenres && view.isFavorites) gateway.favoriteItemTypes() else current.itemTypes
+        // A newer intent's requery(), or a newer refresh's items, own the summary now.
+        if (myGeneration != generation || mySeq != refreshSeq) return
+        _state.update {
+            it.copy(
+                counts = counts ?: it.counts,
+                groups = groups ?: it.groups,
+                genres = if (reloadGenres) genres else it.genres,
+                itemTypes = if (reloadGenres) itemTypes else it.itemTypes,
+            )
+        }
+        if (reloadGenres && isStaleItemTypeFilter(current.filters.itemType, itemTypes)) setItemType(null)
     }
 
     /**
@@ -451,14 +485,7 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
                         // this stale page must not be appended on top.
                         return@withLock
                     }
-                    _state.update { s ->
-                        val known = s.items.asSequence().map { it.id }.toMutableSet()
-                        val additions = page.filter { known.add(it.id) }
-                        s.copy(
-                            items = s.items + additions,
-                            hasMore = page.size == PAGE_SIZE,
-                        )
-                    }
+                    _state.update { if (it.items !== state.items) it else appendPage(it, page, PAGE_SIZE) }
                 } finally {
                     _state.update { it.copy(isLoadingMore = false) }
                 }
@@ -467,9 +494,10 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
     }
 
     /**
-     * Rail-jump prefix loader (docs/16 §4.4/§4.6): if the grid doesn't cover [offset] and more
-     * exists, fetches one page `0..max(offset + PAGE_SIZE, current size)` and replaces
-     * [LibraryUiState.items] (same growing-prefix shape as [refresh]). Returns whether it covers
+     * Rail-jump loader (docs/16 §4.4/§4.6): if the grid doesn't cover [offset] and more exists,
+     * fetches only the missing tail `items.size..offset + PAGE_SIZE` and appends it by id
+     * ([appendPage]). A mirror change between reads can duplicate (dropped) or skip a row; the
+     * change event's [refresh] re-reads the whole prefix and heals it. Returns whether it covers
      * [offset] -- `false` when beyond what the gateway has or the initial load hasn't landed.
      *
      * Takes [pagingMutex] for its whole body so a rail jump waits for an in-flight [loadNextPage]
@@ -483,19 +511,23 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
         val myGeneration = generation
         _state.update { it.copy(isLoadingMore = true) }
         try {
-            val requested = maxOf(offset + PAGE_SIZE, current.items.size)
-            val items = gateway.libraryGrid(view.id, current.sort, current.filters, 0u, requested.toUInt())
+            // Only the missing tail: [items.size, offset + PAGE_SIZE), appended by id.
+            val start = current.items.size
+            val requested = maxOf(offset + PAGE_SIZE - start, PAGE_SIZE)
+            val page = gateway.libraryGrid(view.id, current.sort, current.filters, start.toUInt(), requested.toUInt())
             if (myGeneration != generation) {
                 // A newer intent's requery() already replaced items from offset 0 under the new
                 // sort/filters, so this fetch is discarded; report coverage against its result.
                 return@withLock _state.value.items.size > offset
             }
-            if (items == null) {
+            if (page == null) {
                 // §4.6: a null page leaves `items`/`hasMore` untouched so a later jump can retry.
                 return@withLock _state.value.items.size > offset
             }
-            _state.update { it.copy(items = items, hasMore = items.size == requested) }
-            items.size > offset
+            // A requery that replaced the items mid-read owns them now (same generation: its intent
+            // bumped it before this read began), so the tail is dropped rather than misplaced.
+            _state.update { if (it.items !== current.items) it else appendPage(it, page, requested) }
+            _state.value.items.size > offset
         } finally {
             _state.update { it.copy(isLoadingMore = false) }
         }
@@ -528,4 +560,14 @@ class LibraryViewModelFactory(
         require(modelClass.isAssignableFrom(LibraryViewModel::class.java))
         return LibraryViewModel(gateway, view) as T
     }
+}
+
+/**
+ * [page] (asked for [requested] rows) appended to [state]'s items, skipping ids already shown: an
+ * offset page can overlap the loaded rows after a mirror change. [LibraryUiState.hasMore] follows
+ * the page's own size, not what survived the dedupe.
+ */
+internal fun appendPage(state: LibraryUiState, page: List<Card>, requested: Int): LibraryUiState {
+    val known = state.items.mapTo(HashSet()) { it.id }
+    return state.copy(items = state.items + page.filter { known.add(it.id) }, hasMore = page.size == requested)
 }

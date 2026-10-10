@@ -85,3 +85,13 @@ fun NavBackStack.entryKeys(): List<String> = entries.mapIndexed { index, screen 
 
 /** One entry's [entryKeys] key, given its stack [index]. */
 fun Screen.entryKey(index: Int): String = "$index:${entryIdentity()}"
+
+/**
+ * A drawer pick's stack: Home resets to the root; anything else pushes one level above Home, or
+ * replaces the top when already off Home, so hopping between libraries never piles up.
+ */
+fun NavBackStack.forDrawerPick(screen: Screen): NavBackStack = when {
+    screen == Screen.Home -> NavBackStack.of(Screen.Home)
+    current == Screen.Home -> push(screen)
+    else -> replace(screen)
+}

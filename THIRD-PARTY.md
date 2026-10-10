@@ -47,8 +47,8 @@ are not listed — they never ship in the APK.
 
 ## Rust (`core/`)
 
-Direct dependencies of the workspace's shipping crates (`ffi`, `jellyfin-api`,
-`jellyfin-core`, `media-cache`, `playback-policy`, `seerr-api`); internal
+Direct dependencies of the workspace's shipping crates (`ass-render`, `ffi`,
+`jellyfin-api`, `jellyfin-core`, `media-cache`, `playback-policy`, `seerr-api`); internal
 path dependencies between these crates aren't listed. Versions are the ones
 locked in `core/Cargo.lock`.
 
@@ -67,6 +67,25 @@ locked in `core/Cargo.lock`.
 | reqwest | 0.12.28 | MIT OR Apache-2.0 |
 | tokio-tungstenite | 0.24.0 | MIT |
 | rusqlite (bundled SQLite) | 0.32.1 | MIT (rusqlite); the bundled SQLite C library itself is public domain |
+
+### Styled subtitle renderer (`core/ass-render`)
+
+Full ASS/SSA rendering uses substation, a pure-Rust port of libass, pinned
+to a commit in `core/ass-render/Cargo.toml`. No C library ships for it.
+
+| Crate | Version | Licence |
+|---|---|---|
+| substation | 0.1.0 (git) | GPL-3.0-or-later; ported libass code ISC, ported FreeType and Adobe CFF engine code FTL (its `NOTICE`) |
+| harfrust (vendored in substation, patched) | 0.13.3 | MIT |
+| read-fonts | 0.43.3 | MIT OR Apache-2.0 |
+| unicode-bidi | 0.3.18 | MIT OR Apache-2.0 |
+| unicode-script | 0.5.8 | MIT OR Apache-2.0 |
+| encoding_rs | 0.8.42 | (Apache-2.0 OR MIT) AND BSD-3-Clause |
+
+Portions of this software are copyright © 2026 The FreeType Project
+(www.freetype.org). All rights reserved.
+`core/ass-render/testdata/NotoSans-Latin.ttf` is a test-only subset of Noto
+Sans (OFL-1.1, `OFL.txt` alongside) and never ships.
 
 `reqwest` and `tokio-tungstenite` are built with `rustls` (via `ring`), not
 OpenSSL — no system TLS dependency.

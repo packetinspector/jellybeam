@@ -18,6 +18,7 @@ import tv.jellybeam.ui.cards.ArtSource
 import tv.jellybeam.ui.cards.CardFormatting
 import uniffi.jellybeam_core.AudioSpatialKind
 import uniffi.jellybeam_core.Card
+import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.ImageKind
 import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.MediaStreamInfo
@@ -28,6 +29,43 @@ import uniffi.jellybeam_core.PersonInfo
  * free of any Compose/Android dependency, same discipline as [CardFormatting].
  */
 object DetailFormatting {
+
+    /** How a mirror change bears on a Series/BoxSet page; see [collectionChange]. */
+    sealed interface CollectionChange {
+        data object Affects : CollectionChange
+        data object Ignores : CollectionChange
+
+        /** Refresh only if the mirror says one of [unknownIds] is a child of the series. */
+        data class AffectsIfChildOf(val unknownIds: List<String>) : CollectionChange
+    }
+
+    /**
+     * Series/BoxSet change filter (docs/11 item 11). An unknown id refreshes a Series page only
+     * once the mirror confirms it belongs there, so a new episode reaches the memory-served
+     * season shelves without unrelated sync or userdata upserts re-querying the page.
+     */
+    fun collectionChange(
+        event: ChangeEvent,
+        cardId: String,
+        isSeries: Boolean,
+        knownIds: Set<String>,
+    ): CollectionChange = when (event) {
+        is ChangeEvent.Upserted -> when {
+            knownIds.isEmpty() || event.ids.any { it == cardId || it in knownIds } -> CollectionChange.Affects
+            !isSeries -> CollectionChange.Ignores
+            else -> event.ids.filter { it !in knownIds && it != cardId }
+                .takeIf { it.isNotEmpty() }
+                ?.let { CollectionChange.AffectsIfChildOf(it) }
+                ?: CollectionChange.Ignores
+        }
+        is ChangeEvent.Removed ->
+            if (event.ids.any { it == cardId || it in knownIds }) CollectionChange.Affects else CollectionChange.Ignores
+        ChangeEvent.Refresh -> CollectionChange.Affects
+        ChangeEvent.ViewsChanged -> CollectionChange.Ignores
+    }
+
+    /** Seasons and episodes both carry their series id. */
+    fun isChildOfSeries(cards: List<Card>, seriesId: String): Boolean = cards.any { it.seriesId == seriesId }
 
     private const val SERIES_ITEM_TYPE = "Series"
     private const val MOVIE_ITEM_TYPE = "Movie"
@@ -204,6 +242,24 @@ object DetailFormatting {
         else -> FocusSeedTarget.NONE
     }
 
+    /**
+     * docs/15 §2 rule 3 for a series page: the primary pill wins whenever one exists, the selected
+     * season chip only when the settled primary action is absent, the door last. `null` = not
+     * decidable yet, so a fast-arriving chip row cannot pre-empt a Play/Resume still resolving.
+     */
+    fun resolveSeriesSeed(
+        hasPrimary: Boolean,
+        primarySettled: Boolean,
+        hasChips: Boolean,
+        seasonsSettled: Boolean,
+    ): FocusSeedTarget? = when {
+        hasPrimary -> FocusSeedTarget.PRIMARY
+        !primarySettled -> null
+        hasChips -> FocusSeedTarget.SECONDARY
+        !seasonsSettled -> null
+        else -> FocusSeedTarget.NONE
+    }
+
     private fun isSpecialSeason(season: Card): Boolean = season.name == SPECIALS_SEASON_NAME || season.indexNumber == 0
 
     /** Spec item 3: prefers the first season that's neither named "Specials" nor indexed 0, falling
@@ -215,6 +271,35 @@ object DetailFormatting {
      * counts as special" rule so the tab D-pad focus lands on first always matches.
      */
     fun seasonsWithSpecialsLast(seasons: List<Card>): List<Card> = seasons.sortedBy { if (isSpecialSeason(it)) 1 else 0 }
+
+    /**
+     * One season's episodes derived from the whole-series list, equal to the core's
+     * `children(seasonId)`: match on `parentIndexNumber == season.indexNumber`, drop virtual
+     * Episodes unless [showVirtualEpisodes], order by `indexNumber` (nulls last). `null` when memory
+     * can't be faithful (no list, a season without a number, or an episode without a
+     * `parentIndexNumber`, which the core resolves through `parent_id`, a field [Card] lacks).
+     */
+    fun episodesOfSeason(season: Card, allEpisodes: List<Card>, showVirtualEpisodes: Boolean): List<Card>? {
+        val number = season.indexNumber ?: return null
+        if (allEpisodes.isEmpty() || allEpisodes.any { it.parentIndexNumber == null }) return null
+        return allEpisodes
+            .filter { it.parentIndexNumber == number && (showVirtualEpisodes || !it.isVirtual) }
+            .sortedWith(compareBy(nullsLast()) { it.indexNumber })
+    }
+
+    /**
+     * Selection after the season list was replaced (docs/15 §5): kept while it is in [seasons] or
+     * [seasons] is empty (an empty read also means mirror-unavailable, never "all removed"); a
+     * removed pick, or none once [settled] with seasons present, falls to the resume season, else
+     * the first. Before [settled] a null stays null, and a removed pick is also null, so the resume
+     * pick is never provisional (docs/15 §5).
+     */
+    fun reconcileSelectedSeason(selectedId: String?, seasons: List<Card>, allEpisodes: List<Card>, settled: Boolean): String? {
+        if (selectedId == null && !settled) return null
+        if (selectedId != null && (seasons.isEmpty() || seasons.any { it.id == selectedId })) return selectedId
+        if (!settled) return null
+        return (resolveResumeSeason(seasons, allEpisodes) ?: seasons.firstOrNull())?.id
+    }
 
     /**
      * Series page's initial season-chip preselection. Mirrors [resolveSeriesAction]'s priority so
@@ -441,50 +526,12 @@ object DetailFormatting {
     }
 
     /**
-     * Builds a synthetic Series [Card] from an Episode's own fields so the "View Series" pill can
-     * reuse existing `onOpenDetail(Card)` plumbing with no new FFI: every Episode row already
-     * carries `seriesId`/`seriesName`/`seriesPrimaryTag`, so this is a plain field remap.
-     * [seriesPrimaryTag] is threaded into the synthetic card's own `primaryTag` slot so
-     * [heroPosterArtSource] resolves the series' real poster immediately, no flash of missing art.
-     * `null` when the episode carries no `seriesId` -- callers must hide the pill entirely.
-     */
-    // These two pure predicates are [DetailScreen]'s reveal gates, pulled out here so they're
-    // JVM-testable: the page used to reveal each below-fold section the instant its own
-    // independent fetch landed, several arrivals spread over time each shoving content down a beat.
-
-    /**
-     * Whether the itemDetail-driven trio (spec strip, details footer, cast row) should reveal (or
-     * collapse) as one batch. A Series' spec strip never has anything to show in any itemDetail
-     * state, so it alone is ready immediately rather than waiting on the real fetch.
-     */
-    fun specStripReady(itemType: String, itemDetailLoaded: Boolean): Boolean =
-        itemType == SERIES_ITEM_TYPE || itemDetailLoaded
-
-    /**
-     * Whether the Series episode grid should show skeleton cells: true while either the season
-     * list or the selected season's episode list is loading, covering both the first load and a
-     * later season-tab switch with the same rule. Always `false` for a non-Series item type.
-     */
-    fun showEpisodeSkeleton(isSeries: Boolean, isLoadingSeasons: Boolean, isLoadingEpisodes: Boolean): Boolean =
-        isSeries && (isLoadingSeasons || isLoadingEpisodes)
-
-    /**
-     * §D.1 fix: [parentBackdropItemId]/[parentBackdropTag] are carried over
-     * from the episode rather than nulled out. Jellyfin resolves an
-     * episode's `ParentBackdropItemId`/`ParentBackdropImageTags` by walking
-     * up to the nearest ancestor that actually has backdrop art -- for a
-     * typical library (no per-season backdrop art) that's the Series
-     * itself -- so these two fields are usually already exactly the
-     * synthetic card's OWN backdrop, and [CardFormatting.backdropArtSource]
-     * falls back to them the moment [backdropTag] itself is `null` (true
-     * here: an Episode's own [Card] never carries its series' `backdrop_tag`
-     * column directly, only this parent-pointer pair). Previously nulling
-     * both meant the View-Series synthetic card ALWAYS rendered a flat,
-     * art-less backdrop panel; this is the one concrete in-fence fix for
-     * this pass's "Series backdrop renders black" report -- see this
-     * file's own report for what's NOT fixed here (a Series card reached
-     * the normal way, straight from the mirror, was already carrying its
-     * real `backdropTag` and isn't touched by this function at all).
+     * Builds a synthetic Series [Card] from an Episode's own fields for the "View Series" pill
+     * (no new FFI): `seriesId`/`seriesName`/`seriesPrimaryTag` remap onto the card, so the poster
+     * resolves immediately. [parentBackdropItemId]/[parentBackdropTag] are carried over because
+     * Jellyfin resolves them to the nearest ancestor with backdrop art (usually the Series), and
+     * [CardFormatting.backdropArtSource] falls back to them while `backdropTag` is `null`.
+     * `null` when the episode carries no `seriesId`; callers must hide the pill.
      */
     fun seriesCardFrom(episode: Card): Card? {
         val seriesId = episode.seriesId ?: return null
@@ -711,6 +758,26 @@ object DetailFormatting {
         return if (extra > 0) strings.plural(R.plurals.detail_studio_more, extra, clean.first(), extra) else clean.first()
     }
 
+    /** The credits line's three segments, each `null` when the item has nothing for it. */
+    data class CreditsLines(val directors: String?, val writers: String?, val studio: String?) {
+        val isEmpty: Boolean get() = directors == null && writers == null && studio == null
+    }
+
+    /** docs/23 Rule 3's director / writer / studio segments; empty means the line is absent. */
+    fun creditsLines(strings: UiStrings, directors: List<String>?, writers: List<String>?, studios: List<String>?): CreditsLines =
+        CreditsLines(
+            directors = peopleLine(directors.orEmpty()),
+            writers = peopleLine(writers.orEmpty()),
+            studio = studioSummary(strings, studios.orEmpty())?.uppercaseUi(),
+        )
+
+    /**
+     * The spec capsule's cells: [specStripFields] plus [extraFields] (the Movie page's file size).
+     * Empty before the detail record resolves, so one check serves "no capsule".
+     */
+    fun specCapsuleFields(strings: UiStrings, detail: ItemDetail?, extraFields: List<SpecField> = emptyList()): List<SpecField> =
+        if (detail == null) emptyList() else specStripFields(strings, detail) + extraFields
+
     // docs/19 §1.5 panel-open reflow: pure arithmetic backing [ItemBoundaryLine] and DetailScreen's
     // per-frame LazyRow card-window sizing.
 
@@ -740,5 +807,14 @@ object DetailFormatting {
         val available = contentWidthDp - startMarginDp + gapDp
         val perCard = cardWidthDp + gapDp
         return max(1, floor(available / perCard).toInt())
+    }
+
+    /** The first fully visible item of a shelf (same rule as [rememberCardWindow]'s latch), or null
+     * when the shelf is empty; a partly scrolled-off first item is skipped.
+     */
+    fun shelfEntryIndex(firstVisibleIndex: Int, firstVisibleOffsetPx: Int, itemCount: Int): Int? {
+        if (itemCount <= 0) return null
+        val firstFullyVisible = firstVisibleIndex + if (firstVisibleOffsetPx > 0) 1 else 0
+        return firstFullyVisible.coerceIn(0, itemCount - 1)
     }
 }

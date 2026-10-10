@@ -1,6 +1,9 @@
 # Rust
 /core/target/
 /core/target-docker/
+# Local substation path override (docs/06 "Local substation checkout").
+/core/.cargo/
+/docker-compose.override.yml
 **/*.rs.bk
 
 # Android / Gradle

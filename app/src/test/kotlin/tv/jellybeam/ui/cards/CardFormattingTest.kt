@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import tv.jellybeam.i18n.ResourceUiStrings
 import uniffi.jellybeam_core.ImageKind
+import uniffi.jellybeam_core.ResumeArt
 
 class CardFormattingTest {
     private val strings = ResourceUiStrings.default
@@ -347,26 +348,90 @@ class CardFormattingTest {
 
     // ---- resumeArtSource (resume/next-up shelf's uniform 16:9 chain) ------
 
-    // Android TV deviation from docs/07 §1's mixed-aspect row: movies use posters,
-    // episodes use a screen cap (owner product requirement).
+    // docs/07 §1: the resume row is uniform 16:9; movies use their backdrop, episodes their
+    // screen cap (or the series' art in series-thumb mode).
 
     @Test
     fun `resume art source uses an episode's rail chain`() {
         val card = testCard(itemType = "Episode", primaryTag = "still-tag")
-        assertEquals(CardFormatting.railArtSource(card), CardFormatting.resumeArtSource(card))
+        assertEquals(CardFormatting.railArtSource(card), CardFormatting.resumeArtSource(card, ResumeArt.EPISODE))
     }
 
     @Test
     fun `resume art source uses a movie's own backdrop`() {
         val card = testCard(itemType = "Movie", backdropTag = "bd-tag", primaryTag = "poster-tag")
-        assertEquals(ArtSource.Own("item-1", "bd-tag", ImageKind.BACKDROP), CardFormatting.resumeArtSource(card))
+        assertEquals(ArtSource.Own("item-1", "bd-tag", ImageKind.BACKDROP), CardFormatting.resumeArtSource(card, ResumeArt.EPISODE))
     }
 
     @Test
     fun `resume art source never falls back to a movie's poster`() {
         // No backdrop anywhere: placeholder tile, never a stretched 2:3 poster in the 16:9 slot.
         val card = testCard(itemType = "Movie", primaryTag = "poster-tag")
-        assertEquals(ArtSource.None, CardFormatting.resumeArtSource(card))
+        assertEquals(ArtSource.None, CardFormatting.resumeArtSource(card, ResumeArt.EPISODE))
+    }
+
+    @Test
+    fun `series thumb mode routes through the series thumb chain`() {
+        val card = testCard(
+            itemType = "Episode",
+            primaryTag = "still-tag",
+            parentThumbItemId = "series-1",
+            parentThumbTag = "thumb-tag",
+        )
+        assertEquals(
+            ArtSource.Fallback("series-1", "thumb-tag", ImageKind.THUMB),
+            CardFormatting.resumeArtSource(card, ResumeArt.SERIES_THUMB),
+        )
+    }
+
+    // ---- seriesThumbArtSource (docs/07 §1 spoiler-free chain) -------------
+
+    @Test
+    fun `series thumb art uses an episode's parent thumb over its own still`() {
+        val card = testCard(
+            itemType = "Episode",
+            primaryTag = "still-tag",
+            parentThumbItemId = "series-1",
+            parentThumbTag = "thumb-tag",
+            parentBackdropItemId = "series-1",
+            parentBackdropTag = "bd-tag",
+        )
+        assertEquals(ArtSource.Fallback("series-1", "thumb-tag", ImageKind.THUMB), CardFormatting.seriesThumbArtSource(card))
+    }
+
+    @Test
+    fun `series thumb art falls back to the parent backdrop when an episode has no parent thumb`() {
+        val card = testCard(
+            itemType = "Episode",
+            primaryTag = "still-tag",
+            parentBackdropItemId = "series-1",
+            parentBackdropTag = "bd-tag",
+        )
+        assertEquals(ArtSource.Fallback("series-1", "bd-tag", ImageKind.BACKDROP), CardFormatting.seriesThumbArtSource(card))
+    }
+
+    @Test
+    fun `series thumb art never uses an episode's own still`() {
+        val card = testCard(itemType = "Episode", primaryTag = "still-tag", backdropTag = "own-bd-tag")
+        assertEquals(ArtSource.None, CardFormatting.seriesThumbArtSource(card))
+    }
+
+    @Test
+    fun `series thumb art needs both the parent thumb id and tag`() {
+        val card = testCard(itemType = "Episode", parentThumbItemId = "series-1")
+        assertEquals(ArtSource.None, CardFormatting.seriesThumbArtSource(card))
+    }
+
+    @Test
+    fun `series thumb art uses a movie's own thumb`() {
+        val card = testCard(itemType = "Movie", thumbTag = "thumb-tag", backdropTag = "bd-tag", primaryTag = "poster-tag")
+        assertEquals(ArtSource.Own("item-1", "thumb-tag", ImageKind.THUMB), CardFormatting.seriesThumbArtSource(card))
+    }
+
+    @Test
+    fun `series thumb art falls back to a movie's backdrop`() {
+        val card = testCard(itemType = "Movie", backdropTag = "bd-tag", primaryTag = "poster-tag")
+        assertEquals(ArtSource.Own("item-1", "bd-tag", ImageKind.BACKDROP), CardFormatting.seriesThumbArtSource(card))
     }
 
     // ---- resume row sizing -------------------------------------------------

@@ -99,6 +99,7 @@ import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.PlaybackActivity
+import tv.jellybeam.ui.cards.WIDE_ART_ASPECT
 import tv.jellybeam.ui.cards.BACKDROP_PLACEHOLDER_DIM
 import tv.jellybeam.ui.cards.CARD_TITLE_BLOCK_HEIGHT
 import tv.jellybeam.ui.cards.CardArtImage
@@ -109,6 +110,7 @@ import tv.jellybeam.ui.cards.PreloadOnDwell
 import tv.jellybeam.ui.cards.ResumeCard
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
+import tv.jellybeam.ui.cards.SkeletonBlock
 import tv.jellybeam.ui.cards.rememberSkeletonPulseAlpha
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
@@ -122,6 +124,7 @@ import tv.jellybeam.ui.focus.restoreNow
 import tv.jellybeam.ui.home.common.EmptyLibraryState
 import tv.jellybeam.ui.home.common.HomeClock
 import tv.jellybeam.ui.home.common.HomeMarks
+import tv.jellybeam.ui.home.common.homeRevealStart
 import tv.jellybeam.ui.home.common.HomeSyncStatusPill
 import tv.jellybeam.ui.nav.LocalDrawerFocusCoordinator
 import tv.jellybeam.ui.theme.BackdropScrim
@@ -392,8 +395,11 @@ internal fun ClassicHomeScreen(
     // The effect tests its key, never the live state: a snapshot that lands before the first
     // effect runs must still reveal on the recomposition that carries the content, or the skeleton
     // retires before there is anything to show.
-    var contentRevealed by remember { mutableStateOf(false) }
     val isLoading = chrome.isLoading
+    // Decided once at first composition: a warm-up seed arrives with isLoading already false, so
+    // content draws at once with no skeleton and no fade (docs/10 "Startup phases").
+    val revealStart = remember { homeRevealStart(isLoading) }
+    var contentRevealed by remember { mutableStateOf(revealStart.contentRevealed) }
     LaunchedEffect(isLoading) {
         if (!isLoading) {
             HomeMarks.dataReady()
@@ -408,11 +414,14 @@ internal fun ClassicHomeScreen(
     // The skeleton stays composed for the whole `isLoading` window plus the cross-fade, then leaves
     // composition so its `rememberInfiniteTransition` pulse stops ticking. A plain timer keyed on
     // the one-shot flip, not the animated alpha (which would recompose every animation frame).
-    var showLoadingSkeleton by remember { mutableStateOf(true) }
+    var showLoadingSkeleton by remember { mutableStateOf(revealStart.showLoadingSkeleton) }
     LaunchedEffect(contentRevealed) {
         if (contentRevealed) {
-            delay(CONTENT_REVEAL_MS.toLong())
-            showLoadingSkeleton = false
+            // A seeded start never showed the skeleton, so there is no cross-fade to wait out.
+            if (showLoadingSkeleton) {
+                delay(CONTENT_REVEAL_MS.toLong())
+                showLoadingSkeleton = false
+            }
             HomeMarks.revealEnd()
         }
     }
@@ -428,9 +437,9 @@ internal fun ClassicHomeScreen(
     val nextUpTitle = stringResource(R.string.shelf_next_up)
     val favoritesTitle = stringResource(R.string.shelf_favorites)
     val latestInTemplate = stringResource(R.string.shelf_latest_in)
-    val resumeAsPosters = chrome.resumeAsPosters
-    val shelves = remember(state.shelves, resumeAsPosters) {
-        buildShelves(state.shelves, continueWatchingTitle, nextUpTitle, favoritesTitle, resumeAsPosters) { viewName ->
+    val resumeArt = chrome.resumeArt
+    val shelves = remember(state.shelves, resumeArt) {
+        buildShelves(state.shelves, continueWatchingTitle, nextUpTitle, favoritesTitle, resumeArt) { viewName ->
             String.format(latestInTemplate, viewName)
         }
     }
@@ -981,20 +990,6 @@ private fun SkeletonShelf(pulseAlpha: State<Float>, tileWidth: Dp, tileHeight: D
     }
 }
 
-/** One pulsing skeleton shape (same recipe as [tv.jellybeam.ui.cards.PulsingFlatTile]) with a
- * configurable [clip] radius, covering both tile and title-bar shapes without two near-duplicate
- * composables.
- */
-@Composable
-private fun SkeletonBlock(pulseAlpha: State<Float>, cornerRadius: Dp, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .graphicsLayer { alpha = pulseAlpha.value }
-            .clip(RoundedCornerShape(cornerRadius))
-            .background(JellybeamTheme.SurfaceRaised),
-    )
-}
-
 /**
  * docs/07 §1's hero banner: full-bleed backdrop ([CardFormatting.backdropArtSource], the same
  * chain Detail's header uses) with [BackdropScrim] so title/metadata/buttons read while the art's
@@ -1077,6 +1072,7 @@ private fun HeroBanner(
                 placeholderDimAlpha = BACKDROP_PLACEHOLDER_DIM,
                 modifier = Modifier.fillMaxSize(),
                 placeholderGraceMs = 0L,
+                aspect = WIDE_ART_ASPECT,
             )
         }
         // Two-layer scrim: near-opaque under the (Start-aligned) text column, clear over the art's
@@ -1380,6 +1376,7 @@ private fun Shelf(
                                 imageUrl = { itemId, kind, tag -> AppGraph.gateway.imageUrl(itemId, kind, tag, resumeImageWidth) },
                                 onClick = { onOpenDetail(card) },
                                 modifier = cellModifier,
+                                art = spec.art,
                             )
                         }
                     }

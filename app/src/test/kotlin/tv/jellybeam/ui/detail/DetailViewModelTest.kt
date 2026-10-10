@@ -8,9 +8,14 @@ import tv.jellybeam.i18n.ResourceUiStrings
 import tv.jellybeam.ui.cards.testCard
 import kotlin.random.Random
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -117,8 +122,8 @@ class DetailViewModelTest {
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun `a change event for an unrelated id does not trigger a refetch`() = runTest {
-        // "Unrelated": neither the series id nor an already-loaded season/episode id.
-        val series = testCard(id = "series-1", itemType = "Series")
+        // "Unrelated": neither the series id nor a loaded id, and from another library.
+        val series = testCard(id = "series-1", itemType = "Series", libraryId = "lib-a")
         val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1, name = "Season 1")
         val fake = FakeCoreGateway(
             childrenByParent = mapOf(
@@ -134,7 +139,7 @@ class DetailViewModelTest {
         withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
             val callsBefore = fake.childrenCalls.size
 
-            changes.tryEmit(ChangeEvent.Upserted(ids = listOf("some-other-series-item"), libraryId = null))
+            changes.tryEmit(ChangeEvent.Upserted(ids = listOf("some-other-series-item"), libraryId = "lib-b"))
             runCurrent()
 
             assertEquals(callsBefore, fake.childrenCalls.size)
@@ -177,6 +182,7 @@ class DetailViewModelTest {
             // [allEpisodes] spans both seasons regardless of season tab.
             assertEquals(listOf("s1-ep", "s2-ep"), viewModel.state.value.allEpisodes.map { it.id })
             assertEquals(listOf("series-1"), gateway.seriesEpisodesCalls)
+            assertTrue(viewModel.state.value.allEpisodesSettled)
             // Resume-season preselection: season-2's in-progress episode wins over the default.
             assertEquals("season-2", viewModel.state.value.selectedSeasonId)
             assertEquals(listOf("s2-ep"), viewModel.state.value.episodes.map { it.id })
@@ -278,7 +284,51 @@ class DetailViewModelTest {
 
             // allEpisodes fails but still resolves the flag, falling back to unplayedCount.
             assertTrue(viewModel.state.value.allEpisodes.isEmpty())
+            assertTrue(viewModel.state.value.allEpisodesSettled)
             assertEquals("season-2", viewModel.state.value.selectedSeasonId)
+        }
+    }
+
+    @Test
+    fun `a failed season query settles the shelf empty instead of loading forever`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val season2 = testCard(id = "season-2", itemType = "Season", indexNumber = 2)
+        val fake = FakeCoreGateway(
+            childrenByParent = mapOf(
+                "series-1" to listOf(season1, season2),
+                "season-1" to listOf(testCard(id = "s1-ep", itemType = "Episode")),
+            ),
+        )
+        val gateway = object : CoreGateway by fake {
+            // No in-memory answer, so a season switch must take the network path.
+            override suspend fun getSettings() = throw IllegalStateException("boom")
+            override suspend fun children(parentId: String, sort: SortOrder, offset: UInt, limit: UInt): List<Card> =
+                if (parentId == "season-2") throw IllegalStateException("boom") else fake.children(parentId, sort, offset, limit)
+        }
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            viewModel.selectSeason("season-2")
+
+            assertEquals("season-2", viewModel.state.value.selectedSeasonId)
+            assertFalse(viewModel.state.value.isLoadingEpisodes)
+            assertTrue(viewModel.state.value.episodes.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a series with seasons selects one once seasons and allEpisodes settle, so the shelf cannot pulse forever`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val gateway = FakeCoreGateway(
+            childrenByParent = mapOf("series-1" to listOf(season1), "season-1" to emptyList()),
+        )
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            val state = viewModel.state.value
+            assertTrue(state.seasonsSettled)
+            assertTrue(state.allEpisodesSettled)
+            assertTrue(state.seasons.isNotEmpty())
+            assertEquals("season-1", state.selectedSeasonId)
+            assertFalse(state.isLoadingEpisodes)
         }
     }
 
@@ -289,10 +339,11 @@ class DetailViewModelTest {
         val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
         val season2 = testCard(id = "season-2", itemType = "Season", indexNumber = 2)
         val s2Resuming = testCard(id = "s2-ep", itemType = "Episode", parentIndexNumber = 2, positionTicks = 100)
+        val s1Ep = testCard(id = "s1-ep", itemType = "Episode", parentIndexNumber = 1)
         val fake = FakeCoreGateway(
             childrenByParent = mapOf(
                 "series-1" to listOf(season1, season2),
-                "season-1" to listOf(testCard(id = "s1-ep", itemType = "Episode", parentIndexNumber = 1)),
+                "season-1" to listOf(s1Ep),
                 "season-2" to listOf(s2Resuming),
             ),
         )
@@ -310,7 +361,7 @@ class DetailViewModelTest {
             assertEquals("season-1", viewModel.state.value.selectedSeasonId)
 
             // allEpisodes resolving with season-2 in progress must not yank the viewer's own pick.
-            allEpisodesGate.complete(listOf(s2Resuming))
+            allEpisodesGate.complete(listOf(s1Ep, s2Resuming))
             runCurrent()
 
             assertEquals("season-1", viewModel.state.value.selectedSeasonId)
@@ -661,6 +712,114 @@ class DetailViewModelTest {
         withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
 
             assertNull(viewModel.state.value.libraryName)
+        }
+    }
+
+    // -- nextEpisodeLoaded / libraryNameLoaded: settled flags (docs/11 §Loading state) ----
+
+    @Test
+    fun `nextEpisodeLoaded flips true when an Episode page finds a next episode`() = runTest {
+        val episode = testCard(id = "ep-1", itemType = "Episode")
+        val next = testCard(id = "ep-2", itemType = "Episode", indexNumber = 2)
+        val gateway = FakeCoreGateway(nextEpisodeByItemId = mapOf("ep-1" to next))
+
+        withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
+
+            assertTrue(viewModel.state.value.nextEpisodeLoaded)
+        }
+    }
+
+    @Test
+    fun `nextEpisodeLoaded flips true when there is no next episode -- settled empty`() = runTest {
+        val episode = testCard(id = "ep-1", itemType = "Episode")
+        val gateway = FakeCoreGateway()
+
+        withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
+
+            assertNull(viewModel.state.value.nextEpisode)
+            assertTrue(viewModel.state.value.nextEpisodeLoaded)
+        }
+    }
+
+    @Test
+    fun `nextEpisodeLoaded flips true when the lookup fails`() = runTest {
+        val episode = testCard(id = "ep-1", itemType = "Episode")
+        val gateway = FakeCoreGateway(nextEpisodeError = IllegalStateException("offline"))
+
+        withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
+
+            assertNull(viewModel.state.value.nextEpisode)
+            assertTrue(viewModel.state.value.nextEpisodeLoaded)
+        }
+    }
+
+    @Test
+    fun `a Movie page never looks up Up Next -- nextEpisodeLoaded stays false`() = runTest {
+        val movie = testCard(id = "movie-1", itemType = "Movie")
+        val gateway = FakeCoreGateway()
+
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
+
+            assertFalse(viewModel.state.value.nextEpisodeLoaded)
+        }
+    }
+
+    @Test
+    fun `libraryNameLoaded flips true once the view list resolves the name`() = runTest {
+        val movie = testCard(id = "movie-1", itemType = "Movie", libraryId = "lib-1")
+        val gateway = FakeCoreGateway(viewsList = listOf(ViewSnapshot(id = "lib-1", name = "My Movies", kind = ViewKind.LIBRARY)))
+
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
+
+            assertEquals("My Movies", viewModel.state.value.libraryName)
+            assertTrue(viewModel.state.value.libraryNameLoaded)
+        }
+    }
+
+    @Test
+    fun `libraryNameLoaded flips true for a card with no library id -- the early return settles`() = runTest {
+        val movie = testCard(id = "movie-1", itemType = "Movie", libraryId = null)
+        val gateway = FakeCoreGateway(viewsList = listOf(ViewSnapshot(id = "lib-1", name = "My Movies", kind = ViewKind.LIBRARY)))
+
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
+
+            assertNull(viewModel.state.value.libraryName)
+            assertTrue(viewModel.state.value.libraryNameLoaded)
+        }
+    }
+
+    @Test
+    fun `libraryNameLoaded flips true when no view matches the library id`() = runTest {
+        val movie = testCard(id = "movie-1", itemType = "Movie", libraryId = "lib-9")
+        val gateway = FakeCoreGateway(viewsList = listOf(ViewSnapshot(id = "lib-1", name = "My Movies", kind = ViewKind.LIBRARY)))
+
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
+
+            assertNull(viewModel.state.value.libraryName)
+            assertTrue(viewModel.state.value.libraryNameLoaded)
+        }
+    }
+
+    @Test
+    fun `libraryNameLoaded flips true when the view list fails to load`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series", libraryId = "lib-1")
+        val gateway = FakeCoreGateway(viewsError = IllegalStateException("offline"))
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+
+            assertNull(viewModel.state.value.libraryName)
+            assertTrue(viewModel.state.value.libraryNameLoaded)
+        }
+    }
+
+    @Test
+    fun `an Episode page never loads a library name -- libraryNameLoaded stays false`() = runTest {
+        val episode = testCard(id = "ep-1", itemType = "Episode", libraryId = "lib-1")
+        val gateway = FakeCoreGateway(viewsList = listOf(ViewSnapshot(id = "lib-1", name = "My Movies", kind = ViewKind.LIBRARY)))
+
+        withDetailViewModel(DetailViewModel(gateway, episode, ResourceUiStrings.default)) { viewModel ->
+
+            assertFalse(viewModel.state.value.libraryNameLoaded)
         }
     }
 
@@ -1153,5 +1312,754 @@ class DetailViewModelTest {
             assertTrue(viewModel.state.value.membersSettled)
             assertNull(viewModel.state.value.collectionPlay)
         }
+    }
+
+    // -- mirror-first loadItemDetail (docs/11 item 1) ------------------------
+
+    @Test
+    fun `the mirror record paints before the live ItemDetail arrives`() = runTest {
+        val movie = testCard(id = "movie-1", itemType = "Movie")
+        val local = testItemDetail(id = "movie-1").copy(name = "Local")
+        val liveGate = CompletableDeferred<ItemDetail>()
+        val fake = FakeCoreGateway()
+        fake.itemDetailLocalByItemId["movie-1"] = local
+        val gateway = object : CoreGateway by fake {
+            override suspend fun getItemDetail(itemId: String, accountEpoch: ULong?): ItemDetail = liveGate.await()
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
+            assertEquals(local, viewModel.state.value.itemDetail)
+            assertFalse(viewModel.state.value.itemDetailLoaded)
+        }
+    }
+
+    @Test
+    fun `the live ItemDetail replaces the mirror record and settles`() = runTest {
+        val movie = testCard(id = "movie-1", itemType = "Movie")
+        val local = testItemDetail(id = "movie-1").copy(name = "Local")
+        val live = testItemDetail(id = "movie-1").copy(name = "Live")
+        val liveGate = CompletableDeferred<ItemDetail>()
+        val fake = FakeCoreGateway()
+        fake.itemDetailLocalByItemId["movie-1"] = local
+        val gateway = object : CoreGateway by fake {
+            override suspend fun getItemDetail(itemId: String, accountEpoch: ULong?): ItemDetail = liveGate.await()
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
+            liveGate.complete(live)
+            runCurrent()
+
+            assertEquals(live, viewModel.state.value.itemDetail)
+            assertTrue(viewModel.state.value.itemDetailLoaded)
+        }
+    }
+
+    @Test
+    fun `a failing live fetch keeps the mirror record and still settles`() = runTest {
+        val movie = testCard(id = "movie-1", itemType = "Movie")
+        val local = testItemDetail(id = "movie-1").copy(name = "Local")
+        val liveGate = CompletableDeferred<ItemDetail>()
+        val fake = FakeCoreGateway()
+        fake.itemDetailLocalByItemId["movie-1"] = local
+        val gateway = object : CoreGateway by fake {
+            override suspend fun getItemDetail(itemId: String, accountEpoch: ULong?): ItemDetail = liveGate.await()
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, movie, ResourceUiStrings.default)) { viewModel ->
+            liveGate.completeExceptionally(IllegalStateException("synthetic"))
+            runCurrent()
+
+            assertEquals(local, viewModel.state.value.itemDetail)
+            assertTrue(viewModel.state.value.itemDetailLoaded)
+        }
+    }
+
+    @Test
+    fun `no mirror record and a live success shows the live ItemDetail`() = runTest {
+        val movie = testCard(id = "movie-1", itemType = "Movie")
+        val live = testItemDetail(id = "movie-1").copy(name = "Live")
+        val fake = FakeCoreGateway(itemDetailResultsByItemId = mapOf("movie-1" to Result.success(live)))
+
+        withDetailViewModel(DetailViewModel(fake, movie, ResourceUiStrings.default)) { viewModel ->
+            assertEquals(listOf("movie-1"), fake.itemDetailLocalCalls)
+            assertEquals(live, viewModel.state.value.itemDetail)
+            assertTrue(viewModel.state.value.itemDetailLoaded)
+        }
+    }
+
+    @Test
+    fun `no mirror record and a failing live fetch leaves itemDetail null but settled`() = runTest {
+        val movie = testCard(id = "movie-1", itemType = "Movie")
+
+        withDetailViewModel(DetailViewModel(FakeCoreGateway(), movie, ResourceUiStrings.default)) { viewModel ->
+            assertNull(viewModel.state.value.itemDetail)
+            assertTrue(viewModel.state.value.itemDetailLoaded)
+        }
+    }
+
+    // -- season switch from memory --------------------------------------------
+
+    @Test
+    fun `a season switch after allEpisodes settled answers from memory without a children query`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val season2 = testCard(id = "season-2", itemType = "Season", indexNumber = 2)
+        val s1Ep = testCard(id = "s1-ep", itemType = "Episode", indexNumber = 1, parentIndexNumber = 1)
+        val s2Ep2 = testCard(id = "s2-ep-2", itemType = "Episode", indexNumber = 2, parentIndexNumber = 2)
+        val s2Ep1 = testCard(id = "s2-ep-1", itemType = "Episode", indexNumber = 1, parentIndexNumber = 2)
+        val gateway = FakeCoreGateway(
+            childrenByParent = mapOf(
+                "series-1" to listOf(season1, season2),
+                // Deliberately different from memory: a children() query would show this.
+                "season-2" to listOf(testCard(id = "from-children", itemType = "Episode")),
+            ),
+            seriesEpisodesBySeriesId = mapOf("series-1" to listOf(s1Ep, s2Ep2, s2Ep1)),
+        )
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            assertTrue(viewModel.state.value.allEpisodesSettled)
+
+            viewModel.selectSeason("season-2")
+
+            val state = viewModel.state.value
+            assertEquals("season-2", state.selectedSeasonId)
+            assertFalse(state.isLoadingEpisodes)
+            assertEquals(listOf("s2-ep-1", "s2-ep-2"), state.episodes.map { it.id })
+            assertTrue(gateway.childrenCalls.none { it.parentId.startsWith("season-") })
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `an episode added while the page is open shows when its season is selected`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val season2 = testCard(id = "season-2", itemType = "Season", indexNumber = 2)
+        val s1Ep = testCard(id = "s1-ep", itemType = "Episode", indexNumber = 1, parentIndexNumber = 1)
+        val s2Ep = testCard(id = "s2-ep-1", itemType = "Episode", indexNumber = 1, parentIndexNumber = 2)
+        val newEp = testCard(id = "s2-ep-2", itemType = "Episode", indexNumber = 2, parentIndexNumber = 2, seriesId = "series-1")
+        val fake = FakeCoreGateway(
+            childrenByParent = mapOf(
+                "series-1" to listOf(season1, season2),
+                "season-1" to listOf(s1Ep),
+                "season-2" to listOf(s2Ep),
+            ),
+            seriesEpisodesBySeriesId = mapOf("series-1" to listOf(s1Ep, s2Ep)),
+        )
+        fake.cardsByItemId["s2-ep-2"] = newEp
+        val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+        var added = false
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = changes
+            override suspend fun seriesEpisodes(seriesId: String): List<Card> =
+                fake.seriesEpisodes(seriesId) + if (added) listOf(newEp) else emptyList()
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            assertTrue(viewModel.state.value.allEpisodesSettled)
+
+            added = true
+            changes.tryEmit(ChangeEvent.Upserted(ids = listOf("s2-ep-2"), libraryId = null))
+            runCurrent()
+            viewModel.selectSeason("season-2")
+            runCurrent()
+
+            assertEquals(listOf("s2-ep-1", "s2-ep-2"), viewModel.state.value.episodes.map { it.id })
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `an unknown id that belongs to another series does not trigger a refetch`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val s1Ep = testCard(id = "s1-ep", itemType = "Episode", indexNumber = 1, parentIndexNumber = 1)
+        val foreign = testCard(id = "foreign-ep", itemType = "Episode", seriesId = "series-2")
+        val fake = FakeCoreGateway(
+            childrenByParent = mapOf("series-1" to listOf(season1), "season-1" to listOf(s1Ep)),
+            seriesEpisodesBySeriesId = mapOf("series-1" to listOf(s1Ep)),
+        )
+        fake.cardsByItemId["foreign-ep"] = foreign
+        val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = changes
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) {
+            val childrenBefore = fake.childrenCalls.size
+            val episodesBefore = fake.seriesEpisodesCalls.size
+
+            changes.tryEmit(ChangeEvent.Upserted(ids = listOf("foreign-ep"), libraryId = null))
+            runCurrent()
+
+            assertEquals(childrenBefore, fake.childrenCalls.size)
+            assertEquals(episodesBefore, fake.seriesEpisodesCalls.size)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a removed selected season hands selection to a surviving season and its episodes`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val season2 = testCard(id = "season-2", itemType = "Season", indexNumber = 2)
+        val s1Ep = testCard(id = "s1-ep", itemType = "Episode", indexNumber = 1, parentIndexNumber = 1)
+        val s2Ep = testCard(id = "s2-ep", itemType = "Episode", indexNumber = 1, parentIndexNumber = 2)
+        val fake = FakeCoreGateway(
+            childrenByParent = mapOf(
+                "series-1" to listOf(season1, season2),
+                "season-1" to listOf(s1Ep),
+                "season-2" to listOf(s2Ep),
+            ),
+            seriesEpisodesBySeriesId = mapOf("series-1" to listOf(s1Ep, s2Ep)),
+        )
+        val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+        var removed = false
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = changes
+            override suspend fun seriesEpisodes(seriesId: String): List<Card> =
+                fake.seriesEpisodes(seriesId).filter { !removed || it.id != "s2-ep" }
+            override suspend fun children(parentId: String, sort: SortOrder, offset: UInt, limit: UInt): List<Card> =
+                fake.children(parentId, sort, offset, limit).filter { !removed || (it.id != "season-2" && it.id != "s2-ep") }
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            viewModel.selectSeason("season-2")
+            runCurrent()
+            assertEquals("season-2", viewModel.state.value.selectedSeasonId)
+
+            removed = true
+            changes.tryEmit(ChangeEvent.Removed(ids = listOf("season-2"), libraryId = null))
+            runCurrent()
+
+            assertEquals("season-1", viewModel.state.value.selectedSeasonId)
+            assertEquals(listOf("s1-ep"), viewModel.state.value.episodes.map { it.id })
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a relevant event is not dropped while an earlier probe is suspended`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series", libraryId = "lib-a")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val s1Ep = testCard(id = "s1-ep", itemType = "Episode", indexNumber = 1, parentIndexNumber = 1)
+        val fake = FakeCoreGateway(
+            childrenByParent = mapOf("series-1" to listOf(season1), "season-1" to listOf(s1Ep)),
+            seriesEpisodesBySeriesId = mapOf("series-1" to listOf(s1Ep)),
+        )
+        // Mirrors CoreGateway's production bus: extraBufferCapacity 8, DROP_OLDEST.
+        val bus = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+        val gate = CompletableDeferred<Unit>()
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = bus
+            override suspend fun cardsByIds(itemIds: List<String>): List<Card> {
+                gate.await()
+                return emptyList()
+            }
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) {
+            val before = fake.childrenCalls.size
+
+            bus.tryEmit(ChangeEvent.Upserted(ids = listOf("unknown"), libraryId = null)) // probe suspends
+            bus.tryEmit(ChangeEvent.Refresh)
+            repeat(10) { bus.tryEmit(ChangeEvent.Removed(ids = listOf("other-$it"), libraryId = "lib-b")) }
+            gate.complete(Unit)
+            advanceTimeBy(1_000)
+            runCurrent()
+
+            assertTrue(fake.childrenCalls.size > before)
+        }
+    }
+
+    // State x event matrix for the Series page's selection/episodes lifecycle (docs/15 §0.2/§5, docs/19).
+
+    private fun seasonCard(n: Int) = testCard(id = "season-$n", itemType = "Season", indexNumber = n)
+
+    private fun episodeCard(season: Int, played: Boolean = false) =
+        testCard(id = "s$season-ep", itemType = "Episode", indexNumber = 1, parentIndexNumber = season, played = played, seriesId = "series-1")
+
+    private fun mirrorGateway(seasons: List<Card>, episodes: List<Card>): MirrorGateway {
+        val gateway = MirrorGateway(FakeCoreGateway(), MutableSharedFlow(extraBufferCapacity = 8))
+        gateway.children["series-1"] = seasons
+        seasons.forEach { season -> gateway.children[season.id] = episodes.filter { it.parentIndexNumber == season.indexNumber } }
+        gateway.all = episodes
+        return gateway
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private fun TestScope.record(viewModel: DetailViewModel): MutableList<DetailUiState> {
+        val states = mutableListOf<DetailUiState>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.state.collect { states += it } }
+        return states
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `an older episodes read landing in either order never settles empty or picks the wrong season`() = runTest {
+        for (order in listOf(listOf(0, 1), listOf(1, 0))) {
+            val seasons = listOf(seasonCard(1), seasonCard(2), seasonCard(3))
+            val gateway = mirrorGateway(seasons, listOf(episodeCard(1, true), episodeCard(2, true), episodeCard(3)))
+            val gates = mutableListOf<CompletableDeferred<Unit>>()
+            gateway.allGate = { CompletableDeferred<Unit>().also { gates += it }.await() }
+
+            withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+                val states = record(viewModel)
+                runCurrent()
+                gateway.bus.tryEmit(ChangeEvent.Refresh)
+                runCurrent()
+                assertEquals(2, gates.size)
+
+                order.forEach { gates[it].complete(Unit); runCurrent() }
+
+                assertEquals("season-3", viewModel.state.value.selectedSeasonId)
+                assertTrue(states.none { it.allEpisodesSettled && it.allEpisodes.isEmpty() })
+            }
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a stop report and a change event never run overlapping series refreshes`() = runTest {
+        val v1 = listOf(seasonCard(1), seasonCard(2))
+        val v2 = v1 + seasonCard(3)
+        val gateway = mirrorGateway(v1, listOf(episodeCard(1), episodeCard(2)))
+        val gates = mutableListOf<CompletableDeferred<Unit>>()
+        var gating = false
+        gateway.childrenGate = { id -> if (gating && id == "series-1") CompletableDeferred<Unit>().also { gates += it }.await() }
+        val stopEpoch = MutableStateFlow(0L)
+
+        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default, stopEpoch)) { viewModel ->
+            runCurrent()
+            gating = true
+            gateway.bus.tryEmit(ChangeEvent.Refresh)
+            runCurrent()
+            gateway.children["series-1"] = v2
+            stopEpoch.value = 1L
+            runCurrent()
+            repeat(8) {
+                gates.reversed().forEach { it.complete(Unit) }
+                advanceTimeBy(600)
+                runCurrent()
+            }
+
+            assertEquals(1, gateway.maxInFlightSeries)
+            assertEquals(listOf("season-1", "season-2", "season-3"), viewModel.state.value.seasons.map { it.id })
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `an empty seasons read never clears the viewer's pick`() = runTest {
+        val seasons = listOf(seasonCard(1), seasonCard(2), seasonCard(3))
+        val gateway = mirrorGateway(seasons, listOf(episodeCard(1), episodeCard(2), episodeCard(3)))
+
+        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            viewModel.selectSeason("season-3")
+            val states = record(viewModel)
+
+            gateway.children["series-1"] = emptyList()
+            gateway.bus.tryEmit(ChangeEvent.Refresh)
+            runCurrent()
+            gateway.children["series-1"] = seasons
+            advanceTimeBy(600)
+            gateway.bus.tryEmit(ChangeEvent.Refresh)
+            runCurrent()
+
+            assertTrue(states.all { it.selectedSeasonId == "season-3" })
+            assertEquals("season-3", viewModel.state.value.selectedSeasonId)
+            assertEquals(seasons.map { it.id }, viewModel.state.value.seasons.map { it.id })
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `no state shows seasons without the selected one while a removal refresh is in flight`() = runTest {
+        val seasons = listOf(seasonCard(1), seasonCard(2))
+        val gateway = mirrorGateway(seasons, listOf(episodeCard(1), episodeCard(2)))
+
+        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            viewModel.selectSeason("season-2")
+            val states = record(viewModel)
+            val gate = CompletableDeferred<Unit>()
+            gateway.allGate = { gate.await() }
+
+            gateway.children["series-1"] = listOf(seasons[0])
+            gateway.all = listOf(episodeCard(1))
+            gateway.bus.tryEmit(ChangeEvent.Removed(ids = listOf("season-2"), libraryId = null))
+            runCurrent()
+            gate.complete(Unit)
+            runCurrent()
+
+            val torn = states.filter { st -> st.seasons.isNotEmpty() && st.selectedSeasonId != null && st.seasons.none { it.id == st.selectedSeasonId } }
+            assertTrue("torn states: ${torn.size}", torn.isEmpty())
+            assertEquals("season-1", viewModel.state.value.selectedSeasonId)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `an older season reply never lands over a memory-served return to the same season`() = runTest {
+        val seasons = listOf(seasonCard(1), seasonCard(2))
+        val s1 = episodeCard(1)
+        val gateway = mirrorGateway(seasons, listOf(s1, episodeCard(2)))
+        val networkS1 = testCard(id = "net-s1", itemType = "Episode", parentIndexNumber = 1)
+        val allGate = CompletableDeferred<Unit>()
+        val s1Gate = CompletableDeferred<Unit>()
+        gateway.allGate = { allGate.await() }
+        gateway.childrenGate = { id -> if (id == "season-1") s1Gate.await() }
+        gateway.children["season-1"] = listOf(networkS1)
+
+        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            viewModel.selectSeason("season-1") // memory unavailable: network, gated
+            viewModel.selectSeason("season-2")
+            allGate.complete(Unit)
+            runCurrent()
+            viewModel.selectSeason("season-1") // memory
+            assertEquals(listOf("s1-ep"), viewModel.state.value.episodes.map { it.id })
+
+            s1Gate.complete(Unit)
+            runCurrent()
+
+            assertEquals(listOf("s1-ep"), viewModel.state.value.episodes.map { it.id })
+            assertFalse(viewModel.state.value.isLoadingEpisodes)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `the menu scope drops to the series once the viewer's picked season is removed`() = runTest {
+        val seasons = listOf(seasonCard(1), seasonCard(2))
+        val gateway = mirrorGateway(seasons, listOf(episodeCard(1), episodeCard(2)))
+
+        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            viewModel.selectSeason("season-2")
+            viewModel.openMenu()
+            assertEquals(2, viewModel.state.value.menu?.scopeSeasonNumber)
+            viewModel.closeMenu()
+
+            gateway.children["series-1"] = listOf(seasons[0])
+            gateway.all = listOf(episodeCard(1))
+            gateway.bus.tryEmit(ChangeEvent.Removed(ids = listOf("season-2"), libraryId = null))
+            runCurrent()
+            viewModel.openMenu()
+
+            assertEquals("season-1", viewModel.state.value.selectedSeasonId)
+            assertNull(viewModel.state.value.menu?.scopeSeasonNumber)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a failed or late refresh read never settles empty while a good read is pending`() = runTest {
+        for (initPending in listOf(true, false)) for (refreshThrows in listOf(false, true)) for (order in listOf(listOf(0, 1), listOf(1, 0))) {
+            if (!initPending && order != listOf(0, 1)) continue
+            val seasons = listOf(seasonCard(1), seasonCard(2), seasonCard(3))
+            val gateway = mirrorGateway(seasons, listOf(episodeCard(1, true), episodeCard(2, true), episodeCard(3)))
+            val gates = mutableListOf<CompletableDeferred<Unit>>()
+            gateway.allGate = { CompletableDeferred<Unit>().also { gates += it }.await() }
+
+            withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+                val states = record(viewModel)
+                runCurrent()
+                if (!initPending) {
+                    gates[0].complete(Unit)
+                    runCurrent()
+                }
+                gateway.bus.tryEmit(ChangeEvent.Refresh)
+                runCurrent()
+                val refreshGate = gates.last()
+                val initGate = gates.first()
+                fun release(which: Int) {
+                    val gate = if (which == 0) initGate else refreshGate
+                    if (gate.isCompleted) return
+                    if (which == 1 && refreshThrows) gate.completeExceptionally(IllegalStateException("boom")) else gate.complete(Unit)
+                    runCurrent()
+                }
+                order.forEach(::release)
+                release(0)
+                release(1)
+
+                val label = "initPending=$initPending refreshThrows=$refreshThrows order=$order"
+                assertTrue(label, states.none { it.allEpisodesSettled && it.allEpisodes.isEmpty() })
+                assertEquals(label, "season-3", viewModel.state.value.selectedSeasonId)
+                assertEquals(label, 3, viewModel.state.value.allEpisodes.size)
+            }
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `an older seasons read never lands over a newer one, and a failed initial read still settles the selection`() = runTest {
+        for (initThrows in listOf(false, true)) {
+            val older = listOf(seasonCard(1))
+            val newer = listOf(seasonCard(1), seasonCard(2), seasonCard(3))
+            val gateway = mirrorGateway(older, listOf(episodeCard(1, true), episodeCard(2, true), episodeCard(3)))
+            val gates = mutableListOf<CompletableDeferred<Unit>>()
+            gateway.childrenGate = { id -> if (id == "series-1") CompletableDeferred<Unit>().also { gates += it }.await() }
+
+            withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+                runCurrent()
+                gateway.children["series-1"] = newer
+                gateway.bus.tryEmit(ChangeEvent.Refresh)
+                runCurrent()
+                assertEquals(2, gates.size)
+
+                gates[1].complete(Unit) // the refresh lands first
+                runCurrent()
+                if (initThrows) gates[0].completeExceptionally(IllegalStateException("boom")) else gates[0].complete(Unit)
+                runCurrent()
+
+                val label = "initThrows=$initThrows"
+                assertEquals(label, newer.map { it.id }, viewModel.state.value.seasons.map { it.id })
+                assertEquals(label, "season-3", viewModel.state.value.selectedSeasonId)
+                assertTrue(label, viewModel.state.value.seasonsSettled)
+            }
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `an empty seasons read leaves the shelf alone and the selection and shelf agree when seasons return`() = runTest {
+        val seasons = listOf(seasonCard(1), seasonCard(2))
+        val gateway = mirrorGateway(seasons, listOf(episodeCard(1), episodeCard(2)))
+
+        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            viewModel.selectSeason("season-2")
+            assertEquals(listOf("s2-ep"), viewModel.state.value.episodes.map { it.id })
+
+            gateway.children["series-1"] = emptyList()
+            gateway.children["season-2"] = emptyList() // unknown parent reads empty
+            gateway.all = emptyList()
+            gateway.bus.tryEmit(ChangeEvent.Refresh)
+            runCurrent()
+            assertEquals(listOf("s2-ep"), viewModel.state.value.episodes.map { it.id })
+
+            gateway.children["series-1"] = seasons
+            gateway.children["season-2"] = listOf(episodeCard(2))
+            gateway.all = listOf(episodeCard(1), episodeCard(2))
+            advanceTimeBy(600)
+            gateway.bus.tryEmit(ChangeEvent.Refresh)
+            runCurrent()
+
+            assertEquals("season-2", viewModel.state.value.selectedSeasonId)
+            assertEquals(listOf("s2-ep"), viewModel.state.value.episodes.map { it.id })
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `the menu scope stays on the series when removals bring the selection back to the old pick`() = runTest {
+        val seasons = listOf(seasonCard(1), seasonCard(2))
+        val gateway = mirrorGateway(seasons, listOf(episodeCard(1), episodeCard(2)))
+
+        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            viewModel.selectSeason("season-2")
+
+            gateway.children["series-1"] = listOf(seasons[0])
+            gateway.all = listOf(episodeCard(1))
+            gateway.bus.tryEmit(ChangeEvent.Removed(ids = listOf("season-2"), libraryId = null))
+            runCurrent()
+            assertEquals("season-1", viewModel.state.value.selectedSeasonId)
+
+            gateway.children["series-1"] = listOf(seasons[1])
+            gateway.all = listOf(episodeCard(2))
+            advanceTimeBy(600)
+            gateway.bus.tryEmit(ChangeEvent.Removed(ids = listOf("season-1"), libraryId = null))
+            runCurrent()
+            assertEquals("season-2", viewModel.state.value.selectedSeasonId)
+
+            viewModel.openMenu()
+            assertNull(viewModel.state.value.menu?.scopeSeasonNumber)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a pick removed before the per-episode answer resolves to the resume season, not the first`() = runTest {
+        val seasons = listOf(seasonCard(1), seasonCard(2), seasonCard(3))
+        val gateway = mirrorGateway(seasons, listOf(episodeCard(1, true), episodeCard(2), episodeCard(3)))
+        val gate = CompletableDeferred<Unit>()
+        gateway.allGate = { gate.await() }
+
+        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            viewModel.selectSeason("season-3")
+            gateway.children["series-1"] = seasons.take(2)
+            gateway.bus.tryEmit(ChangeEvent.Removed(ids = listOf("season-3"), libraryId = null))
+            runCurrent()
+            assertTrue("no provisional fallback", viewModel.state.value.selectedSeasonId != "season-1")
+
+            gate.complete(Unit)
+            runCurrent()
+
+            assertEquals("season-2", viewModel.state.value.selectedSeasonId)
+        }
+    }
+
+    @Test
+    fun `a season switch falls back to children when an episode lacks a parent index`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val season2 = testCard(id = "season-2", itemType = "Season", indexNumber = 2)
+        val s1Ep = testCard(id = "s1-ep", itemType = "Episode", parentIndexNumber = 1)
+        val orphan = testCard(id = "orphan-ep", itemType = "Episode", parentIndexNumber = null)
+        val gateway = FakeCoreGateway(
+            childrenByParent = mapOf(
+                "series-1" to listOf(season1, season2),
+                "season-1" to listOf(s1Ep),
+                "season-2" to listOf(testCard(id = "from-children", itemType = "Episode")),
+            ),
+            seriesEpisodesBySeriesId = mapOf("series-1" to listOf(s1Ep, orphan)),
+        )
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            assertTrue(viewModel.state.value.allEpisodesSettled)
+
+            viewModel.selectSeason("season-2")
+            runCurrent()
+
+            assertEquals(listOf("from-children"), viewModel.state.value.episodes.map { it.id })
+            assertEquals(1, gateway.childrenCalls.count { it.parentId == "season-2" })
+        }
+    }
+
+    // -- allEpisodes read ordering + virtual-flag refresh ---------------------
+
+    @Test
+    fun `an older allEpisodes read finishing late is dropped whole, the newer one having settled`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val stale = testCard(id = "stale-ep", itemType = "Episode", parentIndexNumber = 1)
+        val fresh = testCard(id = "fresh-ep", itemType = "Episode", parentIndexNumber = 1)
+        val fake = FakeCoreGateway(childrenByParent = mapOf("series-1" to listOf(season1)))
+        val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+        val firstReadGate = CompletableDeferred<List<Card>>()
+        var reads = 0
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = changes
+
+            // The init read is held; the quiet refresh's read answers at once.
+            override suspend fun seriesEpisodes(seriesId: String): List<Card> =
+                if (++reads == 1) firstReadGate.await() else listOf(fresh)
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            assertFalse(viewModel.state.value.allEpisodesSettled)
+
+            changes.tryEmit(ChangeEvent.Refresh)
+            runCurrent()
+            assertEquals(listOf("fresh-ep"), viewModel.state.value.allEpisodes.map { it.id })
+            assertTrue(viewModel.state.value.allEpisodesSettled)
+
+            firstReadGate.complete(listOf(stale))
+            runCurrent()
+
+            assertEquals(listOf("fresh-ep"), viewModel.state.value.allEpisodes.map { it.id })
+            assertTrue(viewModel.state.value.allEpisodesSettled)
+        }
+    }
+
+    @Test
+    fun `a season switch re-derives with the virtual-episodes flag when it changed since the cached read`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val season2 = testCard(id = "season-2", itemType = "Season", indexNumber = 2)
+        val s1Ep = testCard(id = "s1-ep", itemType = "Episode", indexNumber = 1, parentIndexNumber = 1)
+        val real = testCard(id = "s2-real", itemType = "Episode", indexNumber = 1, parentIndexNumber = 2)
+        val virtual = testCard(id = "s2-virtual", itemType = "Episode", indexNumber = 2, parentIndexNumber = 2, isVirtual = true)
+        val fake = FakeCoreGateway(
+            childrenByParent = mapOf("series-1" to listOf(season1, season2)),
+            seriesEpisodesBySeriesId = mapOf("series-1" to listOf(s1Ep, real, virtual)),
+        )
+        var settingsGate: CompletableDeferred<Unit>? = null
+        var settingsReads = 0
+        val gateway = object : CoreGateway by fake {
+            override suspend fun getSettings() = fake.getSettings().also {
+                settingsReads++
+                settingsGate?.await()
+            }
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            assertTrue(viewModel.state.value.allEpisodesSettled)
+            // The flag flips while the page sits on the stack.
+            fake.setSettings(fake.getSettings().copy(showVirtualEpisodes = true))
+            settingsGate = CompletableDeferred()
+            val readsBefore = settingsReads
+
+            viewModel.selectSeason("season-2")
+
+            // Same frame: the cached flag (hide virtual) answers.
+            assertEquals(listOf("s2-real"), viewModel.state.value.episodes.map { it.id })
+
+            settingsGate!!.complete(Unit)
+            runCurrent()
+
+            assertEquals(readsBefore + 1, settingsReads)
+            assertEquals(listOf("s2-real", "s2-virtual"), viewModel.state.value.episodes.map { it.id })
+            assertEquals("season-2", viewModel.state.value.selectedSeasonId)
+            assertTrue(gateway.let { fake.childrenCalls.none { c -> c.parentId.startsWith("season-") } })
+        }
+    }
+
+    @Test
+    fun `a season switch keeps the memory list when the virtual-episodes flag is unchanged`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1)
+        val season2 = testCard(id = "season-2", itemType = "Season", indexNumber = 2)
+        val s1Ep = testCard(id = "s1-ep", itemType = "Episode", parentIndexNumber = 1)
+        val real = testCard(id = "s2-real", itemType = "Episode", indexNumber = 1, parentIndexNumber = 2)
+        val virtual = testCard(id = "s2-virtual", itemType = "Episode", indexNumber = 2, parentIndexNumber = 2, isVirtual = true)
+        val fake = FakeCoreGateway(
+            childrenByParent = mapOf("series-1" to listOf(season1, season2)),
+            seriesEpisodesBySeriesId = mapOf("series-1" to listOf(s1Ep, real, virtual)),
+        )
+
+        withDetailViewModel(DetailViewModel(fake, series, ResourceUiStrings.default)) { viewModel ->
+            viewModel.selectSeason("season-2")
+            runCurrent()
+
+            assertEquals(listOf("s2-real"), viewModel.state.value.episodes.map { it.id })
+        }
+    }
+}
+
+/** Snapshot-at-call-time gateway with per-call hooks, so a test can hold a read open while the mirror moves on. */
+private class MirrorGateway(
+    private val fake: FakeCoreGateway,
+    val bus: MutableSharedFlow<ChangeEvent>,
+) : CoreGateway by fake {
+    val children = mutableMapOf<String, List<Card>>()
+    var all: List<Card> = emptyList()
+    var childrenGate: (suspend (String) -> Unit)? = null
+    var allGate: (suspend () -> Unit)? = null
+    private var inFlightSeries = 0
+    var maxInFlightSeries = 0
+        private set
+
+    override fun changeEvents(): Flow<ChangeEvent> = bus
+
+    override suspend fun children(parentId: String, sort: SortOrder, offset: UInt, limit: UInt): List<Card> {
+        val snapshot = children[parentId].orEmpty()
+        if (parentId == "series-1") maxInFlightSeries = maxOf(maxInFlightSeries, ++inFlightSeries)
+        try {
+            childrenGate?.invoke(parentId)
+        } finally {
+            if (parentId == "series-1") inFlightSeries--
+        }
+        return snapshot
+    }
+
+    override suspend fun seriesEpisodes(seriesId: String): List<Card> {
+        val snapshot = all
+        allGate?.invoke()
+        return snapshot
     }
 }

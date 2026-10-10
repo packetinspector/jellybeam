@@ -4,29 +4,38 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.HomeShelf
+import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.ShelfSource
 
 enum class ShelfKind { RESUME, POSTER }
 
-data class ShelfSpec(val id: String, val title: String, val items: List<Card>, val kind: ShelfKind)
+/** [art] only matters on a [ShelfKind.RESUME] shelf: which 16:9 chain its cards draw (docs/07 §1). */
+data class ShelfSpec(
+    val id: String,
+    val title: String,
+    val items: List<Card>,
+    val kind: ShelfKind,
+    val art: ResumeArt = ResumeArt.EPISODE,
+)
 
 /**
  * docs/25 §3: the core already decided which shelves show and in what order; this only gives each
  * one its localised title and card treatment. Pulled out of the Composable file so it's
- * plain-JVM-testable. [resumeAsPosters] mirrors `Settings.homeResumePosters` (docs/07 §1).
+ * plain-JVM-testable. [resumeArt] mirrors `Settings.homeResumeArt` (docs/07 §1): Poster draws the Latest poster cells,
+ * the others a 16:9 rail.
  */
 fun buildShelves(
     shelves: List<HomeShelf>,
     continueWatchingTitle: String,
     nextUpTitle: String,
     favoritesTitle: String,
-    resumeAsPosters: Boolean,
+    resumeArt: ResumeArt,
     latestInTitle: (viewName: String) -> String,
 ): List<ShelfSpec> = shelves.map { shelf ->
-    val resumeKind = if (resumeAsPosters) ShelfKind.POSTER else ShelfKind.RESUME
+    val resumeKind = if (resumeArt == ResumeArt.POSTER) ShelfKind.POSTER else ShelfKind.RESUME
     when (val source = shelf.source) {
-        ShelfSource.ContinueWatching -> ShelfSpec(source.key(), continueWatchingTitle, shelf.cards, resumeKind)
-        ShelfSource.NextUp -> ShelfSpec(source.key(), nextUpTitle, shelf.cards, resumeKind)
+        ShelfSource.ContinueWatching -> ShelfSpec(source.key(), continueWatchingTitle, shelf.cards, resumeKind, resumeArt)
+        ShelfSource.NextUp -> ShelfSpec(source.key(), nextUpTitle, shelf.cards, resumeKind, resumeArt)
         ShelfSource.Favorites -> ShelfSpec(source.key(), favoritesTitle, shelf.cards, ShelfKind.POSTER)
         is ShelfSource.Latest -> ShelfSpec(source.key(), latestInTitle(source.viewName), shelf.cards, ShelfKind.POSTER)
     }

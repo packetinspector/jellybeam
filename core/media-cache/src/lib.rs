@@ -64,7 +64,9 @@ pub(crate) fn item_types_for_collection(collection_type: &str) -> &'static [&'st
 ///   drops the dead `image_lru` table.
 /// - 15 -> 16: the `search` FTS table drops `overview`, so search matches titles only (a
 ///   short prefix like "an" matched nearly every synopsis).
-pub const SCHEMA_VERSION: u32 = 16;
+/// - 16 -> 17: adds `items.parent_thumb_item_id`/`parent_thumb_tag` (series Thumb art for
+///   Continue Watching / Next Up, docs/07 §1); forces a resync to backfill.
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// docs/16 §2.7: the reserved `view_id` that scopes the library grid queries to every
 /// favorite across libraries. Server ids are 32-hex, so it can never collide with one.
@@ -306,6 +308,11 @@ pub struct CardRow {
     /// for a Season/Episode row lacking its own (docs/07 §2 art fallback chains).
     pub parent_backdrop_item_id: Option<String>,
     pub parent_backdrop_tag: Option<String>,
+    /// `ParentThumbItemId`/`ParentThumbImageTag`: the owning series' `Thumb` (16:9, spoiler-free)
+    /// for the "series thumb" Continue Watching / Next Up art (docs/07 §1). `None` when the
+    /// server sends none.
+    pub parent_thumb_item_id: Option<String>,
+    pub parent_thumb_tag: Option<String>,
     /// `SeriesName`, for a Season/Episode row. `None` for Movie/Series/BoxSet or a pre-v9
     /// row. Distinct from `series_primary_tag`/`series_id` (artwork/navigation only): this
     /// is what a Continue Watching/Next Up card prints as its second line.
@@ -673,6 +680,8 @@ impl Mirror {
             view_id,
             limit,
             hide_watched,
+            self.inner
+                .index_group_ready(schema::IndexGroup::LatestWatched),
         )
     }
 
@@ -1002,7 +1011,7 @@ mod tests {
 
     #[test]
     fn schema_version_is_stable_constant() {
-        assert_eq!(SCHEMA_VERSION, 16);
+        assert_eq!(SCHEMA_VERSION, 17);
     }
 
     // `start_paused = true`: `recv_changes` always waits out `CHANGE_DEBOUNCE` before

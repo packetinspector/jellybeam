@@ -146,8 +146,9 @@ surface, in this order. The first rule whose target exists wins.
    §7. It is always the *primary action* the screen exists for, because a
    fresh entry with no history is the one moment the viewer has no place
    of their own yet: Home → hero primary (else first shelf cell); Library
-   grid → first cell; Detail → primary pill (Play/Resume); on a series page rule 2
-   (the selected season chip) is reached first; Settings → the active rail row; Search → the
+   grid → first cell; Detail → primary pill (Play/Resume), and on a series page the selected
+   season chip only when the series has no primary pill (a fresh entry waits for the
+   primary action to settle so a faster chip row cannot win); Settings → the active rail row; Search → the
    field; OSD reveal → Play/Pause.
 
 **Rule 2 also governs entering a group.** A D-pad move *into* a group of
@@ -276,8 +277,9 @@ hardware).
 
 Two consequences of the rule worth knowing, both intended by §2 but
 visible on hardware for the first time:
-- A fresh series page lands on the selected season chip, not the Resume
-  pill, because rule 2 outranks rule 3. One Up press reaches Resume.
+- A fresh series page lands on the Play/Resume pill; the selected season
+  chip is the target only when the series has no pill (nothing unplayed or
+  in progress). Rule 2 still governs entering the chip row by D-pad.
 - The resume season is the earliest in-progress episode in series order
   (`resolveResumeSeason`), not the most recently played one. A stale
   partial watch in an early season selects that season even while the
@@ -291,7 +293,7 @@ visible on hardware for the first time:
 | Search, Discover search | the field | `result:<id>` | n/a | pass | not exercised |
 | Detail: movie, episode | primary pill | `action:*`, `overview:more`, `person:<id>`, `similar:<id>`, `up-next` | player return = resume edge, same path; the full-synopsis panel (opened from `overview:more`) takes focus while open, swallows Left/Right/Select, scrolls on Up/Down, and Back returns focus to that MORE stop by key | pass | pass: fresh entry on the primary pill; return from the player on the primary pill; Down from Play lands on MORE, Select opens the panel, Back lands back on MORE. refresh guard implemented |
 | Detail action panel (docs/19) | the predicted row (docs/19 §1.2), else the first action row | n/a (a side panel, never on the stack) | Back, Left, Select or any action returns focus to the `···` door (`action:menu`); the in-place bulk confirm and the collections level return to the row that opened them. The invoker captured on open is cleared by that close (§4: consumed), otherwise the restore order (invoker first) sent every later return to this page to the door instead of the last card | pass | pass: predicted row on open; Back, Left and an action land on the door; Cancel on the confirm lands on the mark row; Go to series lands the series page on its selected chip. Device check: after panel close, move to another episode card, leave via HOME and resume: focus returned to the door (stale invoker); fixed |
-| Detail: series | rule 2 wins on a fresh entry: the **selected season chip** (`season:<id>`); primary pill only when no season is selected | + `season:<id>`, `episode:<id>`; season resolved once, shelf state per season | as above | pass | pass: Back from an episode page lands on that episode card (log: placed by key); selected chip identical at 0.4s and 3.4s after open, no jump; fresh entry lands on the selected chip; Down from Resume lands on the selected chip (was the spatially nearest). refresh guard implemented |
+| Detail: series | primary pill (Play/Resume) when the series has one, decided once the primary action has settled; else the **selected season chip** (`season:<id>`); else the `···` door | + `season:<id>`, `episode:<id>`; season resolved once, shelf state per season | as above | pass | pass: Back from an episode page lands on that episode card (log: placed by key); selected chip identical at 0.4s and 3.4s after open, no jump; fresh entry lands on the primary pill; Down from Resume lands on the selected chip (was the spatially nearest). refresh guard implemented |
 | Settings | active rail row (rule 2 `rail:<section>`) | `<section>/<row>[/<chip>]`; per-section pane entry | n/a (no nested surfaces) | pass | pass: full ring on a middle stacked row; description under the label; leaving a section and re-entering it lands on the same row; entering a chip row lands on its selected chip; chip-row description on its own full-width line |
 | Discover home | Search chip | `chip:*`, `shelf:<row>/card:<key>` | n/a | pass | not exercised |
 | Discover grid / person / requests | first cell | `card:<key>`; stale → first visible | n/a | pass | not exercised |

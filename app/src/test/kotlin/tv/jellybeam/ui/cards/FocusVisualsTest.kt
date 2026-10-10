@@ -16,7 +16,6 @@ class FocusVisualsTest {
         assertEquals(1f, visuals.scale, 0f)
         assertEquals(0f, visuals.ringAlpha, 0f)
         assertEquals(0f, visuals.brightnessLift, 0f)
-        assertEquals(0f, visuals.shadowDp, 0f)
     }
 
     @Test
@@ -26,7 +25,6 @@ class FocusVisualsTest {
         assertEquals(1.04f, visuals.scale, 0.0001f)
         assertEquals(1f, visuals.ringAlpha, 0f)
         assertEquals(0.12f, visuals.brightnessLift, 0.0001f)
-        assertEquals(16f, visuals.shadowDp, 0.0001f)
     }
 
     @Test
@@ -36,7 +34,6 @@ class FocusVisualsTest {
         assertEquals(1.02f, visuals.scale, 0.0001f)
         assertEquals(0.5f, visuals.ringAlpha, 0f)
         assertEquals(0.06f, visuals.brightnessLift, 0.0001f)
-        assertEquals(8f, visuals.shadowDp, 0.0001f)
     }
 
     @Test
@@ -48,7 +45,6 @@ class FocusVisualsTest {
         assertEquals(1.04f, visuals.scale, 0.0001f)
         assertEquals(0.25f, visuals.ringAlpha, 0f)
         assertEquals(0.03f, visuals.brightnessLift, 0.0001f)
-        assertEquals(4f, visuals.shadowDp, 0.0001f)
     }
 
     @Test

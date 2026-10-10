@@ -28,6 +28,8 @@ fun testCard(
     overview: String? = null,
     isVirtual: Boolean = false,
     libraryId: String? = null,
+    parentThumbItemId: String? = null,
+    parentThumbTag: String? = null,
 ): Card = Card(
     id = id,
     itemType = itemType,
@@ -53,4 +55,6 @@ fun testCard(
     overview = overview,
     isVirtual = isVirtual,
     libraryId = libraryId,
+    parentThumbItemId = parentThumbItemId,
+    parentThumbTag = parentThumbTag,
 )

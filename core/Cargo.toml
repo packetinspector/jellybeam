@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "app-updates",
+    "ass-render",
     "ffi",
     "jellyfin-api",
     "jellyfin-core",

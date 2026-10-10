@@ -28,6 +28,8 @@ frame 1920×1080, overflow hidden
    └─ cast band    margin-top 44px, gap 20px
 ```
 
+**Loading amendment.** While its data loads, a region reserves its final height with a skeleton (docs/11 §Loading state); a region that settles empty collapses once. Absent-until-loaded is the failure this prevents: a region that appears later shoves everything below it.
+
 **`min-width: 0` on the text column is load-bearing.** Without it a flex item refuses to shrink below its content width and pushes into its siblings — which is the overlap, in one line of CSS.
 
 **Never combine `margin-top: auto` with an adjacent region that needs a minimum gap.** Give the flexible region the `auto` and its neighbour a fixed margin. Here the spec capsule takes the `auto`; the cast band sits a fixed 44px below it. If `auto` computed to 0 on a tall page, the two would sit flush — the same class of bug in a new place.

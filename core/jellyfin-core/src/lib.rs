@@ -9,8 +9,8 @@ mod playback;
 mod reporting;
 
 pub use device_profile::{
-    android_direct_play_video_codecs, android_tv_profile, AndroidTvCaps, VideoCodec,
-    VideoCodecCaps, VideoProfileLevel,
+    allow_ass_sidecars, android_direct_play_video_codecs, android_tv_profile, AndroidTvCaps,
+    VideoCodec, VideoCodecCaps, VideoProfileLevel,
 };
 pub use event_bus::{EventBus, EventBusHandle};
 pub use reporting::{FinalDelivery, ReportingSession};

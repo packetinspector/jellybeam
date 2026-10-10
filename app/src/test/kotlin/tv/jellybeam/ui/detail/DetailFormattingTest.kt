@@ -6,10 +6,12 @@ import tv.jellybeam.ui.cards.testCard
 import java.time.Instant
 import java.util.Locale
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.jellybeam_core.AudioSpatialKind
+import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.ImageKind
 import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.MediaStreamInfo
@@ -855,45 +857,6 @@ class DetailFormattingTest {
         assertNull(seriesCard?.overview)
     }
 
-    // -- below-fold section reveal gating --------
-
-    @Test
-    fun `specStripReady is immediate for a Series regardless of itemDetail's own load state`() {
-        assertTrue(DetailFormatting.specStripReady("Series", itemDetailLoaded = false))
-        assertTrue(DetailFormatting.specStripReady("Series", itemDetailLoaded = true))
-    }
-
-    @Test
-    fun `specStripReady for a Movie or Episode waits on the itemDetail fetch settling`() {
-        assertEquals(false, DetailFormatting.specStripReady("Movie", itemDetailLoaded = false))
-        assertTrue(DetailFormatting.specStripReady("Movie", itemDetailLoaded = true))
-        assertEquals(false, DetailFormatting.specStripReady("Episode", itemDetailLoaded = false))
-        assertTrue(DetailFormatting.specStripReady("Episode", itemDetailLoaded = true))
-    }
-
-    @Test
-    fun `showEpisodeSkeleton is true for a Series while either seasons or episodes are loading`() {
-        assertTrue(DetailFormatting.showEpisodeSkeleton(isSeries = true, isLoadingSeasons = true, isLoadingEpisodes = false))
-        assertTrue(DetailFormatting.showEpisodeSkeleton(isSeries = true, isLoadingSeasons = false, isLoadingEpisodes = true))
-        assertTrue(DetailFormatting.showEpisodeSkeleton(isSeries = true, isLoadingSeasons = true, isLoadingEpisodes = true))
-    }
-
-    @Test
-    fun `showEpisodeSkeleton is false once a Series has settled -- neither seasons nor episodes loading`() {
-        assertEquals(
-            false,
-            DetailFormatting.showEpisodeSkeleton(isSeries = true, isLoadingSeasons = false, isLoadingEpisodes = false),
-        )
-    }
-
-    @Test
-    fun `showEpisodeSkeleton never applies to a non-Series item, even mid-load`() {
-        assertEquals(
-            false,
-            DetailFormatting.showEpisodeSkeleton(isSeries = false, isLoadingSeasons = true, isLoadingEpisodes = true),
-        )
-    }
-
     // -- shortDate / runtimeAndDateLine --------------------------------------
 
     @Test
@@ -1141,6 +1104,47 @@ class DetailFormattingTest {
         assertNull(DetailFormatting.movieEyebrow(strings, null, null, locale = Locale.US))
     }
 
+    // -- creditsLines / specCapsuleFields (docs/11 §Loading state) --------------
+
+    @Test
+    fun `creditsLines is empty only when no segment has anything`() {
+        assertTrue(DetailFormatting.creditsLines(strings, emptyList(), emptyList(), emptyList()).isEmpty)
+        assertTrue(DetailFormatting.creditsLines(strings, null, null, null).isEmpty)
+        assertTrue(DetailFormatting.creditsLines(strings, listOf(" "), emptyList(), listOf("")).isEmpty)
+    }
+
+    @Test
+    fun `creditsLines keeps names verbatim and uppercases only the studio`() {
+        val lines = DetailFormatting.creditsLines(strings, listOf("Dana Director"), listOf("Wes Writer", "Pat Producer"), listOf("Acme Pictures"))
+        assertEquals("Dana Director", lines.directors)
+        assertEquals("Wes Writer, Pat Producer", lines.writers)
+        assertEquals("ACME PICTURES", lines.studio)
+        assertEquals(false, lines.isEmpty)
+    }
+
+    @Test
+    fun `creditsLines is not empty when only the studio is set`() {
+        assertEquals(false, DetailFormatting.creditsLines(strings, null, null, listOf("Acme Pictures")).isEmpty)
+    }
+
+    @Test
+    fun `specCapsuleFields is empty before the detail record resolves, even with extra fields`() {
+        val extra = listOf(DetailFormatting.SpecField("1 GB", DetailFormatting.SpecWeight.BASELINE))
+        assertTrue(DetailFormatting.specCapsuleFields(strings, null, extra).isEmpty())
+    }
+
+    @Test
+    fun `specCapsuleFields appends the extra fields after the stream fields`() {
+        val detail = testItemDetail(mediaStreams = listOf(testStream(MediaStreamKind.VIDEO, codec = "h264")))
+        val extra = listOf(DetailFormatting.SpecField("1 GB", DetailFormatting.SpecWeight.BASELINE))
+        assertEquals(listOf("H264", "1 GB"), DetailFormatting.specCapsuleFields(strings, detail, extra).map { it.value })
+    }
+
+    @Test
+    fun `specCapsuleFields is empty for a detail with no streams, container or extras`() {
+        assertTrue(DetailFormatting.specCapsuleFields(strings, testItemDetail()).isEmpty())
+    }
+
     // -- peopleLine / studioSummary ----------------------------------------
 
     @Test
@@ -1188,6 +1192,41 @@ class DetailFormattingTest {
         assertEquals(DetailFormatting.FocusSeedTarget.NONE, DetailFormatting.resolveFocusSeedTarget(hasPrimary = false, hasSecondary = false))
     }
 
+    @Test
+    fun `resolveSeriesSeed picks the primary the moment it exists, even before anything else settles`() {
+        assertEquals(
+            DetailFormatting.FocusSeedTarget.PRIMARY,
+            DetailFormatting.resolveSeriesSeed(hasPrimary = true, primarySettled = false, hasChips = true, seasonsSettled = false),
+        )
+        assertEquals(
+            DetailFormatting.FocusSeedTarget.PRIMARY,
+            DetailFormatting.resolveSeriesSeed(hasPrimary = true, primarySettled = true, hasChips = true, seasonsSettled = true),
+        )
+    }
+
+    @Test
+    fun `resolveSeriesSeed waits when the chips arrive before the primary action settles`() {
+        assertNull(DetailFormatting.resolveSeriesSeed(hasPrimary = false, primarySettled = false, hasChips = true, seasonsSettled = true))
+        assertNull(DetailFormatting.resolveSeriesSeed(hasPrimary = false, primarySettled = false, hasChips = false, seasonsSettled = true))
+    }
+
+    @Test
+    fun `resolveSeriesSeed falls to the chip only once the primary settled absent`() {
+        assertEquals(
+            DetailFormatting.FocusSeedTarget.SECONDARY,
+            DetailFormatting.resolveSeriesSeed(hasPrimary = false, primarySettled = true, hasChips = true, seasonsSettled = true),
+        )
+    }
+
+    @Test
+    fun `resolveSeriesSeed waits for seasons before settling on the door`() {
+        assertNull(DetailFormatting.resolveSeriesSeed(hasPrimary = false, primarySettled = true, hasChips = false, seasonsSettled = false))
+        assertEquals(
+            DetailFormatting.FocusSeedTarget.NONE,
+            DetailFormatting.resolveSeriesSeed(hasPrimary = false, primarySettled = true, hasChips = false, seasonsSettled = true),
+        )
+    }
+
     // -- fittingItemCount (docs/19-detail-action-menu.md §1.5 FIX B/C) ------
 
     @Test
@@ -1222,6 +1261,30 @@ class DetailFormattingTest {
         assertEquals(2, DetailFormatting.fittingItemCount(listOf(10f, 20f), separatorWidth = 5f, maxWidth = 35f))
     }
 
+    // -- shelfEntryIndex (docs/15 §2: Down into a shelf lands on its first visible card) ----------
+
+    @Test
+    fun `shelfEntryIndex at rest lands on the first item and is stable across repeated entries`() {
+        assertEquals(0, DetailFormatting.shelfEntryIndex(0, 0, 10))
+        assertEquals(1, DetailFormatting.shelfEntryIndex(1, 0, 10))
+        assertEquals(1, DetailFormatting.shelfEntryIndex(1, 0, 10))
+    }
+
+    @Test
+    fun `shelfEntryIndex skips a partly scrolled-off first item`() {
+        assertEquals(2, DetailFormatting.shelfEntryIndex(1, 50, 10))
+    }
+
+    @Test
+    fun `shelfEntryIndex clamps to the last item`() {
+        assertEquals(9, DetailFormatting.shelfEntryIndex(9, 10, 10))
+    }
+
+    @Test
+    fun `shelfEntryIndex is null for an empty shelf`() {
+        assertNull(DetailFormatting.shelfEntryIndex(0, 0, 0))
+    }
+
     // -- wholeCardCount (docs/19-detail-action-menu.md §1.5 FIX D) ----------
 
     @Test
@@ -1247,5 +1310,125 @@ class DetailFormattingTest {
     @Test
     fun `wholeCardCount never returns fewer than one card, even at a tiny width`() {
         assertEquals(1, DetailFormatting.wholeCardCount(contentWidthDp = 0f, startMarginDp = 40f, cardWidthDp = 172f, gapDp = 15f))
+    }
+
+    // -- episodesOfSeason (in-memory season switch) ----
+
+    @Test
+    fun `episodesOfSeason matches the season number, hides virtuals unless shown, orders by index`() {
+        val season2 = testCard(id = "s2", itemType = "Season", indexNumber = 2)
+        val e1 = testCard(id = "e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1)
+        val e22 = testCard(id = "e22", itemType = "Episode", parentIndexNumber = 2, indexNumber = 2)
+        val e21 = testCard(id = "e21", itemType = "Episode", parentIndexNumber = 2, indexNumber = 1)
+        val ghost = testCard(id = "ghost", itemType = "Episode", parentIndexNumber = 2, indexNumber = 3, isVirtual = true)
+        val all = listOf(e1, e22, ghost, e21)
+        assertEquals(listOf(e21, e22), DetailFormatting.episodesOfSeason(season2, all, showVirtualEpisodes = false))
+        assertEquals(listOf(e21, e22, ghost), DetailFormatting.episodesOfSeason(season2, all, showVirtualEpisodes = true))
+    }
+
+    @Test
+    fun `episodesOfSeason defers to the core when memory cannot be faithful`() {
+        val numbered = testCard(id = "s2", itemType = "Season", indexNumber = 2)
+        val unnumbered = testCard(id = "sx", itemType = "Season")
+        val ep = testCard(id = "e", itemType = "Episode", parentIndexNumber = 2, indexNumber = 1)
+        val orphan = testCard(id = "o", itemType = "Episode", indexNumber = 1)
+        assertEquals(null, DetailFormatting.episodesOfSeason(unnumbered, listOf(ep), true))
+        assertEquals(null, DetailFormatting.episodesOfSeason(numbered, emptyList(), true))
+        assertEquals(null, DetailFormatting.episodesOfSeason(numbered, listOf(ep, orphan), true))
+    }
+
+    private fun change(event: ChangeEvent, isSeries: Boolean = true, known: Set<String> = setOf("known")) =
+        DetailFormatting.collectionChange(event, "series-1", isSeries, known)
+
+    @Test
+    fun `collectionChange on a series probes unknown ids instead of refreshing`() {
+        val up = ChangeEvent.Upserted(ids = listOf("new-ep", "known", "series-1"), libraryId = "lib-a")
+        // Any known or own id wins outright.
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(up))
+        val unknown = ChangeEvent.Upserted(ids = listOf("new-ep", "other"), libraryId = "lib-a")
+        assertEquals(DetailFormatting.CollectionChange.AffectsIfChildOf(listOf("new-ep", "other")), change(unknown))
+    }
+
+    @Test
+    fun `collectionChange passes own id and an empty known set`() {
+        val own = ChangeEvent.Upserted(ids = listOf("series-1"), libraryId = null)
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(own))
+        val x = ChangeEvent.Upserted(ids = listOf("x"), libraryId = null)
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(x, known = emptySet()))
+    }
+
+    @Test
+    fun `collectionChange ignores an empty upsert and unknown removals`() {
+        assertEquals(DetailFormatting.CollectionChange.Ignores, change(ChangeEvent.Upserted(emptyList(), null)))
+        assertEquals(DetailFormatting.CollectionChange.Ignores, change(ChangeEvent.Removed(listOf("x"), "lib-a")))
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(ChangeEvent.Removed(listOf("known"), null)))
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(ChangeEvent.Removed(listOf("series-1"), null)))
+    }
+
+    @Test
+    fun `collectionChange refreshes on Refresh and ignores ViewsChanged`() {
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(ChangeEvent.Refresh))
+        assertEquals(DetailFormatting.CollectionChange.Ignores, change(ChangeEvent.ViewsChanged))
+    }
+
+    @Test
+    fun `collectionChange on a boxset never probes`() {
+        val unknown = ChangeEvent.Upserted(ids = listOf("new"), libraryId = "lib-a")
+        assertEquals(DetailFormatting.CollectionChange.Ignores, change(unknown, isSeries = false))
+        val known = ChangeEvent.Upserted(ids = listOf("known"), libraryId = null)
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(known, isSeries = false))
+    }
+
+    @Test
+    fun `isChildOfSeries matches on seriesId`() {
+        val ep = testCard(id = "e", itemType = "Episode", seriesId = "series-1")
+        val other = testCard(id = "o", itemType = "Episode", seriesId = "series-2")
+        assertTrue(DetailFormatting.isChildOfSeries(listOf(other, ep), "series-1"))
+        assertFalse(DetailFormatting.isChildOfSeries(listOf(other), "series-1"))
+        assertFalse(DetailFormatting.isChildOfSeries(emptyList(), "series-1"))
+    }
+
+    @Test
+    fun `reconcileSelectedSeason keeps a surviving or absent selection`() {
+        val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
+        val s2 = testCard(id = "s2", itemType = "Season", indexNumber = 2)
+        assertEquals("s2", DetailFormatting.reconcileSelectedSeason("s2", listOf(s1, s2), emptyList(), settled = true))
+        assertNull(DetailFormatting.reconcileSelectedSeason(null, listOf(s1, s2), emptyList(), settled = false))
+    }
+
+    @Test
+    fun `reconcileSelectedSeason moves a removed pick to the resume season`() {
+        val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
+        val s3 = testCard(id = "s3", itemType = "Season", indexNumber = 3)
+        val s1Ep = testCard(id = "e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
+        val s3Ep = testCard(id = "e3", itemType = "Episode", parentIndexNumber = 3, indexNumber = 1, played = false)
+        assertEquals("s3", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s3), listOf(s1Ep, s3Ep), settled = true))
+    }
+
+    @Test
+    fun `reconcileSelectedSeason falls to the first season, and keeps a pick when no seasons came back`() {
+        val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
+        assertEquals("s1", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1), emptyList(), settled = true))
+        assertEquals("gone", DetailFormatting.reconcileSelectedSeason("gone", emptyList(), emptyList(), settled = false))
+    }
+
+    @Test
+    fun `reconcileSelectedSeason fills a null selection only once settled`() {
+        val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
+        val s3 = testCard(id = "s3", itemType = "Season", indexNumber = 3)
+        val s3Ep = testCard(id = "e3", itemType = "Episode", parentIndexNumber = 3, indexNumber = 1, played = false)
+        assertNull(DetailFormatting.reconcileSelectedSeason(null, listOf(s1, s3), listOf(s3Ep), settled = false))
+        assertEquals("s3", DetailFormatting.reconcileSelectedSeason(null, listOf(s1, s3), listOf(s3Ep), settled = true))
+        assertEquals("s1", DetailFormatting.reconcileSelectedSeason(null, listOf(s1), emptyList(), settled = true))
+        assertNull(DetailFormatting.reconcileSelectedSeason(null, emptyList(), emptyList(), settled = true))
+    }
+
+    @Test
+    fun `reconcileSelectedSeason never falls back provisionally before the per-episode signal`() {
+        val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
+        val s2 = testCard(id = "s2", itemType = "Season", indexNumber = 2)
+        assertNull(DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s2), emptyList(), settled = false))
+        assertEquals("s1", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s2), emptyList(), settled = true))
+        assertEquals("gone", DetailFormatting.reconcileSelectedSeason("gone", emptyList(), emptyList(), settled = false))
     }
 }

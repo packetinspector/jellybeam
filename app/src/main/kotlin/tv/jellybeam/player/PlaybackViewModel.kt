@@ -605,6 +605,7 @@ class PlaybackViewModel(
      * used.
      */
     private var sessionTolerateMislabeledLevels: Boolean = true
+    private var sessionFullAssStyling: Boolean = false
     private var sessionAudioDecoderPreferences: AudioDecoderPreferences = AudioDecoderPreferences()
 
     /** The play/pause intent ([PlaybackPlayer.playWhenReady]) in effect when the current reconnect
@@ -970,6 +971,19 @@ class PlaybackViewModel(
     }
 
     /**
+     * docs/21 §2.1: one line per negotiated plan, the fallback's included. `transcodeReason` is free
+     * text (docs/18's own doc on PlaybackPlan), so a reason with a space maps to the fixed tag "text".
+     */
+    private fun logPlan(itemId: String, plan: PlaybackPlan) {
+        AppGraph.diag.event("playback.plan") {
+            item("item", itemId)
+            tag("mode", plan.playMethod.name)
+            plan.container?.let { tag("container", it) }
+            tag("reason", plan.transcodeReason?.let { if (' ' in it) "text" else it } ?: "none")
+        }
+    }
+
+    /**
      * docs/18 §1's Auto/Cap fallback -- called from all three local-evidence signals
      * (`onPlayerError`, `onTracksChanged`, the decoder-init hook). A no-op unless
      * [fallbackPossible]; a `true` return tells the caller to skip its own fatal-error handling
@@ -1058,10 +1072,12 @@ class PlaybackViewModel(
                     negotiated,
                     tolerateMislabeledLevels = sessionTolerateMislabeledLevels,
                     audioDecoderPreferences = sessionAudioDecoderPreferences,
+                    fullAssStyling = sessionFullAssStyling,
                 )
                 if (paused) playerHolder.pause()
                 playerHolder.setPlaybackRate(1f)
                 currentPlan = negotiated
+                logPlan(itemId, negotiated)
                 lastReportedPaused = null // the new session starts unpaused; it hears the real state
                 negotiation = null // before the sidecar adoption, which may ask again under this session
                 errorDuringNegotiation = false
@@ -1257,15 +1273,7 @@ class PlaybackViewModel(
         sessionGeneration++ // docs/18 §3: fresh generation guard value for this session
         currentPlan = plan
         lastKnownItemType = plan.itemType
-        // docs/21 §2.1: one line per negotiated plan. `transcodeReason` is free text (docs/18's
-        // own doc on PlaybackPlan), so a reason with a space maps to the fixed tag "text" -- the
-        // line still says a reason existed, without the sentence itself reaching the ring.
-        AppGraph.diag.event("playback.plan") {
-            item("item", itemId)
-            tag("mode", plan.playMethod.name)
-            plan.container?.let { tag("container", it) }
-            tag("reason", plan.transcodeReason?.let { if (' ' in it) "text" else it } ?: "none")
-        }
+        logPlan(itemId, plan)
         transcodeFallbackAttempted = false // docs/18 §1: one fallback per item
         sessionFailedTrack = null
         negotiation = null // a previous item's, whose stop already revoked it
@@ -1332,6 +1340,7 @@ class PlaybackViewModel(
         // Remembered on the instance (docs/18 §3) so a later maybeFallBackToTranscode
         // call can re-load with the exact same preferences without re-reading Settings.
         sessionTolerateMislabeledLevels = settings?.tolerateMislabeledLevels ?: true
+        sessionFullAssStyling = settings?.subtitleFullAssStyling ?: false
         sessionAudioDecoderPreferences = AudioDecoderPreferences(
             preferFfmpegTrueHd = settings?.preferFfmpegTrueHd ?: false,
             preferFfmpegDts = settings?.preferFfmpegDts ?: false,
@@ -1342,6 +1351,7 @@ class PlaybackViewModel(
             plan,
             tolerateMislabeledLevels = sessionTolerateMislabeledLevels,
             audioDecoderPreferences = sessionAudioDecoderPreferences,
+            fullAssStyling = sessionFullAssStyling,
         )
         // The shared PlayerHolder singleton outlives any one session --
         // a previous session's rate must never leak into a freshly loaded item.
@@ -2144,6 +2154,7 @@ class PlaybackViewModel(
         // OFF carries no track id, so no snapshot is needed to apply it.
         playerHolder.applyTrackDecision(SUBTITLES_OFF, Tracks.EMPTY)
         dropPendingSidecar()
+        playerHolder.showAssSidecar(null)
         activeSidecar = index
         val cached = sidecarCache[index]
         if (cached != null) {
@@ -2158,22 +2169,29 @@ class PlaybackViewModel(
             sidecarFailed(index)
             return
         }
+        // With full styling on, an ASS sidecar loads whole into the overlay rather than as cues.
+        val styled = if (ExternalSubtitles.isSsa(sub.codec)) playerHolder.assSidecarTarget(index) else null
         sidecarStatus[index] = SidecarStatus.LOADING
         // start() and a fallback to another media source cancel this job, so a result never lands
         // in another session or on another source's video.
         sidecarJob = viewModelScope.launch {
+            var cues: SidecarCues? = null
             // Any failure, a core panic included, costs this track only, never playback.
-            val text = try {
-                gateway.fetchExternalSubtitle(plan.playSessionId, index)
+            val loaded = try {
+                if (styled != null) {
+                    gateway.loadAssSidecar(plan.playSessionId, index, styled.overlay, styled.key, styled.item)
+                } else {
+                    cues = gateway.fetchExternalSubtitle(plan.playSessionId, index)?.let { parseSidecar(sub.codec, it) }
+                    cues != null
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                null
+                false
             }
-            val cues = text?.let { parseSidecar(sub.codec, it) }
             sidecarJob = null
             val outcome = ExternalSubtitles.fetchOutcome(
-                loaded = cues != null,
+                loaded = loaded,
                 stillChosen = activeSidecar == index,
                 sessionReplaced = plan !== currentPlan,
                 swapPending = negotiation != null,
@@ -2181,8 +2199,9 @@ class PlaybackViewModel(
             when (outcome) {
                 ExternalSubtitles.FetchOutcome.LOADED -> {
                     sidecarStatus.remove(index)
-                    sidecarCache[index] = checkNotNull(cues)
+                    cues?.let { sidecarCache[index] = it }
                     if (activeSidecar == index) {
+                        playerHolder.showAssSidecar(styled)
                         _state.update { it.copy(sidecarCues = cues) }
                         onShown()
                     }
@@ -2245,6 +2264,7 @@ class PlaybackViewModel(
     /** Stops showing any sidecar; embedded text stays as the caller's decision leaves it. */
     private fun hideSidecar() {
         dropPendingSidecar()
+        playerHolder.showAssSidecar(null)
         activeSidecar = null
         _state.update { it.copy(sidecarCues = null) }
     }

@@ -91,6 +91,80 @@ class ChangeRefreshSchedulerTest {
     }
 
     @Test
+    fun `an explicit request ends the rest early but an event keeps it`() = runTest {
+        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+        val active = MutableStateFlow(true)
+        var refreshCount = 0
+        val (scope, job) = newSchedulerScope()
+        val scheduler = ChangeRefreshScheduler(scope, events, active, refresh = { refreshCount++ })
+        try {
+            runCurrent()
+            events.tryEmit(Unit)
+            runCurrent()
+            assertEquals(1, refreshCount)
+
+            events.tryEmit(Unit)
+            advanceTimeBy(100)
+            runCurrent()
+            assertEquals("an event during the rest waits it out", 1, refreshCount)
+
+            scheduler.requestRefresh()
+            runCurrent()
+            assertEquals("an explicit ask cuts the rest", 2, refreshCount)
+        } finally {
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun `an ask during a refresh skips the rest entirely`() = runTest {
+        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+        val active = MutableStateFlow(true)
+        val gate = CompletableDeferred<Unit>()
+        var refreshCount = 0
+        val (scope, job) = newSchedulerScope()
+        val scheduler = ChangeRefreshScheduler(scope, events, active, refresh = { if (++refreshCount == 1) gate.await() })
+        try {
+            runCurrent()
+            events.tryEmit(Unit)
+            runCurrent()
+            scheduler.requestRefresh()
+            gate.complete(Unit)
+            runCurrent()
+            assertEquals("the ask made mid-refresh runs with no rest", 2, refreshCount)
+        } finally {
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun `a refresh that throws is reported and the next dirty still refreshes`() = runTest {
+        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+        val active = MutableStateFlow(true)
+        var refreshCount = 0
+        val errors = mutableListOf<Throwable>()
+        val (scope, job) = newSchedulerScope()
+        ChangeRefreshScheduler(
+            scope, events, active,
+            refresh = { if (++refreshCount == 1) throw IllegalStateException("boom") },
+            onError = { errors += it },
+        )
+        try {
+            runCurrent()
+            events.tryEmit(Unit)
+            runCurrent()
+            assertEquals(1, errors.size)
+
+            advanceTimeBy(1_000)
+            events.tryEmit(Unit)
+            runCurrent()
+            assertEquals("the loop survived", 2, refreshCount)
+        } finally {
+            job.cancel()
+        }
+    }
+
+    @Test
     fun `a continuous stream advances state during the burst, not only once it goes quiet`() = runTest {
         val events = MutableSharedFlow<Unit>(extraBufferCapacity = 32)
         val active = MutableStateFlow(true)

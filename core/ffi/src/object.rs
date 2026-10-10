@@ -19,11 +19,11 @@ use crate::settings::{PlaybackQuality, Settings};
 use crate::track_prefs::TrackPrefsFile;
 use crate::types::{
     AccountIdentity, AccountInfo, Card, ChangeEvent, CollectionInfo, DeviceCaps, EpisodeNeighbors,
-    FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort, ImageKind, ItemDetail,
-    LibraryGridPrefs, LiveSort, MediaSegment, MirrorItemCounts, MirrorLibrary, MirrorStats,
-    PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan, PlaybackRequest, QuickConnectSession,
-    ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus, TrackDecisionFfi, TrackInfo,
-    TrackKindFfi, TrickplayMetaFfi, ViewSnapshot,
+    FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort, ImageKind, ImageUrlPrefix,
+    ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MirrorItemCounts, MirrorLibrary,
+    MirrorStats, PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan, PlaybackRequest,
+    QuickConnectSession, ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus,
+    TrackDecisionFfi, TrackInfo, TrackKindFfi, TrickplayMetaFfi, ViewSnapshot,
 };
 use crate::{device_id, library_prefs, session, settings, signin, track_prefs};
 
@@ -1522,6 +1522,20 @@ impl JellybeamCore {
         Ok(client.image_url(&item_id, kind.into(), &tag, max_width))
     }
 
+    /// The current account's pair Kotlin formats image URLs from, read under one lock with the
+    /// epoch it belongs to; `None` when signed out.
+    pub fn image_url_prefix(&self) -> Option<ImageUrlPrefix> {
+        let (epoch, client) = {
+            let state = self.lock_state();
+            (state.playback_owner.account_epoch, state.client.clone()?)
+        };
+        Some(ImageUrlPrefix {
+            epoch,
+            base_url: client.base_url().to_string(),
+            token: client.image_url_token().to_string(),
+        })
+    }
+
     /// Builds a trickplay tile-sheet image URL for Coil, or `None` if no
     /// signed-in client. Unlike [`Self::image_url`] returns `Option` not
     /// `Result`: a caller only ever calls this after a plan with
@@ -1643,6 +1657,16 @@ impl JellybeamCore {
         })?;
 
         Ok(ItemDetail::from(&dto))
+    }
+
+    /// docs/11 item 1: the Detail page's first paint from the mirror's stored DTO, before
+    /// [`Self::get_item_detail`] answers; carries only what the sync requested, and the network
+    /// record that follows is authoritative. `None` when the mirror doesn't know the item.
+    pub fn item_detail_local(&self, item_id: String) -> Result<Option<ItemDetail>, CoreError> {
+        let mirror = self.require_mirror()?;
+        Ok(mirror
+            .item(&canonicalize_item_id(&item_id))
+            .map(|dto| ItemDetail::from(&dto)))
     }
 
     /// docs/11-detail-ux-spec.md tier 2 item 13, "Similar Titles":
@@ -1777,30 +1801,32 @@ impl JellybeamCore {
     /// docs/18 §3.2: sidecar `index`'s text for `play_session_id`; `None` on a stale session, an
     /// unknown index or any failure, logged by class only (the URL carries the token).
     pub fn fetch_external_subtitle(&self, play_session_id: String, index: i32) -> Option<String> {
-        let (client, url) = {
-            let state = self.lock_state();
-            let url = state
-                .sidecars
-                .as_ref()?
-                .url_for(&play_session_id, index)?
-                .to_string();
-            (Self::playback_account_locked(&state).client?, url)
+        let (client, url) = self.sidecar_source(&play_session_id, index)?;
+        self.sidecar_fetch(
+            index,
+            client.fetch_delivery_text(&url, crate::types::SUBTITLE_MAX_BYTES),
+        )
+    }
+
+    /// docs/18 §3.2: ASS sidecar `index` fetched straight into `overlay` as track `key` of overlay
+    /// item `item`, so the file never enters the JVM heap; blocks until parsed. False on a stale
+    /// session, any fetch failure (logged as above), or a script the overlay refuses.
+    pub fn load_ass_sidecar(
+        &self,
+        play_session_id: String,
+        index: i32,
+        overlay: Arc<crate::ass::AssOverlay>,
+        key: String,
+        item: u64,
+    ) -> bool {
+        let Some((client, url)) = self.sidecar_source(&play_session_id, index) else {
+            return false;
         };
-        // Built inside the runtime: tokio's timer panics when created outside one.
-        let fetched = self.runtime.block_on(async {
-            tokio::time::timeout(
-                crate::types::SUBTITLE_FETCH_TIMEOUT,
-                client.fetch_delivery_text(&url, crate::types::SUBTITLE_MAX_BYTES),
-            )
-            .await
-        });
-        let kind = match fetched {
-            Ok(Ok(text)) => return Some(text),
-            Ok(Err(err)) => crate::types::subtitle_failure_kind(&err),
-            Err(_) => "timeout",
-        };
-        tracing::warn!(index, kind, "sidecar subtitle fetch failed");
-        None
+        self.sidecar_fetch(
+            index,
+            client.fetch_delivery_bytes(&url, ass_render::MAX_SCRIPT_BYTES),
+        )
+        .is_some_and(|data| overlay.add_script(key, data, item))
     }
 
     /// Registers (or replaces) the change listener. If a mirror is already
@@ -2288,8 +2314,12 @@ impl JellybeamCore {
             let parent_index_number = dto.parent_index_number;
             let index_number = dto.index_number;
 
-            let profile =
-                build_android_profile_for_quality(&caps, tolerate_mislabeled_levels, &quality);
+            let profile = build_android_profile_for_quality(
+                &caps,
+                tolerate_mislabeled_levels,
+                &quality,
+                false,
+            );
 
             let (play_session_id, decision) = self.negotiate_playback_info(
                 &client,
@@ -2886,6 +2916,40 @@ type NegotiatedSource = (
 );
 
 impl JellybeamCore {
+    /// The playback client and authed URL of sidecar `index` in session `play_session_id`.
+    fn sidecar_source(
+        &self,
+        play_session_id: &str,
+        index: i32,
+    ) -> Option<(jellyfin_api::JellyfinClient, String)> {
+        let state = self.lock_state();
+        let url = state
+            .sidecars
+            .as_ref()?
+            .url_for(play_session_id, index)?
+            .to_string();
+        Some((Self::playback_account_locked(&state).client?, url))
+    }
+
+    /// Runs one sidecar fetch under its deadline; a failure is logged by class only.
+    fn sidecar_fetch<T>(
+        &self,
+        index: i32,
+        fetch: impl std::future::Future<Output = Result<T, jellyfin_api::ApiError>>,
+    ) -> Option<T> {
+        // The timer is built inside the runtime: tokio's timer panics when created outside one.
+        let fetched = self.runtime.block_on(async {
+            tokio::time::timeout(crate::types::SUBTITLE_FETCH_TIMEOUT, fetch).await
+        });
+        let kind = match fetched {
+            Ok(Ok(body)) => return Some(body),
+            Ok(Err(err)) => crate::types::subtitle_failure_kind(&err),
+            Err(_) => "timeout",
+        };
+        tracing::warn!(index, kind, "sidecar subtitle fetch failed");
+        None
+    }
+
     /// docs/18 §3.2: `source`'s sidecars for [`Self::fetch_external_subtitle`], installed with
     /// the session they belong to ([`Self::install_reporting_session`]), and their descriptors
     /// for the plan.
@@ -3085,7 +3149,7 @@ impl JellybeamCore {
         let start_ticks = resolved_start_ticks(start_from_beginning, &dto);
 
         let profile =
-            build_android_profile_for_quality(&caps, tolerate_mislabeled_levels, &quality);
+            build_android_profile_for_quality(&caps, tolerate_mislabeled_levels, &quality, true);
 
         // Outro timing and trickplay never touch this critical path: Kotlin
         // derives Outro start from its own fire-and-forgotten
@@ -3257,6 +3321,7 @@ impl JellybeamCore {
             &request.caps,
             request.tolerate_mislabeled_levels,
             &request.quality,
+            true,
         );
         let (play_session_id, decision) = Self::negotiate_playback_info_async(
             &request.client,
@@ -3591,7 +3656,7 @@ impl JellybeamCore {
     /// caller only orchestrates: a preload cache hit is `DirectPlay` as-is;
     /// otherwise Cap mode always forces a transcode negotiation, and
     /// Auto/`DirectPlay` negotiate once and hand the decision to
-    /// [`resolve_plan`].
+    /// [`resolve_plan`] (Auto twice when it transcodes, docs/18 §3.2).
     #[allow(clippy::too_many_arguments)]
     fn negotiate_playback_source(
         &self,
@@ -3641,22 +3706,37 @@ impl JellybeamCore {
                 ))
             }
             PlaybackQuality::DirectPlay | PlaybackQuality::Auto => {
-                let (play_session_id, decision) = self.negotiate_playback_info(
-                    client,
-                    item_id,
-                    profile,
-                    start_ticks,
-                    jellyfin_api::PlaybackInfoOptions::default(),
-                )?;
-                let video_codec = video_stream_codec(decision_source(&decision));
                 let supported_codecs = jellyfin_core::android_direct_play_video_codecs(caps);
-                match resolve_plan(
-                    &quality,
-                    decision,
-                    video_codec.as_deref(),
-                    &supported_codecs,
-                    tolerate_mislabeled_levels,
-                ) {
+                let negotiate = |profile| -> Result<_, CoreError> {
+                    let (play_session_id, decision) = self.negotiate_playback_info(
+                        client,
+                        item_id,
+                        profile,
+                        start_ticks,
+                        jellyfin_api::PlaybackInfoOptions::default(),
+                    )?;
+                    let video_codec = video_stream_codec(decision_source(&decision));
+                    let plan = resolve_plan(
+                        &quality,
+                        decision,
+                        video_codec.as_deref(),
+                        &supported_codecs,
+                        tolerate_mislabeled_levels,
+                    );
+                    Ok((play_session_id, plan))
+                };
+                let (mut play_session_id, mut plan) = negotiate(profile)?;
+                // docs/18 §3.2: offered ASS sidecars, the transcode Auto takes anyway would hand
+                // out embedded ASS instead of burning it in, so it is asked for without them.
+                if matches!(plan, Ok(ResolvedPlan::Transcode { .. })) {
+                    (play_session_id, plan) = negotiate(&build_android_profile_for_quality(
+                        caps,
+                        tolerate_mislabeled_levels,
+                        &quality,
+                        false,
+                    ))?;
+                }
+                match plan {
                     Ok(ResolvedPlan::DirectPlay {
                         source,
                         url,
@@ -4571,12 +4651,17 @@ fn resolved_start_ticks(
 /// function is hardcoded to the mpv builder.
 ///
 /// `tolerate_mislabeled_levels` is `Settings::tolerate_mislabeled_levels`
-/// (default `true`), passed straight through to `android_tv_profile`.
+/// (default `true`), passed straight through to `android_tv_profile`;
+/// `ass_sidecars` adds `jellyfin_core::allow_ass_sidecars`.
 fn build_android_profile(
     caps: &jellyfin_core::AndroidTvCaps,
     tolerate_mislabeled_levels: bool,
+    ass_sidecars: bool,
 ) -> jellyfin_api::models::DeviceProfile {
-    let raw = jellyfin_core::android_tv_profile(caps, tolerate_mislabeled_levels);
+    let mut raw = jellyfin_core::android_tv_profile(caps, tolerate_mislabeled_levels);
+    if ass_sidecars {
+        jellyfin_core::allow_ass_sidecars(&mut raw);
+    }
     match serde_json::to_value(raw) {
         Ok(value) => match serde_json::from_value(value) {
             Ok(profile) => profile,
@@ -4601,16 +4686,19 @@ fn build_android_profile(
     }
 }
 
-/// [`Settings::playback_quality`]'s only effect on the negotiated
+/// [`Settings::playback_quality`]'s effect on the negotiated
 /// `DeviceProfile` (docs/18-playback-quality.md §2): in `Cap` mode,
 /// `max_bps` is threaded onto `AndroidTvCaps::max_streaming_bitrate` before
 /// [`build_android_profile`]. `DirectPlay`/`Auto` pass `caps` through
-/// unmodified. Shared by [`JellybeamCore::prepare_playback`] and
+/// unmodified. ASS sidecars are offered only when `may_direct_play` (§3.2): a
+/// transcode offered them hands out even embedded ASS instead of burning it in
+/// (§3.1). Shared by [`JellybeamCore::prepare_playback`], the fallback and
 /// [`JellybeamCore::build_preload_cache`].
 fn build_android_profile_for_quality(
     caps: &jellyfin_core::AndroidTvCaps,
     tolerate_mislabeled_levels: bool,
     quality: &PlaybackQuality,
+    may_direct_play: bool,
 ) -> jellyfin_api::models::DeviceProfile {
     match quality {
         PlaybackQuality::Cap { max_bps } => {
@@ -4618,10 +4706,10 @@ fn build_android_profile_for_quality(
                 max_streaming_bitrate: Some(*max_bps),
                 ..caps.clone()
             };
-            build_android_profile(&capped, tolerate_mislabeled_levels)
+            build_android_profile(&capped, tolerate_mislabeled_levels, false)
         }
         PlaybackQuality::DirectPlay | PlaybackQuality::Auto => {
-            build_android_profile(caps, tolerate_mislabeled_levels)
+            build_android_profile(caps, tolerate_mislabeled_levels, may_direct_play)
         }
     }
 }
@@ -4968,6 +5056,22 @@ mod tests {
             )
             .expect_err("no client yet");
         assert!(matches!(err, CoreError::NotSignedIn));
+    }
+
+    #[test]
+    fn image_url_prefix_names_the_current_epoch_and_none_before_sign_in() {
+        let (_dir, core) = core_in_tempdir();
+        assert!(core.image_url_prefix().is_none());
+        let client = jellyfin_api::JellyfinClient::from_token(
+            "http://localhost:8096",
+            core.client_identity("http://localhost:8096"),
+            "tok",
+        );
+        core.lock_state().client = Some(client);
+        let prefix = core.image_url_prefix().expect("signed in");
+        assert_eq!(prefix.epoch, core.account_epoch());
+        assert_eq!(prefix.base_url, "http://localhost:8096");
+        assert_eq!(prefix.token, "tok");
     }
 
     #[test]
@@ -5630,7 +5734,7 @@ mod tests {
     fn build_android_profile_round_trips_the_conservative_floor() {
         // Same shape assertion as jellyfin-core's own device-profile test,
         // against `android_tv_profile`'s output.
-        let profile = build_android_profile(&jellyfin_core::AndroidTvCaps::default(), true);
+        let profile = build_android_profile(&jellyfin_core::AndroidTvCaps::default(), true, false);
         assert_eq!(profile.name.as_deref(), Some("Jellybeam TV"));
         assert!(!profile.direct_play_profiles.is_empty());
         assert!(!profile.transcoding_profiles.is_empty());
@@ -5642,12 +5746,13 @@ mod tests {
         let caps = jellyfin_core::AndroidTvCaps::default();
 
         let direct_play =
-            build_android_profile_for_quality(&caps, true, &PlaybackQuality::DirectPlay);
-        let auto = build_android_profile_for_quality(&caps, true, &PlaybackQuality::Auto);
+            build_android_profile_for_quality(&caps, true, &PlaybackQuality::DirectPlay, true);
+        let auto = build_android_profile_for_quality(&caps, true, &PlaybackQuality::Auto, true);
         let cap = build_android_profile_for_quality(
             &caps,
             true,
             &PlaybackQuality::Cap { max_bps: 8_000_000 },
+            false,
         );
 
         assert_eq!(
@@ -5662,6 +5767,69 @@ mod tests {
             !cap.codec_profiles.is_empty(),
             "a bitrate cap should add the VideoBitrate CodecProfile condition"
         );
+    }
+
+    /// docs/18 §3.2: ASS sidecars are offered only to a negotiation that may answer Direct Play;
+    /// in a transcode the server would hand out embedded ASS as a sidecar instead of burning it in.
+    #[test]
+    fn ass_sidecars_are_offered_only_where_direct_play_may_answer() {
+        let caps = jellyfin_core::AndroidTvCaps::default();
+        let external_ass = |quality: PlaybackQuality, may_direct_play| {
+            build_android_profile_for_quality(&caps, true, &quality, may_direct_play)
+                .subtitle_profiles
+                .iter()
+                .any(|p| {
+                    p.format.as_deref() == Some("ass")
+                        && p.method == Some(jellyfin_api::models::SubtitleDeliveryMethod::External)
+                })
+        };
+        assert!(external_ass(PlaybackQuality::DirectPlay, true));
+        assert!(external_ass(PlaybackQuality::Auto, true));
+        assert!(!external_ass(PlaybackQuality::Auto, false));
+        assert!(!external_ass(
+            PlaybackQuality::Cap { max_bps: 8_000_000 },
+            true
+        ));
+    }
+
+    /// Whether a recorded `PlaybackInfo` body offered ASS sidecars (docs/18 §3.2).
+    fn offers_ass_sidecars(body: &serde_json::Value) -> bool {
+        body["DeviceProfile"]["SubtitleProfiles"]
+            .as_array()
+            .expect("subtitle profiles")
+            .iter()
+            .any(|p| p["Format"] == "ass" && p["Method"] == "External")
+    }
+
+    /// docs/18 §3.2: Auto offers ASS sidecars so an .ass file never forces a transcode; when the
+    /// answer is a transcode anyway, it asks again without them so embedded ASS is still burned in.
+    #[test]
+    fn auto_mode_asks_a_transcode_again_without_ass_sidecars() {
+        let (_dir, core, mock) = auto_core(vec![transcode_fixture().1]);
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Auto transcodes a source the TV can't decode");
+        assert_eq!(plan.play_method, PlayMethodFfi::Transcode);
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 2);
+        assert!(offers_ass_sidecars(&bodies[0]));
+        assert!(!offers_ass_sidecars(&bodies[1]));
+        assert!(
+            bodies[1].get("EnableDirectPlay").is_none(),
+            "still the server's own choice"
+        );
+    }
+
+    #[test]
+    fn auto_mode_direct_play_asks_once_with_ass_sidecars() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1]);
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("direct play");
+        assert_eq!(plan.play_method, PlayMethodFfi::DirectPlay);
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 1);
+        assert!(offers_ass_sidecars(&bodies[0]));
     }
 
     // --- resolve_plan (docs/18-playback-quality.md §2 matrix); `Cap` mode
@@ -7715,6 +7883,10 @@ mod tests {
         );
         let forced_body = &bodies[1];
         assert_eq!(forced_body["EnableDirectPlay"], false);
+        assert!(
+            !offers_ass_sidecars(forced_body),
+            "a forced transcode must keep burning embedded ASS in (docs/18 §3.1)"
+        );
         assert_eq!(forced_body["EnableDirectStream"], false);
         assert_eq!(forced_body["StartTimeTicks"], 12_345_678);
         // The first, unforced negotiation must NOT have asked for a forced transcode.

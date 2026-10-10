@@ -53,6 +53,10 @@ CREATE TABLE IF NOT EXISTS items (
     series_primary_tag TEXT,
     parent_backdrop_item_id TEXT,
     parent_backdrop_tag TEXT,
+    -- Series `Thumb` (16:9, spoiler-free) for the Continue Watching / Next Up "series thumb" art
+    -- (docs/07 §1): `ParentThumbItemId` / `ParentThumbImageTag`. Schema v17.
+    parent_thumb_item_id TEXT,
+    parent_thumb_tag TEXT,
     -- Owning library (`views.id`), so `latest()`/reconciliation scope by library, not just
     -- item_type. Stamped by `sync::sync_library_breadth`; WS-delta writes that can't
     -- attribute a batch bind NULL, and the upsert's `COALESCE(excluded, old)` keeps the old
@@ -249,7 +253,25 @@ pub(crate) fn open_reader(path: &Path) -> Result<Connection, CacheError> {
     // busy_timeout smooths over the rare moment a reader opens mid-checkpoint.
     conn.busy_timeout(std::time::Duration::from_millis(2000))
         .map_err(db_err)?;
+    // Memory-mapped reads halve a warm grid read; the cap is per reader, so 32-bit
+    // ABIs get half to keep the pool's total mapping inside their address space.
+    conn.pragma_update(None, "mmap_size", reader_mmap_bytes(usize::BITS))
+        .map_err(db_err)?;
+    // The read queries' dynamic variants outnumber rusqlite's default 16-statement cache.
+    conn.set_prepared_statement_cache_capacity(READER_STATEMENT_CACHE);
     Ok(conn)
+}
+
+const READER_STATEMENT_CACHE: usize = 32;
+
+/// `PRAGMA mmap_size` for one reader: 64 MB on 32-bit targets (each pooled reader maps
+/// separately), 128 MB otherwise.
+pub(crate) const fn reader_mmap_bytes(pointer_width: u32) -> i64 {
+    if pointer_width <= 32 {
+        64 << 20
+    } else {
+        128 << 20
+    }
 }
 
 pub(crate) fn upsert_meta(conn: &Connection, key: &str, value: &str) -> Result<(), CacheError> {
@@ -281,10 +303,17 @@ pub(crate) enum IndexGroup {
     /// docs/07 §1: Continue Watching's rows only, in its order. SQLite picks it for `resume()`
     /// on its own once built; until then that query walks `idx_items_resume_by_last_played`.
     Resume,
+    /// `latest_grouped_series` with hide-watched on: the grouped-episode index widened by the
+    /// columns `watched_sql!` reads, so the grouping stays COVERING. Until built, the query
+    /// uses `idx_items_latest_series` (INDEX, slower); never answers empty.
+    LatestWatched,
 }
 
+/// The [`IndexGroup::LatestWatched`] index's name, for `INDEXED BY`.
+pub(crate) const LATEST_WATCHED_INDEX: &str = "idx_items_latest_series_watched";
+
 impl IndexGroup {
-    pub(crate) const ALL: [Self; 2] = [Self::Favorites, Self::Resume];
+    pub(crate) const ALL: [Self; 3] = [Self::Favorites, Self::Resume, Self::LatestWatched];
 
     /// `(name, CREATE INDEX IF NOT EXISTS ...)` for every index in the group.
     const fn indexes(self) -> &'static [(&'static str, &'static str)] {
@@ -316,6 +345,15 @@ impl IndexGroup {
                     crate::watch_grace::in_progress_sql!()
                 ),
             )],
+            // A new name, not a widened `idx_items_latest_series`: CREATE INDEX IF NOT EXISTS
+            // would no-op on an existing mirror.
+            Self::LatestWatched => &[(
+                LATEST_WATCHED_INDEX,
+                "CREATE INDEX IF NOT EXISTS idx_items_latest_series_watched \
+                 ON items(library_id, series_id, date_created, is_virtual, played, \
+                 playback_position_ticks, runtime_ticks) \
+                 WHERE item_type = 'Episode' AND series_id IS NOT NULL",
+            )],
         }
     }
 
@@ -323,7 +361,7 @@ impl IndexGroup {
     /// waits for that layout's first use, so an unused layout never taxes sync writes.
     pub(crate) const fn app_wide(self) -> bool {
         match self {
-            Self::Favorites | Self::Resume => true,
+            Self::Favorites | Self::Resume | Self::LatestWatched => true,
         }
     }
 
@@ -388,7 +426,9 @@ mod tests {
         );
         assert_eq!(
             built_index_groups(&conn),
-            IndexGroup::Favorites.bit() | IndexGroup::Resume.bit()
+            IndexGroup::Favorites.bit()
+                | IndexGroup::Resume.bit()
+                | IndexGroup::LatestWatched.bit()
         );
 
         conn.execute(
@@ -398,7 +438,8 @@ mod tests {
         .expect("insert");
         conn.execute_batch(
             "DROP INDEX idx_items_favorite; DROP INDEX idx_items_series_played; \
-             DROP INDEX idx_items_parent_played; DROP INDEX idx_items_in_progress;",
+             DROP INDEX idx_items_parent_played; DROP INDEX idx_items_in_progress; \
+             DROP INDEX idx_items_latest_series_watched;",
         )
         .expect("drop");
         drop(conn);
@@ -419,6 +460,12 @@ mod tests {
         conn.execute_batch("DROP INDEX idx_items_parent_played;")
             .expect("drop one");
         assert!(!IndexGroup::Favorites.is_built(&conn));
+    }
+
+    #[test]
+    fn reader_mmap_is_halved_on_32_bit_targets() {
+        assert_eq!(reader_mmap_bytes(32), 64 << 20);
+        assert_eq!(reader_mmap_bytes(64), 128 << 20);
     }
 
     #[test]

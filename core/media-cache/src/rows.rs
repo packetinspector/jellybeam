@@ -34,6 +34,8 @@ pub(crate) struct ItemColumns {
     pub series_primary_tag: Option<String>,
     pub parent_backdrop_item_id: Option<String>,
     pub parent_backdrop_tag: Option<String>,
+    pub parent_thumb_item_id: Option<String>,
+    pub parent_thumb_tag: Option<String>,
     /// `UserData.LastPlayedDate`; see `schema.rs`'s `last_played_date` comment for why
     /// `resume()` sorts by this instead of the local write clock.
     pub last_played_date: Option<String>,
@@ -139,6 +141,8 @@ pub(crate) fn extract_columns(item: &BaseItemDto) -> Option<ItemColumns> {
         series_primary_tag: item.series_primary_image_tag.clone(),
         parent_backdrop_item_id: item.parent_backdrop_item_id.map(|u| u.to_string()),
         parent_backdrop_tag: item.parent_backdrop_image_tags.first().cloned(),
+        parent_thumb_item_id: item.parent_thumb_item_id.map(|u| u.to_string()),
+        parent_thumb_tag: item.parent_thumb_image_tag.clone(),
         last_played_date: user_data
             .and_then(|u| u.last_played_date)
             .map(|d| d.to_rfc3339()),
@@ -295,10 +299,27 @@ mod tests {
         assert_eq!(cols.parent_backdrop_tag.as_deref(), Some("season-backdrop"));
     }
 
+    /// docs/07 §1: the series Thumb comes straight off `ParentThumbItemId`/`ParentThumbImageTag`.
+    #[test]
+    fn parent_thumb_columns_extracted() {
+        let mut item = episode_item(Some(9), Some(8), Some(2));
+        item.parent_thumb_item_id = Some(uuid_field(3));
+        item.parent_thumb_image_tag = Some("series-thumb".to_string());
+
+        let cols = extract_columns(&item).expect("has id");
+        assert_eq!(
+            cols.parent_thumb_item_id.as_deref(),
+            Some(uuid_field(3).to_string()).as_deref()
+        );
+        assert_eq!(cols.parent_thumb_tag.as_deref(), Some("series-thumb"));
+    }
+
     #[test]
     fn artwork_fallback_columns_default_to_none() {
         let item = base_item();
         let cols = extract_columns(&item).expect("has id");
+        assert_eq!(cols.parent_thumb_item_id, None);
+        assert_eq!(cols.parent_thumb_tag, None);
         assert_eq!(cols.series_primary_tag, None);
         assert_eq!(cols.parent_backdrop_item_id, None);
         assert_eq!(cols.parent_backdrop_tag, None);

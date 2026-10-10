@@ -334,10 +334,12 @@ class HomeFeedTest {
     }
 
     @Test
-    fun `home state mirrors the resume posters setting`() = runTest {
-        val gateway = FakeHomeGateway(settingsResult = tv.jellybeam.data.defaultTestSettings().copy(homeResumePosters = true))
+    fun `home state mirrors the resume art setting`() = runTest {
+        val gateway = FakeHomeGateway(
+            settingsResult = tv.jellybeam.data.defaultTestSettings().copy(homeResumeArt = uniffi.jellybeam_core.ResumeArt.SERIES_THUMB),
+        )
         withFeed(gateway) { feed ->
-            assertTrue(feed.state.value.chrome.resumeAsPosters)
+            assertEquals(uniffi.jellybeam_core.ResumeArt.SERIES_THUMB, feed.state.value.chrome.resumeArt)
         }
     }
 

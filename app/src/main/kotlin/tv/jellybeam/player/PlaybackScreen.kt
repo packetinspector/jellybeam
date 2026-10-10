@@ -123,6 +123,7 @@ import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.i18n.uppercaseUi
+import tv.jellybeam.ui.cards.WIDE_ART_ASPECT
 import tv.jellybeam.ui.cards.CardArtImage
 import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.detail.DetailFormatting
@@ -1515,6 +1516,7 @@ fun PlaybackScreen(
                     }
                     view.setBottomPaddingFraction(maxOf(osdFraction, positionFraction))
                 }
+                AppGraph.playerHolder.setAssOsdVisible(osdVisible)
             },
             onRelease = { playerView ->
                 sidecarView = null
@@ -2906,6 +2908,7 @@ private fun EndOfEpisodeCard(
                     contentAlpha = 1f,
                     blurhash = card.blurhash,
                     modifier = Modifier.fillMaxSize(),
+                    aspect = WIDE_ART_ASPECT,
                 )
             }
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {

@@ -20,6 +20,7 @@ import tv.jellybeam.ui.common.ChangeRefreshScheduler
 import tv.jellybeam.ui.common.serverHostLabel
 import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.HomeSnapshot
+import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.SyncStatus
 import uniffi.jellybeam_core.ViewSnapshot
 
@@ -55,8 +56,8 @@ data class HomeChrome(
     val syncProgressText: String? = null,
     /** Mirrors [uniffi.jellybeam_core.Settings.showClock]; refreshed with each snapshot. */
     val showClock: Boolean = true,
-    /** Mirrors [uniffi.jellybeam_core.Settings.homeResumePosters]; refreshed with each snapshot. */
-    val resumeAsPosters: Boolean = false,
+    /** Mirrors [uniffi.jellybeam_core.Settings.homeResumeArt]; refreshed with each snapshot. */
+    val resumeArt: ResumeArt = ResumeArt.EPISODE,
     /** `host[:port]` of the active server for the empty-library strip; loaded only when that
      * state shows, so the hot refresh path stays untouched (docs/10).
      */
@@ -99,6 +100,33 @@ fun <T> reuseIfUnchanged(current: T, incoming: T): T =
     if (current == incoming) current else incoming
 
 /**
+ * First-composition seed (docs/10 "Startup phases"): the finished warm-up as a loaded
+ * [HomeFeedState], or `null` when anything is missing or the snapshot is another layout's
+ * (docs/25 §6.3), so the ordinary load runs and the skeleton shows.
+ */
+internal fun <T : Any, U> seedFromWarmup(
+    warm: LaunchWarmup.Home?,
+    initialContent: U,
+    loadingStatusText: String,
+    extract: (HomeSnapshot) -> T?,
+    reduce: (current: U, incoming: T) -> U,
+): HomeFeedState<U>? {
+    val settings = warm?.settings ?: return null
+    val views = warm.views ?: return null
+    val incoming = extract(warm.snapshot) ?: return null
+    return HomeFeedState(
+        chrome = HomeChrome(
+            isLoading = false,
+            views = views,
+            loadingStatusText = loadingStatusText,
+            showClock = settings.showClock,
+            resumeArt = settings.homeResumeArt,
+        ),
+        content = reduce(initialContent, incoming),
+    )
+}
+
+/**
  * docs/25 §5.4: the layout-agnostic half of a Home ViewModel, owned by composition. Fetches
  * [layout]'s snapshot and the shared chrome, and hands the snapshot to the layout through
  * [extract] (this layout's record, `null` for another layout's) and [reduce] (the layout's own
@@ -125,9 +153,21 @@ class HomeFeed<T : Any, U>(
     private val extract: (HomeSnapshot) -> T?,
     private val reduce: (current: U, incoming: T) -> U,
 ) {
-    private val _state = MutableStateFlow(
-        HomeFeedState(HomeChrome(loadingStatusText = strings.get(R.string.home_loading)), initialContent),
-    )
+    private val loadingText = strings.get(R.string.home_loading)
+
+    /** The warm-up snapshot the first state was seeded from, until the first refresh recognises it. */
+    private var seededSnapshot: HomeSnapshot? = null
+    private val _state: MutableStateFlow<HomeFeedState<U>>
+
+    init {
+        // A warm-up that already finished seeds the first state loaded, so Home's first
+        // composition has data and no skeleton.
+        val warm = launchWarmup?.peekHome()
+        val seed = seedFromWarmup(warm, initialContent, loadingText, extract, reduce)
+        if (seed != null) seededSnapshot = warm?.snapshot
+        _state = MutableStateFlow(seed ?: HomeFeedState(HomeChrome(loadingStatusText = loadingText), initialContent))
+    }
+
     val state: StateFlow<HomeFeedState<U>> = _state.asStateFlow()
 
     /** docs/17-mini-player.md §6: true while Home is top of its stack and the host Activity is
@@ -212,25 +252,32 @@ class HomeFeed<T : Any, U>(
     }
 
     private suspend fun refreshSnapshotOnce() = coroutineScope {
+        val seeded = seededSnapshot
+        seededSnapshot = null
         // views()/getSettings() are independent of homeSnapshot(); fetched concurrently so these
         // cheap reads don't queue behind the expensive ~300-Card marshal on the cold-start path.
-        val viewsDeferred = async { gateway.views() }
-        val settingsDeferred = async { gateway.getSettings() }
+        // A seeded first load already holds them.
+        val viewsDeferred = if (seeded == null) async { gateway.views() } else null
+        val settingsDeferred = if (seeded == null) async { gateway.getSettings() } else null
         // [changeRefreshScheduler] is already subscribed, so a stale prefetch owes exactly the
         // one trailing pass queued here.
         val prefetched = launchWarmup?.takeHome()
         if (prefetched?.stale == true) refreshQueued = true
+        if (seeded != null && prefetched?.snapshot === seeded) {
+            // Already on screen from [seed]; only the stale flag above is owed.
+            return@coroutineScope
+        }
         // docs/25 §6.3: a prefetch built for another layout is dropped for this layout's own.
         val incoming = prefetched?.snapshot?.let(extract) ?: extract(gateway.homeSnapshot(layout))
-        val views = viewsDeferred.await()
-        val settings = settingsDeferred.await()
+        val views = viewsDeferred?.await() ?: gateway.views()
+        val settings = settingsDeferred?.await() ?: gateway.getSettings()
         _state.update { current ->
             HomeFeedState(
                 chrome = current.chrome.copy(
                     isLoading = false,
                     views = reuseIfUnchanged(current.chrome.views, views),
                     showClock = settings.showClock,
-                    resumeAsPosters = settings.homeResumePosters,
+                    resumeArt = settings.homeResumeArt,
                 ),
                 content = incoming?.let { reduce(current.content, it) } ?: current.content,
             )

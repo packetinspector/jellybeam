@@ -404,8 +404,8 @@ const ANDROID_WEBVTT_SUBTITLE_FORMATS: &[&str] = &["vtt", "webvtt"];
 /// Bitmap subtitle formats: Media3 composites embedded, else needs server burn-in.
 const ANDROID_BITMAP_SUBTITLE_FORMATS: &[&str] = &["pgssub", "dvdsub"];
 
-/// ASS/SSA: Media3's SSA parser renders them embedded (simplified styling, no libass); Encode
-/// covers transcodes. No `External`: docs/18 §3.2 never parses an ASS sidecar.
+/// ASS/SSA: rendered embedded (Media3's SSA parser, or the styled overlay); Encode covers
+/// transcodes. `External` only through [`allow_ass_sidecars`].
 const ANDROID_ASS_SUBTITLE_FORMATS: &[&str] = &["ass", "ssa"];
 
 /// Builds Jellybeam TV's device profile for the given probed capabilities (named "Jellybeam TV" so
@@ -606,6 +606,18 @@ fn android_codec_profiles(
     profiles
 }
 
+/// docs/18 §3.2: ASS/SSA sidecars Direct Play, where the server would transcode to burn them in.
+///
+/// Only for a negotiation that may answer Direct Play: in a transcode the server would then hand
+/// out even an embedded ASS track as a sidecar instead of burning it in (§3.1).
+pub fn allow_ass_sidecars(profile: &mut RawDeviceProfile) {
+    for format in ANDROID_ASS_SUBTITLE_FORMATS {
+        profile
+            .subtitle_profiles
+            .push(subtitle_profile(format, SubtitleDeliveryMethod::External));
+    }
+}
+
 /// Android TV's subtitle matrix.
 fn android_subtitle_profiles() -> Vec<SubtitleProfile> {
     let mut profiles = Vec::new();
@@ -702,18 +714,37 @@ mod tests {
         }
     }
 
+    fn ass_methods(profile: &RawDeviceProfile) -> Vec<Vec<String>> {
+        let v = serde_json::to_value(profile).expect("test assertion");
+        let profiles = v["SubtitleProfiles"].as_array().expect("test assertion");
+        ANDROID_ASS_SUBTITLE_FORMATS
+            .iter()
+            .map(|f| {
+                profiles
+                    .iter()
+                    .filter(|p| p["Format"] == *f)
+                    .map(|p| p["Method"].as_str().expect("test assertion").to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Embed keeps a file whose default track is ASS on Direct Play; Encode serves transcodes.
     #[test]
     fn android_ass_ssa_embed_or_encode_never_external() {
-        let v = android_json(&AndroidTvCaps::default(), true);
-        let profiles = v["SubtitleProfiles"].as_array().expect("test assertion");
-        for f in ANDROID_ASS_SUBTITLE_FORMATS {
-            let methods: Vec<&str> = profiles
-                .iter()
-                .filter(|p| p["Format"] == *f)
-                .map(|p| p["Method"].as_str().expect("test assertion"))
-                .collect();
-            assert_eq!(methods, ["Embed", "Encode"], "{f}");
+        let profile = android_tv_profile(&AndroidTvCaps::default(), true);
+        for methods in ass_methods(&profile) {
+            assert_eq!(methods, ["Embed", "Encode"]);
+        }
+    }
+
+    /// docs/18 §3.2: only an explicit opt-in adds sidecar delivery, beside the burn-in fallback.
+    #[test]
+    fn allow_ass_sidecars_adds_external_delivery() {
+        let mut profile = android_tv_profile(&AndroidTvCaps::default(), true);
+        allow_ass_sidecars(&mut profile);
+        for methods in ass_methods(&profile) {
+            assert_eq!(methods, ["Embed", "Encode", "External"]);
         }
     }
 

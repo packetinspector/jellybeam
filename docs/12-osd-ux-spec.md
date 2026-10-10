@@ -572,6 +572,11 @@ visible, never below the viewer's position preset (0.08 / 0.16 / 0.24 /
 0.32). While a sheet is open the subtitle view's right margin becomes the
 sheet width, so cues reflow into the left column and never run under the
 sheet. Size, bold and background opacity come from Settings › Subtitles.
+Plain ASS/SSA (full styling off) follows the same rule for lines without
+`\pos`: Media3 pins those to one spot per alignment, so lines sharing a spot
+are stacked into one cue as libass stacks them (later bottom lines above
+earlier ones, later top or middle lines below) and the bottom stack takes the
+bottom padding; positioned signs keep their place.
 
 ## 17. Sheets
 

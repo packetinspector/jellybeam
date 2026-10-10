@@ -1,0 +1,16 @@
+[package]
+name = "ass-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Full ASS/SSA subtitle rendering: Rust owns tracks, fonts, budgets and the frame; substation rasterizes."
+
+[dependencies]
+# Pure-Rust libass port. Local dev may override this with a gitignored path patch (docs/06).
+substation = { git = "https://github.com/packetinspector/substation", rev = "4ed175eb91d8027d025f7384dbced70be0ffb8a5" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = "0.6"
+
+[lints]
+workspace = true

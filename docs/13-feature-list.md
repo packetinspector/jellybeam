@@ -24,8 +24,10 @@ favorites, latest, per-library visibility; a user-set shelf size caps every row,
 and Next Up never repeats a Continue Watching title and moves on as soon as an
 episode is finished or marked watched, here or on another device; grace windows keep a
 2-minute sample out of Continue Watching and count a stop in the credits (last
-10 min of a movie, last 2 min of anything else) as watched, Next Up included; an opt-in setting draws
-Continue Watching and Next Up as spoiler-free posters instead of thumbnails); Favorites (docs/16 §2.7):
+10 min of a movie, last 2 min of anything else) as watched, Next Up included; a Home
+setting picks the Continue Watching and Next Up art: the episode's own still
+(default), the series' 16:9 thumb, or the 2:3 series poster, the last two
+spoiler-free); Favorites (docs/16 §2.7):
 a Home row of your favorite movies, shows, seasons, episodes and collections,
 most recently played first, and a Favorites page under Home in the drawer while
 any exist, the same sortable grid with a Type filter; a favorited episode shows
@@ -54,7 +56,11 @@ studio credit, the outlined spec capsule -- its audio cell carries an ATMOS or
 DTS:X suffix in the accent tier when the default track is object-based, read
 from the server's spatial-format field or, on servers that only say so in the
 stream profile, from there -- and a fixed-width cast row --
-nothing overlaps however long the title, synopsis, or a cast name runs);
+nothing overlaps however long the title, synopsis, or a cast name runs, and
+nothing moves while the page loads: each region still waiting on its data -- eyebrow,
+genre chips, credits, spec capsule, cast, Up Next, season chips, episode shelf --
+holds its final size as a quiet pulsing skeleton and fades its content in; a
+region that turns out empty collapses once, docs/11 §Loading state);
 selecting a cast member opens a person page (portrait, name, birth and death
 details, biography, "In your library" with their movies and series, and --
 when Discover is connected -- "Not in your library" with their remaining
@@ -130,7 +136,7 @@ Play through the server's static stream even when the server, having no
 codec facts from the plugin, reports Direct Play as unsupported and offers
 only a transcode; every single-file video kind (`Video`, `MusicVideo`,
 `Recording`) gets the same Play/Resume action as a movie.
-<!-- verified: core/jellyfin-core/src/playback.rs is_codec_blind()/choose(); core/jellyfin-api/src/lib.rs stream_url() item-id path; core/ffi/src/types.rs ViewKind::ChannelFolder, LiveSort; core/ffi/src/object.rs live_children() sort mapping; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailFormatting.kt OTHER_SINGLE_VIDEO_ITEM_TYPES; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt liveChildren() doc comment; app/src/main/kotlin/tv/jellybeam/nav/Screen.kt screenForLibraryCard(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryViewModel.kt ViewKind.isLive branches/liveSortFor() in refresh()/loadNextPage()/onBecameTop(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryScreen.kt ChannelFolderList diversion; app/src/main/kotlin/tv/jellybeam/ui/library/ChannelFolderList.kt; app/src/main/kotlin/tv/jellybeam/ui/library/RecordingFormatting.kt --> Empty Home retains D-pad access to libraries and server management, including before the first titles arrive.
+<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/detail/DetailRegions.kt regionShow(); app/src/main/kotlin/tv/jellybeam/ui/detail/DetailSkeletons.kt RegionReveal; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailScreen.kt; core/jellyfin-core/src/playback.rs is_codec_blind()/choose(); core/jellyfin-api/src/lib.rs stream_url() item-id path; core/ffi/src/types.rs ViewKind::ChannelFolder, LiveSort; core/ffi/src/object.rs live_children() sort mapping; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailFormatting.kt OTHER_SINGLE_VIDEO_ITEM_TYPES; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt liveChildren() doc comment; app/src/main/kotlin/tv/jellybeam/nav/Screen.kt screenForLibraryCard(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryViewModel.kt ViewKind.isLive branches/liveSortFor() in refresh()/loadNextPage()/onBecameTop(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryScreen.kt ChannelFolderList diversion; app/src/main/kotlin/tv/jellybeam/ui/library/ChannelFolderList.kt; app/src/main/kotlin/tv/jellybeam/ui/library/RecordingFormatting.kt --> Empty Home retains D-pad access to libraries and server management, including before the first titles arrive.
 
 
 **Navigation** — a left-edge nav drawer (Home, every library, Discover when
@@ -276,7 +282,7 @@ leaving it running in the background. Card art (Home, Library, Search, and
 Discover posters) that fails to load retries on its own instead of showing
 a blank/blurhash tile for the rest of that screen's life: bounded backoff
 (up to three attempts, 2s/4s/8s) restarts automatically on a failed load,
-plus one immediate retry whenever the app returns to the foreground. Art that arrives within 250 ms (cache hits) fades straight in with no placeholder flash; slower loads show the blurhash or pulse after that grace. Static named fallbacks for missing artwork; loading pulses stop when image retries are exhausted, avoiding perpetual animation on incomplete libraries. The Home sync pill names the library being synced by its server-configured name with an item count ("Syncing Movies — 40 of 120…"), during the cold-start skeleton and for background syncs after it, and never shows a library id. Failed or cancelled initial library syncs release their syncing state and buffered-update waiters without recording a successful sync cursor.
+plus one immediate retry whenever the app returns to the foreground. Art from the disk or memory cache appears at once with no fade and no placeholder flash; only art fetched over the network cross-fades in, and slower loads show the blurhash or pulse after a 250 ms grace. Static named fallbacks for missing artwork; loading pulses stop when image retries are exhausted, avoiding perpetual animation on incomplete libraries. The Home sync pill names the library being synced by its server-configured name with an item count ("Syncing Movies — 40 of 120…"), during the cold-start skeleton and for background syncs after it, and never shows a library id. Failed or cancelled initial library syncs release their syncing state and buffered-update waiters without recording a successful sync cursor.
 <!-- verified: core/jellyfin-core/src/event_bus.rs EventBus::spawn/supervise (Backoff, USEFUL_CONNECTION_DURATION), EventBusHandle::shutdown; core/ffi/src/object.rs open_mirror (spawn ordering doc comment), stop_event_bus and its call sites in sign_out/switch_session/remove_session/open_mirror re-entry/Drop -->
 <!-- verified: app/src/main/kotlin/tv/jellybeam/ui/cards/CardArt.kt IMAGE_LOAD_MAX_RETRIES = 3, IMAGE_LOAD_RETRY_BASE_MS = 2000L, imageRetryDelayMs, CardArtImage's retryAttempt/retryToken LaunchedEffects; app/src/main/kotlin/tv/jellybeam/AppForeground.kt resumeCount, bumped from MainActivity.onResume; app/src/main/kotlin/tv/jellybeam/ui/discover/DiscoverPosterCard.kt SeerrPosterArt (same recipe) -->
 
@@ -335,7 +341,7 @@ payload.
 `set_settings`, tolerant load/migration, atomic file replacement and ordered
 Settings-screen saves); Home section (Next Up cutoff
 presets + rewatching toggle, per-library Home visibility, shelf size (10/20/30,
-default 20, every Home row), resume-shelf posters toggle, Favorites row toggle, hide-watched-in-Latest,
+default 20, every Home row), Resume art chips for Continue Watching and Next Up (Episode / Series thumb / Poster), Favorites row toggle, hide-watched-in-Latest,
 startup screen picker, clock toggle, show/hide missing episodes); Playback
 section (skip back/forward, Quality chips (Direct Play / Auto / 20 / 8 / 3
 Mbps, default Direct Play), autoplay enabled + delay, mini player toggle
@@ -350,14 +356,17 @@ green with swatches, bold, background presets; a "Use system caption style"
 toggle hands color, font and background to Android's caption settings; a
 change made from the mini player applies when the player returns to full
 screen; styled (SSA) and image (PGS, VobSub) subtitles keep their own
-colors, size and placement); Discover section
+colors, size and placement; a "Full styling for styled subtitles" toggle,
+off by default while it is new, renders ASS/SSA as authored, off shows them
+simplified);
+Discover section
 (Jellyseerr/Overseerr connect/disconnect: server address, auth method,
 credentials -- the identity field reads "Email address" for a Seerr account, a
 rejected sign-in says so in plain words instead of an HTTP status, a refusal on Seerr's
 own side names the fix -- Seerr can't sign in to its Jellyfin (Jellyseerr 2.x against
 Jellyfin 12), the sign-in method is switched off, or the Jellyfin user isn't in Seerr yet
 with new sign-ins off -- and focus follows
-Connect, Disconnect and its confirmation instead of being lost); About section (a centred brand header -- mark, wordmark, descriptor,
+Connect, Disconnect and its confirmation instead of being lost); About section (a centred brand header -- mark beside wordmark, then descriptor,
 version and build, a Kotlin / Rust / Media3 / Direct Play pill -- rising beside
 the Settings title so the page fits one screen, then the connected server as
 stat cards, never option rows: a Server card with the server's own name and
@@ -371,7 +380,9 @@ items mirrored, database size, last full sync, last change check, sync state,
 with the live-events connection in its header; and a This Device card with the
 Android and Media3 versions and the device id; hairline-ruled label/value
 rows (Archivo labels, monospace values); each card is a quiet focusable
-block so the D-pad walks and scrolls them; there is no Refresh control --
+block so the D-pad walks and scrolls them, and the pane's scroll snaps so the
+brand header is either fully shown or fully scrolled off, never half-clipped;
+there is no Refresh control --
 every entry into the section re-fetches the details and re-persists the
 server's name and version for the version gate); every option row carries a
 one-line description that fades in for the focused row (fixed row heights --
@@ -470,19 +481,64 @@ public display.)*
 - Embedded subtitles just work, because Direct Play delivers the whole
   file: SRT, TTML, WebVTT, ASS/SSA, and bitmap PGS/VobSub tracks all
   render straight from the container — including ASS, which several
-  Android clients can't show without a transcode. (ASS styling is
-  simplified relative to a full libass renderer: text and basic styling
-  render; elaborate typesetting is approximated. External sidecar files
-  load too — see the next item.)
-  <!-- verified live on-device (embedded ASS rendering during Direct Play); Media3 DefaultSubtitleParserFactory includes SsaParser for demuxed application/x-ssa tracks; device_profile.rs declares ass/ssa (like PGS/VobSub) as Embed+Encode, since an Encode-only format makes the server refuse Direct Play whenever it is the default or selected track -->
-- External subtitle files (.srt/.vtt/.ttml next to the media) appear in
-  the subtitle picker beside the embedded tracks, tagged External, without
-  leaving Direct Play, and join auto-selection and per-series memory. A
+  Android clients can't show without a transcode. (With full styling
+  off, ASS styling is simplified relative to a full libass renderer: text and basic styling
+  render; elaborate typesetting is approximated, and at most 8 lines show
+  at once, stacked rather than drawn over each other, with bottom lines
+  rising above the OSD like any subtitle. External sidecar files load too — see the next item.) ASS
+  tracks are never parsed while the file is read: only the chosen track
+  is, a line at a time as playback reaches it, so an effects-heavy file
+  with tens of thousands of lines per track buffers like any other, even
+  with subtitles off.
+  <!-- verified live on-device (embedded ASS rendering during Direct Play); app/src/main/kotlin/tv/jellybeam/player/ass/AssMedia3.kt AssAwareSubtitleParserFactory declines raw SSA, PlainSsa.kt PlainSsaRenderer parses the chosen track with Media3's SsaParser; device_profile.rs declares ass/ssa (like PGS/VobSub) as Embed+Encode, since an Encode-only format makes the server refuse Direct Play whenever it is the default or selected track -->
+- External subtitle files (.srt/.vtt/.ttml/.ass/.ssa next to the media)
+  appear in the subtitle picker beside the embedded tracks, tagged
+  External, without leaving Direct Play, and join auto-selection and
+  per-series memory. An .ass file never costs a transcode to burn it in
+  (nor a refusal in Direct Play mode): with full styling on it renders as
+  authored through the styled overlay, otherwise as plain text. A
   file loads only when chosen, so playback starts just as fast, and
   choosing or switching never rebuffers the video. While it loads the row
   reads Loading…; a missing or malformed file reads Unavailable, puts
   subtitles back to Off with a short notice, and never interrupts the video.
-  <!-- verified: core/ffi/src/types.rs external_subtitles_of (IsExternal only) + SessionSidecars; core/ffi/src/object.rs fetch_external_subtitle; app/src/main/kotlin/tv/jellybeam/player/ExternalSubtitles.kt + SidecarCues.kt + PlaybackViewModel.showSidecar + PlaybackScreen sidecar feed + TrackChoiceText.kt; docs/18 §3.2 -->
+  <!-- verified: core/ffi/src/types.rs external_subtitles_of (IsExternal only) + SessionSidecars; core/ffi/src/object.rs fetch_external_subtitle + load_ass_sidecar, build_android_profile_for_quality + negotiate_playback_source (ASS External only where Direct Play may answer; Auto re-asks a transcode without it); app/src/main/kotlin/tv/jellybeam/player/ExternalSubtitles.kt + SidecarCues.kt + PlaybackViewModel.showSidecar + PlayerHolder.showAssSidecar + PlaybackScreen sidecar feed + TrackChoiceText.kt; docs/18 §3.2 -->
+- With Settings > Subtitles "Full styling for styled subtitles" on (off by
+  default), ASS/SSA renders as authored: embedded fonts, signs, karaoke,
+  drawings, clips, blur and animation, through substation, a pure-Rust port
+  of libass, driven by a Rust engine (`core/ass-render`) that owns tracks,
+  fonts and the frame and draws into its own surface between the video and
+  the OSD. Every track is treated as untrusted: input, font, memory and
+  per-frame work limits sized for a 32-bit TV bound hostile files, and a
+  refused frame shows nothing and backs off instead of stalling. Fonts are
+  never read before the first frame, styled or not: the player jumps over
+  an MKV's attachments in one go, then, once a styled track is shown, reads
+  each attachment's header and range-fetches its fonts in the background,
+  and that track waits for them (at most 5 s, including up to 1 s for the
+  item's subtitle choice) rather than appear in a stand-in font. They are de-duplicated and capped per item,
+  and freed when the item ends; the default font follows the dialogue's
+  script (Latin, CJK, Arabic, Hebrew, Thai) from Android's own system
+  fonts, and a glyph the style's font lacks comes from an attached font,
+  then Android's outline fonts (CJK, Arabic, Hebrew, Thai, Devanagari,
+  Tibetan, symbols). A font the script names but the file doesn't attach is
+  not looked up among Android's installed fonts, so its text takes those
+  defaults, and emoji show only from an attached font (Android's own emoji
+  are colour bitmaps the renderer can't draw). Bottom dialogue rises above the OSD while it is up; positioned
+  signs stay put. A render-cost guard steps the overlay down to 75% and
+  50% resolution, then 12 updates a second, when a scene is too heavy, and
+  back up once it has headroom; video never waits on subtitles, and
+  neither does leaving the player. Files
+  without a styled track never load the renderer, and files that store
+  tens of MB of fonts before the video, or tens of thousands of lines in
+  their first seconds, start as fast as any other. Fonts download only
+  while a styled track shows and the item's subtitle choice is made (at
+  most 1 s), so a file whose default subtitle the viewer's settings turn
+  off fetches none. The
+  overlay repaints only the regions whose images changed. Lines that began
+  before a resume, seek or track switch show at once: the player reads just
+  those lines back from the file's index instead of waiting for the next
+  one. Colours follow the script's `YCbCr Matrix` header onto the video's
+  colour space, as scripts timed against VSFilter expect.
+  <!-- verified: core/ass-render (engine.rs, limits.rs, fonts.rs, budget.rs, script.rs, colour.rs); app/src/main/kotlin/tv/jellybeam/player/ass/ (MatroskaCues.kt, MatroskaAttachments.kt, AssMatroskaExtractor in AssMedia3.kt); emulator run of substation's open test set T01-T12 (T10 needs HEVC Main10) plus seek-span, system-glyph and colour-matrix files -->
 - Pure-black letterbox bars — no washed-out gray edges on OLED panels
   during scope/widescreen content.
   <!-- verified: app/src/main/kotlin/tv/jellybeam/player/PlaybackScreen.kt Color.Black background + setBackgroundColor/setShutterBackgroundColor BLACK, three-layer letterbox -->

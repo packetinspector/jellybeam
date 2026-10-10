@@ -2,7 +2,9 @@ package tv.jellybeam.player
 
 import androidx.media3.common.MimeTypes
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.jellybeam_core.ExternalSubtitleFfi
 import uniffi.jellybeam_core.SubtitleActionFfi
@@ -17,13 +19,34 @@ class ExternalSubtitlesTest {
         TrackDecisionFfi(audioTrackId = 4L, subtitleAction = action, subtitleTrackId = id)
 
     @Test
-    fun `sidecar text codecs map to a Media3 mime, bitmaps and ASS do not`() {
+    fun `sidecar text codecs map to a Media3 mime, bitmaps do not`() {
         assertEquals(MimeTypes.APPLICATION_SUBRIP, ExternalSubtitles.mimeFor("SubRip"))
         assertEquals(MimeTypes.TEXT_VTT, ExternalSubtitles.mimeFor("webvtt"))
-        assertNull(ExternalSubtitles.mimeFor("ass"))
+        assertEquals(MimeTypes.TEXT_SSA, ExternalSubtitles.mimeFor("ASS"))
+        assertEquals(MimeTypes.TEXT_SSA, ExternalSubtitles.mimeFor("ssa"))
         assertEquals(MimeTypes.APPLICATION_TTML, ExternalSubtitles.mimeFor("ttml"))
         assertNull(ExternalSubtitles.mimeFor("pgssub"))
         assertNull(ExternalSubtitles.mimeFor(""))
+        assertTrue(ExternalSubtitles.isSsa("ass"))
+        assertFalse(ExternalSubtitles.isSsa("srt"))
+    }
+
+    @Test
+    fun `an ass file splits into the header, its events format and each dialogue line`() {
+        val text = "\uFEFF[Script Info]\r\nScriptType: v4.00+\r\n\r\n[V4+ Styles]\r\nFormat: Name, Fontname\r\nStyle: Default,Arial\r\n\r\n" +
+            "[Events]\r\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n" +
+            "Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,note\r\n" +
+            "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,One\r\n" +
+            "Dialogue: 0,0:00:01.50,0:00:03.00,Default,,0,0,0,,Two, with a comma\r\n"
+        val parts = checkNotNull(ssaParts(text))
+        assertEquals("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text", parts.formatLine.trimEnd())
+        assertEquals(2, parts.dialogues.size)
+        assertTrue(parts.dialogues[1].trimEnd().endsWith("Two, with a comma"))
+        assertTrue(parts.header.startsWith("[Script Info]"))
+        assertTrue("styles stay in the header", "Style: Default,Arial" in parts.header)
+        assertFalse("dialogue never reaches the header", "Dialogue:" in parts.header)
+        // The styles' own Format line is not the events'.
+        assertNull(ssaParts("[V4+ Styles]\nFormat: Name\n[Events]\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,x\n"))
     }
 
     @Test

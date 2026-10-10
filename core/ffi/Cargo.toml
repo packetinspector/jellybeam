@@ -54,6 +54,8 @@ media-cache = { path = "../media-cache" }
 jellyfin-core = { path = "../jellyfin-core" }
 jellyfin-api = { path = "../jellyfin-api" }
 playback-policy = { path = "../playback-policy" }
+# Full ASS/SSA rendering: the overlay object in src/ass.rs.
+ass-render = { path = "../ass-render" }
 seerr-api = { path = "../seerr-api" }
 # Already resolved transitively (jellyfin-api -> reqwest -> url); declared
 # directly for signin.rs's own URL parsing/validation, same version pin as

@@ -202,7 +202,7 @@ Favorites are per user on the server. The mirror's `is_favorite` flag follows th
 toggle, live `UserDataChanged` events, and `sync_favorites`: an id-only `isFavorite=true` walk
 that runs last in the warm startup pass, after each reconnect and on the reconcile timer, and
 makes the flag match the server list (any failed or incomplete page changes nothing, and it
-leaves alone any row written after the fetch began, so a stale snapshot never undoes a newer
+leaves alone any row written in or after the millisecond the fetch began, so a stale snapshot never undoes a newer
 toggle, server event or item fetch). That guard reads each row's general write time, so any
 write to an item during the sync -- a playback position, a metadata refresh -- also shields
 that item's favorite flag from the snapshot. The window spans the whole paged fetch plus the
@@ -341,8 +341,9 @@ Unfocused: the entry containing the focused poster (first visible item
 when nothing in the grid has focus) is `Panna`; others `Grigio`. Focused:
 the focused entry is `Pistacchio` inside a fixed 48×22dp pill border drawn
 within the entry's own bounds (an outset ring would overlap the
-neighbours above and below). Holding Up/Down repeats the jump on every
-repeat event.
+neighbours above and below). Holding Up/Down retargets the jump on every
+repeat event: one load runs at a time, it re-reads for the newest entry when
+it finishes, and only the newest entry scrolls the grid.
 
 Keys: Right from the last column of any grid row focuses the rail at the
 entry containing the focused poster. Up/Down move to the next non-empty
@@ -359,8 +360,11 @@ The strip stays open; the grid area shows one line, Archivo 16sp `Grigio`:
 ### 4.6 Paging
 
 `LibraryViewModel` keeps its growing-prefix model (200 per page). A rail
-jump to offset `n` first ensures the prefix covers `n + PAGE_SIZE`, then
-scrolls to `n`'s row start. Counts and groups are re-queried with every
+jump to offset `n` first ensures the loaded rows cover `n + PAGE_SIZE`,
+reading only the missing tail and appending it by id, then scrolls to
+`n`'s row start. A mirror change between those reads can duplicate (dropped)
+or skip a row; the change event's refresh re-reads the whole prefix and
+heals it. Counts and groups are re-queried with every
 sort/filter change and on mirror change events, alongside the items.
 
 Mirror change events reach this re-query through
@@ -385,8 +389,9 @@ Three rules keep the loaders honest:
   on top of Year/Watched, and a page from the old ordering is never
   appended to the new grid.
 - **One load at a time.** Page appends and rail prefix loads share one
-  mutex — the mirror-refresh loader takes the same mutex for its whole
-  body, so an overlapping refresh and page load, or two
+  mutex — the mirror-refresh loader takes the same mutex for its items
+  read and publish (counts, groups and genres follow outside it, so they
+  never hold up a page or a jump), so an overlapping refresh and page load, or two
   overlapping refreshes, always serialize instead of racing to publish;
   the later one, reading newer data, lands last. A rail jump that arrives
   while a page is loading waits for it, re-checks coverage, loads if

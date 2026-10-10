@@ -46,10 +46,11 @@ class SidecarCues private constructor(
         private const val MIN_RATE = 0.1f
 
         /**
-         * Builds the segments; null when nothing would ever show. An entry with no duration lasts
-         * until the next entry starts, matching how Media3 replaces cues.
+         * Builds the segments, each shown set passed through [arrange]; null when nothing would ever
+         * show. An entry with no duration lasts until the next entry starts, matching how Media3
+         * replaces cues.
          */
-        fun of(entries: List<CuesWithTiming>): SidecarCues? {
+        fun of(entries: List<CuesWithTiming>, arrange: (List<Cue>) -> List<Cue> = { it }): SidecarCues? {
             // Empty entries still end the one before them, so they are dropped only after.
             val timed = entries.sortedBy { it.startTimeUs }
             val spans = timed.mapIndexed { i, entry ->
@@ -86,7 +87,7 @@ class SidecarCues private constructor(
                 val ids = active.take(MAX_VISIBLE)
                 if (ids != shownIds) {
                     shownIds = ids
-                    shown = ids.flatMap { spans[it].cues }.take(MAX_VISIBLE)
+                    shown = arrange(ids.flatMap { spans[it].cues }.take(MAX_VISIBLE))
                 }
                 shown
             }

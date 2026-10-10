@@ -72,6 +72,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -101,10 +103,13 @@ import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
+import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.PlaybackActivity
+import tv.jellybeam.ui.cards.WIDE_ART_ASPECT
+import tv.jellybeam.ui.cards.SkeletonBlock
 import tv.jellybeam.ui.cards.ArtSource
 import tv.jellybeam.ui.cards.BACKDROP_PLACEHOLDER_DIM
 import tv.jellybeam.ui.cards.CardArtImage
@@ -114,6 +119,7 @@ import tv.jellybeam.ui.cards.PosterCard
 import tv.jellybeam.ui.cards.PreloadOnDwell
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberHeaderPageBringIntoViewSpec
+import tv.jellybeam.ui.cards.rememberSkeletonPulseAlpha
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
@@ -169,6 +175,36 @@ internal val DETAIL_TITLE_STYLE = TextStyle(
     fontSize = 32.sp,
     lineHeight = 34.sp,
 )
+
+// docs/11 §Loading state: every style and metric a skeleton measures lives here, shared with the
+// real text, so a region and its skeleton cannot drift apart.
+internal val EYEBROW_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Pistacchio, fontSize = 11.sp, letterSpacing = (-0.02).em)
+internal val DETAIL_META_LINE_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 14.sp)
+private val MOVIE_META_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 13.5.sp)
+private val RATING_BADGE_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna2, fontSize = 9.5.sp)
+internal val GENRE_CHIP_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 11.sp)
+internal val GENRE_CHIP_VPAD = 4.dp
+internal val CREDITS_LABEL_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 8.5.sp, letterSpacing = (-0.02).em)
+internal val CREDITS_NAMES_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 11.sp)
+private val CREDITS_STUDIO_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 8.5.sp)
+internal val CREDITS_SEPARATOR_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Hairline, fontSize = 9.sp)
+/** The box-drawing bar (as rendered) the credits and spec rows join their cells with. */
+internal const val BOX_SEPARATOR = " │ "
+internal val SPEC_TEXT_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, fontSize = 9.sp)
+internal val SPEC_PILL_VPAD = 5.dp
+private val SPEC_PILL_HPAD = 12.dp
+/** Small-caps section label shared by the Cast header and the Seasons label. */
+internal val CAST_HEADER_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 10.sp, letterSpacing = (-0.02).em)
+internal val CAST_NAME_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 11.sp, textAlign = TextAlign.Center)
+internal val CAST_ROLE_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 10.sp, textAlign = TextAlign.Center)
+internal val CAST_HEADER_GAP = 12.dp
+internal val CAST_NAME_GAP = 8.dp
+internal val CAST_ROLE_GAP = 2.dp
+internal val SEASON_CHIP_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+internal val SEASON_CHIP_VPAD = 4.5.dp
+internal val SEASON_ROW_GAP = 14.dp
+internal val SEASON_CHIP_GAP = 6.dp
+internal val EPISODE_SHELF_GAP = 15.dp
 
 /** The overview's own focus-stop key ([OverviewBlock]/[MoreStop]/[SynopsisPanel]'s shared
  * contract).
@@ -439,11 +475,13 @@ private fun EpisodeDetailScreen(
     // docs/23-detail-layout-rules.md Rule 2's full-synopsis panel.
     var synopsisOpen by remember(card.id) { mutableStateOf(false) }
     val synopsisScope = rememberCoroutineScope()
-    // Round-3 punch list, items 2+3: the lower band's own visibility check
-    // (below) needs to know up front whether the spec-strip cell will
-    // actually render anything, same "no SpecStripRow means no stray gap"
-    // contract [SpecStripRow] itself already enforces by returning early.
-    val specFields = remember(strings, detail) { detail?.let { DetailFormatting.specStripFields(strings, it) }.orEmpty() }
+    // docs/11 §Loading state: the lower band is present while either of its cells is loading or
+    // has content, decided from region states (not raw data) so Up Next never shifts when the
+    // spec strip arrives.
+    val specFields = remember(strings, detail) { DetailFormatting.specCapsuleFields(strings, detail) }
+    val specShow = regionShow(state.itemDetailLoaded, specFields.isNotEmpty())
+    val upNextShow = regionShow(state.nextEpisodeLoaded, state.nextEpisode != null)
+    val castShow = regionShow(state.itemDetailLoaded, castMembers.isNotEmpty())
 
     // Both of this screen's possible seed targets resolve straight from [card], no async fetch
     // gate, so [seedTarget] is stable from the first composition. The door renders unconditionally
@@ -607,12 +645,12 @@ private fun EpisodeDetailScreen(
             // This whole screen is one top-anchored, flowed Column (text block -> lower band ->
             // cast row) so no section's position is ever hardcoded to a screen y that could drift
             // out of sync with content above it and overlap.
-            val showLowerBand = specFields.isNotEmpty() || state.nextEpisode != null
+            val showLowerBand = lowerBandPresent(specShow, upNextShow)
 
             Column(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = 75.dp)
+                    .padding(top = DETAIL_CONTENT_TOP)
                     .fillMaxWidth()
                     // docs/19 §1.5: the page's reflow while the panel is open -- content only,
                     // never the backdrop/scrim.
@@ -629,15 +667,19 @@ private fun EpisodeDetailScreen(
                         overflow = TextOverflow.Ellipsis,
                         style = DETAIL_TITLE_STYLE,
                     )
-                    if (metaItems.isNotEmpty()) {
-                        // docs/19 §1.5 FIX B: drops whole trailing items as the panel reflow
-                        // narrows this 510dp column.
-                        ItemBoundaryLine(
-                            items = metaItems,
-                            separator = DetailFormatting.META_SEPARATOR,
-                            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 14.sp),
-                        )
-                    }
+                    RegionReveal(
+                        show = regionShow(state.itemDetailLoaded, metaItems.isNotEmpty()),
+                        skeleton = { MetaLineSkeleton() },
+                        content = {
+                            // docs/19 §1.5 FIX B: drops whole trailing items as the panel reflow
+                            // narrows this 510dp column.
+                            ItemBoundaryLine(
+                                items = metaItems,
+                                separator = DetailFormatting.META_SEPARATOR,
+                                style = DETAIL_META_LINE_STYLE,
+                            )
+                        },
+                    )
                     if (hasResume && resumeFraction != null) {
                         ResumeProgressRow(fraction = resumeFraction, remainingLabel = remainingLabel)
                     }
@@ -666,7 +708,7 @@ private fun EpisodeDetailScreen(
                         moreKey = OVERVIEW_MORE_KEY,
                         onMore = { synopsisOpen = true },
                     )
-                    CreditsLine(detail?.directors, detail?.writers, emptyList())
+                    CreditsRegion(strings, state.itemDetailLoaded, detail?.directors, detail?.writers, emptyList())
                 }
 
                 if (showLowerBand) {
@@ -676,32 +718,51 @@ private fun EpisodeDetailScreen(
                         verticalAlignment = Alignment.Top,
                     ) {
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.TopStart) {
-                            if (specFields.isNotEmpty() && detail != null) {
-                                SpecStripRow(itemType = card.itemType, detail = detail, extraFields = emptyList())
-                            }
+                            RegionReveal(
+                                show = specShow,
+                                skeleton = { SpecStripSkeleton() },
+                                content = { SpecStripRow(fields = specFields) },
+                            )
                         }
-                        state.nextEpisode?.let { next ->
-                            UpNextPanel(nextEpisode = next, onClick = { onOpenDetail(next) }, memory = memory)
-                        }
+                        RegionReveal(
+                            show = upNextShow,
+                            skeleton = { UpNextSkeleton() },
+                            content = {
+                                state.nextEpisode?.let { next ->
+                                    UpNextPanel(nextEpisode = next, onClick = { onOpenDetail(next) }, memory = memory)
+                                }
+                            },
+                        )
                     }
                 }
 
                 // docs/23-detail-layout-rules.md Rule 1: sections flow, the page scrolls,
                 // nothing can overlap.
-                if (castMembers.isNotEmpty()) {
-                    Box(modifier = Modifier.height(12.dp))
-                    CastRow(
-                        members = castMembers,
-                        onOpenPerson = onOpenPerson,
-                        memory = memory,
-                        listState = castListState,
-                        showRole = false,
-                        showHeader = false,
-                        contentWidth = contentWidth,
-                        active = cardWindowActive,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
+                RegionReveal(
+                    show = castShow,
+                    skeleton = {
+                        Column {
+                            Box(modifier = Modifier.height(12.dp))
+                            CastRowSkeleton(showHeader = false, showRole = false, contentWidth = contentWidth)
+                        }
+                    },
+                    content = {
+                        Column {
+                            Box(modifier = Modifier.height(12.dp))
+                            CastRow(
+                                members = castMembers,
+                                onOpenPerson = onOpenPerson,
+                                memory = memory,
+                                listState = castListState,
+                                showRole = false,
+                                showHeader = false,
+                                contentWidth = contentWidth,
+                                active = cardWindowActive,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    },
+                )
             }
         }
 
@@ -776,10 +837,21 @@ private fun EpisodeActionRow(
 
 // Shrunk from 122x69dp now that the panel flows in the lower band rather than floating over the
 // backdrop.
-private val UP_NEXT_THUMB_WIDTH = 96.dp
-private val UP_NEXT_THUMB_HEIGHT = 54.dp
-private val UP_NEXT_PANEL_PADDING = 14.dp
-private val UP_NEXT_THUMB_TITLE_GAP = 11.dp
+internal val UP_NEXT_THUMB_WIDTH = 96.dp
+internal val UP_NEXT_THUMB_HEIGHT = 54.dp
+internal val UP_NEXT_PANEL_PADDING = 14.dp
+internal val UP_NEXT_THUMB_TITLE_GAP = 11.dp
+internal val UP_NEXT_PANEL_WIDTH = 310.dp
+internal val UP_NEXT_PANEL_SHAPE = RoundedCornerShape(4.dp)
+internal const val UP_NEXT_PANEL_FILL_ALPHA = 0.92f
+internal val UP_NEXT_LABEL_GAP = 10.dp
+internal val UP_NEXT_TITLE_META_GAP = 4.dp
+internal val UP_NEXT_THUMB_RADIUS = 2.dp
+/** Two 13.5sp/17sp title lines, reserved even when the title is one line. */
+internal val UP_NEXT_TITLE_HEIGHT = 34.dp
+internal val UP_NEXT_LABEL_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Pistacchio, fontSize = 10.sp, letterSpacing = (-0.02).em)
+private val UP_NEXT_TITLE_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = JellybeamTheme.Panna, fontSize = 13.5.sp, lineHeight = 17.sp)
+internal val UP_NEXT_META_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 11.sp)
 
 /**
  * §C.1: mono "UP NEXT" label, then one row of (thumb, 11dp gap, title-over-meta column) -- no
@@ -794,8 +866,7 @@ private fun UpNextPanel(nextEpisode: Card, onClick: () -> Unit, memory: FocusMem
     // stale.
     val artSource = CardFormatting.railArtSource(nextEpisode)
     val metaLine = DetailFormatting.runtimeAndDateLine(rememberUiStrings(), nextEpisode.runtimeTicks, nextEpisode.premiereDate)
-    val panelWidth = 310.dp
-    val titleColumnWidth = panelWidth - UP_NEXT_PANEL_PADDING * 2 - UP_NEXT_THUMB_WIDTH - UP_NEXT_THUMB_TITLE_GAP
+    val titleColumnWidth = UP_NEXT_PANEL_WIDTH - UP_NEXT_PANEL_PADDING * 2 - UP_NEXT_THUMB_WIDTH - UP_NEXT_THUMB_TITLE_GAP
     val density = LocalDensity.current
     val thumbImageWidth = remember(density) {
         CardFormatting.bucketedImageWidth(with(density) { UP_NEXT_THUMB_WIDTH.roundToPx() })
@@ -804,24 +875,24 @@ private fun UpNextPanel(nextEpisode: Card, onClick: () -> Unit, memory: FocusMem
     Column(
         modifier = modifier
             .focusKey(memory, "up-next")
-            .width(panelWidth)
+            .width(UP_NEXT_PANEL_WIDTH)
             .focusRing(isFocused = isFocused, cornerRadius = 4.dp)
-            .clip(RoundedCornerShape(4.dp))
-            .background(JellybeamTheme.Notte.copy(alpha = 0.92f))
-            .border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(4.dp))
+            .clip(UP_NEXT_PANEL_SHAPE)
+            .background(JellybeamTheme.Notte.copy(alpha = UP_NEXT_PANEL_FILL_ALPHA))
+            .border(1.dp, JellybeamTheme.Hairline, UP_NEXT_PANEL_SHAPE)
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
             .padding(UP_NEXT_PANEL_PADDING),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(UP_NEXT_LABEL_GAP),
     ) {
         BasicText(
             text = stringResource(R.string.detail_up_next),
-            style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Pistacchio, fontSize = 10.sp, letterSpacing = (-0.02).em),
+            style = UP_NEXT_LABEL_STYLE,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(UP_NEXT_THUMB_TITLE_GAP)) {
             Box(
                 modifier = Modifier
                     .size(UP_NEXT_THUMB_WIDTH, UP_NEXT_THUMB_HEIGHT)
-                    .clip(RoundedCornerShape(2.dp))
+                    .clip(RoundedCornerShape(UP_NEXT_THUMB_RADIUS))
                     .background(JellybeamTheme.SurfaceRaised),
             ) {
                 CardArtImage(
@@ -831,18 +902,19 @@ private fun UpNextPanel(nextEpisode: Card, onClick: () -> Unit, memory: FocusMem
                     contentAlpha = 1f,
                     blurhash = nextEpisode.blurhash,
                     modifier = Modifier.fillMaxSize(),
+                    aspect = WIDE_ART_ASPECT,
                 )
             }
-            Column(modifier = Modifier.width(titleColumnWidth), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(modifier = Modifier.width(titleColumnWidth), verticalArrangement = Arrangement.spacedBy(UP_NEXT_TITLE_META_GAP)) {
                 BasicText(
                     text = nextEpisode.name,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth().height(34.dp),
-                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = JellybeamTheme.Panna, fontSize = 13.5.sp, lineHeight = 17.sp),
+                    modifier = Modifier.fillMaxWidth().height(UP_NEXT_TITLE_HEIGHT),
+                    style = UP_NEXT_TITLE_STYLE,
                 )
                 metaLine?.let {
-                    BasicText(text = it, style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 11.sp))
+                    BasicText(text = it, style = UP_NEXT_META_STYLE)
                 }
             }
         }
@@ -889,45 +961,34 @@ private fun SeriesDetailScreen(
         if (state.selectedSeasonId != null) selectedChipBringIntoViewRequester.bringIntoView()
     }
 
-    // [seedTarget] is keyed directly on the two independent readiness signals ([hasPrimaryButton],
-    // [hasChips], each resolved by its own separately-timed fetch), so [FocusRestorer]'s [ready]
-    // fires the instant either one resolves rather than waiting on the unrelated other one.
-    // [DetailFormatting.resolveFocusSeedTarget] keeps "primary button wins, chip row only a
-    // fallback"; [FocusRestorer]'s own multi-frame retry then guards a single un-retried attempt
-    // losing the race against this screen's layout on a freshly pushed composition.
-    val seedTarget = remember(card.id, hasPrimaryButton, hasChips) {
-        DetailFormatting.resolveFocusSeedTarget(hasPrimaryButton, hasChips)
+    // docs/15 §2 rule 3: the primary pill wins whenever the series has one; [seedDecision] is null
+    // until that is knowable, so the separately-fetched season chips cannot win the race.
+    val seedDecision = remember(card.id, hasPrimaryButton, state.allEpisodesSettled, hasChips, state.seasonsSettled) {
+        DetailFormatting.resolveSeriesSeed(hasPrimaryButton, state.allEpisodesSettled, hasChips, state.seasonsSettled)
     }
-    // docs/19-detail-action-menu.md's door renders unconditionally (position
-    // two, even with no primary action), so the old NONE case -- no primary
-    // button AND no season chips -- now falls to the door instead of
-    // leaving the page with nothing focusable at all.
+    val seedTarget = seedDecision ?: DetailFormatting.FocusSeedTarget.NONE
+    // docs/19-detail-action-menu.md's door renders unconditionally (position two, even with no
+    // primary action), so a series with neither a primary pill nor chips falls to the door.
     val seedFocusRequester = when (seedTarget) {
         DetailFormatting.FocusSeedTarget.PRIMARY -> initialFocusRequester
         DetailFormatting.FocusSeedTarget.SECONDARY -> selectedChipFocusRequester
         DetailFormatting.FocusSeedTarget.NONE -> doorFocusRequester
     }
 
-    // docs/15-focus-and-selection.md §5: one shared restore mechanism.
-    // [selectedKey] is the selected season chip (§2 rule 2) -- Series is
-    // the one Detail variant with a "current value" to fall back to before
-    // reaching [seedFocusRequester]'s own §2 rule 3 primary.
-    // [ready]: a primary pill or a season chip is the fresh-entry target
-    // (docs/15 §2 rules 2-3); the door is only the fallback of last resort,
-    // once the seasons fetch has settled with neither. Without this gate the
-    // restorer fired on the first composition and seeded the door before
-    // the seasons had even arrived.
-    // Hoisted so [FocusRestorer] (becoming-top) and the refresh guard below
-    // (same-composition) share one §2-rule-3 fallback -- same relationship
-    // [tv.jellybeam.ui.library.LibraryScreen]'s own `libraryFallback` has to
-    // its [FocusRestorer] call.
+    // docs/15 §5: one shared restore mechanism. [selectedKey] (§2 rule 2) yields to the primary
+    // pill on a fresh entry (§2 rule 3); the chip is the target only when no pill exists.
+    // Hoisted so [FocusRestorer] (becoming-top) and the refresh guard below (same-composition)
+    // share one §2-rule-3 fallback.
     val seriesFallback: () -> FocusTarget? = { seedFocusRequester.asFocusTarget() }
     FocusRestorer(
         memory = memory,
         isTop = isTop,
         focusGate = focusGate,
-        ready = seedTarget != DetailFormatting.FocusSeedTarget.NONE || state.seasonsSettled,
-        selectedKey = { state.selectedSeasonId?.let { "season:$it" } },
+        ready = seedDecision != null,
+        selectedKey = {
+            if (seedDecision == DetailFormatting.FocusSeedTarget.PRIMARY) null
+            else state.selectedSeasonId?.let { "season:$it" }
+        },
         fallback = seriesFallback,
         tag = "detail-series",
     )
@@ -1076,7 +1137,7 @@ private fun SeriesDetailScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 48.dp)
+                    .padding(top = DETAIL_CONTENT_TOP)
                     // docs/19 §1.5: the page's reflow while the panel is open -- content only,
                     // never the backdrop/scrim.
                     .padding(end = contentEndInset),
@@ -1094,7 +1155,11 @@ private fun SeriesDetailScreen(
                         modifier = Modifier.weight(1f, fill = false).widthIn(max = 510.dp),
                         verticalArrangement = Arrangement.spacedBy(11.dp),
                     ) {
-                        state.libraryName?.let { EyebrowText(it) }
+                        RegionReveal(
+                            show = regionShow(state.libraryNameLoaded, state.libraryName != null),
+                            skeleton = { EyebrowSkeleton() },
+                            content = { state.libraryName?.let { EyebrowText(it) } },
+                        )
                         BasicText(
                             text = card.name,
                             maxLines = 2,
@@ -1114,20 +1179,25 @@ private fun SeriesDetailScreen(
                             officialRating = detail?.officialRating,
                             genres = detail?.genres.orEmpty(),
                         )
-                        if (headerItems.isNotEmpty()) {
-                            // docs/19 §1.5 FIX B: drops whole trailing items as the panel reflow
-                            // narrows this column.
-                            ItemBoundaryLine(
-                                items = headerItems,
-                                separator = DetailFormatting.META_SEPARATOR,
-                                style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 14.sp),
-                            )
-                        }
+                        RegionReveal(
+                            show = regionShow(state.itemDetailLoaded, headerItems.isNotEmpty()),
+                            skeleton = { MetaLineSkeleton() },
+                            content = {
+                                // docs/19 §1.5 FIX B: drops whole trailing items as the panel
+                                // reflow narrows this column.
+                                ItemBoundaryLine(
+                                    items = headerItems,
+                                    separator = DetailFormatting.META_SEPARATOR,
+                                    style = DETAIL_META_LINE_STYLE,
+                                )
+                            },
+                        )
                         // [DetailFormatting.seriesCardFrom]'s synthesized card always sets
                         // `overview = null`, so [detail] wins over `card.overview` here.
                         SeriesActionRow(
                             card = card,
                             action = primaryAction,
+                            primaryPending = !state.allEpisodesSettled,
                             focusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.PRIMARY) initialFocusRequester else null,
                             doorFocusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.NONE) doorFocusRequester else null,
                             memory = memory,
@@ -1143,53 +1213,80 @@ private fun SeriesDetailScreen(
                             moreKey = OVERVIEW_MORE_KEY,
                             onMore = { synopsisOpen = true },
                         )
-                        CreditsLine(detail?.directors, detail?.writers, detail?.studios)
+                        CreditsRegion(strings, state.itemDetailLoaded, detail?.directors, detail?.writers, detail?.studios)
                     }
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
-                SeasonSelectorSection(
-                    seasons = seasons,
-                    selectedSeasonId = state.selectedSeasonId,
-                    selectedSeason = selectedSeason,
-                    episodes = state.episodes,
-                    onSelect = viewModel::selectSeason,
-                    memory = memory,
-                    selectedChipFocusRequester = selectedChipFocusRequester,
-                    selectedChipBringIntoViewRequester = selectedChipBringIntoViewRequester,
-                    modifier = Modifier.fillMaxWidth(),
+                // docs/11 §Loading state: the chip row and the shelf keep their final heights
+                // while seasons and the resume season's episodes load.
+                RegionReveal(
+                    show = seasonChipsShow(state.seasonsSettled, seasons.size, detail?.childCount),
+                    skeleton = { SeasonChipsSkeleton(Modifier.fillMaxWidth()) },
+                    content = {
+                        SeasonSelectorSection(
+                            seasons = seasons,
+                            selectedSeasonId = state.selectedSeasonId,
+                            selectedSeason = selectedSeason,
+                            episodes = state.episodes,
+                            onSelect = viewModel::selectSeason,
+                            memory = memory,
+                            selectedChipFocusRequester = selectedChipFocusRequester,
+                            selectedChipBringIntoViewRequester = selectedChipBringIntoViewRequester,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    },
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
-                SeasonEpisodeShelf(
-                    episodes = state.episodes,
-                    isLoading = DetailFormatting.showEpisodeSkeleton(true, state.isLoadingSeasons, state.isLoadingEpisodes),
-                    onOpenDetail = onOpenDetail,
-                    memory = memory,
-                    listState = episodeListState,
-                    contentWidth = contentWidth,
-                    active = cardWindowActive,
-                    modifier = Modifier.fillMaxWidth(),
+                RegionReveal(
+                    show = episodeShelfShow(
+                        seasonsSettled = state.seasonsSettled,
+                        hasSeasons = seasons.isNotEmpty(),
+                        hasSelectedSeason = state.selectedSeasonId != null,
+                        isLoadingEpisodes = state.isLoadingEpisodes,
+                        hasEpisodes = state.episodes.isNotEmpty(),
+                    ),
+                    skeleton = { EpisodeShelfSkeleton(Modifier.fillMaxWidth()) },
+                    content = {
+                        SeasonEpisodeShelf(
+                            episodes = state.episodes,
+                            onOpenDetail = onOpenDetail,
+                            memory = memory,
+                            listState = episodeListState,
+                            contentWidth = contentWidth,
+                            active = cardWindowActive,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    },
                 )
             }
         }
 
         // docs/19 §1.5: these rows are siblings of the flow column above, so they carry the panel
         // inset themselves.
-        if (castMembers.isNotEmpty()) {
-            Box(modifier = Modifier.padding(top = SECTION_TOP_GAP, end = contentEndInset)) {
-                CastRow(
-                    members = castMembers,
-                    onOpenPerson = onOpenPerson,
-                    memory = memory,
-                    listState = castListState,
-                    showHeader = true,
-                    showRole = true,
-                    contentWidth = contentWidth,
-                    active = cardWindowActive,
-                )
-            }
-        }
+        RegionReveal(
+            show = regionShow(state.itemDetailLoaded, castMembers.isNotEmpty()),
+            skeleton = {
+                Box(modifier = Modifier.padding(top = SECTION_TOP_GAP, end = contentEndInset)) {
+                    CastRowSkeleton(showHeader = true, showRole = true, contentWidth = contentWidth)
+                }
+            },
+            content = {
+                Box(modifier = Modifier.padding(top = SECTION_TOP_GAP, end = contentEndInset)) {
+                    CastRow(
+                        members = castMembers,
+                        onOpenPerson = onOpenPerson,
+                        memory = memory,
+                        listState = castListState,
+                        showHeader = true,
+                        showRole = true,
+                        contentWidth = contentWidth,
+                        active = cardWindowActive,
+                    )
+                }
+            },
+        )
 
         if (state.similarLoaded && state.similar.isNotEmpty()) {
             Box(modifier = Modifier.padding(top = SECTION_TOP_GAP, end = contentEndInset)) {
@@ -1249,6 +1346,7 @@ private fun seriesRefreshFallback(
 private fun SeriesActionRow(
     card: Card,
     action: DetailFormatting.PrimaryAction,
+    primaryPending: Boolean,
     focusRequester: FocusRequester?,
     doorFocusRequester: FocusRequester?,
     memory: FocusMemory,
@@ -1261,6 +1359,15 @@ private fun SeriesActionRow(
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (action == DetailFormatting.PrimaryAction.None && primaryPending) {
+            // docs/11 §Loading state: the slot holds the row's height and the common "Play" width
+            // until the series' episodes resolve it; a longer "Resume S3 E2" label still widens it.
+            SkeletonBlock(
+                rememberSkeletonPulseAlpha(),
+                ACTION_BUTTON_HEIGHT / 2,
+                Modifier.size(ACTION_BUTTON_MIN_WIDTH, ACTION_BUTTON_HEIGHT),
+            )
+        }
         if (action != DetailFormatting.PrimaryAction.None) {
             val label = when (action) {
                 is DetailFormatting.PrimaryAction.Playable -> action.label
@@ -1313,20 +1420,19 @@ private fun SeasonSelectorSection(
     selectedChipBringIntoViewRequester: BringIntoViewRequester,
     modifier: Modifier = Modifier,
 ) {
-    if (seasons.size <= 1) return
     val strings = rememberUiStrings()
     val summaryItems = selectedSeason?.let { DetailFormatting.seasonSummaryItems(strings, it.name, episodes) }.orEmpty()
     val showLabel = DetailFormatting.showSeasonsLabel(seasons.size)
 
     Row(
         modifier = modifier.padding(start = PAGE_MARGIN, end = PAGE_MARGIN),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(SEASON_ROW_GAP),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (showLabel) {
             BasicText(
                 text = stringResource(R.string.detail_seasons),
-                style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 10.sp, letterSpacing = (-0.02).em),
+                style = CAST_HEADER_STYLE,
             )
         }
         Row(
@@ -1346,7 +1452,7 @@ private fun SeasonSelectorSection(
                     enter = { if (selectedSeasonId != null && !memory.frozen) selectedChipFocusRequester else FocusRequester.Default }
                 }
                 .focusGroup(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(SEASON_CHIP_GAP),
         ) {
             seasons.forEach { season ->
                 val isSpecial = season.name == SPECIALS_SEASON_NAME || season.indexNumber == 0
@@ -1367,7 +1473,7 @@ private fun SeasonSelectorSection(
                 ItemBoundaryLine(
                     items = summaryItems,
                     separator = " · ",
-                    style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 10.sp, letterSpacing = (-0.02).em),
+                    style = CAST_HEADER_STYLE,
                     alignEnd = true,
                 )
             }
@@ -1375,7 +1481,7 @@ private fun SeasonSelectorSection(
     }
 }
 
-private val SEASON_CHIP_MIN_WIDTH = 31.dp
+internal val SEASON_CHIP_MIN_WIDTH = 31.dp
 
 /** The focus ring's full reach outside a chip: [tv.jellybeam.ui.cards.focusRing]'s 3dp gap + 3dp
  * stroke.
@@ -1417,9 +1523,9 @@ private fun SeasonChip(
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .let { if (bringIntoViewRequester != null) it.bringIntoViewRequester(bringIntoViewRequester) else it }
                 .clickable(interactionSource = interactionSource, indication = null, onClick = onSelect)
-                .padding(horizontal = 10.dp, vertical = 4.5.dp),
+                .padding(horizontal = 10.dp, vertical = SEASON_CHIP_VPAD),
         ) {
-            BasicText(text = label, style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = textColor, fontSize = 13.sp))
+            BasicText(text = label, style = SEASON_CHIP_STYLE.copy(color = textColor))
         }
     }
 }
@@ -1464,14 +1570,38 @@ internal fun <T> rememberCardWindow(
     return CardWindow(items.subList(start, endIndex), start)
 }
 
+/**
+ * docs/15 §2: a lazy shelf's per-item requesters so entering it lands on its first fully visible
+ * item ([DetailFormatting.shelfEntryIndex]), not the spatially nearest one; yields while
+ * [FocusMemory.frozen] so a remembered key wins. Indices are in the composed (sliced) list space.
+ */
+private class ShelfEntry {
+    private val requesters = mutableMapOf<Int, FocusRequester>()
+
+    fun target(memory: FocusMemory, listState: LazyListState, itemCount: Int): FocusRequester {
+        if (memory.frozen) return FocusRequester.Default
+        val index = DetailFormatting.shelfEntryIndex(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, itemCount)
+        return index?.let { requesters[it] } ?: FocusRequester.Default
+    }
+
+    @Composable
+    fun requester(index: Int): FocusRequester {
+        val requester = remember { FocusRequester() }
+        DisposableEffect(index, requester) {
+            requesters[index] = requester
+            onDispose { if (requesters[index] === requester) requesters.remove(index) }
+        }
+        return requester
+    }
+}
+
 /** §3 item 7's season episode shelf: a horizontal, per-season row of [EpisodeGridCard]s (not a
  * wrapping grid).
  */
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun SeasonEpisodeShelf(
     episodes: List<Card>,
-    isLoading: Boolean,
     onOpenDetail: (Card) -> Unit,
     memory: FocusMemory,
     listState: LazyListState,
@@ -1485,31 +1615,29 @@ private fun SeasonEpisodeShelf(
     }
 
     Box(modifier = modifier) {
-        if (isLoading) {
-            Row(
-                modifier = Modifier.padding(horizontal = PAGE_MARGIN),
-                horizontalArrangement = Arrangement.spacedBy(15.dp),
-            ) {
-                repeat(4) { EpisodeGridSkeletonCard() }
-            }
-        } else if (episodes.isNotEmpty()) {
+        if (episodes.isNotEmpty()) {
             // docs/19 §1.5 FIX D: whole episode cards only while the panel is open -- see
             // [rememberCardWindow].
-            val window = rememberCardWindow(episodes, listState, contentWidth, EPISODE_CARD_WIDTH, 15.dp, active)
+            val window = rememberCardWindow(episodes, listState, contentWidth, EPISODE_CARD_WIDTH, EPISODE_SHELF_GAP, active)
+            val shelfEntry = remember { ShelfEntry() }
             CompositionLocalProvider(LocalBringIntoViewSpec provides rememberShelfBringIntoViewSpec(startMargin = PAGE_MARGIN)) {
                 LazyRow(
                     state = listState,
-                    horizontalArrangement = Arrangement.spacedBy(15.dp),
+                    horizontalArrangement = Arrangement.spacedBy(EPISODE_SHELF_GAP),
                     contentPadding = PaddingValues(horizontal = PAGE_MARGIN),
+                    modifier = Modifier
+                        .focusProperties { enter = { shelfEntry.target(memory, listState, window.items.size) } }
+                        .focusGroup(),
                 ) {
-                    itemsIndexed(window.items, key = { _, episode -> episode.id }) { _, episode ->
+                    itemsIndexed(window.items, key = { _, episode -> episode.id }) { index, episode ->
+                        val requester = shelfEntry.requester(index)
                         var isFocused by remember(episode.id) { mutableStateOf(false) }
                         EpisodeGridCard(
                             card = episode,
                             isFocused = isFocused,
                             imageUrl = { itemId, kind, tag -> AppGraph.gateway.imageUrl(itemId, kind, tag, episodeImageWidth) },
                             onClick = { onOpenDetail(episode) },
-                            modifier = Modifier.focusKey(memory, "episode:${episode.id}").onFocusChanged { focusState ->
+                            modifier = Modifier.focusKey(memory, "episode:${episode.id}").focusRequester(requester).onFocusChanged { focusState ->
                                 isFocused = focusState.isFocused
                                 // docs/13 focus-dwell preload; Rust's preload_playback no-ops on a
                                 // virtual episode.
@@ -1554,6 +1682,15 @@ private fun MovieDetailScreen(
     val primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList())
     val hasPrimaryButton = primaryAction != DetailFormatting.PrimaryAction.None
     val castMembers = remember(detail) { DetailFormatting.castMembers(detail?.people.orEmpty()) }
+    val specFields = remember(strings, detail) {
+        DetailFormatting.specCapsuleFields(
+            strings,
+            detail,
+            extraFields = DetailFormatting.formatFileSize(detail?.sizeBytes)
+                ?.let { listOf(DetailFormatting.SpecField(it, DetailFormatting.SpecWeight.BASELINE)) }
+                .orEmpty(),
+        )
+    }
 
     // [hasPrimaryButton] resolves synchronously from [card]'s own fields (no FFI round trip like
     // Series'), but a single un-retried `requestFocus()` could still lose the race against this
@@ -1729,14 +1866,18 @@ private fun MovieDetailScreen(
                                 val eyebrow = remember(strings, card.id, state.libraryName, detail?.dateCreated) {
                                     DetailFormatting.movieEyebrow(strings, state.libraryName, detail?.dateCreated)
                                 }
-                                eyebrow?.let { EyebrowText(it) }
+                                RegionReveal(
+                                    show = movieEyebrowShow(state.libraryNameLoaded, state.itemDetailLoaded, eyebrow != null),
+                                    skeleton = { EyebrowSkeleton() },
+                                    content = { eyebrow?.let { EyebrowText(it) } },
+                                )
                                 BasicText(
                                     text = card.name,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                     style = DETAIL_TITLE_STYLE,
                                 )
-                                MovieMetadataRow(card = card, detail = detail)
+                                MovieMetadataRow(card = card, detail = detail, detailLoaded = state.itemDetailLoaded)
                                 MovieActionRow(
                                     card = card,
                                     action = primaryAction,
@@ -1753,7 +1894,7 @@ private fun MovieDetailScreen(
                                     moreKey = OVERVIEW_MORE_KEY,
                                     onMore = { synopsisOpen = true },
                                 )
-                                CreditsLine(detail?.directors, detail?.writers, detail?.studios)
+                                CreditsRegion(strings, state.itemDetailLoaded, detail?.directors, detail?.writers, detail?.studios)
                             }
                         }
                     }
@@ -1762,36 +1903,42 @@ private fun MovieDetailScreen(
                     // the padded Column above.
                     Spacer(modifier = Modifier.weight(1f))
 
-                    if (detail != null) {
-                        val fileSizeField = DetailFormatting.formatFileSize(detail.sizeBytes)
-                            ?.let { listOf(DetailFormatting.SpecField(it, DetailFormatting.SpecWeight.BASELINE)) }
-                            .orEmpty()
-                        // 8dp fixed minimum above the capsule: the weighted Spacer can compute to
-                        // zero on a two-line-title page.
-                        SpecStripRow(
-                            itemType = card.itemType,
-                            detail = detail,
-                            extraFields = fileSizeField,
-                            modifier = Modifier.padding(start = PAGE_MARGIN, top = 8.dp),
-                        )
-                    }
+                    // 8dp fixed minimum above the capsule: the weighted Spacer can compute to
+                    // zero on a two-line-title page.
+                    val specModifier = Modifier.padding(start = PAGE_MARGIN, top = 8.dp)
+                    RegionReveal(
+                        show = regionShow(state.itemDetailLoaded, specFields.isNotEmpty()),
+                        skeleton = { SpecStripSkeleton(specModifier) },
+                        content = { SpecStripRow(fields = specFields, modifier = specModifier) },
+                    )
 
                     // [CastRow]'s own LazyRow already carries a PAGE_MARGIN `contentPadding`, so
                     // adding padding here too would double the left margin.
-                    if (castMembers.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(22.dp))
-                        CastRow(
-                            members = castMembers,
-                            onOpenPerson = onOpenPerson,
-                            memory = memory,
-                            listState = castListState,
-                            showHeader = true,
-                            showRole = true,
-                            contentWidth = contentWidth,
-                            active = cardWindowActive,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
+                    RegionReveal(
+                        show = regionShow(state.itemDetailLoaded, castMembers.isNotEmpty()),
+                        skeleton = {
+                            Column {
+                                Spacer(modifier = Modifier.height(22.dp))
+                                CastRowSkeleton(showHeader = true, showRole = true, contentWidth = contentWidth)
+                            }
+                        },
+                        content = {
+                            Column {
+                                Spacer(modifier = Modifier.height(22.dp))
+                                CastRow(
+                                    members = castMembers,
+                                    onOpenPerson = onOpenPerson,
+                                    memory = memory,
+                                    listState = castListState,
+                                    showHeader = true,
+                                    showRole = true,
+                                    contentWidth = contentWidth,
+                                    active = cardWindowActive,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        },
+                    )
                 }
             }
 
@@ -1849,40 +1996,66 @@ private fun frameBringIntoViewSpec(scrollState: ScrollState): BringIntoViewSpec 
     }
 }
 
-/** §4 item 4's metadata row: "{year} · {runtime}", a boxed rating badge, then up to 3 genre chips.
+/**
+ * §4 item 4's metadata row: "{year} · {runtime}", a boxed rating badge, then up to 3 genre chips.
+ * The row keeps a genre chip's height while the chips load (docs/11 §Loading state), so their
+ * arrival changes no height; each chip fades in on the shared region fade.
  */
 @Composable
-private fun MovieMetadataRow(card: Card, detail: ItemDetail?) {
+private fun MovieMetadataRow(card: Card, detail: ItemDetail?, detailLoaded: Boolean) {
     // Computed inline, not remembered, so a refreshed Card recomputes instead of staying stale.
     val metaLine = DetailFormatting.movieMetaLine(rememberUiStrings(), card.productionYear, card.runtimeTicks)
-    if (metaLine == null && detail?.officialRating.isNullOrBlank() && detail?.genres.isNullOrEmpty()) return
+    val rating = detail?.officialRating?.takeIf { it.isNotBlank() }
+    val genres = detail?.genres.orEmpty().filter { it.isNotBlank() }.take(3)
+    val chipsShow = movieChipsShow(detailLoaded, rating != null, genres.size)
+    if (metaLine == null && chipsShow == RegionShow.GONE) return
 
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    val fade = rememberRegionAlpha(chipsShow)
+    val chipHeight = rememberTextLineHeight(GENRE_CHIP_STYLE) + GENRE_CHIP_VPAD * 2
+    FlowRow(
+        modifier = Modifier.heightIn(min = if (chipsShow == RegionShow.GONE) 0.dp else chipHeight),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
         metaLine?.let {
-            BasicText(text = it, style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 13.5.sp))
+            BasicText(text = it, style = MOVIE_META_STYLE)
         }
-        detail?.officialRating?.takeIf { it.isNotBlank() }?.let { RatingBadge(it) }
-        detail?.genres?.filter { it.isNotBlank() }?.take(3)?.forEach { GenreChip(it) }
+        when (chipsShow) {
+            RegionShow.SKELETON -> {
+                val pulse = rememberSkeletonPulseAlpha()
+                GenreChipSkeleton(pulse, width = 56.dp)
+                GenreChipSkeleton(pulse, width = 64.dp)
+            }
+            RegionShow.CONTENT -> {
+                val fadeLayer = Modifier.graphicsLayer {
+                    alpha = fade.value
+                    compositingStrategy = CompositingStrategy.ModulateAlpha
+                }
+                rating?.let { RatingBadge(it, fadeLayer) }
+                genres.forEach { GenreChip(it, fadeLayer) }
+            }
+            RegionShow.GONE -> Unit
+        }
     }
 }
 
 @Composable
-private fun RatingBadge(rating: String) {
-    Box(modifier = Modifier.border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(2.dp)).padding(horizontal = 6.dp, vertical = 3.dp)) {
-        BasicText(text = rating, style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna2, fontSize = 9.5.sp))
+private fun RatingBadge(rating: String, modifier: Modifier = Modifier) {
+    Box(modifier = modifier.border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(2.dp)).padding(horizontal = 6.dp, vertical = 3.dp)) {
+        BasicText(text = rating, style = RATING_BADGE_STYLE)
     }
 }
 
 @Composable
-private fun GenreChip(name: String) {
+private fun GenreChip(name: String, modifier: Modifier = Modifier) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(50))
             .background(JellybeamTheme.Surface.copy(alpha = 0.9f))
             .border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(50))
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+            .padding(horizontal = 10.dp, vertical = GENRE_CHIP_VPAD),
     ) {
-        BasicText(text = name, style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 11.sp))
+        BasicText(text = name, style = GENRE_CHIP_STYLE)
     }
 }
 
@@ -1980,17 +2153,36 @@ private fun MoreStop(memory: FocusMemory, moreKey: String, onMore: () -> Unit) {
 }
 
 /**
+ * The credits region: a one-line skeleton while the detail record loads, the prose line when it has
+ * a director, writer or studio, nothing otherwise (docs/11 §Loading state).
+ */
+@Composable
+private fun CreditsRegion(
+    strings: UiStrings,
+    itemDetailLoaded: Boolean,
+    directors: List<String>?,
+    writers: List<String>?,
+    studios: List<String>?,
+) {
+    val lines = remember(strings, directors, writers, studios) { DetailFormatting.creditsLines(strings, directors, writers, studios) }
+    RegionReveal(
+        show = regionShow(itemDetailLoaded, !lines.isEmpty),
+        skeleton = { CreditsSkeleton() },
+        content = { CreditsLine(lines) },
+    )
+}
+
+/**
  * docs/23-detail-layout-rules.md Rule 3: director/writer/studio as one non-wrapping prose line.
  * Each segment gets its own `weight(1f, fill = false)` so a long name list shrinks and ellipsizes
  * instead of reflowing a sibling or overflowing the row.
  */
 @Composable
-private fun CreditsLine(directors: List<String>?, writers: List<String>?, studios: List<String>?) {
-    val strings = rememberUiStrings()
-    val directorsLine = remember(directors) { DetailFormatting.peopleLine(directors.orEmpty()) }
-    val writersLine = remember(writers) { DetailFormatting.peopleLine(writers.orEmpty()) }
-    val studioLine = remember(strings, studios) { DetailFormatting.studioSummary(strings, studios.orEmpty())?.uppercaseUi() }
-    if (directorsLine == null && writersLine == null && studioLine == null) return
+private fun CreditsLine(lines: DetailFormatting.CreditsLines) {
+    val directorsLine = lines.directors
+    val writersLine = lines.writers
+    val studioLine = lines.studio
+    if (lines.isEmpty) return
 
     Row(verticalAlignment = Alignment.CenterVertically) {
         var needsSeparator = false
@@ -2000,7 +2192,7 @@ private fun CreditsLine(directors: List<String>?, writers: List<String>?, studio
             Row(modifier = Modifier.weight(creditsWeight(names), fill = false), verticalAlignment = Alignment.CenterVertically) {
                 BasicText(
                     text = stringResource(R.string.detail_directed_by),
-                    style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 8.5.sp, letterSpacing = (-0.02).em),
+                    style = CREDITS_LABEL_STYLE,
                 )
                 Box(modifier = Modifier.width(6.dp))
                 BasicText(
@@ -2008,7 +2200,7 @@ private fun CreditsLine(directors: List<String>?, writers: List<String>?, studio
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
-                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 11.sp),
+                    style = CREDITS_NAMES_STYLE,
                 )
             }
         }
@@ -2018,7 +2210,7 @@ private fun CreditsLine(directors: List<String>?, writers: List<String>?, studio
             Row(modifier = Modifier.weight(creditsWeight(names), fill = false), verticalAlignment = Alignment.CenterVertically) {
                 BasicText(
                     text = stringResource(R.string.detail_written_by),
-                    style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 8.5.sp, letterSpacing = (-0.02).em),
+                    style = CREDITS_LABEL_STYLE,
                 )
                 Box(modifier = Modifier.width(6.dp))
                 BasicText(
@@ -2026,7 +2218,7 @@ private fun CreditsLine(directors: List<String>?, writers: List<String>?, studio
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
-                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 11.sp),
+                    style = CREDITS_NAMES_STYLE,
                 )
             }
         }
@@ -2037,7 +2229,7 @@ private fun CreditsLine(directors: List<String>?, writers: List<String>?, studio
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(creditsWeight(studio), fill = false),
-                style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 8.5.sp),
+                style = CREDITS_STUDIO_STYLE,
             )
         }
     }
@@ -2050,7 +2242,7 @@ private fun creditsWeight(text: String): Float = (text.length + 12).toFloat()
 
 @Composable
 private fun CreditsSeparator() {
-    BasicText(text = " │ ", style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Hairline, fontSize = 9.sp))
+    BasicText(text = BOX_SEPARATOR, style = CREDITS_SEPARATOR_STYLE)
 }
 
 /**
@@ -2131,6 +2323,11 @@ internal fun SynopsisPanel(
     }
 }
 
+/** docs/23: Series and Episode pages share one structure, so their content starts at one inset. */
+private val DETAIL_CONTENT_TOP = 48.dp
+
+private const val DETAIL_BACKDROP_WIDTH_PX = 960u
+
 /**
  * The full-bleed backdrop image every screen above uses. [CardArtImage]'s no-art fallback
  * ([tv.jellybeam.ui.cards.PlaceholderTile]) renders the item's name centered on the tile, which would
@@ -2139,15 +2336,10 @@ internal fun SynopsisPanel(
  */
 @Composable
 internal fun DetailBackdropImage(card: Card, artSource: ArtSource, height: Dp, modifier: Modifier = Modifier) {
-    val density = LocalDensity.current
-    BoxWithConstraints(modifier = modifier.fillMaxWidth().height(height)) {
-        // Captured into a local val before use inside the nested remember{} lambda:
-        // BoxWithConstraints'
-        // `maxWidth` is an implicit scope receiver a K2 nested lambda can't resolve directly.
-        val backdropWidthDp = maxWidth
-        val widthPx = remember(backdropWidthDp, density) {
-            CardFormatting.bucketedImageWidth(with(density) { backdropWidthDp.roundToPx() })
-        }
+    Box(modifier = modifier.fillMaxWidth().height(height)) {
+        // A fixed 960 px rendition, not the full-width bucket: the left third sits under a
+        // near-opaque scrim, so the extra pixels buy nothing but decode time.
+        val widthPx = DETAIL_BACKDROP_WIDTH_PX
         if (artSource == ArtSource.None) {
             Box(modifier = Modifier.fillMaxSize().background(JellybeamTheme.SurfacePanel))
         } else {
@@ -2165,6 +2357,8 @@ internal fun DetailBackdropImage(card: Card, artSource: ArtSource, height: Dp, m
                 blurhash = card.blurhash,
                 placeholderDimAlpha = BACKDROP_PLACEHOLDER_DIM,
                 modifier = Modifier.fillMaxSize(),
+                aspect = WIDE_ART_ASPECT,
+                fadeFromDisk = true,
             )
         }
     }
@@ -2222,7 +2416,7 @@ internal fun EyebrowText(text: String, modifier: Modifier = Modifier) {
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier = modifier,
-        style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Pistacchio, fontSize = 11.sp, letterSpacing = (-0.02).em),
+        style = EYEBROW_STYLE,
     )
 }
 
@@ -2302,44 +2496,36 @@ private fun specWeightColor(weight: DetailFormatting.SpecWeight): Color = when (
 
 /**
  * §2 item 4 / §4 item 7's spec strip: one non-wrapping pill of Martian Mono values, individually
- * colored by [DetailFormatting.classify]. Renders nothing for a Series or before [detail]
- * resolves. [extraFields] appends after the base fields (the Movie screen's trailing file-size
- * cell). docs/23-detail-layout-rules.md Rule 4: an outlined capsule, not filled.
+ * colored by [DetailFormatting.classify]. [fields] is [DetailFormatting.specCapsuleFields]'s
+ * answer; callers compose this only when it is non-empty. docs/23-detail-layout-rules.md Rule 4:
+ * an outlined capsule, not filled.
  */
 @Composable
-private fun SpecStripRow(itemType: String, detail: ItemDetail?, extraFields: List<DetailFormatting.SpecField>, modifier: Modifier = Modifier) {
-    if (itemType == SERIES_ITEM_TYPE || detail == null) return
-    val strings = rememberUiStrings()
-    val fields = remember(strings, detail, extraFields) { DetailFormatting.specStripFields(strings, detail) + extraFields }
-    if (fields.isEmpty()) return
-
+private fun SpecStripRow(fields: List<DetailFormatting.SpecField>, modifier: Modifier = Modifier) {
     FlowRow(
         modifier = modifier
             .clip(RoundedCornerShape(50))
             .border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(50))
-            .padding(horizontal = 12.dp, vertical = 5.dp),
+            .padding(horizontal = SPEC_PILL_HPAD, vertical = SPEC_PILL_VPAD),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         fields.forEachIndexed { index, field ->
             Row {
                 if (index > 0) {
                     BasicText(
-                        text = " │ ",
-                        style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Hairline, fontSize = 9.sp),
+                        text = BOX_SEPARATOR,
+                        style = SPEC_TEXT_STYLE.copy(color = JellybeamTheme.Hairline),
                     )
                 }
                 BasicText(
                     text = field.value,
-                    style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = specWeightColor(field.weight), fontSize = 9.sp),
+                    style = SPEC_TEXT_STYLE.copy(color = specWeightColor(field.weight)),
                 )
             }
         }
     }
 }
 
-// docs/23-detail-layout-rules.md Rule 5's own [CastRow] figure: 64dp
-// avatar + 8dp gap + ~14dp name line + 2dp gap + ~12dp role line.
-private val CAST_ROW_FADE_HEIGHT = 100.dp
 private val EDGE_FADE_WIDTH = 48.dp
 private val EDGE_FADE_LEFT_BRUSH = androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(JellybeamTheme.Notte, Color.Transparent))
 private val EDGE_FADE_RIGHT_BRUSH = androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color.Transparent, JellybeamTheme.Notte))
@@ -2372,9 +2558,9 @@ internal fun SectionHeader(textRes: Int) {
 }
 
 // docs/23-detail-layout-rules.md Rule 5's own [CastRow] figure.
-private val CAST_CARD_WIDTH = 84.dp
-private val CAST_AVATAR_SIZE = 64.dp
-private val CAST_ROW_GAP = 22.dp
+internal val CAST_CARD_WIDTH = 84.dp
+internal val CAST_AVATAR_SIZE = 64.dp
+internal val CAST_ROW_GAP = 22.dp
 
 /**
  * The Cast row: one treatment for all three screens (docs/23-detail-layout-rules.md Rule 5's
@@ -2398,48 +2584,48 @@ private fun CastRow(
     if (members.isEmpty()) return
     // FIX D: whole cast cards only while the panel is open (see [rememberCardWindow]).
     // [window.startIndex] widens each rendered item's key so scroll-position-by-key survives a
-    // close; [itemRequesters] stays keyed by the composed (rendered-relative) index since `enter`
-    // reads [listState.firstVisibleItemIndex] in that same space.
+    // close; [ShelfEntry] stays keyed by the composed (rendered-relative) index since `enter`
+    // reads [listState] in that same space.
     val window = rememberCardWindow(members, listState, contentWidth, CAST_CARD_WIDTH, CAST_ROW_GAP, active)
 
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    // docs/11 §Loading state: the role line's height is reserved on every card of a role-showing
+    // row, so the row's height does not depend on which portraits are composed.
+    val lines = rememberLineHeights()
+    val roleLineHeight = lines.of(CAST_ROLE_STYLE)
+    // The row's own height (docs/23 Rule 5): the edge fades are sized to it, so showing one can
+    // never make the row taller than its skeleton.
+    val rowHeight = CAST_AVATAR_SIZE + CAST_NAME_GAP + lines.of(CAST_NAME_STYLE) +
+        if (showRole) CAST_ROLE_GAP + roleLineHeight else 0.dp
+
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(CAST_HEADER_GAP)) {
         if (showHeader) {
             BasicText(
                 text = stringResource(R.string.detail_cast).uppercaseUi(),
                 modifier = Modifier.padding(start = PAGE_MARGIN),
-                style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 10.sp, letterSpacing = (-0.02).em),
+                style = CAST_HEADER_STYLE,
             )
         }
         // Same shelf scroll rule as the episode shelf and Home's rows: the focused portrait pins
-        // at the page margin. docs/15 §2: entering this group lands on the row's first visible
-        // portrait, not the spatially nearest one; yields during a programmatic restore
-        // ([memory.frozen]) so a remembered `person:<id>` wins.
-        val itemRequesters = remember { mutableMapOf<Int, FocusRequester>() }
-        EdgeFadedLazyRow(listState = listState, height = CAST_ROW_FADE_HEIGHT) {
+        // at the page margin; entry follows [ShelfEntry].
+        val shelfEntry = remember { ShelfEntry() }
+        EdgeFadedLazyRow(listState = listState, height = rowHeight) {
             CompositionLocalProvider(LocalBringIntoViewSpec provides rememberShelfBringIntoViewSpec(startMargin = PAGE_MARGIN)) {
                 LazyRow(
                     state = listState,
                     horizontalArrangement = Arrangement.spacedBy(CAST_ROW_GAP),
                     contentPadding = PaddingValues(horizontal = PAGE_MARGIN),
                     modifier = Modifier
-                        .focusProperties {
-                            enter = {
-                                if (memory.frozen) FocusRequester.Default else itemRequesters[listState.firstVisibleItemIndex] ?: FocusRequester.Default
-                            }
-                        }
+                        .focusProperties { enter = { shelfEntry.target(memory, listState, window.items.size) } }
                         .focusGroup(),
                 ) {
                     itemsIndexed(window.items, key = { index, person -> "${window.startIndex + index}-${person.id}" }) { index, person ->
-                        val requester = remember { FocusRequester() }
-                        DisposableEffect(index, requester) {
-                            itemRequesters[index] = requester
-                            onDispose { if (itemRequesters[index] === requester) itemRequesters.remove(index) }
-                        }
+                        val requester = shelfEntry.requester(index)
                         CastPortrait(
                             person = person,
                             memory = memory,
                             key = "person:${person.id}",
                             showRole = showRole,
+                            roleLineHeight = roleLineHeight,
                             focusRequester = requester,
                             onClick = { onOpenPerson(person) },
                         )
@@ -2451,7 +2637,15 @@ private fun CastRow(
 }
 
 @Composable
-private fun CastPortrait(person: PersonInfo, memory: FocusMemory, key: String, showRole: Boolean, focusRequester: FocusRequester, onClick: () -> Unit) {
+private fun CastPortrait(
+    person: PersonInfo,
+    memory: FocusMemory,
+    key: String,
+    showRole: Boolean,
+    roleLineHeight: Dp,
+    focusRequester: FocusRequester,
+    onClick: () -> Unit,
+) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
 
@@ -2482,24 +2676,26 @@ private fun CastPortrait(person: PersonInfo, memory: FocusMemory, key: String, s
                 modifier = Modifier.fillMaxSize(),
             )
         }
-        Box(modifier = Modifier.height(8.dp))
+        Box(modifier = Modifier.height(CAST_NAME_GAP))
         BasicText(
             text = person.name.orEmpty(),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.fillMaxWidth(),
-            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 11.sp, textAlign = TextAlign.Center),
+            style = CAST_NAME_STYLE,
         )
         if (showRole) {
-            person.role?.takeIf { it.isNotBlank() }?.let { role ->
-                Box(modifier = Modifier.height(2.dp))
-                BasicText(
-                    text = role,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth(),
-                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 10.sp, textAlign = TextAlign.Center),
-                )
+            Box(modifier = Modifier.height(CAST_ROLE_GAP))
+            Box(modifier = Modifier.fillMaxWidth().height(roleLineHeight)) {
+                person.role?.takeIf { it.isNotBlank() }?.let { role ->
+                    BasicText(
+                        text = role,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth(),
+                        style = CAST_ROLE_STYLE,
+                    )
+                }
             }
         }
     }

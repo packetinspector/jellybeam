@@ -570,7 +570,7 @@ class LibraryViewModelTest {
     }
 
     @Test
-    fun `ensureLoadedThrough loads a bigger prefix only when needed`() = runTest {
+    fun `ensureLoadedThrough reads only the missing tail`() = runTest {
         val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
         val items = (0 until 500).map { testCard(id = "item-$it", name = "Item $it") }
         val gateway = FakeCoreGateway(libraryGridByView = mapOf("view-1" to items))
@@ -580,12 +580,14 @@ class LibraryViewModelTest {
 
             viewModel.ensureLoadedThrough(350)
 
-            // offset 350 requires 350 + PAGE_SIZE(200) = 550, clamped to the 500 items available.
+            // offset 350 needs rows up to 350 + PAGE_SIZE(200) = 550: the 350 after the loaded 200,
+            // clamped to the 500 items available.
             assertEquals(500, viewModel.state.value.items.size)
+            assertEquals(items.map { it.id }, viewModel.state.value.items.map { it.id })
             assertFalse(viewModel.state.value.hasMore)
             val call = gateway.libraryGridCalls.last()
-            assertEquals(0u, call.offset)
-            assertEquals(550u, call.limit)
+            assertEquals(200u, call.offset)
+            assertEquals(350u, call.limit)
         }
     }
 
@@ -1088,6 +1090,121 @@ class LibraryViewModelTest {
             assertEquals(3, fake.childrenCalls.count { it.parentId == "boxA" })
             assertEquals(1, fake.childrenCalls.count { it.parentId == "boxB" })
             assertNull(viewModel.collectionPreview("boxB").first())
+        }
+    }
+
+    // ---- tail reads dropped when a requery replaced the items (identity guard) ----
+
+    @Test
+    fun `a next-page tail in flight across a requery is dropped, leaving a prefix of the new order`() = runTest {
+        val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
+        val nameOrder = (0 until 500).map { testCard(id = "name-$it", name = "Item $it") }
+        val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to nameOrder))
+
+        withLibraryViewModel(fake, view) { viewModel ->
+            assertEquals(200, viewModel.state.value.items.size)
+
+            val tailGate = CompletableDeferred<Unit>()
+            fake.libraryGridGate = tailGate
+            viewModel.loadNextPage()
+            runCurrent()
+            assertTrue(viewModel.state.value.isLoadingMore)
+
+            // The requery runs ungated and lands first, under the new order.
+            val yearOrder = (0 until 500).map { testCard(id = "year-$it", name = "Item $it") }
+            fake.libraryGridGate = null
+            fake.libraryGridByView = mapOf("view-1" to yearOrder)
+            viewModel.setSort(GridSortField.YEAR)
+            runCurrent()
+            assertEquals(yearOrder.take(200).map { it.id }, viewModel.state.value.items.map { it.id })
+
+            tailGate.complete(Unit)
+            runCurrent()
+
+            assertEquals(yearOrder.take(200).map { it.id }, viewModel.state.value.items.map { it.id })
+            assertTrue(viewModel.state.value.hasMore)
+            assertFalse(viewModel.state.value.isLoadingMore)
+        }
+    }
+
+    @Test
+    fun `a rail-jump tail in flight across a requery is dropped, leaving a prefix of the new order`() = runTest {
+        val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
+        val nameOrder = (0 until 500).map { testCard(id = "name-$it", name = "Item $it") }
+        val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to nameOrder))
+
+        withLibraryViewModel(fake, view) { viewModel ->
+            assertEquals(200, viewModel.state.value.items.size)
+
+            val tailGate = CompletableDeferred<Unit>()
+            fake.libraryGridGate = tailGate
+            var covered: Boolean? = null
+            val jump = launch { covered = viewModel.ensureLoadedThrough(250) }
+            runCurrent()
+            assertNull(covered)
+
+            val yearOrder = (0 until 500).map { testCard(id = "year-$it", name = "Item $it") }
+            fake.libraryGridGate = null
+            fake.libraryGridByView = mapOf("view-1" to yearOrder)
+            viewModel.setSort(GridSortField.YEAR)
+            runCurrent()
+
+            tailGate.complete(Unit)
+            runCurrent()
+            jump.join()
+
+            assertEquals(yearOrder.take(200).map { it.id }, viewModel.state.value.items.map { it.id })
+            // Coverage is reported against the new result, which stops short of the offset.
+            assertEquals(false, covered)
+            assertFalse(viewModel.state.value.isLoadingMore)
+        }
+    }
+
+    // ---- refresh summary ordering (refreshSeq) ---------------------------------
+
+    @Test
+    fun `an older refresh's counts and groups never land after a newer refresh's`() = runTest {
+        val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
+        val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to listOf(testCard(id = "a"))))
+        val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+        val firstSummaryGate = CompletableDeferred<Unit>()
+        var countsCalls = 0
+        val oldCounts = GridCounts(filtered = 1uL, total = 1uL)
+        val newCounts = GridCounts(filtered = 2uL, total = 2uL)
+        val oldGroups = listOf(GridGroup(key = "OLD", count = 1uL))
+        val newGroups = listOf(GridGroup(key = "NEW", count = 2uL))
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = changes
+
+            // The first refresh's summary is held; the second's answers at once with newer data.
+            override suspend fun libraryGridCounts(viewId: String, filters: GridFilters): GridCounts? {
+                if (++countsCalls == 1) {
+                    firstSummaryGate.await()
+                    return oldCounts
+                }
+                return newCounts
+            }
+
+            // The first refresh only reaches its groups read after the gate opens.
+            override suspend fun libraryGridGroups(viewId: String, sort: GridSort, filters: GridFilters): List<GridGroup>? =
+                if (firstSummaryGate.isCompleted) oldGroups else newGroups
+        }
+
+        withLibraryViewModel(gateway, view) { viewModel ->
+            // Init refresh published its items and is parked on its summary read.
+            assertEquals(1, countsCalls)
+            assertEquals(listOf("a"), viewModel.state.value.items.map { it.id })
+
+            changes.tryEmit(ChangeEvent.Refresh)
+            runCurrent()
+            assertEquals(newCounts, viewModel.state.value.counts)
+            assertEquals(newGroups, viewModel.state.value.groups)
+
+            firstSummaryGate.complete(Unit)
+            runCurrent()
+
+            assertEquals(newCounts, viewModel.state.value.counts)
+            assertEquals(newGroups, viewModel.state.value.groups)
         }
     }
 }

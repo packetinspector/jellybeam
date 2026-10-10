@@ -247,6 +247,7 @@ pub(crate) fn spawn(
             with_upgraded!(startup_weak, |s| {
                 ensure_index_group(&s, IndexGroup::Favorites).await;
                 ensure_index_group(&s, IndexGroup::Resume).await;
+                ensure_index_group(&s, IndexGroup::LatestWatched).await;
             });
 
             // Delta before reconcile, at every trigger: delta is the fast path (new/updated
@@ -1950,6 +1951,7 @@ async fn reconcile_timer(state: Weak<MirrorState>) {
         // Retries a startup build that failed.
         ensure_index_group(&state, IndexGroup::Favorites).await;
         ensure_index_group(&state, IndexGroup::Resume).await;
+        ensure_index_group(&state, IndexGroup::LatestWatched).await;
         sync_favorites(&state).await;
     }
 }
@@ -4309,6 +4311,11 @@ mod tests {
                 .collect::<rusqlite::Result<_>>()
                 .expect("rows")
         };
+
+        // A snapshot only rewrites rows written strictly before its start, and the write clock
+        // is whole milliseconds: let it tick past the resume rows so a fast host (release
+        // build) cannot land both in one millisecond and shield them.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
         // No `/Items` route yet: the fetch fails and the old flag must survive.
         sync_favorites(&mirror.state).await;

@@ -35,6 +35,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import uniffi.jellybeam_core.AccountIdentity
+import uniffi.jellybeam_core.AssOverlay
 import uniffi.jellybeam_core.ChapterInfoFfi
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.EpisodeNeighbors
@@ -44,6 +45,7 @@ import uniffi.jellybeam_core.ExternalSubtitleFfi
 import uniffi.jellybeam_core.FailedTrackFfi
 import uniffi.jellybeam_core.MediaSegment
 import uniffi.jellybeam_core.MediaSegmentKind
+import uniffi.jellybeam_core.NoHandle
 import uniffi.jellybeam_core.OsdDetailSetting
 import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.PlayMethodFfi
@@ -1460,6 +1462,22 @@ class PlaybackViewModelTest {
             val viewModel = buildViewModel(gateway, player, plan.itemId)
             withSession(viewModel) {
                 assertEquals(true, player.lastTolerateMislabeledLevels)
+            }
+        }
+
+    @Test
+    fun `full styling toggle is read from settings and passed through to the player's load call`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val plan = samplePlan()
+            val gateway = FakeCoreGateway(
+                preparePlaybackResult = Result.success(plan),
+                settings = defaultTestSettings().copy(subtitleFullAssStyling = true),
+            )
+            val player = FakePlaybackPlayer()
+
+            val viewModel = buildViewModel(gateway, player, plan.itemId)
+            withSession(viewModel) {
+                assertEquals(true, player.lastFullAssStyling)
             }
         }
 
@@ -4347,6 +4365,71 @@ class PlaybackViewModelTest {
             viewModel.chooseSubtitle(sidecarId)
             assertNotNull(viewModel.state.value.sidecarCues)
             assertEquals("a second pick reuses the parsed file", 1, gateway.fetchExternalSubtitleCalls.size)
+        }
+    }
+
+    @Test
+    fun `with full styling on an ass sidecar loads whole into the overlay, and leaving it hides it`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(seriesId = "series-1", externalSubtitles = listOf(sampleSidecar().copy(codec = "ass")))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val target = AssSidecarTarget(AssOverlay(NoHandle), "sidecar:5", 1uL)
+        player.assTarget = { index -> target.takeIf { index == 5 } }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            val tracks = pickerTracks()
+            player.fireTracksChanged(tracks)
+            viewModel.openTrackPicker()
+            val sidecarId = ExternalSubtitles.idFor(5)
+
+            viewModel.chooseSubtitle(sidecarId)
+
+            assertEquals(subtitlesOff, player.applyTrackDecisionCalls.last().first)
+            assertEquals(listOf(Triple("session-1", 5, "sidecar:5")), gateway.loadAssSidecarCalls)
+            assertTrue("never read as text", gateway.fetchExternalSubtitleCalls.isEmpty())
+            assertEquals(target, player.shownAssSidecars.last())
+            assertNull("no plain cues alongside it", viewModel.state.value.sidecarCues)
+            assertTrue(viewModel.state.value.trackPicker!!.subtitleTracks.single { it.id == sidecarId }.selected)
+
+            viewModel.chooseSubtitle(TrackMapping.toTrackInfos(tracks).single { it.kind == TrackKindFfi.SUBTITLE }.id)
+            assertNull("an embedded pick hides it", player.shownAssSidecars.last())
+        }
+    }
+
+    @Test
+    fun `a styled ass sidecar the overlay refuses goes back to Off with a notice`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(seriesId = "series-1", externalSubtitles = listOf(sampleSidecar().copy(codec = "ass")))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan)).apply { assSidecarLoads = false }
+        val player = FakePlaybackPlayer()
+        player.assTarget = { AssSidecarTarget(AssOverlay(NoHandle), "sidecar:$it", 1uL) }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.openTrackPicker()
+
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+
+            assertTrue("never shown", player.shownAssSidecars.all { it == null })
+            assertEquals(PlaybackEvent.SubtitleUnavailable, viewModel.events.replayCache.last())
+            assertTrue(viewModel.state.value.trackPicker!!.subtitleTracks.first().selected)
+        }
+    }
+
+    @Test
+    fun `with full styling off an ass sidecar is read as plain cues`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(seriesId = "series-1", externalSubtitles = listOf(sampleSidecar().copy(codec = "ass")))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan), externalSubtitleText = mapOf(5 to "ok"))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.openTrackPicker()
+
+            viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
+
+            assertEquals(listOf("session-1" to 5), gateway.fetchExternalSubtitleCalls)
+            assertTrue(gateway.loadAssSidecarCalls.isEmpty())
+            assertNotNull(viewModel.state.value.sidecarCues)
         }
     }
 

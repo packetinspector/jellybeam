@@ -426,10 +426,15 @@ Session threading rules shared by every path above:
 
 ### 3.2 External subtitles
 
-The device profile advertises `External` delivery for SRT/WebVTT/TTML, so the
-server hands back sidecar files as `MediaStream`s with `DeliveryUrl`. ASS/SSA
-sidecars are never side-loaded: Media3's SSA parser expands every overlap
-before it yields a cue, so no budget can bound it.
+The device profile advertises `External` delivery for SRT/WebVTT/TTML, and for
+ASS/SSA too whenever the server may answer Direct Play, so the server hands
+back sidecar files as `MediaStream`s with `DeliveryUrl`; without it an ASS
+sidecar makes the server refuse Direct Play (Direct Play mode) or transcode to
+burn it in (Auto), though the player draws it itself. Offered ASS sidecars, a
+transcode would hand out even an embedded ASS track as a sidecar instead of
+burning it in (§3.1), so a forced transcode (Cap, the fallback) never offers
+them, and an Auto answer that transcodes anyway is asked for again without
+them (one extra round trip, only when a transcode was unavoidable).
 `PlaybackPlan::external_subtitles` lists the chosen source's text sidecars,
 only streams with `IsExternal` (bitmap formats and off-server URLs are
 dropped). An embedded track the server also offers as External is left in the
@@ -456,7 +461,23 @@ Choosing a sidecar turns embedded text off and asks the core for the file
 failures are logged by index and failure class, never the URL). Kotlin parses
 it off the main thread with Media3's own parsers, outside the player, into
 `SidecarCues` segments (at most 8 cues each, so heavy overlap stays linear),
-cached for the session. Our own `SubtitleView`, a sibling of PlayerView's with
+cached for the session. An ASS/SSA file is parsed a `Dialogue` line at a time
+(SsaParser given the file's header and events `Format` line, as Matroska hands
+it over), since its whole-file parse expands every overlap first.
+
+With full styling on, an ASS/SSA sidecar goes to the styled overlay instead:
+`load_ass_sidecar` fetches it (10 s, 16 MiB, the overlay's per-track input
+cap) straight into the Rust engine, so the file never enters the JVM heap,
+and returns once the render thread has parsed it whole with substation's
+script reader under the same input limits as an embedded track. Nothing
+prunes that track, since nothing would deliver its lines again; the item
+holds one script at a time and frees it when it ends, and a script fetched
+for an item that has since ended is dropped (`AssOverlay.item`). The player
+polls the position every 40 ms and sends it as `AssTextRenderer` does for an
+embedded track, and it counts as a styled track showing, so the MKV's attached fonts
+load for it. Leaving a track deselects only that track's key, so a renderer
+disabled late can't blank a sidecar chosen meanwhile. The server serves
+sidecars as UTF-8 (it converts UTF-16; a UTF-8 byte-order mark is skipped). Our own `SubtitleView`, a sibling of PlayerView's with
 the same styling, is fed from the live position, sleeping until the next cue
 change scaled by the playback rate (at most 120 ms, so a seek lands promptly).
 The video is never re-prepared, so a pick or a switch never rebuffers. The row

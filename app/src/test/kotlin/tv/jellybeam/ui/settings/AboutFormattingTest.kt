@@ -121,4 +121,50 @@ class AboutFormattingTest {
 
         assertEquals(11f, AboutFormatting.fitMonoFontSp(chars = 40, availableSp = 82f, maxSp = 23f, minSp = 11f), 0.001f)
     }
+
+    // ---- aboutSnapScrollTarget ---------------------------------------------
+
+    @Test
+    fun `snap target stays at rest when nothing needs to scroll`() {
+        assertEquals(0, aboutSnapScrollTarget(currentScrollPx = 0, defaultTargetPx = 0, headerBottomPx = 230, maxScrollPx = 400))
+    }
+
+    @Test
+    fun `a small down request snaps to the header bottom`() {
+        assertEquals(230, aboutSnapScrollTarget(currentScrollPx = 0, defaultTargetPx = 20, headerBottomPx = 230, maxScrollPx = 400))
+        assertEquals(230, aboutSnapScrollTarget(currentScrollPx = 120, defaultTargetPx = 120, headerBottomPx = 230, maxScrollPx = 400))
+    }
+
+    @Test
+    fun `a request at or past the header bottom passes through`() {
+        assertEquals(230, aboutSnapScrollTarget(0, 230, 230, 400))
+        assertEquals(300, aboutSnapScrollTarget(0, 300, 230, 400))
+        assertEquals(260, aboutSnapScrollTarget(300, 260, 230, 400))
+    }
+
+    @Test
+    fun `an up request into the band snaps to the top`() {
+        assertEquals(0, aboutSnapScrollTarget(currentScrollPx = 300, defaultTargetPx = 100, headerBottomPx = 230, maxScrollPx = 400))
+    }
+
+    @Test
+    fun `the target is clamped to the scroll range`() {
+        assertEquals(350, aboutSnapScrollTarget(0, 500, 230, 350))
+        assertEquals(100, aboutSnapScrollTarget(0, 20, 230, 100))
+        assertEquals(0, aboutSnapScrollTarget(0, -40, 230, 400))
+    }
+
+    @Test
+    fun `an unmeasured header leaves the default target alone`() {
+        assertEquals(20, aboutSnapScrollTarget(0, 20, 0, 400))
+    }
+
+    @Test
+    fun `bottom slack lifts a short scroll range to the header bottom`() {
+        assertEquals(0, aboutBottomSlackPx(maxScrollWithoutSlackPx = 0, headerBottomPx = 230))
+        assertEquals(210, aboutBottomSlackPx(maxScrollWithoutSlackPx = 20, headerBottomPx = 230))
+        assertEquals(0, aboutBottomSlackPx(maxScrollWithoutSlackPx = 230, headerBottomPx = 230))
+        assertEquals(0, aboutBottomSlackPx(maxScrollWithoutSlackPx = 500, headerBottomPx = 230))
+        assertEquals(0, aboutBottomSlackPx(maxScrollWithoutSlackPx = 20, headerBottomPx = 0))
+    }
 }

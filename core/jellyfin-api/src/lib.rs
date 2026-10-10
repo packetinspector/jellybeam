@@ -1280,6 +1280,15 @@ impl JellyfinClient {
         delivery_url: &str,
         max_bytes: usize,
     ) -> Result<String, ApiError> {
+        text_from_delivery_body(self.fetch_delivery_bytes(delivery_url, max_bytes).await?)
+    }
+
+    /// [`Self::fetch_delivery_text`] without the UTF-8 check, for a reader that decodes the bytes itself.
+    pub async fn fetch_delivery_bytes(
+        &self,
+        delivery_url: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ApiError> {
         let url = self
             .delivery_url(delivery_url)
             .ok_or_else(|| ApiError::Decode("delivery url is off-server".to_string()))?;
@@ -1298,19 +1307,24 @@ impl JellyfinClient {
                 body: String::new(),
             });
         }
-        let body = read_capped_body(resp, max_bytes, "delivery text")
+        read_capped_body(resp, max_bytes, "delivery text")
             .await
             .map_err(|e| match e {
                 ApiError::Transport(_) => ApiError::Transport("delivery read failed".to_string()),
                 other => other,
-            })?;
-        text_from_delivery_body(body)
+            })
     }
 
     /// This client's server base URL (scheme://host[:port], no trailing
     /// slash) -- e.g. as a cache key for per-server measured state.
     pub fn base_url(&self) -> &str {
         &self.inner.base_url
+    }
+
+    /// The raw access token `image_url` carries in `ApiKey`, for a caller that formats image URLs
+    /// itself from [`Self::base_url`] (same credential rules as [`Self::image_url`]).
+    pub fn image_url_token(&self) -> &str {
+        &self.inner.token
     }
 
     /// Whether `other` is the same signed-in account and credential as this client, without

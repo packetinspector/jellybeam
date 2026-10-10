@@ -2,6 +2,7 @@ package tv.jellybeam.player
 
 import android.content.Context
 import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.C
@@ -19,6 +20,7 @@ import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecAdapter
 import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.text.TextOutput
 import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 import tv.jellybeam.perf.PerfLog
@@ -191,7 +193,21 @@ class JellybeamRenderersFactory(
      * change.
      */
     private val audioDecoderPreferences: () -> AudioDecoderPreferences = { AudioDecoderPreferences() },
+    /** Builds the raw-SSA renderers placed ahead of Media3's TextRenderer; null leaves text stock. */
+    private val ssaRenderers: ((TextOutput, Looper) -> List<Renderer>)? = null,
 ) : DefaultRenderersFactory(context) {
+
+    /** Media3's TextRenderer also claims raw SSA (then fails without legacy decoding); first wins. */
+    override fun buildTextRenderers(
+        context: Context,
+        output: TextOutput,
+        outputLooper: Looper,
+        extensionRendererMode: Int,
+        out: ArrayList<Renderer>,
+    ) {
+        ssaRenderers?.let { out.addAll(it(output, outputLooper)) }
+        super.buildTextRenderers(context, output, outputLooper, extensionRendererMode, out)
+    }
 
     /**
      * Platform renderer that opts out only for a user-selected audio codec. Required even for

@@ -7,6 +7,7 @@
 
 uniffi::setup_scaffolding!();
 
+mod ass;
 mod device_id;
 mod diag;
 mod discovery;
@@ -45,19 +46,21 @@ pub use seerr_types::{
     SeerrServiceServer, SeerrStatus, SeerrTvDetail,
 };
 pub use settings::{
-    LanguageSettings, PlaybackQuality, SeekPreviewSize, SegmentAction, Settings, StillWatchingMode,
-    StillWatchingSettings, SubtitleColorPreset, SubtitleModeSetting, SubtitlePositionPreset,
+    LanguageSettings, PlaybackQuality, ResumeArt, SeekPreviewSize, SegmentAction, Settings,
+    StillWatchingMode, StillWatchingSettings, SubtitleColorPreset, SubtitleModeSetting,
+    SubtitlePositionPreset,
 };
 pub use still_watching::StillWatchingDecision;
 pub use types::{
     AccountIdentity, AccountInfo, AudioSpatialKind, Card, ChangeEvent, ChapterInfoFfi, Decade,
     DeviceCaps, EmbeddedSubtitleFfi, EpisodeNeighbors, ExternalSubtitleFfi, FailedTrackFfi,
-    GridCounts, GridFilters, GridGroup, GridSort, GridSortField, ImageKind, ItemDetail,
-    LibraryGridPrefs, LiveSort, MediaSegment, MediaSegmentKind, MediaStreamInfo, MediaStreamKind,
-    MirrorItemCounts, MirrorLibrary, MirrorStats, PersonInfo, PlayMethodFfi, PlaybackOsdDetail,
-    PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails, ServerInfoSnapshot,
-    SortOrder, StatusFilter, SubtitleActionFfi, TrackDecisionFfi, TrackInfo, TrackKindFfi,
-    TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId, ViewSnapshot, WatchedFilter,
+    GridCounts, GridFilters, GridGroup, GridSort, GridSortField, ImageKind, ImageUrlPrefix,
+    ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MediaSegmentKind, MediaStreamInfo,
+    MediaStreamKind, MirrorItemCounts, MirrorLibrary, MirrorStats, PersonInfo, PlayMethodFfi,
+    PlaybackOsdDetail, PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails,
+    ServerInfoSnapshot, SortOrder, StatusFilter, SubtitleActionFfi, TrackDecisionFfi, TrackInfo,
+    TrackKindFfi, TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId, ViewSnapshot,
+    WatchedFilter,
 };
 
 /// docs/16 §2.7: the drawer's Favorites page as a library view; Kotlin recognises it by

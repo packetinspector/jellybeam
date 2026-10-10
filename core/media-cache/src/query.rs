@@ -21,7 +21,7 @@ const CARD_COLUMNS: &str = "id, item_type, name, primary_tag, primary_blurhash, 
      index_number, parent_index_number, series_id, series_primary_tag, \
      parent_backdrop_item_id, parent_backdrop_tag, last_played_date, overview, \
      premiere_date, is_virtual, series_name, library_id, backdrop_tag, thumb_tag, \
-     is_favorite";
+     is_favorite, parent_thumb_item_id, parent_thumb_tag";
 
 /// Watch state leaves the mirror already graced (docs/07 §1), so every browse surface agrees.
 fn row_to_card(row: &Row<'_>) -> rusqlite::Result<CardRow> {
@@ -59,6 +59,8 @@ fn row_to_card(row: &Row<'_>) -> rusqlite::Result<CardRow> {
         backdrop_tag: row.get(22)?,
         thumb_tag: row.get(23)?,
         is_favorite: row.get(24)?,
+        parent_thumb_item_id: row.get(25)?,
+        parent_thumb_tag: row.get(26)?,
     })
 }
 
@@ -594,6 +596,17 @@ fn seasons_of_series_checked(
     rows.collect()
 }
 
+/// [`season_episode_counts`]' seasons of one series.
+const SERIES_SEASONS_SQL: &str = "SELECT id, index_number FROM items WHERE item_type = 'Season' \
+     AND (series_id = ?1 OR (series_id IS NULL AND parent_id = ?1))";
+
+/// [`season_episode_counts`]' episode totals per season key: (parent_index_number, parent_id
+/// only when the index is NULL) -> (total, non-virtual).
+const SERIES_EPISODE_GROUPS_SQL: &str = "SELECT parent_index_number, \
+     CASE WHEN parent_index_number IS NULL THEN parent_id END, \
+     COUNT(*), COALESCE(SUM(is_virtual = 0), 0) \
+     FROM items WHERE item_type = 'Episode' AND series_id = ?1 GROUP BY 1, 2";
+
 /// Per-season episode counts under `series_id`, for `JellybeamCore::children`'s Series ->
 /// Seasons virtual-season filtering: a fully-unaired season still needs to select an empty
 /// grid, which needs per-season totals [`seasons_of_series_checked`] alone can't supply.
@@ -606,35 +619,46 @@ pub(crate) fn season_episode_counts(
     conn: &Connection,
     series_id: &str,
 ) -> rusqlite::Result<Vec<(String, i64, i64)>> {
-    // LEFT JOIN so a season with no episodes still contributes one (0, 0) group; an inner
-    // join would drop it, indistinguishable from "this season doesn't exist".
-    let sql = "SELECT s.id, \
-                      COUNT(e.id), \
-                      COALESCE(SUM(CASE WHEN e.is_virtual = 0 THEN 1 ELSE 0 END), 0) \
-               FROM items s \
-               LEFT JOIN items e \
-                 ON e.item_type = 'Episode' \
-                 AND e.series_id = ?1 \
-                 AND (e.parent_index_number = s.index_number \
-                      OR (e.parent_index_number IS NULL AND e.parent_id = s.id)) \
-               WHERE s.item_type = 'Season' \
-                 AND (s.series_id = ?1 OR (s.series_id IS NULL AND s.parent_id = ?1)) \
-               GROUP BY s.id";
-    let mut stmt = conn.prepare_cached(sql)?;
-    let rows = stmt.query_map(params![series_id], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })?;
-    rows.collect()
+    // One grouped pass over the series' episodes, mapped onto the seasons in Rust, so the
+    // episodes are read once rather than once per season. A season with no episodes still yields
+    // (id, 0, 0); matching mirrors `episodes_of_season_checked`.
+    let seasons: Vec<(String, Option<i32>)> = conn
+        .prepare_cached(SERIES_SEASONS_SQL)?
+        .query_map(params![series_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let groups: Vec<(Option<i32>, Option<String>, i64, i64)> = conn
+        .prepare_cached(SERIES_EPISODE_GROUPS_SQL)?
+        .query_map(params![series_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(seasons
+        .into_iter()
+        .map(|(id, index)| {
+            let (mut total, mut real) = (0, 0);
+            for (pin, pid, count, non_virtual) in &groups {
+                let hit = match (pin, index) {
+                    (Some(p), Some(i)) => *p == i,
+                    (None, _) => pid.as_deref() == Some(id.as_str()),
+                    _ => false,
+                };
+                if hit {
+                    total += count;
+                    real += non_virtual;
+                }
+            }
+            (id, total, real)
+        })
+        .collect())
 }
 
 /// `children_checked`'s Season branch: resolves episodes by (series, season number) instead
 /// of literal `parent_id` equality; see that call site for the duplicate-Season bug this
 /// fixes. The `OR`'s second arm is a `parent_id` fallback for an episode with no
 /// `ParentIndexNumber` at all, so it doesn't silently vanish from every season's list.
-/// `INDEXED BY` is deliberately not pinned here: the `OR` gives the planner two legitimate
-/// ways to serve this from `idx_items_series`, and pinning one risks a "no query solution"
-/// error later; `episodes_of_season_query_does_not_scan_items` asserts it never degrades to
-/// a full scan.
+/// The statement comes from [`episodes_of_season_sql`]; `INDEXED BY` is deliberately not
+/// pinned, and `episodes_of_season_query_does_not_scan_items` asserts it never degrades to a
+/// full scan.
 fn episodes_of_season_checked(
     conn: &Connection,
     season_id: &str,
@@ -644,20 +668,40 @@ fn episodes_of_season_checked(
     offset: u32,
     limit: u32,
 ) -> rusqlite::Result<Vec<CardRow>> {
-    let sql = format!(
-        "SELECT {CARD_COLUMNS} FROM items \
-         WHERE item_type = 'Episode' AND series_id = ?1 \
-         AND (parent_index_number = ?2 \
-              OR (parent_index_number IS NULL AND parent_id = ?3)) \
-         ORDER BY {} LIMIT ?4 OFFSET ?5",
-        sort_clause(sort)
-    );
+    let sql = episodes_of_season_sql(sort);
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(
         params![series_id, season_index, season_id, limit, offset],
         row_to_card,
     )?;
     rows.collect()
+}
+
+/// Index order gets a `UNION ALL` of the two seekable branches (`(series_id,
+/// parent_index_number)` and the NULL-index `parent_id` fallback): the equivalent `OR` seeks on
+/// `series_id` alone and filters. The ORDER BY of a compound select must name result columns,
+/// which `parent_index_number, index_number` are. Other sorts keep the `OR` form.
+fn episodes_of_season_sql(sort: Sort) -> String {
+    if sort == Sort::IndexNumber {
+        return format!(
+            "SELECT {c} FROM items WHERE item_type = 'Episode' AND series_id = ?1 \
+                AND parent_index_number = ?2 \
+             UNION ALL \
+             SELECT {c} FROM items WHERE item_type = 'Episode' AND series_id = ?1 \
+                AND parent_index_number IS NULL AND parent_id = ?3 \
+             ORDER BY {o} LIMIT ?4 OFFSET ?5",
+            c = CARD_COLUMNS,
+            o = sort_clause(sort)
+        );
+    }
+    format!(
+        "SELECT {CARD_COLUMNS} FROM items \
+         WHERE item_type = 'Episode' AND series_id = ?1 \
+         AND (parent_index_number = ?2 \
+              OR (parent_index_number IS NULL AND parent_id = ?3)) \
+         ORDER BY {} LIMIT ?4 OFFSET ?5",
+        sort_clause(sort)
+    )
 }
 
 /// [`favorites`]' statement. Only a Series or Season looks at its episodes, each through one
@@ -801,11 +845,15 @@ pub(crate) fn cards_by_ids(conn: &Connection, ids: &[String]) -> Vec<CardRow> {
 /// every other collection type stays per-item. `hide_watched` excludes displayed-watched rows (docs/07 §1);
 /// deliberately not threaded into `resume()`/`next_up()`, which are unwatched/in-progress by
 /// construction.
+///
+/// `watched_index_ready`: whether [`IndexGroup::LatestWatched`](crate::schema::IndexGroup)
+/// is built; a hide-watched grouped read uses it, else the older index (never empty).
 pub(crate) fn latest(
     conn: &Connection,
     view_id: &str,
     limit: u32,
     hide_watched: bool,
+    watched_index_ready: bool,
 ) -> Vec<CardRow> {
     let collection_type: Option<String> = conn
         .query_row(
@@ -819,7 +867,7 @@ pub(crate) fn latest(
     };
 
     if collection_type == "tvshows" {
-        return latest_grouped_series(conn, view_id, limit, hide_watched);
+        return latest_grouped_series(conn, view_id, limit, hide_watched, watched_index_ready);
     }
 
     let item_types = crate::item_types_for_collection(&collection_type);
@@ -856,6 +904,24 @@ pub(crate) fn latest(
     })
 }
 
+/// `is_virtual = 0` (see `latest`) also means a series whose only recent episodes are
+/// virtual placeholders drops out of the grouping entirely, matching Jellyfin Web.
+fn grouped_series_sql(index: &str, played_filter: &str, cols: &str) -> String {
+    format!(
+        "WITH grouped AS (\
+             SELECT series_id, MAX(date_created) AS newest_episode \
+             FROM items INDEXED BY {index} \
+             WHERE library_id = ?1 AND item_type = 'Episode' AND series_id IS NOT NULL \
+             AND is_virtual = 0{played_filter} \
+             GROUP BY series_id \
+             ORDER BY newest_episode DESC \
+             LIMIT ?2\
+         ) \
+         SELECT {cols} FROM grouped JOIN items ON items.id = grouped.series_id \
+         ORDER BY grouped.newest_episode DESC"
+    )
+}
+
 /// Jellyfin's Latest-Media semantics for a TV library: one tile per series, ordered by its
 /// most-recently added episode, not one tile per episode (otherwise a binge-worthy season
 /// floods the shelf with the same poster). Mirrors `/Users/{id}/Items/Latest?GroupItems=true`.
@@ -869,28 +935,20 @@ fn latest_grouped_series(
     view_id: &str,
     limit: u32,
     hide_watched: bool,
+    watched_index_ready: bool,
 ) -> Vec<CardRow> {
+    // `INDEXED BY` a missing index is an error, so the widened one is gated on its group.
+    let index = if hide_watched && watched_index_ready {
+        crate::schema::LATEST_WATCHED_INDEX
+    } else {
+        "idx_items_latest_series"
+    };
     let played_filter = if hide_watched {
         concat!(" AND NOT ", crate::watch_grace::watched_sql!(""))
     } else {
         ""
     };
-    // `is_virtual = 0` (see `latest`) also means a series whose only recent episodes are
-    // virtual placeholders drops out of the grouping entirely, matching Jellyfin Web.
-    let sql = format!(
-        "WITH grouped AS (\
-             SELECT series_id, MAX(date_created) AS newest_episode \
-             FROM items INDEXED BY idx_items_latest_series \
-             WHERE library_id = ?1 AND item_type = 'Episode' AND series_id IS NOT NULL \
-             AND is_virtual = 0{played_filter} \
-             GROUP BY series_id \
-             ORDER BY newest_episode DESC \
-             LIMIT ?2\
-         ) \
-         SELECT {cols} FROM grouped JOIN items ON items.id = grouped.series_id \
-         ORDER BY grouped.newest_episode DESC",
-        cols = qualified_card_columns()
-    );
+    let sql = grouped_series_sql(index, played_filter, &qualified_card_columns());
     let result = (|| -> rusqlite::Result<Vec<CardRow>> {
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![view_id, limit], row_to_card)?;
@@ -1272,6 +1330,58 @@ mod tests {
         }
     }
 
+    /// Hide-watched grouping reads the widened `idx_items_latest_series_watched` entirely from
+    /// the index (COVERING, no temp b-tree); the pre-widening index only reaches INDEX.
+    #[test]
+    fn latest_grouped_series_hide_watched_is_covering_on_the_widened_index() {
+        let (_dir, conn) = open_test_db();
+        let watched = concat!(" AND NOT ", crate::watch_grace::watched_sql!(""));
+        let plan_for = |index: &str| {
+            explain(
+                &conn,
+                &grouped_series_sql(index, watched, "items.id"),
+                params![String::from("lib1"), 10u32],
+            )
+        };
+        let plan = plan_for(crate::schema::LATEST_WATCHED_INDEX);
+        assert!(
+            plan.iter()
+                .any(|l| l.contains("COVERING INDEX idx_items_latest_series_watched")),
+            "plan: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|l| l.contains("TEMP B-TREE FOR GROUP BY")),
+            "plan: {plan:?}"
+        );
+    }
+
+    /// The widened-index route and the fallback (group not built yet) return the same cards.
+    #[test]
+    fn latest_grouped_series_same_rows_with_or_without_the_widened_index() {
+        let (_dir, mut conn) = open_test_db();
+        conn.execute(
+            "INSERT INTO views (id, name, collection_type, sort_index) VALUES ('shows', 'Shows', 'tvshows', 0)",
+            [],
+        )
+        .expect("insert view");
+        let series = uuid_n(1);
+        apply_upsert_items_scoped(
+            &mut conn,
+            &[item_dto(&series, "Series", None, BaseItemKind::Series)],
+            Some("shows"),
+        )
+        .expect("insert series");
+        let mut ep = item_dto(&uuid_n(2), "S1E1", Some(&series), BaseItemKind::Episode);
+        ep.series_id = Some(uuid::Uuid::parse_str(&series).expect("uuid"));
+        ep.date_created = Some("2024-06-01T00:00:00Z".parse().expect("date"));
+        apply_upsert_items_scoped(&mut conn, &[ep], Some("shows")).expect("insert episode");
+
+        let fallback = latest(&conn, "shows", 10, true, false);
+        let widened = latest(&conn, "shows", 10, true, true);
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback, widened);
+    }
+
     #[test]
     fn collection_membership_children_query_uses_index_not_scan() {
         let (_dir, conn) = open_test_db();
@@ -1463,6 +1573,8 @@ mod tests {
         ep.series_primary_image_tag = Some("series-poster".to_string());
         ep.parent_backdrop_item_id = Some(uuid::Uuid::parse_str(&uuid_n(9)).expect("uuid"));
         ep.parent_backdrop_image_tags = vec!["parent-backdrop".to_string()];
+        ep.parent_thumb_item_id = Some(uuid::Uuid::parse_str(&uuid_n(8)).expect("uuid"));
+        ep.parent_thumb_image_tag = Some("parent-thumb".to_string());
         apply_upsert_items(&mut conn, &[ep]).expect("insert");
 
         let rows = children(&conn, &series, Sort::IndexNumber, 0, 10);
@@ -1477,6 +1589,11 @@ mod tests {
             rows[0].parent_backdrop_tag.as_deref(),
             Some("parent-backdrop")
         );
+        assert_eq!(
+            rows[0].parent_thumb_item_id.as_deref(),
+            Some(uuid_n(8).as_str())
+        );
+        assert_eq!(rows[0].parent_thumb_tag.as_deref(), Some("parent-thumb"));
     }
 
     /// `CardRow::is_virtual`/`premiere_date` must round-trip: `LocationType == "Virtual"`
@@ -1778,26 +1895,13 @@ mod tests {
         assert_eq!(find_counts(&counts, &season2), &(season2.clone(), 1, 0));
     }
 
-    /// The aggregate join must not degrade to a full `items` scan on either side.
+    /// Neither of the season-count statements degrades to a full `items` scan.
     #[test]
     fn season_episode_counts_query_does_not_scan_items() {
         let (_dir, conn) = open_test_db();
-        let plan = explain(
-            &conn,
-            "SELECT s.id, COUNT(e.id), \
-                    COALESCE(SUM(CASE WHEN e.is_virtual = 0 THEN 1 ELSE 0 END), 0) \
-             FROM items s \
-             LEFT JOIN items e \
-               ON e.item_type = 'Episode' \
-               AND e.series_id = ?1 \
-               AND (e.parent_index_number = s.index_number \
-                    OR (e.parent_index_number IS NULL AND e.parent_id = s.id)) \
-             WHERE s.item_type = 'Season' \
-               AND (s.series_id = ?1 OR (s.series_id IS NULL AND s.parent_id = ?1)) \
-             GROUP BY s.id",
-            params![String::from("series-1")],
-        );
-        assert_no_items_scan(&plan);
+        for sql in [SERIES_SEASONS_SQL, SERIES_EPISODE_GROUPS_SQL] {
+            assert_no_items_scan(&explain(&conn, sql, params![String::from("series-1")]));
+        }
     }
 
     #[test]
@@ -2028,7 +2132,7 @@ mod tests {
         )
         .expect("insert");
 
-        let rows = latest(&conn, "lib1", 10, false);
+        let rows = latest(&conn, "lib1", 10, false, false);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "A Movie");
     }
@@ -2061,8 +2165,8 @@ mod tests {
         )
         .expect("insert");
 
-        let library_a_rows = latest(&conn, "library-a", 10, false);
-        let library_b_rows = latest(&conn, "library-b", 10, false);
+        let library_a_rows = latest(&conn, "library-a", 10, false, false);
+        let library_b_rows = latest(&conn, "library-b", 10, false, false);
         assert_eq!(
             library_a_rows
                 .iter()
@@ -2100,7 +2204,7 @@ mod tests {
         )
         .expect("insert");
 
-        assert!(latest(&conn, "lib1", 10, false).is_empty());
+        assert!(latest(&conn, "lib1", 10, false, false).is_empty());
     }
 
     /// `hide_watched = true` excludes an already-played item; `false` keeps it.
@@ -2129,7 +2233,7 @@ mod tests {
         let unwatched = item_dto(&uuid_n(2), "Unwatched Movie", None, BaseItemKind::Movie);
         apply_upsert_items_scoped(&mut conn, &[watched, unwatched], Some("lib1")).expect("insert");
 
-        let with_watched = latest(&conn, "lib1", 10, false);
+        let with_watched = latest(&conn, "lib1", 10, false, false);
         assert_eq!(
             with_watched
                 .iter()
@@ -2139,7 +2243,7 @@ mod tests {
             "hide_watched=false must keep today's behavior -- both items show"
         );
 
-        let hidden = latest(&conn, "lib1", 10, true);
+        let hidden = latest(&conn, "lib1", 10, true, false);
         assert_eq!(
             hidden.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["Unwatched Movie"],
@@ -2163,7 +2267,7 @@ mod tests {
         apply_upsert_items_scoped(&mut conn, &[virtual_movie, real_movie], Some("lib1"))
             .expect("insert");
 
-        let rows = latest(&conn, "lib1", 10, false);
+        let rows = latest(&conn, "lib1", 10, false, false);
         assert_eq!(
             rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["Real Movie"],
@@ -2207,7 +2311,7 @@ mod tests {
         apply_upsert_items_scoped(&mut conn, &[ep_a1, ep_a2, ep_b1], Some("shows"))
             .expect("insert episodes");
 
-        let rows = latest(&conn, "shows", 10, false);
+        let rows = latest(&conn, "shows", 10, false, false);
         assert_eq!(
             rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["Series A", "Series B"],
@@ -2252,7 +2356,7 @@ mod tests {
         apply_upsert_items_scoped(&mut conn, &[ep_a_virtual, ep_b_real], Some("shows"))
             .expect("insert episodes");
 
-        let rows = latest(&conn, "shows", 10, false);
+        let rows = latest(&conn, "shows", 10, false, false);
         assert_eq!(
             rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["Real Series"],
@@ -2318,7 +2422,7 @@ mod tests {
         apply_upsert_items_scoped(&mut conn, &[ep_a1, ep_b1, ep_b2], Some("shows"))
             .expect("insert episodes");
 
-        let with_watched = latest(&conn, "shows", 10, false);
+        let with_watched = latest(&conn, "shows", 10, false, false);
         assert_eq!(
             with_watched
                 .iter()
@@ -2328,7 +2432,7 @@ mod tests {
             "hide_watched=false must keep today's behavior -- both series show"
         );
 
-        let hidden = latest(&conn, "shows", 10, true);
+        let hidden = latest(&conn, "shows", 10, true, false);
         assert_eq!(
             hidden.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["Series B"],
@@ -2802,11 +2906,7 @@ mod tests {
         let (_dir, conn) = open_test_db();
         let plan = explain(
             &conn,
-            "SELECT id FROM items \
-             WHERE item_type = 'Episode' AND series_id = ?1 \
-             AND (parent_index_number = ?2 \
-                  OR (parent_index_number IS NULL AND parent_id = ?3)) \
-             ORDER BY parent_index_number ASC, index_number ASC LIMIT ?4 OFFSET ?5",
+            &episodes_of_season_sql(Sort::IndexNumber),
             params![
                 String::from("series-1"),
                 1i32,
@@ -2816,6 +2916,68 @@ mod tests {
             ],
         );
         assert_no_items_scan(&plan);
+        let text = plan.join("\n");
+        assert!(
+            text.contains("parent_index_number"),
+            "seek on (series_id, parent_index_number): {text}"
+        );
+        assert!(
+            !text.contains("TEMP B-TREE"),
+            "both branches arrive in index order: {text}"
+        );
+    }
+
+    /// The UNION ALL form returns exactly what the `OR` form does, in the same order,
+    /// including NULL-index episodes that fall back to `parent_id`.
+    #[test]
+    fn episodes_of_season_union_matches_or_form() {
+        let (_dir, mut conn) = open_test_db();
+        let series = uuid_n(1);
+        let season = uuid_n(2);
+        let other = uuid_n(3);
+        let series_uuid = uuid::Uuid::parse_str(&series).expect("uuid");
+        let mut season_dto = item_dto(&season, "Season 1", Some(&series), BaseItemKind::Season);
+        season_dto.series_id = Some(series_uuid);
+        season_dto.index_number = Some(1);
+        let mut dtos = vec![season_dto];
+        let mut n = 10u8;
+        for (pin, parent, idx) in [
+            (Some(1), &season, 2),
+            (Some(1), &season, 1),
+            (None, &season, 3),
+            (None, &other, 4),
+            (Some(2), &other, 1),
+        ] {
+            let mut ep = item_dto(
+                &uuid_n(n),
+                &format!("E{n}"),
+                Some(parent),
+                BaseItemKind::Episode,
+            );
+            ep.series_id = Some(series_uuid);
+            ep.season_id = Some(uuid::Uuid::parse_str(parent).expect("uuid"));
+            ep.parent_index_number = pin;
+            ep.index_number = Some(idx);
+            dtos.push(ep);
+            n += 1;
+        }
+        apply_upsert_items(&mut conn, &dtos).expect("insert");
+        let or_sql = format!(
+            "SELECT {CARD_COLUMNS} FROM items WHERE item_type = 'Episode' AND series_id = ?1 \
+             AND (parent_index_number = ?2 OR (parent_index_number IS NULL AND parent_id = ?3)) \
+             ORDER BY {} LIMIT ?4 OFFSET ?5",
+            sort_clause(Sort::IndexNumber)
+        );
+        let mut stmt = conn.prepare(&or_sql).expect("prepare");
+        let expected: Vec<CardRow> = stmt
+            .query_map(params![series, 1i32, season, 100u32, 0u32], row_to_card)
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        let got = episodes_of_season_checked(&conn, &season, &series, 1, Sort::IndexNumber, 0, 100)
+            .expect("union");
+        assert_eq!(expected.len(), 3);
+        assert_eq!(expected, got);
     }
 
     #[test]
@@ -3494,7 +3656,7 @@ mod tests {
         .expect("shows");
 
         let shown = |view: &str| {
-            let mut v: Vec<_> = latest(&conn, view, 10, true)
+            let mut v: Vec<_> = latest(&conn, view, 10, true, false)
                 .into_iter()
                 .map(|r| r.name)
                 .collect();

@@ -59,6 +59,29 @@ Pick the amd64 service only when the arm64 image will not build or run on
 your host (an Intel machine, or a Docker runtime without amd64 emulation
 inside arm64 containers): `JELLYBEAM_BUILD_SERVICE=android-build`.
 
+## Local substation checkout
+
+`core/ass-render` pins substation (the styled-subtitle renderer) to a git
+commit. To build against a local checkout instead, keep both gitignored
+files below; never commit either, or a local path.
+
+- `core/.cargo/config.toml` patches the git source with a path relative to
+  `core/`, so the same file resolves on the host and in the container:
+
+  ```toml
+  [patch."https://github.com/packetinspector/substation"]
+  substation = { path = "../../substation" }
+  ```
+
+- `docker-compose.override.yml` mounts that checkout read-only at
+  `/substation` for both services (`- <checkout>:/substation:ro`), then
+  `docker compose up -d --force-recreate <service>`.
+
+With the patch active, cargo rewrites the substation entries of
+`core/Cargo.lock` without their git source; commit `Cargo.lock` only as
+generated with the patch moved aside. Gradle reruns cargo when the
+checkout's sources change.
+
 ## Running a debug build on an emulator or device
 
 `install` is release-only. A debug APK goes on with plain `adb` from the
@@ -145,6 +168,10 @@ What the release APK is built with, so nothing ships half-optimized:
   `.symtab`. AGP strips the packaged copy instead, which needs `ndkVersion` in
   `app/build.gradle.kts` to match the image's NDK; with no match AGP silently packages the
   unstripped library.
+- 32-bit ARM: the Rust code is built with `+neon` (`cargoNdkBuild` in `app/build.gradle.kts`),
+  as the NDK already builds the bundled C (SQLite, ring) and FFmpeg. Nothing newer: no VFPv4,
+  no `target-cpu`. `llvm-readelf -A` on the armeabi-v7a `libjellybeam_core.so` must read
+  ARM v7 / VFPv3 / NEONv1.
 - ABIs: `abiFilters` keeps only the three slices the core is built for. JNA's AAR brings
   x86, mips and armeabi copies of `libjnidispatch.so`; packaged, they let such a device
   install an APK that has no core to load.

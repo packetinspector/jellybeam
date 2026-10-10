@@ -77,7 +77,8 @@ it, ranked by contribution to "feels like Jellybeam".
    No section header. Absent rows dropped.
 9. **Cast row.** Header "Cast" (20px SEMIBOLD). 72px circular portraits,
    name (12px, 1-line) + role (11px TERTIARY, 1-line), 84px columns.
-   HARD RULE: skip anyone without a portrait — no gray placeholder circles.
+   HARD RULE: skip anyone without a portrait — no gray placeholder circles
+   (the pulsing circles of §Loading state exist only while the row loads).
    Row absent if none survive. Edge-faded horizontal strip. Select on a
    card opens that person's page (§Person page).
 10. **Series-specific meta line:** `YearRange · N seasons · OfficialRating`.
@@ -309,3 +310,50 @@ the repo). Applies to Movie, Series and Episode alike.
   episode shelf and Home's rows use.
 - **Poster.** 148×222dp, 4dp radius, 26dp from the text column (was
   150×227, 3dp, 24dp).
+
+## Loading state
+
+Movie, Series and Episode pages draw their final layout on the first frame.
+
+- **Rule.** Every above-the-fold region whose data is still loading shows a quiet
+  pulsing skeleton at its final size. Content replaces it with a 150 ms fade
+  (alpha only), so nothing below it moves. A region whose source settles empty
+  or failed collapses once; that is the only allowed movement. Content that is
+  already there on the first frame (a revisit, or the mirror record's
+  overview and genres arriving ahead of the live record) shows with no fade
+  and no skeleton. Below-the-fold rows (Similar Titles, collections, extras)
+  reserve nothing.
+- **Skeletons.** `SurfaceRaised` shapes on the one shared skeleton pulse
+  (docs/07 §6), plain non-focusable boxes: focus is untouched (docs/15 §2,
+  §7). Text regions are as tall as the real text, measured from the same
+  text style; the rest share the real composable's constants.
+- **Cast circles.** The pulsing circles in the Cast skeleton are the one place
+  a portrait-less circle is drawn, and only while loading (item 9's hard rule
+  is about the loaded row). The cast row reserves its role line on every card
+  of a role-showing row, so its height never depends on which portraits are
+  composed.
+
+| Region | Page | Settled when | Content when |
+| --- | --- | --- | --- |
+| Eyebrow | Movie | library name and detail record settled | eyebrow text exists |
+| Eyebrow | Series | library name settled | library name exists |
+| Eyebrow | Episode | card-only, never loads | |
+| Rating badge + genre chips | Movie | detail record settled | a rating or a genre |
+| Meta line | Series, Episode | detail record settled | any meta item (the card's year and runtime count) |
+| Credits line | all | detail record settled | a director, writer or studio |
+| Spec capsule | Movie, Episode | detail record settled | any spec field (Movie: file size too) |
+| Cast row | all | detail record settled | a cast member with a portrait |
+| Up Next panel | Episode | next-episode lookup settled | a next episode |
+| Season chips | Series | seasons settled | two or more seasons |
+| Episode shelf | Series | seasons settled, a season selected, its episodes loaded | any episode |
+
+The Episode page's lower band (spec capsule left, Up Next right) exists
+while either cell is loading or has content, decided from those states and
+not from raw data, so Up Next keeps its place when the spec strip arrives.
+The Movie genre row keeps one chip's height until the chips settle.
+
+Accepted one-time collapses, because their emptiness is only known after the
+fact: a Cast row whose members all lack portraits, and the Up Next panel on a
+last episode. Each reserves its skeleton until its source settles, then
+collapses once, which is the rule's single allowed movement. A Series whose
+record already reports one season or none never shows the chip skeleton.

@@ -1,5 +1,6 @@
 package tv.jellybeam.data
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -31,6 +32,8 @@ class LaunchWarmupTest {
     private inner class Gateway(
         private val restored: AccountInfo? = account,
         private val openMirrorError: Throwable? = null,
+        /** Holds [homeSnapshot] open until completed, so a test can look at the in-flight prefetch. */
+        private val snapshotGate: CompletableDeferred<Unit>? = null,
     ) : CoreGateway by FakeCoreGateway() {
         val calls = mutableListOf<String>()
         val requestedLayouts = mutableListOf<HomeLayout>()
@@ -49,6 +52,7 @@ class LaunchWarmupTest {
         override suspend fun homeSnapshot(layout: HomeLayout): HomeSnapshot {
             calls += "homeSnapshot"
             requestedLayouts += layout
+            snapshotGate?.await()
             return snapshot
         }
 
@@ -148,5 +152,71 @@ class LaunchWarmupTest {
         assertNull(warmup.takeSession())
         assertNull(warmup.takeHome())
         assertEquals(0, gateway.events.subscriptionCount.value)
+    }
+
+    @Test
+    fun `peekHome is null while the prefetch is still running`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val warmup = LaunchWarmup(Gateway(snapshotGate = gate), backgroundScope)
+        runCurrent()
+
+        assertNull(warmup.peekHome())
+    }
+
+    @Test
+    fun `peekHome returns the snapshot once the prefetch completed`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val warmup = LaunchWarmup(Gateway(snapshotGate = gate), backgroundScope)
+        runCurrent()
+        gate.complete(Unit)
+        runCurrent()
+
+        val peeked = warmup.peekHome()
+        assertSame(snapshot, peeked?.snapshot)
+        assertFalse(peeked!!.stale)
+    }
+
+    @Test
+    fun `peekHome takes nothing, so takeHome still returns the prefetch`() = runTest {
+        val warmup = LaunchWarmup(Gateway(), backgroundScope)
+        runCurrent()
+
+        assertNotNull(warmup.peekHome())
+        assertNotNull(warmup.peekHome())
+        assertSame(snapshot, warmup.takeHome()?.snapshot)
+    }
+
+    @Test
+    fun `peekHome is null after takeHome`() = runTest {
+        val warmup = LaunchWarmup(Gateway(), backgroundScope)
+        runCurrent()
+
+        warmup.takeHome()
+
+        assertNull(warmup.peekHome())
+    }
+
+    @Test
+    fun `peekHome is null after discard and for a signed-out launch`() = runTest {
+        val discarded = LaunchWarmup(Gateway(), backgroundScope)
+        runCurrent()
+        discarded.discard()
+        assertNull(discarded.peekHome())
+
+        val signedOut = LaunchWarmup(Gateway(restored = null), backgroundScope)
+        runCurrent()
+        assertNull(signedOut.peekHome())
+    }
+
+    @Test
+    fun `peekHome reports a change seen so far as stale without releasing the watcher`() = runTest {
+        val gateway = Gateway()
+        val warmup = LaunchWarmup(gateway, backgroundScope)
+        runCurrent()
+        gateway.events.emit(ChangeEvent.Refresh)
+        runCurrent()
+
+        assertTrue(warmup.peekHome()!!.stale)
+        assertEquals(1, gateway.events.subscriptionCount.value)
     }
 }

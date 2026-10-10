@@ -222,6 +222,11 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
         args("--features", "update-test-fixture")
         environment("JELLYBEAM_UPDATE_TEST_CA", rootProject.file("internal/updates/ca.pem").absolutePath)
     }
+    // docs/06: 32-bit ARM Rust code gets NEON (the bundled C code already has it, so no device is
+    // newly excluded); nothing newer such as VFPv4, and never a host-tuned target-cpu.
+    val armv7RustFlags = "-C target-feature=+neon"
+    environment("CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS", armv7RustFlags)
+    inputs.property("armv7RustFlags", armv7RustFlags)
     inputs.property("updateFixture", updateFixtureBuild)
     inputs.dir(coreDir.dir("app-updates/src"))
     inputs.file(coreDir.file("app-updates/Cargo.toml"))
@@ -231,6 +236,15 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
     inputs.dir(coreDir.dir("jellyfin-api/src"))
     inputs.dir(coreDir.dir("seerr-api/src"))
     inputs.dir(coreDir.dir("playback-policy/src"))
+    inputs.dir(coreDir.dir("ass-render/src"))
+    inputs.file(coreDir.file("ass-render/Cargo.toml"))
+    // docs/06: a local substation checkout patched in through core/.cargo must rebuild on edit.
+    val substationOverride = coreDir.file(".cargo/config.toml").asFile
+    if (substationOverride.exists()) {
+        inputs.file(substationOverride)
+        inputs.dir(coreDir.dir("../../substation/src")).optional()
+        inputs.dir(coreDir.dir("../../substation/third_party/harfrust/src")).optional()
+    }
     inputs.file(coreDir.file("Cargo.toml"))
     inputs.file(coreDir.file("Cargo.lock"))
     inputs.file(coreDir.file("ffi/Cargo.toml"))

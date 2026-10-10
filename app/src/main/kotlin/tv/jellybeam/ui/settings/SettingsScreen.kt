@@ -1,5 +1,6 @@
 package tv.jellybeam.ui.settings
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
@@ -143,7 +144,6 @@ fun SettingsScreen(
     // §3's per-section pane memory: which pane row/chip key was last focused in each section, so a
     // return via the rail (not a becoming-top restore, that's [memory]'s job) can re-enter there.
     val paneLastKey = rememberSaveable(saver = PaneLastKeySaver) { mutableStateMapOf() }
-    val paneEntryRequester = remember { FocusRequester() }
 
     // Keyed on [memory], not [activeSection], so it observes every focus move for this screen's
     // lifetime. Only a pane key, never a rail key, is recorded (see [isPaneKey]).
@@ -173,47 +173,54 @@ fun SettingsScreen(
         CompositionLocalProvider(LocalSettingsFocusMemory provides memory) {
             // One pane, two placements: beside the rail, or (About) over the full page height.
             val pane: @Composable (Modifier, Dp) -> Unit = { paneModifier, contentPadding ->
-                // §3 pane entry point: `enter` hands focus to [paneEntryRequester], carried by
-                // this section's recorded last-focused row/chip or else by the first row (never
-                // the spatially nearest); a section switch disposes the pane and its claim.
-                val entryKey = paneLastKey[activeSection.name]
-                val paneEntry = remember(activeSection, entryKey) { SettingsPaneEntryTarget(entryKey, paneEntryRequester) }
-                Column(
-                    modifier = paneModifier
-                        .focusProperties {
-                            enter = { if (paneEntry.attachedCount > 0) paneEntryRequester else FocusRequester.Default }
-                            // Up/Down never leave the pane (past the last or first row the
-                            // D-pad stops), and Left returns to the active section's rail row
-                            // rather than the spatially nearest one, which would switch sections.
-                            exit = { direction ->
-                                when (direction) {
-                                    FocusDirection.Up, FocusDirection.Down -> FocusRequester.Cancel
-                                    FocusDirection.Left -> railFocusRequesters.getValue(activeSection)
-                                    else -> FocusRequester.Default
+                // §3 pane entry point: `enter` hands focus to this section's recorded last-focused
+                // row/chip or else the first row (never the spatially nearest). One target per
+                // section, reading the key only inside `enter`, so a focus move recomposes nothing.
+                val paneEntry = remember(activeSection) {
+                    val section = activeSection
+                    SettingsPaneEntryTarget { paneLastKey[section.name] }
+                }
+                val paneScroll = rememberSaveable(activeSection, saver = ScrollState.Saver) { ScrollState(0) }
+                // About alone snaps its scroll so the brand header is never half-clipped.
+                val aboutSnap = remember(paneScroll) { AboutScrollSnap(paneScroll) }
+                AboutSnapScope(aboutSnap.takeIf { activeSection == SettingsSection.ABOUT }) {
+                    Column(
+                        modifier = paneModifier
+                            .focusProperties {
+                                enter = { paneEntry.resolve() ?: FocusRequester.Default }
+                                // Up/Down never leave the pane (past the last or first row the
+                                // D-pad stops), and Left returns to the active section's rail row
+                                // rather than the spatially nearest one, which would switch sections.
+                                exit = { direction ->
+                                    when (direction) {
+                                        FocusDirection.Up, FocusDirection.Down -> FocusRequester.Cancel
+                                        FocusDirection.Left -> railFocusRequesters.getValue(activeSection)
+                                        else -> FocusRequester.Default
+                                    }
                                 }
                             }
-                        }
-                        .focusGroup()
-                        .then(if (activeSection == SettingsSection.UPDATES) Modifier else Modifier.verticalScroll(rememberScrollState()))
-                        .padding(vertical = if (activeSection == SettingsSection.UPDATES) 0.dp else contentPadding),
-                ) {
-                    CompositionLocalProvider(
-                        LocalSettingsPaneEntryKey provides paneEntry,
-                        LocalSettingsFocusGate provides focusGate,
+                            .focusGroup()
+                            .then(if (activeSection == SettingsSection.UPDATES) Modifier else Modifier.verticalScroll(paneScroll))
+                            .padding(vertical = if (activeSection == SettingsSection.UPDATES) 0.dp else contentPadding),
                     ) {
-                        when (activeSection) {
-                            SettingsSection.HOME -> HomeSectionContent(state, viewModel)
-                            SettingsSection.LIBRARY -> LibrarySectionContent(state, viewModel)
-                            SettingsSection.PLAYBACK -> PlaybackSectionContent(state, viewModel)
-                            SettingsSection.OSD -> OsdSectionContent(state, viewModel)
-                            SettingsSection.SUBTITLES -> SubtitlesSectionContent(state, viewModel)
-                            SettingsSection.DISCOVER -> DiscoverSectionContent(onSeerrConfigChanged = onSeerrConfigChanged)
-                            SettingsSection.TROUBLESHOOTING -> TroubleshootingSectionContent(state, viewModel, onReportProblem)
-                            SettingsSection.UPDATES -> UpdatesSectionContent(isTop, viewModel::setAutomaticUpdateChecks) {
-                                activeSection = SettingsSection.HOME
-                                railFocusRequesters.getValue(SettingsSection.HOME).requestFocus()
+                        CompositionLocalProvider(
+                            LocalSettingsPaneEntryKey provides paneEntry,
+                            LocalSettingsFocusGate provides focusGate,
+                        ) {
+                            when (activeSection) {
+                                SettingsSection.HOME -> HomeSectionContent(state, viewModel)
+                                SettingsSection.LIBRARY -> LibrarySectionContent(state, viewModel)
+                                SettingsSection.PLAYBACK -> PlaybackSectionContent(state, viewModel)
+                                SettingsSection.OSD -> OsdSectionContent(state, viewModel)
+                                SettingsSection.SUBTITLES -> SubtitlesSectionContent(state, viewModel)
+                                SettingsSection.DISCOVER -> DiscoverSectionContent(onSeerrConfigChanged = onSeerrConfigChanged)
+                                SettingsSection.TROUBLESHOOTING -> TroubleshootingSectionContent(state, viewModel, onReportProblem)
+                                SettingsSection.UPDATES -> UpdatesSectionContent(isTop, viewModel::setAutomaticUpdateChecks) {
+                                    activeSection = SettingsSection.HOME
+                                    railFocusRequesters.getValue(SettingsSection.HOME).requestFocus()
+                                }
+                                SettingsSection.ABOUT -> AboutSectionContent(scrollSnap = aboutSnap, paneTopInset = contentPadding)
                             }
-                            SettingsSection.ABOUT -> AboutSectionContent()
                         }
                     }
                 }

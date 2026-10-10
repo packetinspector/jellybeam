@@ -32,8 +32,10 @@ the in-memory state and mirror side effects.
   resume, next_up, favorites and every latest shelf in home_snapshot.
 - `home_show_favorites: bool` (default true) → whether home_snapshot returns
   the Favorites shelf; the drawer's Favorites entry ignores it (docs/07 §5).
-- `home_resume_posters: bool` (default false) → Kotlin-only: Continue Watching
-  and Next Up draw poster cells instead of 16:9 thumbnails (docs/07 §1).
+- `home_resume_art: ResumeArt` (`Episode` default / `SeriesThumb` / `Poster`) →
+  Kotlin-only: the art Continue Watching and Next Up draw (docs/07 §1). `load`
+  maps the retired bool `home_resume_posters: true` to `Poster` when the new key
+  is absent; the new key wins, and the old key is never written back.
 - `startup_screen: Option<String>` (view id; None = Home) — Kotlin resolves at
   launch, stale id falls back to Home (docs/07 §5).
 - `skip_back_secs/skip_forward_secs: u32` (SkipLengthPrefs semantics; presets
@@ -47,6 +49,10 @@ the in-memory state and mirror side effects.
   apply). Curated presets only, no free color picker: four colors cover
   the real needs (HDR glare, classic yellow, color-vision preference) and
   the system toggle is the escape hatch.
+  `subtitle_full_ass_styling` (default false while it is new) renders
+  ASS/SSA tracks as authored through the substation overlay (docs/13); off
+  keeps Media3's simplified text rendering. These style presets never apply to
+  those tracks either way.
 - `autoplay: AutoplayPrefs` (enabled, delay_secs; default true/10).
 - `playback_quality: PlaybackQuality` (DirectPlay default / Auto / Cap {
   max_bps }) — docs/18; read by `prepare_playback` and

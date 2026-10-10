@@ -86,6 +86,13 @@ pub struct Card {
     /// false)]` gives them an implicit `false`.
     #[uniffi(default = false)]
     pub is_favorite: bool,
+    /// `ParentThumbItemId`/`ParentThumbImageTag`: the owning series' 16:9 `Thumb`, for the
+    /// "series thumb" Continue Watching / Next Up art (docs/07 §1). Last fields with
+    /// `None` defaults so existing positional call sites keep compiling.
+    #[uniffi(default = None)]
+    pub parent_thumb_item_id: Option<String>,
+    #[uniffi(default = None)]
+    pub parent_thumb_tag: Option<String>,
 }
 
 #[cfg(test)]
@@ -118,6 +125,8 @@ impl Card {
             is_virtual: false,
             library_id: None,
             is_favorite: false,
+            parent_thumb_item_id: None,
+            parent_thumb_tag: None,
         }
     }
 }
@@ -159,6 +168,8 @@ impl From<media_cache::CardRow> for Card {
             is_virtual: row.is_virtual,
             library_id: row.library_id,
             is_favorite: row.is_favorite,
+            parent_thumb_item_id: row.parent_thumb_item_id,
+            parent_thumb_tag: row.parent_thumb_tag,
         }
     }
 }
@@ -222,6 +233,8 @@ impl TryFrom<&jellyfin_api::models::BaseItemDto> for Card {
             is_virtual: dto.location_type == Some(jellyfin_api::models::LocationType::Virtual),
             library_id: None,
             is_favorite: user_data.and_then(|u| u.is_favorite).unwrap_or(false),
+            parent_thumb_item_id: dto.parent_thumb_item_id.map(|id| id.to_string()),
+            parent_thumb_tag: dto.parent_thumb_image_tag.clone(),
         })
     }
 }
@@ -1077,6 +1090,27 @@ pub enum LiveSort {
     NewestFirst,
 }
 
+/// The per-account half of every image URL (`jellyfin_api::JellyfinClient::image_url`), so Kotlin
+/// formats card art URLs itself instead of crossing FFI per card. `epoch` is the account epoch the
+/// pair belongs to (docs/18 §2.1); drop it when that epoch moves. `token` is a credential: never
+/// log or persist it.
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+pub struct ImageUrlPrefix {
+    pub epoch: u64,
+    pub base_url: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for ImageUrlPrefix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageUrlPrefix")
+            .field("epoch", &self.epoch)
+            .field("base_url", &self.base_url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Mirrors `jellyfin_api::ImageKind` 1:1 -- the three kinds
 /// `JellyfinClient::image_url` accepts (not `media_cache::ImageKind`,
 /// which also has `Trickplay` for its own on-disk cache).
@@ -1309,9 +1343,10 @@ pub(crate) const fn subtitle_failure_kind(err: &jellyfin_api::ApiError) -> &'sta
     }
 }
 
-/// docs/18 §3.2: the profile's `External` formats. Bitmaps can't be parsed, and Media3's SSA
-/// parser expands every overlap before yielding a cue, so an ASS sidecar has no memory bound.
-const SIDELOADABLE_SUBTITLE_CODECS: &[&str] = &["srt", "subrip", "vtt", "webvtt", "ttml"];
+/// docs/18 §3.2: the profile's `External` formats. Bitmaps can't be parsed; ASS/SSA is offered
+/// only where Direct Play may answer, and read a line at a time, or whole by the styled overlay.
+const SIDELOADABLE_SUBTITLE_CODECS: &[&str] =
+    &["srt", "subrip", "vtt", "webvtt", "ttml", "ass", "ssa"];
 
 /// docs/18 §3.2: the chosen source's sidecar text subtitles, unfetched. `resolve_url` turns
 /// a `DeliveryUrl` into an authed absolute URL (`None` drops the track).
@@ -1733,6 +1768,7 @@ mod tests {
             got,
             vec![
                 (2, "subrip", "http://example.test/s/2.srt"),
+                (6, "ass", "http://example.test/s/6.ass"),
                 (9, "ttml", "http://example.test/s/9.ttml"),
             ]
         );
@@ -2681,6 +2717,33 @@ mod tests {
         assert!(detail.writers.is_empty());
     }
 
+    /// `JellybeamCore::item_detail_local` maps the mirror's stored DTO through this same impl: the
+    /// sync-requested fields survive, everything the sync never asks for stays empty.
+    #[test]
+    fn item_detail_from_a_sync_shaped_dto_carries_overview_genres_and_added_date_only() {
+        let mut dto = jellyfin_api::models::BaseItemDto::default();
+        dto.overview = Some("A synopsis.".to_string());
+        dto.genres = vec!["Drama".to_string()];
+        dto.date_created = Some("2024-01-02T03:04:05Z".parse().expect("date"));
+        let detail = ItemDetail::from(&dto);
+        assert_eq!(detail.overview.as_deref(), Some("A synopsis."));
+        assert_eq!(detail.genres, vec!["Drama".to_string()]);
+        assert!(detail.date_created.is_some());
+        assert!(
+            detail.people.is_empty()
+                && detail.media_streams.is_empty()
+                && detail.studios.is_empty()
+        );
+        assert_eq!(
+            (
+                detail.size_bytes,
+                detail.child_count,
+                detail.recursive_item_count
+            ),
+            (None, None, None)
+        );
+    }
+
     #[test]
     fn item_detail_size_bytes_comes_from_the_first_media_source_only() {
         let mut dto = sample_series_dto();
@@ -2799,6 +2862,23 @@ mod tests {
         assert!(card.played);
         assert_eq!(card.position_ticks, 36_000_000_000);
         assert_eq!(card.library_id, None);
+    }
+
+    /// docs/07 §1: the series Thumb ids carry over from the wire DTO.
+    #[test]
+    fn card_try_from_base_item_dto_carries_parent_thumb() {
+        let id = uuid::Uuid::parse_str("e2f5a5f1-1a0b-4b3a-9c2e-000000000004").expect("uuid");
+        let series = uuid::Uuid::parse_str("e2f5a5f1-1a0b-4b3a-9c2e-000000000005").expect("uuid");
+        let dto = jellyfin_api::models::BaseItemDto {
+            id: Some(id),
+            type_: Some(jellyfin_api::models::BaseItemKind::Episode),
+            parent_thumb_item_id: Some(series),
+            parent_thumb_image_tag: Some("series-thumb".to_string()),
+            ..Default::default()
+        };
+        let card = Card::try_from(&dto).expect("has id");
+        assert_eq!(card.parent_thumb_item_id, Some(series.to_string()));
+        assert_eq!(card.parent_thumb_tag.as_deref(), Some("series-thumb"));
     }
 
     #[test]

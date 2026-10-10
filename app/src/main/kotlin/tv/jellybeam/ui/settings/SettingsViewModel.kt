@@ -6,6 +6,13 @@ import androidx.lifecycle.viewModelScope
 import tv.jellybeam.AppGraph
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.diag.DiagStatus
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,10 +20,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.LanguageSettings
 import uniffi.jellybeam_core.OsdDetailSetting
 import uniffi.jellybeam_core.PlaybackQuality
+import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.Settings
@@ -33,6 +42,13 @@ val NEXT_UP_CUTOFF_DAY_PRESETS: List<UInt?> = listOf(null, 7u, 14u, 30u, 90u, 36
 
 /** Home shelf-size presets (docs/09). Chip options, in display order. */
 val HOME_SHELF_SIZE_PRESETS: List<UInt> = listOf(10u, 20u, 30u)
+
+/** Continue Watching / Next Up art chips (docs/07 §1), in display order. */
+val RESUME_ART_PRESETS: List<ResumeArt> = listOf(
+    ResumeArt.EPISODE,
+    ResumeArt.SERIES_THUMB,
+    ResumeArt.POSTER,
+)
 
 /** Skip back/forward presets, shared by both rows (docs/09). Chip options, in display order. */
 val SKIP_SECONDS_PRESETS: List<UInt> = listOf(5u, 10u, 15u, 30u, 60u)
@@ -131,7 +147,7 @@ fun defaultSettings(): Settings = Settings(
     startupScreenViewId = null,
     homeShelfSize = 20u,
     homeShowFavorites = true,
-    homeResumePosters = false,
+    homeResumeArt = ResumeArt.EPISODE,
     skipBackSecs = 10u,
     skipForwardSecs = 10u,
     language = LanguageSettings(audio = null, subtitle = null, subtitleMode = SubtitleModeSetting.DEFAULT),
@@ -143,6 +159,7 @@ fun defaultSettings(): Settings = Settings(
     subtitleBackgroundOpacity = 0.0f,
     subtitleColor = SubtitleColorPreset.WHITE,
     subtitleUseSystemStyle = false,
+    subtitleFullAssStyling = false,
     skipIntro = SegmentAction.ASK,
     skipOutro = SegmentAction.ASK,
     skipRecap = SegmentAction.ASK,
@@ -236,6 +253,13 @@ object AppGraphDiagnosticsController : DiagnosticsController {
     override fun crashPending(): Boolean = AppGraph.crash.pending() != null
 }
 
+/** Runs every queued diagnostics write; one that throws is logged by class only, so the rest and the read after still run. */
+internal fun drainDiagnosticsWrites(queue: java.util.Queue<() -> Unit>) {
+    generateSequence { queue.poll() }.forEach { write ->
+        runCatching(write).onFailure { android.util.Log.w("SettingsViewModel", "diagnostics write failed: ${it.javaClass.simpleName}") }
+    }
+}
+
 /**
  * Backs the Settings screen (docs/09-settings-plan.md slice 2): loads the whole [Settings]
  * record plus [CoreGateway.views] once on entry, then write-through on every row change -- each
@@ -247,11 +271,21 @@ class SettingsViewModel(
     /** docs/21 §6: injected so tests observe a fake status instead of the real [AppGraph.diag]. */
     private val diagStatus: StateFlow<DiagStatus> = AppGraph.diag.status,
     private val diagnostics: DiagnosticsController = AppGraphDiagnosticsController,
+    /** The crash-capture check and the diagnostics writes touch disk, so they never run on Main; injected for tests. */
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SettingsUiState())
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
     private val settingsWrites = Mutex()
+    // Declared before init, whose first refreshCrashPending() uses both.
+    private var crashPendingJob: Job? = null
+
+    /** Diagnostics writes waiting for the next crash-pending read, which runs them off Main first. */
+    private val diagnosticsWrites = java.util.concurrent.ConcurrentLinkedQueue<() -> Unit>()
+
+    /** Held only while writes run, so a read waits for any write in flight but never for a slow read. */
+    private val diagnosticsIo = Mutex()
 
     init {
         viewModelScope.launch { refresh() }
@@ -259,13 +293,30 @@ class SettingsViewModel(
         viewModelScope.launch { diagStatus.collect { status -> _state.update { it.copy(diagStatus = status) } } }
     }
 
-    private fun refreshCrashPending() {
-        _state.update { it.copy(crashPending = diagnostics.crashPending()) }
+    /**
+     * The newest read wins: an older read is cancelled, never published late. A queued [write] runs on
+     * [ioDispatcher] before the read, started at once and not cancellable, so a newer refresh or a
+     * cleared ViewModel never drops it.
+     */
+    private fun refreshCrashPending(write: (() -> Unit)? = null) {
+        write?.let(diagnosticsWrites::add)
+        crashPendingJob?.cancel()
+        crashPendingJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            // A cancelled job still runs its block (writes must land) but never publishes the result.
+            val pending = withContext(ioDispatcher + NonCancellable) {
+                diagnosticsIo.withLock { drainDiagnosticsWrites(diagnosticsWrites) }
+                diagnostics.crashPending()
+            }
+            _state.update { it.copy(crashPending = pending) }
+        }
     }
 
     private suspend fun refresh() {
-        val settings = gateway.getSettings()
-        val views = gateway.views()
+        val (settings, views) = coroutineScope {
+            val settingsJob = async { gateway.getSettings() }
+            val viewsJob = async { gateway.views() }
+            settingsJob.await() to viewsJob.await()
+        }
         _state.update { it.copy(isLoading = false, settings = settings, views = views) }
     }
 
@@ -294,7 +345,7 @@ class SettingsViewModel(
 
     fun toggleHomeShowFavorites() = updateSettings { it.copy(homeShowFavorites = !it.homeShowFavorites) }
 
-    fun toggleHomeResumePosters() = updateSettings { it.copy(homeResumePosters = !it.homeResumePosters) }
+    fun selectHomeResumeArt(value: ResumeArt) = updateSettings { it.copy(homeResumeArt = value) }
 
     fun toggleLibraryVisibility(viewId: String) = updateSettings { settings ->
         settings.copy(hiddenLibraryIds = toggleHiddenLibrary(settings.hiddenLibraryIds, viewId))
@@ -333,6 +384,9 @@ class SettingsViewModel(
 
     fun toggleSubtitleUseSystemStyle() =
         updateSettings { it.copy(subtitleUseSystemStyle = !it.subtitleUseSystemStyle) }
+
+    fun toggleSubtitleFullAssStyling() =
+        updateSettings { it.copy(subtitleFullAssStyling = !it.subtitleFullAssStyling) }
 
     fun selectSkipIntro(action: SegmentAction) = updateSettings { it.copy(skipIntro = action) }
 
@@ -422,16 +476,12 @@ class SettingsViewModel(
         val enabling = !_state.value.settings.crashReportsEnabled
         updateSettings { it.copy(crashReportsEnabled = enabling) }
         diagnostics.setCrashReportsEnabled(enabling)
-        if (!enabling) {
-            diagnostics.discardCrash()
-            refreshCrashPending()
-        }
+        if (!enabling) refreshCrashPending(diagnostics::discardCrash)
     }
 
     /** "Clear log" action row: ring, flushed file, and any crash capture, all at once. */
     fun clearDiagnostics() {
-        diagnostics.clearDiagnostics()
-        refreshCrashPending()
+        refreshCrashPending(diagnostics::clearDiagnostics)
     }
 }
 

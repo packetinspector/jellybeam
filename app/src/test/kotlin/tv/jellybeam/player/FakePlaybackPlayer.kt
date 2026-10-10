@@ -15,6 +15,18 @@ import uniffi.jellybeam_core.TrackDecisionFfi
  * [fireError], etc.
  */
 class FakePlaybackPlayer : PlaybackPlayer {
+    /** docs/18 §3.2: what [assSidecarTarget] answers; null (full styling off) reads ASS as plain cues. */
+    var assTarget: (Int) -> AssSidecarTarget? = { null }
+
+    /** Every [showAssSidecar] call, in order. */
+    val shownAssSidecars = mutableListOf<AssSidecarTarget?>()
+
+    override fun assSidecarTarget(index: Int): AssSidecarTarget? = assTarget(index)
+
+    override fun showAssSidecar(target: AssSidecarTarget?) {
+        shownAssSidecars += target
+    }
+
     var loadedPlan: PlaybackPlan? = null
         private set
 
@@ -89,6 +101,9 @@ class FakePlaybackPlayer : PlaybackPlayer {
     override var isPlaying: Boolean = false
     override var playbackState: Int = Player.STATE_IDLE
 
+    /** The `fullAssStyling` snapshot the last [load] received. */
+    var lastFullAssStyling: Boolean? = null
+
     /** Backing value for [seekability]; set UNSEEKABLE or UNKNOWN to model those files. */
     var seekabilityValue: Seekability = Seekability.SEEKABLE
 
@@ -98,8 +113,10 @@ class FakePlaybackPlayer : PlaybackPlayer {
         plan: PlaybackPlan,
         tolerateMislabeledLevels: Boolean,
         audioDecoderPreferences: AudioDecoderPreferences,
+        fullAssStyling: Boolean,
     ) {
         loadedPlan = plan
+        lastFullAssStyling = fullAssStyling
         loadedPlans += plan
         // The real per-load reset (docs/18 §3.1), so a test sees what a reload does to text.
         trackSelectionParameters = trackSelectionBaseline(trackSelectionParameters)

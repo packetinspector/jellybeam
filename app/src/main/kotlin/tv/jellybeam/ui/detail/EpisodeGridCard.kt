@@ -1,12 +1,6 @@
 package tv.jellybeam.ui.detail
 
 import tv.jellybeam.i18n.rememberUiStrings
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,7 +16,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.State
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,12 +27,14 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.ui.cards.WIDE_ART_ASPECT
 import tv.jellybeam.ui.cards.ArtBox
 import tv.jellybeam.ui.cards.CardArtImage
 import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.cards.CardTitleText
 import tv.jellybeam.ui.cards.WatchIndicator
 import tv.jellybeam.ui.cards.WatchProgressBar
+import tv.jellybeam.ui.cards.rememberSkeletonPulseAlpha
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
 
@@ -98,6 +93,7 @@ fun EpisodeGridCard(
                 contentAlpha = if (card.isVirtual) 0.4f else 1f,
                 blurhash = card.blurhash,
                 modifier = Modifier.fillMaxSize(),
+                aspect = WIDE_ART_ASPECT,
             )
             // Mutually exclusive: [CardFormatting.watchIndicator] returns WatchedCheck only when
             // [progress] is null.
@@ -140,34 +136,13 @@ private fun BoxScope.EpisodeWatchedTick() {
     }
 }
 
-/** Same 2s/0.85-1.0/linear/reverse pulse recipe as [tv.jellybeam.ui.cards.CardArt]'s pulsing tile,
- * reimplemented locally since that helper is `private`.
- */
-private const val SKELETON_PULSE_DURATION_MS = 2000
-private const val SKELETON_PULSE_MIN_ALPHA = 0.85f
-private const val SKELETON_PULSE_MAX_ALPHA = 1.0f
-
-@Composable
-private fun rememberEpisodeSkeletonPulseAlpha(): State<Float> {
-    val transition = rememberInfiniteTransition(label = "episodeSkeletonPulse")
-    return transition.animateFloat(
-        initialValue = SKELETON_PULSE_MIN_ALPHA,
-        targetValue = SKELETON_PULSE_MAX_ALPHA,
-        animationSpec = infiniteRepeatable(
-            animation = tween(SKELETON_PULSE_DURATION_MS, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "episodeSkeletonPulseAlpha",
-    )
-}
-
 /** Loading stand-in for [EpisodeGridCard]: matches its art box + two-zone text footprint exactly,
  * so swapping in real cells doesn't change the shelf's height. Not focusable/clickable.
  */
 @Composable
 fun EpisodeGridSkeletonCard(modifier: Modifier = Modifier, width: Dp = EPISODE_CARD_WIDTH) {
     val height = width * 9f / 16f
-    val pulseAlpha = rememberEpisodeSkeletonPulseAlpha()
+    val pulseAlpha = rememberSkeletonPulseAlpha()
 
     Column(
         modifier = modifier.graphicsLayer { alpha = pulseAlpha.value },

@@ -25,6 +25,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
 import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
+import uniffi.jellybeam_core.AssOverlay
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.ChangeListener
@@ -251,6 +252,12 @@ interface CoreGateway {
      */
     @Throws(CoreException::class)
     suspend fun getItemDetail(itemId: String, accountEpoch: ULong? = null): ItemDetail
+
+    /**
+     * [getItemDetail]'s first paint from the mirror (docs/11 item 1): overview, genres, added date,
+     * no cast/streams/counts; never networks, `null` when the mirror doesn't know [itemId].
+     */
+    suspend fun itemDetailLocal(itemId: String): ItemDetail? = null
 
     /** Mirror-only lookup of one item's full [Card] by bare id, `null` if not in the local mirror.
      * Backs Discover's "Go to library" routing (docs/14-seerr-discover.md).
@@ -483,6 +490,12 @@ interface CoreGateway {
 
     /** docs/18 §3.2: sidecar [index]'s text for session [playSessionId], fetched on pick; null on any failure. */
     suspend fun fetchExternalSubtitle(playSessionId: String, index: Int): String?
+
+    /**
+     * docs/18 §3.2: ASS sidecar [index] fetched by the core straight into [overlay] as track [key]
+     * of overlay item [item], never through the JVM heap; false on any failure.
+     */
+    suspend fun loadAssSidecar(playSessionId: String, index: Int, overlay: AssOverlay, key: String, item: ULong): Boolean
 
     /** Pure delegate to `trickplay_locate`: the sprite-sheet tile (if any) covering [positionMs]
      * for [meta]. No I/O; not `suspend`. Callers must not re-derive the tile-grid math themselves.
@@ -852,6 +865,9 @@ class RealCoreGateway(
     override suspend fun getItemDetail(itemId: String, accountEpoch: ULong?): ItemDetail =
         ffi("ffi.getItemDetail") { getItemDetail(itemId, accountEpoch) }
 
+    override suspend fun itemDetailLocal(itemId: String): ItemDetail? =
+        ffi("ffi.itemDetailLocal") { itemDetailLocal(itemId) }
+
     override suspend fun cardById(itemId: String): Card? =
         ffi("ffi.cardById") { cardById(itemId) }
 
@@ -876,17 +892,46 @@ class RealCoreGateway(
     override suspend fun setSettings(settings: Settings) =
         ffi("ffi.setSettings") { setSettings(settings) }
 
-    /** Count-only accumulator for [imageUrl], called dozens of times a second while scrolling,
-     * so a per-call [PerfLog.timed] line would itself be the overhead being measured.
+    /** Count-only accumulator for [imageUrl]'s FFI path (another account's epoch), which can still
+     * run per card, so a per-call [PerfLog.timed] line would itself be the overhead measured.
      */
     private val imageUrlPerf = PerfAccumulator(label = "ffi.imageUrl", outlierMs = 5.0)
 
+    /** The current account's URL base, cached per account epoch. Never cached while an account call
+     * is in flight (the core's epoch may already have moved past [_accountEpoch]) and dropped when
+     * one ends; written under [urlBaseLock] so a fetch racing that drop can't keep a stale token.
+     */
+    @Volatile
+    private var urlBase: ImageUrlBase? = null
+    private val urlBaseLock = Any()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun currentUrlBase(): ImageUrlBase? {
+        if (accountCallsInFlight.value > 0) return freshUrlBase()
+        urlBase?.let { if (it.epoch == _accountEpoch.value) return it }
+        synchronized(urlBaseLock) {
+            urlBase?.let { if (it.epoch == _accountEpoch.value) return it }
+            return freshUrlBase()?.also { urlBase = it }
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun freshUrlBase(): ImageUrlBase? =
+        core.getCompleted().imageUrlPrefix()?.let { ImageUrlBase(it.epoch, it.baseUrl, it.token) }
+
     /** Not `suspend`, so can't `await()` [core]; the [isCompleted] check fails open to the
-     * placeholder tile instead of [Deferred.getCompleted]'s `IllegalStateException`.
+     * placeholder tile instead of [Deferred.getCompleted]'s `IllegalStateException`. The current
+     * account's URLs are formatted in Kotlin ([ImageUrls]); a player's other epoch crosses FFI.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun imageUrl(itemId: String, kind: ImageKind, tag: String, maxWidth: UInt, accountEpoch: ULong?): String? {
         if (!core.isCompleted) return null
+        if (accountEpoch == null) return currentUrlBase()?.url(itemId, kind, tag, maxWidth)
+        return imageUrlViaCore(itemId, kind, tag, maxWidth, accountEpoch)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun imageUrlViaCore(itemId: String, kind: ImageKind, tag: String, maxWidth: UInt, accountEpoch: ULong?): String? {
         if (!PerfLog.enabled) {
             return try {
                 core.getCompleted().imageUrl(itemId, kind, tag, maxWidth, accountEpoch)
@@ -939,6 +984,7 @@ class RealCoreGateway(
      */
     private suspend inline fun <T> accountChange(crossinline call: suspend () -> T): T {
         accountCallsInFlight.update { it + 1 }
+        synchronized(urlBaseLock) { urlBase = null }
         try {
             return call()
         } finally {
@@ -951,6 +997,7 @@ class RealCoreGateway(
                         val core = core.await()
                         _parkedEpoch.value = core.parkedAccountEpoch()
                         _accountEpoch.value = core.accountEpoch()
+                        synchronized(urlBaseLock) { urlBase = null }
                     }
                 } finally {
                     accountCallsInFlight.update { it - 1 }
@@ -1050,6 +1097,9 @@ class RealCoreGateway(
 
     override suspend fun fetchExternalSubtitle(playSessionId: String, index: Int): String? =
         ffi("ffi.fetchExternalSubtitle") { fetchExternalSubtitle(playSessionId, index) }
+
+    override suspend fun loadAssSidecar(playSessionId: String, index: Int, overlay: AssOverlay, key: String, item: ULong): Boolean =
+        ffi("ffi.loadAssSidecar") { loadAssSidecar(playSessionId, index, overlay, key, item) }
 
     override fun trickplayLocate(meta: TrickplayMetaFfi, positionMs: ULong): TrickplayTileFfi? =
         uniffi.jellybeam_core.trickplayLocate(meta, positionMs)

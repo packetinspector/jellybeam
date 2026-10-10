@@ -213,6 +213,19 @@ pub enum OsdDetailSetting {
     Full,
 }
 
+/// Which art Continue Watching and Next Up draw (docs/07 §1). `Episode` is the episode's own
+/// 16:9 still, `SeriesThumb` the series' 16:9 Thumb (spoiler-free), `Poster` the 2:3 poster
+/// cell. `#[default]` on `Episode` keeps today's thumbnail rows.
+#[derive(
+    uniffi::Enum, Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum ResumeArt {
+    #[default]
+    Episode,
+    SeriesThumb,
+    Poster,
+}
+
 /// Seek-preview (trickplay) panel size, docs/12 §11: Small is the server thumbnail
 /// pixel-for-pixel on a 1080p panel, Medium is Netflix-like, Large is the old
 /// native-dp size. Kotlin maps each to a dp width; `#[default]` on `Medium`.
@@ -346,11 +359,10 @@ pub struct Settings {
     #[serde(default = "default_home_show_favorites")]
     #[uniffi(default = true)]
     pub home_show_favorites: bool,
-    /// docs/07 §1: Continue Watching and Next Up draw 2:3 posters instead of 16:9 thumbnails,
-    /// which can spoil an unwatched episode. Off by default, today's thumbnail rows.
+    /// docs/07 §1: the art Continue Watching and Next Up draw. Defaults to the episode still;
+    /// a pre-enum `home_resume_posters: true` loads as `Poster` (see [`load`]).
     #[serde(default)]
-    #[uniffi(default = false)]
-    pub home_resume_posters: bool,
+    pub home_resume_art: ResumeArt,
     /// Seek-back magnitude, in seconds. One of Kotlin's skip-length presets
     /// by convention, not validated as such here.
     #[serde(default = "default_skip_back_secs")]
@@ -389,6 +401,10 @@ pub struct Settings {
     /// caption settings instead of the presets; size and position still apply.
     #[serde(default)]
     pub subtitle_use_system_style: bool,
+    /// Render ASS/SSA with full typesetting (fonts, signs, karaoke) through the substation
+    /// overlay; off (the default while it is new) keeps Media3's plain-text rendering.
+    #[serde(default)]
+    pub subtitle_full_ass_styling: bool,
     /// Per-`MediaSegmentKind` skip behavior -- see [`SegmentAction`]. Bare
     /// `#[serde(default)]` is correct: `SegmentAction::default()` (`Ask`)
     /// already matches this field's intended fallback.
@@ -495,7 +511,7 @@ impl Default for Settings {
             startup_screen_view_id: None,
             home_shelf_size: default_home_shelf_size(),
             home_show_favorites: default_home_show_favorites(),
-            home_resume_posters: false,
+            home_resume_art: ResumeArt::default(),
             skip_back_secs: default_skip_back_secs(),
             skip_forward_secs: default_skip_forward_secs(),
             language: LanguageSettings::default(),
@@ -507,6 +523,7 @@ impl Default for Settings {
             subtitle_background_opacity: 0.0,
             subtitle_color: SubtitleColorPreset::default(),
             subtitle_use_system_style: false,
+            subtitle_full_ass_styling: false,
             skip_intro: SegmentAction::Ask,
             skip_outro: SegmentAction::Ask,
             skip_recap: SegmentAction::Ask,
@@ -578,8 +595,22 @@ pub(crate) fn save(data_dir: &Path, settings: &Settings) -> std::io::Result<()> 
 pub(crate) fn load(data_dir: &Path) -> Settings {
     std::fs::read(path(data_dir))
         .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .map(migrate_legacy_keys)
+        .and_then(|raw| serde_json::from_value(raw).ok())
         .unwrap_or_default()
+}
+
+/// docs/09: `home_resume_posters: true` (the pre-`home_resume_art` bool) becomes
+/// `home_resume_art: "Poster"`, so a saved choice survives; a present `home_resume_art` wins.
+fn migrate_legacy_keys(mut raw: serde_json::Value) -> serde_json::Value {
+    if let Some(map) = raw.as_object_mut() {
+        let legacy = map.remove("home_resume_posters");
+        if !map.contains_key("home_resume_art") && legacy == Some(serde_json::Value::Bool(true)) {
+            map.insert("home_resume_art".to_string(), "Poster".into());
+        }
+    }
+    raw
 }
 
 #[cfg(test)]
@@ -628,7 +659,7 @@ mod tests {
             startup_screen_view_id: Some("view-1".to_string()),
             home_shelf_size: 30,
             home_show_favorites: false,
-            home_resume_posters: true,
+            home_resume_art: ResumeArt::SeriesThumb,
             skip_back_secs: 15,
             skip_forward_secs: 30,
             language: LanguageSettings {
@@ -644,6 +675,7 @@ mod tests {
             subtitle_background_opacity: 0.5,
             subtitle_color: SubtitleColorPreset::Yellow,
             subtitle_use_system_style: true,
+            subtitle_full_ass_styling: false,
             skip_intro: SegmentAction::Off,
             skip_outro: SegmentAction::AutoSkip,
             skip_recap: SegmentAction::Off,
@@ -714,7 +746,7 @@ mod tests {
         assert!(settings.startup_screen_view_id.is_none());
         assert_eq!(settings.home_shelf_size, 20);
         assert!(settings.home_show_favorites);
-        assert!(!settings.home_resume_posters);
+        assert_eq!(settings.home_resume_art, ResumeArt::Episode);
         assert!(settings.language.audio.is_none());
         assert!(settings.language.subtitle.is_none());
         assert_eq!(settings.subtitle_scale, 1.0);
@@ -723,6 +755,7 @@ mod tests {
         assert_eq!(settings.subtitle_background_opacity, 0.0);
         assert_eq!(settings.subtitle_color, SubtitleColorPreset::White);
         assert!(!settings.subtitle_use_system_style);
+        assert!(!settings.subtitle_full_ass_styling);
         assert_eq!(settings.skip_intro, SegmentAction::Ask);
         assert_eq!(settings.skip_outro, SegmentAction::Ask);
         assert_eq!(settings.skip_recap, SegmentAction::Ask);
@@ -787,6 +820,43 @@ mod tests {
         assert_eq!(loaded, original);
     }
 
+    /// docs/09: the legacy bool maps onto the enum; an explicit new key beats it.
+    #[test]
+    fn load_maps_legacy_home_resume_posters_onto_home_resume_art() {
+        let mut raw = legacy_base();
+        raw["home_resume_posters"] = json!(true);
+        assert_eq!(load_from_json(raw).home_resume_art, ResumeArt::Poster);
+
+        let mut raw = legacy_base();
+        raw["home_resume_posters"] = json!(false);
+        assert_eq!(load_from_json(raw).home_resume_art, ResumeArt::Episode);
+
+        assert_eq!(
+            load_from_json(legacy_base()).home_resume_art,
+            ResumeArt::Episode
+        );
+
+        let mut raw = legacy_base();
+        raw["home_resume_posters"] = json!(true);
+        raw["home_resume_art"] = json!("SeriesThumb");
+        assert_eq!(load_from_json(raw).home_resume_art, ResumeArt::SeriesThumb);
+    }
+
+    #[test]
+    fn home_resume_art_round_trips_and_drops_the_legacy_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = Settings {
+            home_resume_art: ResumeArt::SeriesThumb,
+            ..Settings::default()
+        };
+        save(dir.path(), &settings).expect("save");
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path(dir.path())).expect("read")).expect("json");
+        assert_eq!(on_disk["home_resume_art"], json!("SeriesThumb"));
+        assert!(on_disk.get("home_resume_posters").is_none());
+        assert_eq!(load(dir.path()).home_resume_art, ResumeArt::SeriesThumb);
+    }
+
     #[test]
     fn load_returns_defaults_when_no_settings_file_exists() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -832,7 +902,7 @@ mod tests {
         // Absent from the old file: the shelf shows, not hides.
         assert!(loaded.home_show_favorites);
         // Absent from the old file: resume shelves keep thumbnails.
-        assert!(!loaded.home_resume_posters);
+        assert_eq!(loaded.home_resume_art, ResumeArt::Episode);
         assert!(loaded.autoplay_enabled);
         // Missing field falls back to the playback-policy default, not 0.
         assert_eq!(
@@ -846,6 +916,8 @@ mod tests {
         assert_eq!(loaded.subtitle_background_opacity, 0.0);
         assert_eq!(loaded.subtitle_color, SubtitleColorPreset::White);
         assert!(!loaded.subtitle_use_system_style);
+        // Missing subtitle_full_ass_styling falls back to off.
+        assert!(!loaded.subtitle_full_ass_styling);
         // Missing skip_* fields fall back to their own real defaults --
         // Ask for everything except commercial.
         assert_eq!(loaded.skip_intro, SegmentAction::Ask);

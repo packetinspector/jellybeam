@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
+import uniffi.jellybeam_core.AssOverlay
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.ClassicHome
@@ -67,6 +68,7 @@ import uniffi.jellybeam_core.StillWatchingSettings
 import uniffi.jellybeam_core.SubtitleActionFfi
 import uniffi.jellybeam_core.SubtitleModeSetting
 import uniffi.jellybeam_core.SubtitleColorPreset
+import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.SyncStatus
 import uniffi.jellybeam_core.TitleTmdbRef
@@ -86,7 +88,7 @@ fun defaultTestSettings(): Settings = Settings(
     hideWatchedInLatest = false,
     startupScreenViewId = null,
     homeShelfSize = 20u,
-    homeResumePosters = false,
+    homeResumeArt = ResumeArt.EPISODE,
     skipBackSecs = 10u,
     skipForwardSecs = 10u,
     language = LanguageSettings(audio = null, subtitle = null, subtitleMode = SubtitleModeSetting.DEFAULT),
@@ -98,6 +100,7 @@ fun defaultTestSettings(): Settings = Settings(
     subtitleBackgroundOpacity = 0.0f,
     subtitleColor = SubtitleColorPreset.WHITE,
     subtitleUseSystemStyle = false,
+    subtitleFullAssStyling = false,
     skipIntro = SegmentAction.ASK,
     skipOutro = SegmentAction.ASK,
     skipRecap = SegmentAction.ASK,
@@ -165,6 +168,8 @@ class FakeCoreGateway(
     /** When non-null, every [liveChildren] call throws this instead of returning a page. */
     var liveChildrenError: Throwable? = null,
     private val viewsList: List<ViewSnapshot> = emptyList(),
+    /** When non-null, [views] throws this instead of returning [viewsList]. */
+    var viewsError: Throwable? = null,
     /** [discoverServers] result; defaults to none found. */
     private val discoveredServers: List<DiscoveredServer> = emptyList(),
     /** [search] results keyed by exact query string; unmapped queries fall back to empty. */
@@ -174,6 +179,8 @@ class FakeCoreGateway(
     /** [prepareTranscodeFallback] result; an unconfigured call throws [UnconfiguredFakeCall]. */
     var prepareTranscodeFallbackResult: Result<PlaybackPlan>? = null,
     private val nextEpisodeByItemId: Map<String, Card?> = emptyMap(),
+    /** When non-null, [nextEpisodeAfter] throws this instead of looking up [nextEpisodeByItemId]. */
+    var nextEpisodeError: Throwable? = null,
     private val seriesEpisodesBySeriesId: Map<String, List<Card>> = emptyMap(),
     /** [previousEpisodeBefore] results keyed by item id; unmapped ids fall back to `null`. */
     private val previousEpisodeByItemId: Map<String, Card?> = emptyMap(),
@@ -606,7 +613,7 @@ class FakeCoreGateway(
         return items.drop(startIndex.toInt()).take(limit.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt())
     }
 
-    override suspend fun views(): List<ViewSnapshot> = viewsList
+    override suspend fun views(): List<ViewSnapshot> = viewsError?.let { throw it } ?: viewsList
 
     var hasFavoritesResult: Boolean = false
     override suspend fun hasFavorites(): Boolean = hasFavoritesResult
@@ -625,6 +632,17 @@ class FakeCoreGateway(
         val result = itemDetailResultsByItemId[itemId]
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.getItemDetail($itemId): no result configured")
         return result.getOrElse { throw it }
+    }
+
+    /** [itemDetailLocal] mirror records keyed by item id; unmapped resolves `null` ("not mirrored"). */
+    val itemDetailLocalByItemId = mutableMapOf<String, ItemDetail>()
+
+    private val _itemDetailLocalCalls = mutableListOf<String>()
+    val itemDetailLocalCalls: List<String> get() = _itemDetailLocalCalls
+
+    override suspend fun itemDetailLocal(itemId: String): ItemDetail? {
+        _itemDetailLocalCalls.add(itemId)
+        return itemDetailLocalByItemId[itemId]
     }
 
     /** [cardById] results keyed by item id; unmapped resolves `null` ("not in the mirror"). */
@@ -762,6 +780,7 @@ class FakeCoreGateway(
 
     override suspend fun nextEpisodeAfter(itemId: String): Card? {
         _nextEpisodeAfterCalls.add(itemId)
+        nextEpisodeError?.let { throw it }
         return nextEpisodeByItemId[itemId]
     }
 
@@ -887,6 +906,15 @@ class FakeCoreGateway(
         fetchExternalSubtitleCalls += key
         externalSubtitleGates[key]?.await()
         return if (key in externalSubtitleTextBySession) externalSubtitleTextBySession[key] else externalSubtitleText[index]
+    }
+
+    /** (session, index, key) per styled ASS sidecar load; [assSidecarLoads] answers it, true by default. */
+    val loadAssSidecarCalls = mutableListOf<Triple<String, Int, String>>()
+    var assSidecarLoads = true
+
+    override suspend fun loadAssSidecar(playSessionId: String, index: Int, overlay: AssOverlay, key: String, item: ULong): Boolean {
+        loadAssSidecarCalls += Triple(playSessionId, index, key)
+        return assSidecarLoads
     }
 
     override suspend fun getTrickplay(itemId: String, mediaSourceId: String, accountEpoch: ULong?): TrickplayMetaFfi? {

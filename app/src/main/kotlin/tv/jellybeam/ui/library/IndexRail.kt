@@ -14,9 +14,11 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -38,6 +40,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.ui.nav.LocalDrawerLeftEdgeSuppressed
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.placeByKeys
 import tv.jellybeam.ui.focus.requestFocusWithRetry
@@ -94,12 +97,22 @@ internal fun IndexRail(
 ) {
     val scope = rememberCoroutineScope()
     var railFocused by remember { mutableStateOf(false) }
-    // docs/16 §4.4: every repeat cancels whichever load+scroll job is still in flight.
+    // docs/16 §4.4: a repeat retargets the in-flight load+scroll job; it loops until its last read
+    // matches the newest target, and only that target scrolls the grid.
     var jumpJob by remember { mutableStateOf<Job?>(null) }
+    var jumpOffset by remember { mutableIntStateOf(0) }
 
     // §4.4: the entry containing the first visible grid item is Panna when unfocused.
     val current by remember(entries, focusedIndex) {
         derivedStateOf { IndexRailModel.entryIndexForOffset(entries, focusedIndex ?: gridState.firstVisibleItemIndex) }
+    }
+
+    // docs/16 §4.4: Left from the rail focuses the entry's first poster, so the drawer's
+    // "move focus Left" gesture stands down while the rail holds focus.
+    val drawerLeftEdgeSuppressed = LocalDrawerLeftEdgeSuppressed.current
+    DisposableEffect(drawerLeftEdgeSuppressed, railFocused) {
+        drawerLeftEdgeSuppressed?.value = railFocused
+        onDispose { drawerLeftEdgeSuppressed?.value = false }
     }
 
     BackHandler(enabled = isTop && railFocused) {
@@ -123,19 +136,31 @@ internal fun IndexRail(
                         if (next != null) {
                             onRailIndexChange(next)
                             val entry = entries[next]
-                            jumpJob?.cancel()
-                            jumpJob = scope.launch {
-                                viewModel.ensureLoadedThrough(entry.offset)
-                                gridState.scrollToItem(GridPaging.rowStart(entry.offset, columns))
+                            jumpOffset = entry.offset
+                            if (jumpJob?.isActive != true) {
+                                jumpJob = scope.launch {
+                                    var done = -1
+                                    while (done != jumpOffset) {
+                                        val target = jumpOffset
+                                        viewModel.ensureLoadedThrough(target)
+                                        if (target == jumpOffset) {
+                                            gridState.scrollToItem(GridPaging.rowStart(target, columns))
+                                        }
+                                        done = target
+                                    }
+                                }
                             }
                         }
                         true
                     }
+                    // A jump still in flight would scroll to its own target after focus lands.
                     Key.DirectionLeft -> {
+                        jumpJob?.cancel()
                         focusGridEntry(entries.getOrNull(railIndex), scope, viewModel, gridState, memory, focusGate, columns)
                         true
                     }
                     in RAIL_SELECT_KEYS -> {
+                        jumpJob?.cancel()
                         focusGridEntry(entries.getOrNull(railIndex), scope, viewModel, gridState, memory, focusGate, columns)
                         true
                     }

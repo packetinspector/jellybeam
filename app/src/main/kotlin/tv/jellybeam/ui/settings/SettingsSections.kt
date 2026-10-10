@@ -48,6 +48,7 @@ import tv.jellybeam.player.pipController
 import tv.jellybeam.player.subtitleColorArgb
 import tv.jellybeam.ui.focus.focusKey
 import uniffi.jellybeam_core.OsdDetailSetting
+import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.PlaybackQuality
 import uniffi.jellybeam_core.SeerrAuthMethod
@@ -165,12 +166,14 @@ internal fun HomeSectionContent(state: SettingsUiState, viewModel: SettingsViewM
             onSelect = viewModel::selectHomeShelfSize,
             chipLabel = { size -> size.toString() },
         )
-        ToggleRow(
-            label = stringResource(R.string.settings_home_resume_posters),
-            description = stringResource(R.string.settings_desc_home_resume_posters),
-            value = settings.homeResumePosters,
-            onToggle = viewModel::toggleHomeResumePosters,
-            key = "home/resume_posters",
+        PresetChipRow(
+            label = stringResource(R.string.settings_home_resume_art),
+            description = stringResource(R.string.settings_desc_home_resume_art),
+            key = "home/resume_art",
+            options = RESUME_ART_PRESETS,
+            selected = settings.homeResumeArt,
+            onSelect = viewModel::selectHomeResumeArt,
+            chipLabel = { resumeArtChipLabel(it) },
         )
         ToggleRow(
             label = stringResource(R.string.settings_hide_watched_in_latest),
@@ -511,6 +514,14 @@ private fun StillWatchingGroup(state: SettingsUiState, viewModel: SettingsViewMo
     }
 }
 
+/** [ResumeArt]'s chip label (docs/09). */
+@Composable
+private fun resumeArtChipLabel(art: ResumeArt): String = when (art) {
+    ResumeArt.EPISODE -> stringResource(R.string.settings_home_resume_art_episode)
+    ResumeArt.SERIES_THUMB -> stringResource(R.string.settings_home_resume_art_series_thumb)
+    ResumeArt.POSTER -> stringResource(R.string.settings_home_resume_art_poster)
+}
+
 /** [OsdDetailSetting]'s chip label -- Minimal/Full (docs/jellybeam-osd-handoff §7). */
 @Composable
 private fun osdDetailChipLabel(detail: OsdDetailSetting): String = when (detail) {
@@ -635,6 +646,13 @@ internal fun SubtitlesSectionContent(state: SettingsUiState, viewModel: Settings
             selected = settings.subtitleBackgroundOpacity,
             onSelect = viewModel::selectSubtitleBackgroundOpacity,
             chipLabel = { percentChipLabel(it) },
+        )
+        ToggleRow(
+            label = stringResource(R.string.settings_subtitle_full_styling),
+            description = stringResource(R.string.settings_desc_subtitles_subtitle_full_styling),
+            value = settings.subtitleFullAssStyling,
+            onToggle = viewModel::toggleSubtitleFullAssStyling,
+            key = "subtitles/subtitle_full_styling",
         )
     }
 }

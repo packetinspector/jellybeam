@@ -22,6 +22,7 @@ import tv.jellybeam.ui.home.resume
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.HomeShelf
+import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.ShelfSource
 
 /** Classic's own half: titles, card treatment and keys for the core's shelves, and reuse of
@@ -59,7 +60,7 @@ class ClassicHomeViewModelTest {
             "Continue Watching",
             "Next Up",
             "Favorites",
-            resumeAsPosters = false,
+            resumeArt = ResumeArt.EPISODE,
         ) { "Latest in $it" }
 
         assertEquals(
@@ -73,7 +74,7 @@ class ClassicHomeViewModelTest {
     }
 
     @Test
-    fun `resume posters turns only Continue Watching and Next Up into poster shelves`() {
+    fun `resume art poster turns only Continue Watching and Next Up into poster shelves`() {
         val shelves = buildShelves(
             listOf(
                 HomeShelf(ShelfSource.ContinueWatching, listOf(testCard(id = "r1"))),
@@ -83,11 +84,30 @@ class ClassicHomeViewModelTest {
             "Continue Watching",
             "Next Up",
             "Favorites",
-            resumeAsPosters = true,
+            resumeArt = ResumeArt.POSTER,
         ) { "Latest in $it" }
 
         assertEquals(listOf(ShelfKind.POSTER, ShelfKind.POSTER, ShelfKind.POSTER), shelves.map { it.kind })
         assertEquals(listOf("resume", "next-up", "latest:v1"), shelves.map { it.id })
+    }
+
+    @Test
+    fun `series thumb keeps the 16 by 9 resume shelves and hands them the art mode`() {
+        val shelves = buildShelves(
+            listOf(
+                HomeShelf(ShelfSource.ContinueWatching, listOf(testCard(id = "r1"))),
+                HomeShelf(ShelfSource.NextUp, listOf(testCard(id = "n1"))),
+                latestShelf("v1", "Movies", listOf(testCard(id = "m1"))),
+            ),
+            "Continue Watching",
+            "Next Up",
+            "Favorites",
+            resumeArt = ResumeArt.SERIES_THUMB,
+        ) { "Latest in $it" }
+
+        assertEquals(listOf(ShelfKind.RESUME, ShelfKind.RESUME, ShelfKind.POSTER), shelves.map { it.kind })
+        assertEquals(ResumeArt.SERIES_THUMB, shelves[0].art)
+        assertEquals(ResumeArt.SERIES_THUMB, shelves[1].art)
     }
 
     @Test

@@ -30,6 +30,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -53,7 +54,9 @@ import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import coil.memory.MemoryCache
 import coil.request.ImageRequest
+import coil.size.Precision
 import tv.jellybeam.AppForeground
+import tv.jellybeam.IMAGE_CROSSFADE_MS
 import tv.jellybeam.JellybeamTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -80,24 +83,18 @@ private val RING_GAP = 3.dp
 private val ART_RADIUS = 2.dp
 private val ART_SHAPE = RoundedCornerShape(ART_RADIUS)
 
-/** §0.4's focused-element shadow, approximated via a [graphicsLayer]'s shadow elevation
- * (Compose has no x/y-offset + blur-radius knobs to match the spec's CSS box-shadow exactly).
- */
-private val FOCUS_SHADOW_ELEVATION = 16.dp
-private val FOCUS_SHADOW_COLOR = Color.Black.copy(alpha = 0.55f)
-
 /** §0.4's brightness lift, approximated with a white wash (no single-call HSL lightness
  * transform); raised to 12% from spec's 8% for visibility, same reason as [RING_WIDTH].
  */
 private const val FOCUS_BRIGHTNESS_LIFT = 0.12f
 
 /**
- * [ArtBox]'s four focus-visual axes as pure functions, so they're unit-testable without Compose
- * and read only from draw/graphicsLayer lambdas, never in composition. Ring/lift/shadow share one
+ * [ArtBox]'s three focus-visual axes as pure functions, so they're unit-testable without Compose
+ * and read only from draw/graphicsLayer lambdas, never in composition. Ring and lift share one
  * 0..1 [progress]; [scale] instead derives from its own [scaleProgress] -- see
- * [FOCUS_SCALE_ANIM_MS] for why it can't share the other three's timing.
+ * [FOCUS_SCALE_ANIM_MS] for why it can't share their timing.
  */
-internal data class FocusVisuals(val scale: Float, val ringAlpha: Float, val brightnessLift: Float, val shadowDp: Float)
+internal data class FocusVisuals(val scale: Float, val ringAlpha: Float, val brightnessLift: Float)
 
 internal fun focusVisuals(progress: Float, scaleProgress: Float): FocusVisuals {
     val p = progress.coerceIn(0f, 1f)
@@ -106,7 +103,6 @@ internal fun focusVisuals(progress: Float, scaleProgress: Float): FocusVisuals {
         scale = 1f + (FOCUS_SCALE - 1f) * sp,
         ringAlpha = p,
         brightnessLift = FOCUS_BRIGHTNESS_LIFT * p,
-        shadowDp = FOCUS_SHADOW_ELEVATION.value * p,
     )
 }
 
@@ -137,6 +133,24 @@ const val IMAGE_LOAD_MAX_RETRIES = 3
 /** [CardArtImage]'s backoff base, doubled per attempt (2s/4s/8s) -- see [imageRetryDelayMs]. */
 const val IMAGE_LOAD_RETRY_BASE_MS = 2000L
 
+private val MAX_WIDTH_PARAM = Regex("[?&]maxWidth=(\\d+)")
+
+/** The `maxWidth` the image URL asks the server for, i.e. the rendition's pixel width. */
+internal fun urlMaxWidth(url: String): Int? = MAX_WIDTH_PARAM.find(url)?.groupValues?.get(1)?.toIntOrNull()
+
+/** Height / width of a 16:9 rendition: backdrops, thumbs and episode stills. */
+const val WIDE_ART_ASPECT = 9f / 16f
+
+/** Height / width of a [source]'s rendition: Primary art is a 2:3 poster, everything else 16:9. */
+internal fun renditionAspect(source: ArtSource): Float {
+    val kind = (source as? ArtSource.Own)?.kind ?: (source as? ArtSource.Fallback)?.kind
+    return if (kind == ImageKind.PRIMARY) 3f / 2f else WIDE_ART_ASPECT
+}
+
+/** The (width, height) Coil should decode [url] at, or `null` when the URL names no `maxWidth`. */
+internal fun renditionSizePx(url: String, aspect: Float): Pair<Int, Int>? =
+    urlMaxWidth(url)?.let { w -> w to (w * aspect).toInt().coerceAtLeast(1) }
+
 /** Pure so the backoff schedule is unit-testable without Compose: 0 -> 2s, 1 -> 4s, 2 -> 8s. */
 fun imageRetryDelayMs(attempt: Int): Long = IMAGE_LOAD_RETRY_BASE_MS shl attempt
 
@@ -148,8 +162,9 @@ private val blurhashBitmapCache = BoundedLruCache<String, Bitmap>(64)
 
 /**
  * The art slot every card is built from: a fixed-size box (so a focused sibling scaling up never
- * reflows the row) reacting to [isFocused] with a scale, an accent ring clear of the unscaled edge,
- * and a soft drop shadow (§0.4). [content] paints the art plus any badges/progress bar with it.
+ * reflows the row) reacting to [isFocused] with a scale, a brightness lift and an accent ring clear
+ * of the unscaled edge, with no shadow (docs/07). [content] paints the art plus any badges/progress
+ * bar with it.
  */
 @Composable
 fun ArtBox(
@@ -159,7 +174,7 @@ fun ArtBox(
     modifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    // Ring/lift/shadow share one Animatable; scale gets its own, on its own timing (§0.4
+    // Ring and lift share one Animatable; scale gets its own, on its own timing (§0.4
     // exception, see FOCUS_SCALE_ANIM_MS). Both launched from the same LaunchedEffect(isFocused)
     // as concurrent children, so a focus change starts (or reverses) them together -- one extra
     // coroutine only while a card is animating, none at rest. [focusVisuals] is read only inside
@@ -183,17 +198,7 @@ fun ArtBox(
     }
 
     Box(
-        modifier = modifier
-            .size(width, height)
-            .graphicsLayer {
-                // Shadow only: clip=false so it casts outside the art bounds (§0.4) instead of
-                // being cut by this layer's own shape.
-                shadowElevation = focusVisuals(progress.value, scaleProgress.value).shadowDp.dp.toPx()
-                shape = ART_SHAPE
-                clip = false
-                ambientShadowColor = FOCUS_SHADOW_COLOR
-                spotShadowColor = FOCUS_SHADOW_COLOR
-            },
+        modifier = modifier.size(width, height),
     ) {
         Box(
             modifier = Modifier
@@ -329,6 +334,21 @@ fun rememberSkeletonPulseAlpha(): State<Float> {
     return SkeletonPulseAlphaState
 }
 
+/**
+ * One pulsing skeleton shape (same recipe as [PulsingFlatTile]) with a configurable corner radius,
+ * covering tile, bar and circle shapes. A plain non-focusable [Box]: a skeleton must never be
+ * reachable by D-pad navigation (docs/07 §6, docs/11 §Loading state).
+ */
+@Composable
+internal fun SkeletonBlock(pulseAlpha: State<Float>, cornerRadius: Dp, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .graphicsLayer { alpha = pulseAlpha.value }
+            .clip(RoundedCornerShape(cornerRadius))
+            .background(JellybeamTheme.SurfaceRaised),
+    )
+}
+
 /** docs/07 §2: missing artwork is a settled state, so the named fallback never animates. */
 @Composable
 fun PlaceholderTile(name: String, modifier: Modifier = Modifier) {
@@ -441,6 +461,12 @@ fun CardArtImage(
     placeholderMemoryCacheKey: MemoryCache.Key? = null,
     /** 0 when an outgoing image fades over this one (Home hero), since an empty grace dips to dark. */
     placeholderGraceMs: Long = PLACEHOLDER_GRACE_MS,
+    /** Height / width of the server rendition; null derives it from the kind (Primary 3:2, else 16:9). */
+    aspect: Float? = null,
+    /** docs/07: a full-bleed backdrop fades in from the disk cache too, since popping in reads as a
+     * flash; only a memory hit, already there on the first frame, skips the fade.
+     */
+    fadeFromDisk: Boolean = false,
 ) {
     // The ImageKind comes from the source case, never the caller: a fallback changes the image
     // type too.
@@ -482,15 +508,19 @@ fun CardArtImage(
     // without changing caching.
     val context = LocalContext.current
     val cacheKey = placeholderMemoryCacheKey
-    val model = remember(url, retryToken, cacheKey) {
-        if (retryToken == 0 && cacheKey == null) {
-            url
-        } else {
-            val builder = ImageRequest.Builder(context).data(url)
-            if (retryToken != 0) builder.setParameter("retry", retryToken, memoryCacheKey = null)
-            if (cacheKey != null) builder.placeholderMemoryCacheKey(cacheKey)
-            builder.build()
+    // An explicit size (the rendition the URL asks for) lets Coil start at composition instead of
+    // waiting for layout to measure the slot.
+    val model = remember(url, retryToken, cacheKey, source, aspect, fadeFromDisk) {
+        val builder = ImageRequest.Builder(context).data(url)
+        // Coil's own crossfade factory already skips memory-cache hits.
+        if (fadeFromDisk) builder.crossfade(IMAGE_CROSSFADE_MS)
+        renditionSizePx(url, aspect ?: renditionAspect(source))?.let { (w, h) ->
+            builder.size(w, h)
+            builder.precision(Precision.INEXACT)
         }
+        if (retryToken != 0) builder.setParameter("retry", retryToken, memoryCacheKey = null)
+        if (cacheKey != null) builder.placeholderMemoryCacheKey(cacheKey)
+        builder.build()
     }
 
     val painter = rememberAsyncImagePainter(

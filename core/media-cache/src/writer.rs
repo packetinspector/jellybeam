@@ -593,10 +593,11 @@ INSERT INTO items (
     unplayed_item_count, primary_tag, backdrop_tag, thumb_tag, primary_blurhash,
     series_primary_tag, parent_backdrop_item_id, parent_backdrop_tag,
     library_id, last_played_date, overview, is_virtual, series_name, series_status,
-    dto, updated_at
+    dto, updated_at, parent_thumb_item_id, parent_thumb_tag
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-    ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33
+    ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33,
+    ?36, ?37
 )
 ON CONFLICT(id) DO UPDATE SET
     -- A view-stamped `parent_id` survives an upsert carrying a non-view parent (e.g.
@@ -624,6 +625,8 @@ ON CONFLICT(id) DO UPDATE SET
     series_primary_tag = excluded.series_primary_tag,
     parent_backdrop_item_id = excluded.parent_backdrop_item_id,
     parent_backdrop_tag = excluded.parent_backdrop_tag,
+    parent_thumb_item_id = excluded.parent_thumb_item_id,
+    parent_thumb_tag = excluded.parent_thumb_tag,
     -- A NULL `excluded.library_id` (unattributed batch) must never clobber a known value; a
     -- non-NULL one always wins, including correcting a stale value on a library move.
     library_id = COALESCE(excluded.library_id, items.library_id),
@@ -711,12 +714,13 @@ pub(crate) fn apply_upsert_items_scoped(
             continue;
         };
 
+        // Per-item statements come from the connection's statement cache: preparing them per
+        // item would dominate a page write.
         let old: Option<OldItemRow> = tx
-            .query_row(
-                "SELECT rowid, dto, library_id, parent_id FROM items WHERE id = ?1",
-                [&cols.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
+            .prepare_cached("SELECT rowid, dto, library_id, parent_id FROM items WHERE id = ?1")?
+            .query_row([&cols.id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
             .optional()?;
 
         let old_parent_id = old.as_ref().and_then(|(_, _, _, p)| p.as_deref());
@@ -764,8 +768,7 @@ pub(crate) fn apply_upsert_items_scoped(
 
         let now = now_millis();
 
-        let rowid: i64 = tx.query_row(
-            UPSERT_ITEM_SQL,
+        let rowid: i64 = tx.prepare_cached(UPSERT_ITEM_SQL)?.query_row(
             params![
                 cols.id,
                 cols.parent_id,
@@ -804,6 +807,9 @@ pub(crate) fn apply_upsert_items_scoped(
                 // Raw `Option`s, bound only for the ON CONFLICT SET clause's COALESCE guard.
                 cols.played,
                 cols.playback_position_ticks,
+                // Appended last so the numbered placeholders above stay put.
+                cols.parent_thumb_item_id,
+                cols.parent_thumb_tag,
             ],
             |row| row.get(0),
         )?;
@@ -823,14 +829,15 @@ pub(crate) fn apply_upsert_items_scoped(
         // outright, including when empty -- safe because every persisting fetch through this
         // function requests `Genres` (`sync::item_fields()`), unlike `played`/`library_id`
         // which need a COALESCE guard.
-        tx.execute("DELETE FROM item_genres WHERE item_id = ?1", [&cols.id])?;
+        tx.prepare_cached("DELETE FROM item_genres WHERE item_id = ?1")?
+            .execute([&cols.id])?;
         for genre in &cols.genres {
             // A DTO carrying the same genre string twice must not fail the whole transaction.
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO item_genres (item_id, genre) VALUES (?1, ?2) \
                  ON CONFLICT(item_id, genre) DO NOTHING",
-                params![cols.id, genre],
-            )?;
+            )?
+            .execute(params![cols.id, genre])?;
         }
 
         upserted.push(cols.id);
@@ -844,10 +851,15 @@ fn fts_insert(
     rowid: i64,
     text: &SearchText,
 ) -> rusqlite::Result<()> {
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO search (rowid, name, original_title, series_name) VALUES (?1, ?2, ?3, ?4)",
-        params![rowid, text.name, text.original_title, text.series_name],
-    )?;
+    )?
+    .execute(params![
+        rowid,
+        text.name,
+        text.original_title,
+        text.series_name
+    ])?;
     Ok(())
 }
 
@@ -856,10 +868,10 @@ fn fts_delete(
     rowid: i64,
     text: &SearchText,
 ) -> rusqlite::Result<()> {
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO search (search, rowid, name, original_title, series_name) VALUES ('delete', ?1, ?2, ?3, ?4)",
-        params![rowid, text.name, text.original_title, text.series_name],
-    )?;
+    )?
+    .execute(params![rowid, text.name, text.original_title, text.series_name])?;
     Ok(())
 }
 
@@ -881,12 +893,14 @@ fn delete_item_row(
     if let Ok(old_item) = serde_json::from_slice::<BaseItemDto>(dto) {
         fts_delete(tx, rowid, &search_text(&old_item))?;
     }
-    let deleted = tx.execute("DELETE FROM items WHERE id = ?1", [id])? > 0;
-    tx.execute(
-        "DELETE FROM collection_members WHERE collection_id = ?1 OR item_id = ?1",
-        [id],
-    )?;
-    tx.execute("DELETE FROM item_genres WHERE item_id = ?1", [id])?;
+    let deleted = tx
+        .prepare_cached("DELETE FROM items WHERE id = ?1")?
+        .execute([id])?
+        > 0;
+    tx.prepare_cached("DELETE FROM collection_members WHERE collection_id = ?1 OR item_id = ?1")?
+        .execute([id])?;
+    tx.prepare_cached("DELETE FROM item_genres WHERE item_id = ?1")?
+        .execute([id])?;
     Ok(deleted)
 }
 
@@ -2282,6 +2296,34 @@ mod tests {
                 .expect("repeat")
                 .is_empty(),
             "an unchanged list must flip nothing"
+        );
+    }
+
+    /// The write clock is whole milliseconds, so a row stamped in the snapshot's own millisecond
+    /// cannot be ordered against it and keeps its flag; only a strictly earlier row changes.
+    #[test]
+    fn set_favorite_ids_shields_a_row_written_in_the_snapshots_millisecond() {
+        let (_dir, mut conn) = open_test_db();
+        let id = "e2f5a5f1-1a0b-4b3a-9c2e-000000000001".to_string();
+        apply_upsert_items(&mut conn, &[item(&id, "Movie")]).expect("insert");
+        apply_set_favorite_ids(&mut conn, std::slice::from_ref(&id), i64::MAX)
+            .expect("seed favorite");
+        let written: i64 = conn
+            .query_row("SELECT updated_at FROM items WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .expect("updated_at");
+
+        assert!(
+            apply_set_favorite_ids(&mut conn, &[], written)
+                .expect("same millisecond")
+                .is_empty(),
+            "a row written in the snapshot's millisecond must keep its flag"
+        );
+        assert_eq!(
+            apply_set_favorite_ids(&mut conn, &[], written + 1).expect("later snapshot"),
+            vec![id],
+            "a row written before the snapshot's millisecond is cleared"
         );
     }
 

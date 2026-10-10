@@ -250,9 +250,10 @@ are already durations (`ms=`), not `atMs=` timestamps.
 
 ### `imageUrl` (per-card art URL formatting)
 
-`CoreGateway.imageUrl` is a plain synchronous FFI call, invoked once per
-visible card -- Home's card grid can call it dozens of times a second while
-scrolling, so it gets a count-only accumulator instead of a per-call line:
+`CoreGateway.imageUrl` formats the current account's card art URLs in Kotlin
+from a per-epoch URL base, so card art makes no FFI call. Only a URL for
+another account's epoch (a player still on the previous account) crosses FFI,
+and those calls get a count-only accumulator instead of a per-call line:
 
 ```
 perf ffi.imageUrl count=214 success=214 avgMs=0.31 maxMs=1.02
@@ -408,11 +409,9 @@ perf section=ffi.openMirror ms=12.44
 perf section=ffi.getSettings ms=0.88
 perf section=ffi.views ms=1.02
 perf section=ffi.homeSnapshot ms=9.77
-perf ffi.imageUrl count=48 success=48 avgMs=0.28 maxMs=0.91
 perf image.load count=48 success=48 avgMs=142.3 maxMs=610.90 bytes=7340032
 perf frames count=598 janky=1 p50Ms=7.8 p90Ms=12.4
 perf section=ffi.children ms=6.31
-perf ffi.imageUrl count=36 success=36 avgMs=0.25 maxMs=0.60
 perf image.load count=36 success=36 avgMs=88.1 maxMs=310.20 bytes=5505024
 perf frames count=601 janky=0 p50Ms=7.1 p90Ms=10.9
 perf section=ffi.preparePlayback ms=63.40

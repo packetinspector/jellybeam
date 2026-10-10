@@ -1,10 +1,14 @@
 package tv.jellybeam.ui.settings
 
 import android.os.Build
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -22,14 +26,19 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -39,12 +48,14 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.pm.PackageInfoCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaLibraryInfo
 import java.text.NumberFormat
+import kotlin.math.roundToInt
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
@@ -66,25 +77,83 @@ private val TILE_HEIGHT = 65.dp
 private val TILE_GAP = 6.dp
 private val TILE_HPADDING = 8.dp
 private const val TILES_PER_ROW = 3
+private val HEADER_SPACER = 19.dp
+private val HEADER_MASCOT_HEIGHT = 44.dp
+private val HEADER_LOCKUP_GAP = 8.dp
+
+/**
+ * The About pane's scroll snap (docs/13-feature-list.md "About section"): [headerBottomPx] is the
+ * brand header plus its spacer in scroll-content pixels, 0 until measured; [spec] reads it live.
+ */
+internal class AboutScrollSnap(private val scrollState: ScrollState) {
+    var headerBottomPx by mutableIntStateOf(0)
+
+    /** Trailing space that lifts the scroll range to 0 or at least [headerBottomPx]. */
+    var bottomSlackPx by mutableIntStateOf(0)
+        private set
+
+    /** The slack as last laid out; [ScrollState.maxValue] includes this, not a pending [bottomSlackPx]. */
+    var laidOutSlackPx by mutableIntStateOf(0)
+
+    /** Re-derives the slack from the slack-free range, read against the laid-out slack so it never flips. */
+    suspend fun trackBottomSlack() {
+        snapshotFlow { aboutBottomSlackPx((scrollState.maxValue - laidOutSlackPx).coerceAtLeast(0), headerBottomPx) }
+            .collect { bottomSlackPx = it }
+    }
+
+    @OptIn(ExperimentalFoundationApi::class)
+    val spec: BringIntoViewSpec = object : BringIntoViewSpec {
+        override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+            val current = scrollState.value
+            val defaultTarget = current + super.calculateScrollDistance(offset, size, containerSize).roundToInt()
+            return (aboutSnapScrollTarget(current, defaultTarget, headerBottomPx, scrollState.maxValue) - current).toFloat()
+        }
+    }
+}
+
+/** Provides [snap]'s spec to the scrollable beneath it; a null [snap] leaves the ambient spec. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun AboutSnapScope(snap: AboutScrollSnap?, content: @Composable () -> Unit) {
+    if (snap == null) {
+        content()
+    } else {
+        // verticalScroll reads the spec where it is composed, so this wraps the scrollable itself.
+        CompositionLocalProvider(LocalBringIntoViewSpec provides snap.spec, content = content)
+    }
+}
 
 /**
  * Settings > About (docs/13-feature-list.md "About section"): a centred brand header (local-only,
- * no network), then the connected server, local mirror and this device as stat cards, backed by
- * [AboutViewModel]. No Refresh control: every entry into the section re-fetches. Reads
+ * no network, never left half-scrolled: see [AboutScrollSnap]), then the connected server, local
+ * mirror and this device as stat cards, backed by [AboutViewModel]. No Refresh control: every entry into the section re-fetches. Reads
  * `PackageInfo` off `PackageManager` rather than `BuildConfig`, since this module's
  * `buildFeatures` never turned `buildConfig` on.
  */
 @Composable
-internal fun AboutSectionContent(viewModel: AboutViewModel = viewModel(factory = AboutViewModelFactory(AppGraph.gateway))) {
+internal fun AboutSectionContent(
+    viewModel: AboutViewModel = viewModel(factory = AboutViewModelFactory(AppGraph.gateway)),
+    scrollSnap: AboutScrollSnap? = null,
+    paneTopInset: Dp = 0.dp,
+) {
     val state by viewModel.state.collectAsState()
     val snapshot = state.snapshot
+    val topInsetPx = with(LocalDensity.current) { paneTopInset.roundToPx() }
 
     // The ViewModel outlives the section, so its init alone would leave a revisit stale.
     LaunchedEffect(viewModel) { viewModel.refresh() }
+    LaunchedEffect(scrollSnap) { scrollSnap?.trackBottomSlack() }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        AboutBrandHeader(modifier = Modifier.align(Alignment.CenterHorizontally))
-        Spacer(Modifier.height(19.dp))
+        // Header plus spacer, plus the pane's top padding above them, is what a snap must scroll off.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .onSizeChanged { scrollSnap?.headerBottomPx = topInsetPx + it.height },
+        ) {
+            AboutBrandHeader(modifier = Modifier.align(Alignment.CenterHorizontally))
+            Spacer(Modifier.height(HEADER_SPACER))
+        }
 
         // Nothing below the header until the first snapshot read lands, so the not-signed-in
         // note never flashes on a signed-in account's first frame.
@@ -95,10 +164,14 @@ internal fun AboutSectionContent(viewModel: AboutViewModel = viewModel(factory =
                 ServerAboutContent(snapshot, state)
             }
         }
+        // Without it a range shorter than the header would leave the header half-clipped.
+        scrollSnap?.let { snap ->
+            Spacer(Modifier.height(with(LocalDensity.current) { snap.bottomSlackPx.toDp() }).onSizeChanged { snap.laidOutSlackPx = it.height })
+        }
     }
 }
 
-/** Mark, wordmark, descriptor, version/build line and the stack-facts pill, all centred. */
+/** Mark beside wordmark, then descriptor, version/build line and the stack-facts pill, all centred. */
 @Composable
 private fun AboutBrandHeader(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -117,14 +190,15 @@ private fun AboutBrandHeader(modifier: Modifier = Modifier) {
     val facts = stringArrayResource(R.array.settings_about_facts)
 
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Image(
-            painter = painterResource(R.drawable.jb_mascot_base),
-            contentDescription = null,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.height(64.dp),
-        )
-        Spacer(Modifier.height(6.dp))
-        JellybeamWordmark(size = 34.sp)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(HEADER_LOCKUP_GAP)) {
+            Image(
+                painter = painterResource(R.drawable.jb_mascot_base),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.height(HEADER_MASCOT_HEIGHT),
+            )
+            JellybeamWordmark(size = 34.sp)
+        }
         BasicText(
             text = stringResource(R.string.settings_about_descriptor),
             style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 12.sp),

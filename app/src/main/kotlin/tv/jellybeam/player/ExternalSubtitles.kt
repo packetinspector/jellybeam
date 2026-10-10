@@ -10,6 +10,7 @@ import uniffi.jellybeam_core.SubtitleActionFfi
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
+import tv.jellybeam.player.ass.arrangePlainSsa
 
 /** A sidecar row's fetch state in the picker; absent once it has loaded. */
 enum class SidecarStatus { LOADING, UNAVAILABLE }
@@ -21,13 +22,17 @@ object ExternalSubtitles {
     /** Above any [TrackMapping.toId] id, so the two ranges never collide and [TrackMapping.resolve] rejects these. */
     private const val ID_BASE = 1_000_000_000L
 
-    /** Media3 mime for a sidecar codec, or null for one we never parse (bitmaps, unbounded ASS). */
+    /** Media3 mime for a sidecar codec, or null for one we never parse (bitmaps). */
     fun mimeFor(codec: String): String? = when (codec.lowercase()) {
         "srt", "subrip" -> MimeTypes.APPLICATION_SUBRIP
         "vtt", "webvtt" -> MimeTypes.TEXT_VTT
         "ttml" -> MimeTypes.APPLICATION_TTML
+        "ass", "ssa" -> MimeTypes.TEXT_SSA
         else -> null
     }
+
+    /** An ASS/SSA sidecar: the styled overlay can load it whole (docs/18 §3.2). */
+    fun isSsa(codec: String): Boolean = mimeFor(codec) == MimeTypes.TEXT_SSA
 
     fun idFor(index: Int): Long = ID_BASE + index
 
@@ -102,15 +107,25 @@ object ExternalSubtitles {
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     fun parse(codec: String, text: String): SidecarCues? {
         val mime = mimeFor(codec) ?: return null
-        val format = Format.Builder().setSampleMimeType(mime).build()
+        val ssa = if (mime == MimeTypes.TEXT_SSA) ssaParts(text) ?: return null else null
+        val format = Format.Builder().setSampleMimeType(mime)
+            .setInitializationData(ssa?.let { listOf(it.formatLine.toByteArray(), it.header.toByteArray()) } ?: emptyList())
+            .build()
         val factory = DefaultSubtitleParserFactory()
         if (!factory.supportsFormat(format)) return null
         val sink = ParsedCueSink()
         // A malformed or hostile file may throw anything, deep nesting and exhaustion included; it
         // costs the track, never playback.
         return try {
-            factory.create(format).parse(text.toByteArray(Charsets.UTF_8), SubtitleParser.OutputOptions.allCues(), sink::accept)
-            SidecarCues.of(sink.entries)
+            val parser = factory.create(format)
+            val all = SubtitleParser.OutputOptions.allCues()
+            if (ssa == null) {
+                parser.parse(text.toByteArray(Charsets.UTF_8), all, sink::accept)
+            } else {
+                // A line at a time: the whole-file parser expands every overlap before yielding a cue.
+                ssa.dialogues.forEach { parser.parse(it.toByteArray(Charsets.UTF_8), all, sink::accept) }
+            }
+            SidecarCues.of(sink.entries, if (ssa == null) { cues -> cues } else ::arrangePlainSsa)
         } catch (_: Exception) {
             null
         } catch (_: StackOverflowError) {
@@ -119,6 +134,30 @@ object ExternalSubtitles {
             null
         }
     }
+}
+
+/** An ASS/SSA file split for Media3's SsaParser as Matroska hands it over: header, events format, lines. */
+internal data class SsaParts(val header: String, val formatLine: String, val dialogues: List<String>)
+
+/** docs/18 §3.2: [text]'s parts, or null without an `[Events]` format line, which every line needs. */
+internal fun ssaParts(text: String): SsaParts? {
+    val header = StringBuilder()
+    val dialogues = mutableListOf<String>()
+    var formatLine: String? = null
+    var inEvents = false
+    for (line in text.removePrefix("\uFEFF").lineSequence()) {
+        val trimmed = line.trimStart()
+        when {
+            trimmed.startsWith("[") -> inEvents = trimmed.startsWith("[Events]", ignoreCase = true)
+            inEvents && trimmed.startsWith("Dialogue:") -> {
+                dialogues += trimmed
+                continue
+            }
+            inEvents && trimmed.startsWith("Format:") -> formatLine = trimmed
+        }
+        header.append(line).append('\n')
+    }
+    return SsaParts(header.toString(), formatLine ?: return null, dialogues)
 }
 
 /**

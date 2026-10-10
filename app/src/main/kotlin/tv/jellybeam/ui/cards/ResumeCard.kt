@@ -18,12 +18,13 @@ import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.i18n.rememberUiStrings
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
+import uniffi.jellybeam_core.ResumeArt
 
 /**
- * A Continue Watching / Next Up tile. Deviates from docs/07 §1's mixed-aspect single row:
- * every card is uniform 16:9 at [rowHeight], using [CardFormatting.resumeArtSource]'s
- * backdrop chain rather than a movie's 2:3 poster. Per §7, the remaining-time/virtual-status
- * pill lives on the art ([TimingPill]); below it sits a fixed 2-line title plus one
+ * A Continue Watching / Next Up tile (docs/07 §1): every card is uniform 16:9 at [rowHeight],
+ * using [CardFormatting.resumeArtSource]'s chain for [art] rather than a movie's 2:3 poster. Per
+ * §7, the remaining-time/virtual-status pill lives on the art ([TimingPill]); below it sits a
+ * fixed 2-line title plus one
  * series/season line. No `rowDim` param (§0.4): the ring alone carries focus.
  */
 @Composable
@@ -34,12 +35,13 @@ fun ResumeCard(
     imageUrl: (itemId: String, kind: ImageKind, tag: String) -> String?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    art: ResumeArt = ResumeArt.EPISODE,
 ) {
     val isEpisode = card.itemType == "Episode"
     val width = rowHeight * (16f / 9f)
     // Computed inline, not remembered: a refreshed Card with the same id must recompute
     // rather than show the first composition's stale value (docs/07-home-browse-behavior.md §1).
-    val artSource = CardFormatting.resumeArtSource(card)
+    val artSource = CardFormatting.resumeArtSource(card, art)
     val progress = CardFormatting.watchProgress(card)
     val indicator = CardFormatting.watchIndicator(card, progress)
     val strings = rememberUiStrings()
@@ -59,6 +61,7 @@ fun ResumeCard(
                 contentAlpha = if (card.isVirtual) 0.4f else 1f,
                 blurhash = card.blurhash,
                 modifier = Modifier.fillMaxSize(),
+                aspect = WIDE_ART_ASPECT,
             )
             timingLabel?.let { TimingPill(it) }
             progress?.let { WatchProgressBar(it) }
