@@ -20,6 +20,7 @@ Want more Rust? [Try out Jellybeam on your Mac.](https://github.com/packetinspec
 - **TrueHD, DTS, DTS-HD, Atmos, HDR10, Dolby Vision.** Decoded on the device or passed straight through. The server stays cool.
 - **Seerr is built in.** Trending, upcoming, search, request. From the couch, with the remote.
 - **A player that was designed, not inherited.** Glyph-only OSD, chapter ticks, skips per segment type.
+- **Fansubs the way they were made.** Opt in and ASS/SSA renders as authored: embedded fonts, signs, karaoke, animation. A pure-Rust port of libass, on the TV, no burn-in.
 - **Glide Seek with trickplay.** Hold Left or Right and the file glides at 6x, 30x, then 120x, with the server's own thumbnails on screen the whole way. Release and it seeks once, exactly where you stopped.
 - **Picture-in-picture.** Back or Home during playback tucks the video into a corner and keeps it playing while you browse.
 - **Fast enough to measure in milliseconds.** First frame around 80 ms. Press Play to player-prepare around 50 ms.
@@ -65,11 +66,25 @@ Want more Rust? [Try out Jellybeam on your Mac.](https://github.com/packetinspec
 - **A real decoder probe, every startup.** Codecs, profiles, levels, resolutions, read from the hardware, so the server hears what your TV can really do.
 - **Mislabeled levels don't cost you.** HEVC files that over-state their level in the container still play at full HDR quality instead of being transcoded. On by default; a switch if you insist.
 - **Jellyfin's FFmpeg audio decoder is bundled.** TrueHD, DTS, DTS-HD and EAC3 decode on the device. Atmos reaches your receiver untouched.
-- **Subtitles from the container.** SRT, TTML, WebVTT, ASS, PGS, VobSub. No burn-in transcode to show a caption.
+- **Subtitles from the container, or next to it.** SRT, TTML, WebVTT, ASS, PGS, VobSub embedded, plus .srt, .vtt, .ttml, .ass and .ssa sidecars. No burn-in transcode to show a caption.
 - **Transcoding is a setting, not a surprise.** Direct Play refuses rather than downgrading. Auto and bitrate caps are opt-in, and the OSD says `TRANSCODE` and why.
 - **Jellyfin 12 ready.** Tested against 12.x and good to go, including the new authorization rules.
 
 <br clear="right">
+
+## Subtitles, as authored
+
+Most TV clients either burn styled subtitles into a transcode or flatten them to plain white text. Jellybeam draws them itself.
+
+- **Full styling for ASS/SSA.** Turn on Settings > Subtitles > Full styling for styled subtitles and every typeset sign, karaoke line, drawing, clip, blur and move renders the way the fansubber made it. Experimental, and off by default while it settles in.
+- **substation, a pure-Rust port of libass.** It runs in the Rust core and draws into its own layer between the video and the OSD, so the OSD always sits on top.
+- **The file's own fonts.** Fonts attached to the MKV are fetched in the background, only once a styled track is actually on screen. Glyphs a font lacks fall back to the other attached fonts, then Android's for CJK, Arabic, Hebrew, Thai and more.
+- **Video never waits on subtitles.** A heavy scene steps rendering quality down instead of dropping frames, then climbs back once there's headroom. Files with tens of MB of fonts or tens of thousands of lines start as fast as any other.
+- **Every track is untrusted.** Input, fonts, memory and per-frame work are capped for a 32-bit TV. A frame over the limits is skipped, never waited on.
+- **Sidecars stay in Direct Play.** An .ass file next to your media is rendered on the TV, so the server never has to transcode to burn it in.
+- **Off still looks good.** With full styling off, ASS/SSA shows simplified, keeping its own colours, size and placement. Your size, colour and position settings apply to plain text subtitles.
+
+<br>
 
 ## Seerr, built in
 
