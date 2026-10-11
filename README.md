@@ -74,6 +74,8 @@ Want more Rust? [Try out Jellybeam on your Mac.](https://github.com/packetinspec
 
 ## Subtitles, as authored
 
+<img src="docs/readme/mascot-grinning.png" width="170" align="right" alt="The Jellybeam mascot, grinning pose">
+
 Most TV clients either burn styled subtitles into a transcode or flatten them to plain white text. Jellybeam draws them itself.
 
 - **Full styling for ASS/SSA.** Turn on Settings > Subtitles > Full styling for styled subtitles and every typeset sign, karaoke line, drawing, clip, blur and move renders the way the fansubber made it. Experimental, and off by default while it settles in.
@@ -84,7 +86,7 @@ Most TV clients either burn styled subtitles into a transcode or flatten them to
 - **Sidecars stay in Direct Play.** An .ass file next to your media is rendered on the TV, so the server never has to transcode to burn it in.
 - **Off still looks good.** With full styling off, ASS/SSA shows simplified, keeping its own colours, size and placement. Your size, colour and position settings apply to plain text subtitles.
 
-<br>
+<br clear="right">
 
 ## Seerr, built in
 
