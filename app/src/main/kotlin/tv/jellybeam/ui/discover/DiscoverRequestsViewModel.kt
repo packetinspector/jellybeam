@@ -9,7 +9,11 @@ import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.SeerrMyRequest
@@ -26,20 +30,34 @@ class DiscoverRequestsViewModel(private val gateway: CoreGateway, private val st
     private val _state = MutableStateFlow(DiscoverRequestsUiState())
     val state: StateFlow<DiscoverRequestsUiState> = _state.asStateFlow()
 
+    private var loadJob: Job? = null
+
+    private var active = true
+
     init {
         refresh()
+        // A change landing while this list is top (Back during the POST) reloads it; one landing while away is covered by the return.
+        gateway.seerrRevision.drop(1).onEach { if (active) refresh() }.launchIn(viewModelScope)
+    }
+
+    /** Fed by the screen's `isTop`: each return to the top reloads, since a Seerr change is always made on another screen (docs/14). */
+    fun setActive(isActive: Boolean) {
+        if (isActive && !active) refresh()
+        active = isActive
     }
 
     private fun refresh() {
-        _state.update { it.copy(isLoading = true, error = null, notConfigured = false) }
-        viewModelScope.launch {
+        loadJob?.cancel()
+        // Rows already on screen stay up during a reload; only an empty screen shows the skeleton (docs/14).
+        _state.update { it.copy(isLoading = it.requests.isEmpty(), error = null, notConfigured = false) }
+        loadJob = viewModelScope.launch {
             try {
                 val requests = gateway.seerrMyRequests()
                 // docs/14: the grid keys by request_id, so a row the server repeats is dropped here.
                 _state.update { it.copy(isLoading = false, requests = requests.distinctBy { r -> r.requestId }) }
             } catch (e: CoreException) {
                 _state.update {
-                    it.copy(isLoading = false, notConfigured = e is CoreException.SeerrNotConfigured, error = e.displayMessage(strings))
+                    it.copy(isLoading = false, requests = emptyList(), notConfigured = e is CoreException.SeerrNotConfigured, error = e.displayMessage(strings))
                 }
             }
         }

@@ -18,7 +18,7 @@ pub enum CoreError {
     /// The saved access token was rejected; kept distinct from a generic API
     /// failure so Android can route straight into reauthorization. `account`
     /// names the Jellyfin account it was issued to (docs/18 §2.1); `None` when no token named
-    /// one: Seerr's, or a public call's.
+    /// one: a public call's.
     #[error("authorization expired")]
     Unauthorized {
         account: Option<crate::types::AccountIdentity>,
@@ -77,6 +77,9 @@ pub enum CoreError {
     /// `https://` is pointed at a plain-http Jellyfin server.
     #[error("https not offered by {host}")]
     HttpsNotOffered { host: String },
+    /// docs/13 sign-in: the server offered TLS but its certificate was refused; never suggests http://.
+    #[error("certificate rejected by {host}")]
+    CertificateRejected { host: String },
     /// docs/13 "sign-in": got an HTTP response, but not one a Jellyfin
     /// server would send (wrong port/app, or a non-2xx status).
     #[error("not a jellyfin server: {host} (http {status})")]
@@ -86,6 +89,9 @@ pub enum CoreError {
     /// which is a saved token needing reauthorization, not a fresh attempt.
     #[error("invalid credentials")]
     InvalidCredentials,
+    /// docs/13 "sign-in": the server has Quick Connect turned off (it answers Initiate with 401).
+    #[error("quick connect is disabled on {host}")]
+    QuickConnectDisabled { host: String },
     /// docs/14-seerr-discover.md: the Seerr server answered a connect with
     /// 401/403, so the address is right and `method`'s identity or secret is
     /// wrong (a Seerr local account signs in with its email address).
@@ -102,6 +108,15 @@ pub enum CoreError {
         reason: crate::seerr_types::SeerrRefusal,
         detail: String,
     },
+    /// docs/14-seerr-discover.md "Errors": a Seerr call was refused (401) even after the one
+    /// relogin, so the saved Seerr credentials no longer work. Never the Jellyfin token's
+    /// [`Self::Unauthorized`], which routes to Jellyfin reauthorization.
+    #[error("seerr session expired")]
+    SeerrSessionExpired,
+    /// docs/14-seerr-discover.md "Errors": a submit or cancel reached Seerr and changed it, but
+    /// the title's new state could not be read back; the caller must treat the server as changed.
+    #[error("seerr changed, but the title's new state could not be read")]
+    SeerrChangeUnconfirmed,
     /// docs/14-seerr-discover.md: a Seerr request never got an answer; Kotlin
     /// words `reason` (docs/27 §5) rather than showing transport text.
     #[error("seerr unreachable: {reason:?}")]
@@ -109,6 +124,20 @@ pub enum CoreError {
     /// docs/26: the updater's working directory can't be created or opened.
     #[error("update storage unavailable")]
     UpdateStorageUnavailable,
+}
+
+/// A Kotlin callback ([`crate::ChangeListener`], [`crate::DiagSink`]) threw; its Rust caller
+/// drops the one call and keeps delivering, since a `()` callback would panic the calling task.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum CallbackError {
+    #[error("callback failed")]
+    Failed,
+}
+
+impl From<uniffi::UnexpectedUniFFICallbackError> for CallbackError {
+    fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        CallbackError::Failed
+    }
 }
 
 /// docs/27 §5: why [`CoreError::ServerUnreachable`]'s request never got an answer; Kotlin words it.
@@ -147,7 +176,7 @@ impl From<media_cache::CacheError> for CoreError {
 impl From<seerr_api::SeerrError> for CoreError {
     fn from(err: seerr_api::SeerrError) -> Self {
         match err {
-            seerr_api::SeerrError::Unauthorized => CoreError::Unauthorized { account: None },
+            seerr_api::SeerrError::Unauthorized => CoreError::SeerrSessionExpired,
             seerr_api::SeerrError::Transport(msg) => CoreError::SeerrUnreachable {
                 reason: crate::signin::unreachable_reason(&msg),
             },
@@ -285,12 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn seerr_unauthorized_maps_to_typed_authorization_error() {
+    fn seerr_unauthorized_maps_to_its_own_session_expired_error() {
         let core_err: CoreError = seerr_api::SeerrError::Unauthorized.into();
-        assert!(matches!(
-            core_err,
-            CoreError::Unauthorized { account: None }
-        ));
+        assert!(matches!(core_err, CoreError::SeerrSessionExpired));
     }
 
     #[test]

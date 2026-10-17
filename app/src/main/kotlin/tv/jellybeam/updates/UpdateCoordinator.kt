@@ -16,6 +16,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import tv.jellybeam.AppGraph
+import tv.jellybeam.data.runCatchingCancellable
 import uniffi.jellybeam_core.AppUpdater
 import uniffi.jellybeam_core.UpdateSnapshot
 
@@ -48,6 +49,8 @@ class UpdateCoordinator(private val context: Context) {
         get() = permission.value
         set(value) { permission.value = value }
     private var work: Job? = null
+    /** What [work] is doing; read only while it is active, so a finished job's kind is never acted on. */
+    private var workKind: WorkKind? = null
     private var verifying: ULong? = null
     private var staging: ULong? = null
     private var pendingConfirmation: Intent? = null
@@ -92,9 +95,10 @@ class UpdateCoordinator(private val context: Context) {
         when (snapshot.phase) {
             "Verifying" -> if (verifying != snapshot.generation && work?.isActive != true) {
                 verifying = snapshot.generation
+                workKind = WorkKind.Verify
                 work = scope.launch {
                     val archive = withContext(Dispatchers.IO) {
-                        runCatching { verifyArchive(context, File(snapshot.apkPath), snapshot.profilePath?.let(::File)) }.getOrNull()
+                        runCatchingCancellable { verifyArchive(context, File(snapshot.apkPath), snapshot.profilePath?.let(::File)) }.getOrNull()
                     }
                     withContext(Dispatchers.IO) {
                         core.verified(snapshot.generation, uniffi.jellybeam_core.VerifiedUpdateFacts(
@@ -218,6 +222,7 @@ class UpdateCoordinator(private val context: Context) {
     private fun continueInstall(snapshot: UpdateSnapshot) {
         if (!mayContinueInstall(work?.isActive == true, mutable.value?.generation, snapshot.generation)) return
         if (!installer.allowed()) { permissionNeeded = true; return }
+        workKind = WorkKind.Prepare
         work = scope.launch(Dispatchers.IO) {
             if (mutable.value?.generation == snapshot.generation) updater.await().prepareInstall(snapshot.generation)
             nudge()
@@ -239,17 +244,28 @@ class UpdateCoordinator(private val context: Context) {
     fun playbackChanged(active: Boolean) {
         playback = active
         playbackStarting = false
-        if (active) { autoCheck?.cancel(); cancel() }
+        if (active) {
+            autoCheck?.cancel()
+            val plan = yieldToPlayback()
+            if (plan.launch == PlayLaunchPlan.LaunchThenAbandonStaging && !unavailable) scope.launch { abandonUncommittedStaging(plan.cancelCore) }
+        }
         else if (resumed) browsingReady()
         nudge()
     }
-    // docs/26 §1: Play is never dropped, and never waits for blocking verification (a stale result is ignored by generation).
+    /** docs/26 §1: Play, from either entry, drops the install authorization and decides by [playPlan]; a download or verification continues. */
+    private fun yieldToPlayback(): PlayPlan {
+        authorization = null
+        permissionNeeded = false
+        val plan = playPlan(installer.hasStaging(), mutable.value?.phase.orEmpty(), workKind.takeIf { work?.isActive == true })
+        if (plan.cancelWork) work?.cancel()
+        return plan
+    }
+    // docs/26 §1: Play is never dropped and starts at once; only uncommitted staging is abandoned, after the launch.
     fun launchPlayback(launch: () -> Unit) {
         if (unavailable) { launch(); return }
-        authorization = null
         playbackStarting = true
         autoCheck?.cancel()
-        work?.cancel()
+        val plan = yieldToPlayback()
         scope.launch {
             try {
                 val committed = installer.committedGeneration
@@ -259,16 +275,29 @@ class UpdateCoordinator(private val context: Context) {
                         withContext(Dispatchers.IO) { updater.await().installerResult(committed, "canceled") }
                     }
                 }
-                if (installer.committedGeneration == null) withContext(Dispatchers.IO) { installer.abandonStaging(); updater.await().cancel() }
-            } catch (_: Exception) { markUnavailable() }
-            launch()
-            playbackStarting = false
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { markUnavailable() }
+            finally {
+                playbackStarting = false
+                launch()
+            }
+            if (plan.launch == PlayLaunchPlan.LaunchThenAbandonStaging && !unavailable) abandonUncommittedStaging(plan.cancelCore)
             nudge()
         }
     }
+    /** Abandons the uncommitted installer session; the core's install preparation is cancelled too only when [cancelCore]. */
+    private suspend fun abandonUncommittedStaging(cancelCore: Boolean) {
+        try {
+            if (installer.committedGeneration == null) withContext(Dispatchers.IO) {
+                installer.abandonStaging()
+                if (cancelCore) updater.await().cancel()
+            }
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) { markUnavailable() }
+    }
     private suspend fun failCommitted(generation: ULong) {
         withContext(Dispatchers.IO) {
-            runCatching { installer.clear() }
+            runCatchingCancellable { installer.clear() }
             updater.await().installerResult(generation, "failed")
         }
         authorization = null; pendingConfirmation = null; staging = null
@@ -276,6 +305,7 @@ class UpdateCoordinator(private val context: Context) {
     }
     private fun stage(snapshot: UpdateSnapshot, core: AppUpdater) {
         if (!eligible() || authorization != snapshot.generation) { cancel(); return }
+        workKind = WorkKind.Stage
         work = scope.launch {
             try {
                 val session = withContext(Dispatchers.IO) {
@@ -291,12 +321,12 @@ class UpdateCoordinator(private val context: Context) {
                 installer.commit(session, snapshot.generation)
             } catch (e: Exception) {
                 // A copy interrupted by cancellation surfaces as an IO error; it is still a cancel.
-                val canceled = e is CancellationException || !isActive
+                val cancellation = e is CancellationException
+                val active = isActive
                 authorization = null
                 withContext(NonCancellable + Dispatchers.IO) {
                     installer.abandonStaging()
-                    if (canceled) { if (installer.committedGeneration == null) core.installerResult(snapshot.generation, "canceled") }
-                    else core.installerResult(snapshot.generation, "failed")
+                    stageOutcome(cancellation, active, installer.committedGeneration != null)?.let { core.installerResult(snapshot.generation, it) }
                 }
                 if (e is CancellationException) throw e
             }

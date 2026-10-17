@@ -3,10 +3,13 @@ package tv.jellybeam.ui.library
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import tv.jellybeam.AppGraph
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.ui.common.ChangeRefreshScheduler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -91,17 +94,19 @@ data class LibraryUiState(
  * §4.6). [LibraryUiState.genres] only reloads on the first query and a change event, gated by
  * [affectsThisLibrary].
  *
- * docs/16 §4.6, docs/17-mini-player.md §6: a resetting `debounce(500)` never fires while a sync
- * burst keeps events under 500ms apart. [changeRefreshScheduler] drives the re-query instead:
- * leading refresh, bounded periodic sampling, and a guaranteed trailing refresh, gated by
- * [setActive] so a hidden-but-retained screen samples at a slower rate.
+ * docs/16 §4.6: [changeRefreshScheduler] drives the re-query, only while [setActive] says this screen is on top.
  *
  * A live view ([ViewKind.isLive]: `CHANNEL` or a `CHANNEL_FOLDER` inside one) never syncs to the
  * offline mirror, so every page comes from [CoreGateway.liveChildren] instead, with no
  * [ChangeEvent] stream and no sort/filter/prefs concept; [onBecameTop] re-queries it when this
  * screen becomes visible again (see [liveSortFor] for its per-kind sort).
  */
-class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewSnapshot) : ViewModel() {
+class LibraryViewModel(
+    private val gateway: CoreGateway,
+    private val view: ViewSnapshot,
+    /** Where the sort/filter prefs are written, so a cleared screen still persists the latest intent (docs/16 §5). */
+    private val persistScope: CoroutineScope = AppGraph.processScope,
+) : ViewModel() {
 
     private companion object {
         const val PAGE_SIZE = 200
@@ -180,13 +185,32 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
     /**
      * Bumped synchronously in [applyIntent]: [refresh]/[loadNextPage]/[ensureLoadedThrough]
      * snapshot this before their first suspension and discard a stale result if it moved on, so
-     * an older query can't overwrite a newer [requery]'s results (docs/16 §4.6). [requery] needs
-     * no such check since [applyIntent] cancels the previous [intentJob] first.
+     * an older query can't overwrite a newer [requery]'s results (docs/16 §4.6).
      */
     private var generation = 0
 
-    /** Bumped by every [refresh]'s items publish, so only the newest refresh publishes its summary. */
-    private var refreshSeq = 0
+    /**
+     * The one items-publish sequence (docs/16 §4.6): bumped as each [refresh] and [requery] starts
+     * its read, and only the read holding the newest value publishes, so the grid always shows the
+     * last-started query's items under the current sort.
+     */
+    private var readSeq = 0
+
+    /**
+     * Persisted sort/filters, written beside the requery they came with (docs/16 §5): each value
+     * is the whole record, so only the latest needs to land.
+     */
+    private val prefsWrites = Channel<LibraryGridPrefs>(Channel.CONFLATED)
+
+    /**
+     * True until genres and item types are loaded for the current mirror state, and again after a
+     * [ChangeEvent.Refresh]; any settled read then loads them, so a superseded first read never
+     * leaves them empty (docs/16 §4.6).
+     */
+    private var genresNeeded = true
+
+    /** Serializes [loadGenresIfNeeded] so two settled reads never load them twice at once. */
+    private val genresLoad = Mutex()
 
     /**
      * Serializes [loadNextPage] against [ensureLoadedThrough]: a rail jump waits for an in-flight
@@ -195,11 +219,7 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
      */
     private val pagingMutex = Mutex()
 
-    /**
-     * docs/16 §4.6, docs/17-mini-player.md §6: true while top of stack and the host Activity is
-     * resumed (fed by [LibraryScreen]'s `setActive(isTop)`). Drives [changeRefreshScheduler]'s
-     * sampling rate; meaningless for a live view, which has no scheduler.
-     */
+    /** docs/16 §4.6: top of the stack and resumed; [changeRefreshScheduler] refreshes only while true. */
     private val _active = MutableStateFlow(false)
 
     fun setActive(active: Boolean) {
@@ -207,9 +227,9 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
     }
 
     /**
-     * `null` for a live view; [onBecameTop] is its only refresh trigger. Filtered before reaching
-     * the scheduler, since checking relevance after conflating risks swallowing a relevant event
-     * that landed earlier in a burst.
+     * `null` for a live view; [onBecameTop] is its only refresh trigger. [affectsThisLibrary]
+     * decides per event, ahead of conflation, so a relevant event landing early in a burst is
+     * never swallowed by an irrelevant one.
      */
     private val changeRefreshScheduler: ChangeRefreshScheduler<ChangeEvent>? =
         if (view.kind.isLive) {
@@ -217,16 +237,23 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
         } else {
             ChangeRefreshScheduler(
                 scope = viewModelScope,
-                events = gateway.changeEvents().onEach(::markPreviewsDirty).filter(::affectsThisLibrary),
+                events = gateway.changeEvents().onEach {
+                    markPreviewsDirty(it)
+                    if (it == ChangeEvent.Refresh) genresNeeded = true
+                },
+                affects = ::affectsThisLibrary,
                 active = _active.asStateFlow(),
                 refresh = {
-                    refresh(reloadGenres = true)
+                    refresh()
                     refreshCollectionPreviews()
                 },
             )
         }
 
     init {
+        persistScope.launch {
+            for (prefs in prefsWrites) runCatchingCancellable { gateway.setLibraryGridPrefs(view.id, prefs) }
+        }
         viewModelScope.launch {
             if (!view.kind.isLive) {
                 // Prefs load before the first query (docs/16 §5): it must use the saved
@@ -234,7 +261,7 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
                 val prefs = gateway.getLibraryGridPrefs(view.id)
                 _state.update { it.copy(sort = prefs.sort, filters = prefs.filters, prefsLoaded = true) }
             }
-            refresh(reloadGenres = true)
+            refresh()
         }
     }
 
@@ -305,7 +332,7 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
 
     /**
      * Growing-prefix refresh: re-fetches items `0..max(PAGE_SIZE, current size)` under the current
-     * [LibraryUiState.sort]/[filters], plus [counts]/[groups], plus [genres] when [reloadGenres]
+     * [LibraryUiState.sort]/[filters], plus [counts]/[groups], then [loadGenresIfNeeded]
      * (docs/16 §4.6). Used by [init]'s first load and [changeRefreshScheduler]; never by a
      * sort/filter intent, which drops the old prefix instead (see [requery]).
      *
@@ -318,11 +345,11 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
      * Not fixed here: items/counts/groups/genres remain separate, non-transactional reads that can
      * straddle an intervening commit -- self-heals on the next change event/refresh.
      */
-    private suspend fun refresh(reloadGenres: Boolean = false) {
+    private suspend fun refresh() {
         if (view.kind.isLive) {
             pagingMutex.withLock {
                 // Live listing has no mirror behind it: always re-pulled from the top.
-                val page = runCatching {
+                val page = runCatchingCancellable {
                     gateway.liveChildren(view.id, 0u, PAGE_SIZE.toUInt(), liveSortFor(view.kind))
                 }.getOrElse {
                     // Fail soft: keep whatever was already on screen rather than blanking the grid.
@@ -341,11 +368,11 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
         var stale = false
         pagingMutex.withLock {
             myGeneration = generation
-            mySeq = ++refreshSeq
+            mySeq = ++readSeq
             current = _state.value
             val requested = maxOf(PAGE_SIZE, current.items.size)
             val items = gateway.libraryGrid(view.id, current.sort, current.filters, 0u, requested.toUInt())
-            if (myGeneration != generation) {
+            if (myGeneration != generation || mySeq != readSeq) {
                 stale = true
                 _state.update { it.copy(isLoading = false, isLoadingMore = false) }
                 return@withLock
@@ -361,31 +388,57 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
         }
         if (stale) return
         val (counts, groups) = readSummary(current.sort, current.filters)
-        val genres = if (reloadGenres) gateway.libraryGenres(view.id) else current.genres
-        val itemTypes = if (reloadGenres && view.isFavorites) gateway.favoriteItemTypes() else current.itemTypes
-        // A newer intent's requery(), or a newer refresh's items, own the summary now.
-        if (myGeneration != generation || mySeq != refreshSeq) return
+        // A newer intent's requery(), or a newer read's items, own the summary now.
+        if (myGeneration != generation || mySeq != readSeq) return
         _state.update {
             it.copy(
                 counts = counts ?: it.counts,
                 groups = groups ?: it.groups,
-                genres = if (reloadGenres) genres else it.genres,
-                itemTypes = if (reloadGenres) itemTypes else it.itemTypes,
             )
         }
-        if (reloadGenres && isStaleItemTypeFilter(current.filters.itemType, itemTypes)) setItemType(null)
+        loadGenresIfNeeded()
+    }
+
+    /**
+     * Loads [LibraryUiState.genres] (and the Favorites Type options) while [genresNeeded]; a read
+     * that fails or is cancelled leaves it set for the next settled read. A saved Type filter no
+     * favorite has any more is cleared (docs/16 §2.7).
+     */
+    private suspend fun loadGenresIfNeeded() {
+        if (view.kind.isLive) return
+        var clearItemType = false
+        genresLoad.withLock {
+            if (!genresNeeded) return
+            genresNeeded = false
+            var loaded = false
+            try {
+                val genres = gateway.libraryGenres(view.id)
+                val itemTypes = if (view.isFavorites) gateway.favoriteItemTypes() else null
+                _state.update { it.copy(genres = genres, itemTypes = itemTypes ?: it.itemTypes) }
+                clearItemType = itemTypes != null && isStaleItemTypeFilter(_state.value.filters.itemType, itemTypes)
+                loaded = true
+            } finally {
+                if (!loaded) genresNeeded = true
+            }
+        }
+        // Outside the lock: the intent's own requery settles through this funnel again.
+        if (clearItemType) setItemType(null)
     }
 
     /**
      * A sort/filter intent's re-query (docs/16 §4.2: results change on Select, never on focus
      * move): drops the loaded prefix and re-fetches one [PAGE_SIZE] page from offset 0 under the
-     * just-updated sort/filters, plus counts/groups. Never reloads genres. Null-vs-empty
+     * just-updated sort/filters, plus counts/groups, then [loadGenresIfNeeded]. Null-vs-empty
      * coalescing: see [GridRead]/[applying] -- a stale-but-populated grid beats an empty one.
      */
     private suspend fun requery() {
         val current = _state.value
+        val mySeq = ++readSeq
         val read = readGrid(current.sort, current.filters, PAGE_SIZE)
+        // A read that started after this one owns the grid, whichever lands first.
+        if (mySeq != readSeq) return
         _state.update { it.applying(read) }
+        loadGenresIfNeeded()
     }
 
     /**
@@ -395,18 +448,17 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
      */
     private var intentJob: Job? = null
 
-    /** Shared body for every public sort/filter intent below: applies [transform], persists via
-     * [CoreGateway.setLibraryGridPrefs], then [requery]s.
+    /** Shared body for every public sort/filter intent below: applies [transform], queues the
+     * prefs write via [prefsWrites] (beside the query, so a slow write never delays results), then
+     * [requery]s.
      */
     private fun applyIntent(transform: (LibraryUiState) -> LibraryUiState) {
         generation++
         _state.update(transform)
+        val current = _state.value
+        prefsWrites.trySend(LibraryGridPrefs(current.sort, current.filters))
         intentJob?.cancel()
-        intentJob = viewModelScope.launch {
-            val current = _state.value
-            gateway.setLibraryGridPrefs(view.id, LibraryGridPrefs(current.sort, current.filters))
-            requery()
-        }
+        intentJob = viewModelScope.launch { requery() }
     }
 
     /** Sort chip Select (docs/16 §4.2): an inactive field becomes active in its natural direction
@@ -473,7 +525,7 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
                     val offset = state.items.size
                     // §4.6: a null page leaves `items`/`hasMore` untouched (not `hasMore = false`)
                     // so a later scroll retries instead of being permanently stranded.
-                    val page = runCatching {
+                    val page = runCatchingCancellable {
                         if (view.kind.isLive) {
                             gateway.liveChildren(view.id, offset.toUInt(), PAGE_SIZE.toUInt(), liveSortFor(view.kind))
                         } else {
@@ -531,6 +583,11 @@ class LibraryViewModel(private val gateway: CoreGateway, private val view: ViewS
         } finally {
             _state.update { it.copy(isLoadingMore = false) }
         }
+    }
+
+    /** Closing the channel lets the writer deliver the latest intent, then end (docs/16 §5). */
+    override fun onCleared() {
+        prefsWrites.close()
     }
 
     /**

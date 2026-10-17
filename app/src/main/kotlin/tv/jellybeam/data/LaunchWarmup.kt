@@ -25,8 +25,9 @@ class LaunchWarmup(
     private val gateway: CoreGateway,
     private val scope: CoroutineScope,
 ) {
-    /** [account] is `null` for a signed-out launch. [settings] and [views] are the launch reads,
-     * `null` when they failed; [homeLayout] seeds the session's committed Home layout (docs/25
+    /** [account] is `null` for a signed-out launch. [settings] is the launch read, `null` when it
+     * failed; [views] is the list [CoreGateway.viewsState] held once the mirror opened (empty when
+     * it failed to open), `null` only for a signed-out launch; [homeLayout] seeds the session's committed Home layout (docs/25
      * §6.1).
      */
     class Session(val account: AccountInfo?, val settings: Settings?, val views: List<ViewSnapshot>?) {
@@ -34,8 +35,8 @@ class LaunchWarmup(
     }
 
     /** [stale]: the mirror changed after [snapshot] was read, so the taker owes one refresh.
-     * [settings]/[views] are the launch reads the snapshot was built beside; `null` when either
-     * failed, so the taker fetches its own.
+     * [settings] is the launch read the snapshot was built beside, `null` when it failed, so the
+     * taker fetches its own; [views] is [CoreGateway.viewsState] as of the snapshot.
      */
     class Home(
         val snapshot: HomeSnapshot,
@@ -53,14 +54,15 @@ class LaunchWarmup(
 
     private val session: Deferred<Session> = scope.async {
         val account = gateway.restoreSession()
+        // In-memory settings read, no network and no mirror: overlaps openMirror. A failure leaves
+        // the default layout.
+        val settingsRead = async { runCatchingCancellable { gateway.getSettings() }.getOrNull() }
         // Fail open (docs/05): a mirror that won't open still lands on Home's empty state.
-        if (account != null) runCatching { gateway.openMirror() }
-        // In-memory settings read, no network; a failure leaves the default layout.
-        val settings = runCatching { gateway.getSettings() }.getOrNull()
-        // Local mirror read, so only after openMirror; the startup-screen pick and Home's chrome
-        // both need it (docs/10).
-        val views = if (account != null) runCatching { gateway.views() }.getOrNull() else null
-        Session(account, settings, views)
+        if (account != null) runCatchingCancellable { gateway.openMirror() }
+        // The library list openMirror just published (docs/07 §5); the startup-screen pick and
+        // Home's chrome both need it (docs/10).
+        val views = if (account != null) gateway.viewsState.value else null
+        Session(account, settingsRead.await(), views)
     }
 
     @Volatile
@@ -77,11 +79,8 @@ class LaunchWarmup(
             gateway.changeEvents().collect { changed.set(true) }
         }
         if (released.get()) watcher?.cancel()
-        val snapshot = runCatching { gateway.homeSnapshot(restored.homeLayout) }.getOrNull() ?: return@async null
-        // Re-read under the watcher, so a views write between the session's read and the
-        // subscription can't leave the seeded chrome behind the snapshot.
-        val views = runCatching { gateway.views() }.getOrNull()
-        Prefetched(snapshot, restored.settings, views)
+        val snapshot = runCatchingCancellable { gateway.homeSnapshot(restored.homeLayout) }.getOrNull() ?: return@async null
+        Prefetched(snapshot, restored.settings, gateway.viewsState.value)
     }
 
     private val sessionSlot = AtomicReference<Deferred<Session>?>(session)

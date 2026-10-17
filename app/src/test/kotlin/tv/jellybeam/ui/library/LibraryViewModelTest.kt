@@ -6,10 +6,14 @@ import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.FakeCoreGateway
 import tv.jellybeam.ui.cards.testCard
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
@@ -20,6 +24,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.Decade
 import uniffi.jellybeam_core.GridCounts
@@ -60,7 +65,9 @@ class LibraryViewModelTest {
         view: ViewSnapshot,
         block: (LibraryViewModel) -> Unit,
     ) {
-        val viewModel = LibraryViewModel(gateway, view)
+        val viewModel = LibraryViewModel(gateway, view, CoroutineScope(SupervisorJob() + Dispatchers.Main))
+        // On screen: a hidden library only marks itself dirty (docs/16 §4.6).
+        viewModel.setActive(true)
         try {
             block(viewModel)
         } finally {
@@ -875,7 +882,7 @@ class LibraryViewModelTest {
         val items = listOf(testCard(id = "rec-1", name = "Recording 1"))
         val gateway = FakeCoreGateway(liveChildrenByParent = mapOf("channel-1" to items))
 
-        val viewModel = LibraryViewModel(gateway, view)
+        val viewModel = LibraryViewModel(gateway, view, CoroutineScope(SupervisorJob() + Dispatchers.Main))
 
         assertEquals(items, viewModel.state.value.items)
         assertFalse(viewModel.state.value.isLoading)
@@ -903,7 +910,7 @@ class LibraryViewModelTest {
         val view = ViewSnapshot(id = "folder-1", name = "Aug 30", kind = ViewKind.CHANNEL_FOLDER)
         val items = (0 until 250).map { testCard(id = "rec-$it", name = "Recording $it") }
         val gateway = FakeCoreGateway(liveChildrenByParent = mapOf("folder-1" to items))
-        val viewModel = LibraryViewModel(gateway, view)
+        val viewModel = LibraryViewModel(gateway, view, CoroutineScope(SupervisorJob() + Dispatchers.Main))
 
         assertEquals(LiveSort.NEWEST_FIRST, gateway.liveChildrenCalls.single().sort)
 
@@ -919,7 +926,7 @@ class LibraryViewModelTest {
         val view = ViewSnapshot(id = "channel-1", name = "Recordings", kind = ViewKind.CHANNEL)
         val items = (0 until 250).map { testCard(id = "rec-$it", name = "Recording $it") }
         val gateway = FakeCoreGateway(liveChildrenByParent = mapOf("channel-1" to items))
-        val viewModel = LibraryViewModel(gateway, view)
+        val viewModel = LibraryViewModel(gateway, view, CoroutineScope(SupervisorJob() + Dispatchers.Main))
 
         assertEquals(200, viewModel.state.value.items.size)
         viewModel.loadNextPage()
@@ -935,7 +942,7 @@ class LibraryViewModelTest {
         val view = ViewSnapshot(id = "channel-1", name = "Recordings", kind = ViewKind.CHANNEL)
         val items = listOf(testCard(id = "rec-1", name = "Recording 1"))
         val gateway = FakeCoreGateway(liveChildrenByParent = mapOf("channel-1" to items))
-        val viewModel = LibraryViewModel(gateway, view)
+        val viewModel = LibraryViewModel(gateway, view, CoroutineScope(SupervisorJob() + Dispatchers.Main))
         assertEquals(items, viewModel.state.value.items)
 
         gateway.liveChildrenError = RuntimeException("server unreachable")
@@ -951,7 +958,7 @@ class LibraryViewModelTest {
         val view = ViewSnapshot(id = "channel-1", name = "Recordings", kind = ViewKind.CHANNEL)
         val items = listOf(testCard(id = "rec-1", name = "Recording 1"))
         val gateway = FakeCoreGateway(liveChildrenByParent = mapOf("channel-1" to items))
-        val viewModel = LibraryViewModel(gateway, view)
+        val viewModel = LibraryViewModel(gateway, view, CoroutineScope(SupervisorJob() + Dispatchers.Main))
         assertEquals(1, gateway.liveChildrenCalls.size)
 
         viewModel.onBecameTop()
@@ -964,7 +971,7 @@ class LibraryViewModelTest {
         val view = ViewSnapshot(id = "folder-1", name = "Aug 30", kind = ViewKind.CHANNEL_FOLDER)
         val items = listOf(testCard(id = "rec-1", name = "Recording 1"))
         val gateway = FakeCoreGateway(liveChildrenByParent = mapOf("folder-1" to items))
-        val viewModel = LibraryViewModel(gateway, view)
+        val viewModel = LibraryViewModel(gateway, view, CoroutineScope(SupervisorJob() + Dispatchers.Main))
         assertEquals(1, gateway.liveChildrenCalls.size)
 
         viewModel.onBecameTop()
@@ -1010,7 +1017,7 @@ class LibraryViewModelTest {
         val view = ViewSnapshot(id = "channel-1", name = "Recordings", kind = ViewKind.CHANNEL)
         val gateway = FakeCoreGateway(liveChildrenByParent = mapOf("channel-1" to listOf(testCard(id = "rec-1"))))
 
-        val viewModel = LibraryViewModel(gateway, view)
+        val viewModel = LibraryViewModel(gateway, view, CoroutineScope(SupervisorJob() + Dispatchers.Main))
 
         assertFalse(viewModel.state.value.prefsLoaded)
     }
@@ -1206,5 +1213,178 @@ class LibraryViewModelTest {
             assertEquals(newCounts, viewModel.state.value.counts)
             assertEquals(newGroups, viewModel.state.value.groups)
         }
+    }
+
+    // ---- docs/16 §4.6: one items publish sequence across requery and refresh ------------
+
+    /** A gateway whose grid reads, once [holding], each park on their own deferred so a test
+     * completes them in any order; [started] lists them in the order they began.
+     */
+    private class HeldGrid(val fake: FakeCoreGateway, val changes: MutableSharedFlow<ChangeEvent>) : CoreGateway by fake {
+        class Read(val sort: GridSort, val result: CompletableDeferred<List<Card>?> = CompletableDeferred())
+
+        var holding = false
+        val started = mutableListOf<Read>()
+
+        override fun changeEvents(): Flow<ChangeEvent> = changes
+
+        override suspend fun libraryGrid(viewId: String, sort: GridSort, filters: GridFilters, offset: UInt, limit: UInt): List<Card>? {
+            if (!holding) return fake.libraryGrid(viewId, sort, filters, offset, limit)
+            val read = Read(sort)
+            started += read
+            return read.result.await()
+        }
+    }
+
+    /** A sort intent's requery and a mirror-event refresh both in flight, started in the given
+     * order and completed in the given order: the grid ends on the current sort and the items of
+     * whichever read started last.
+     */
+    private fun TestScope.lastStartedWins(requeryFirst: Boolean, lastStartedCompletesFirst: Boolean) {
+        val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
+        val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to listOf(testCard(id = "init"))))
+        val grid = HeldGrid(fake, MutableSharedFlow(extraBufferCapacity = 4))
+        withLibraryViewModel(grid, view) { viewModel ->
+            grid.holding = true
+            val startRequery = { viewModel.setSort(GridSortField.YEAR); runCurrent() }
+            val startRefresh = { grid.changes.tryEmit(ChangeEvent.Refresh); runCurrent() }
+            if (requeryFirst) { startRequery(); startRefresh() } else { startRefresh(); startRequery() }
+            assertEquals(2, grid.started.size)
+
+            val older = listOf(testCard(id = "older-started"))
+            val newest = listOf(testCard(id = "last-started"))
+            val (first, second) = grid.started
+            val completions = listOf(first to older, second to newest)
+            (if (lastStartedCompletesFirst) completions.reversed() else completions).forEach { (read, items) ->
+                read.result.complete(items)
+                runCurrent()
+            }
+
+            assertEquals(GridSortField.YEAR, viewModel.state.value.sort.field)
+            assertEquals(newest.map { it.id }, viewModel.state.value.items.map { it.id })
+        }
+    }
+
+    @Test
+    fun `a requery then a refresh, the refresh landing first, ends on the refresh's items`() = runTest {
+        lastStartedWins(requeryFirst = true, lastStartedCompletesFirst = true)
+    }
+
+    @Test
+    fun `a requery then a refresh, the requery landing first, ends on the refresh's items`() = runTest {
+        lastStartedWins(requeryFirst = true, lastStartedCompletesFirst = false)
+    }
+
+    @Test
+    fun `a refresh then a requery, the requery landing first, ends on the requery's items`() = runTest {
+        lastStartedWins(requeryFirst = false, lastStartedCompletesFirst = true)
+    }
+
+    @Test
+    fun `a refresh then a requery, the refresh landing first, ends on the requery's items`() = runTest {
+        lastStartedWins(requeryFirst = false, lastStartedCompletesFirst = false)
+    }
+
+    // ---- docs/16 §5: prefs persist beside the requery, not before it ---------------------
+
+    @Test
+    fun `a slow prefs write does not delay the requery`() = runTest {
+        val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
+        val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to listOf(testCard(id = "name-order"))))
+
+        withLibraryViewModel(fake, view) { viewModel ->
+            val queriesBefore = fake.libraryGridCalls.size
+            val writeGate = CompletableDeferred<Unit>()
+            fake.setLibraryGridPrefsGate = writeGate
+            fake.libraryGridByView = mapOf("view-1" to listOf(testCard(id = "year-order")))
+
+            viewModel.setSort(GridSortField.YEAR)
+            runCurrent()
+
+            assertEquals("the write has begun", 1, fake.setLibraryGridPrefsCalls.size)
+            assertEquals("the requery ran while the write is still parked", queriesBefore + 1, fake.libraryGridCalls.size)
+            assertEquals(GridSortField.YEAR, fake.libraryGridCalls.last().sort.field)
+            assertEquals(listOf("year-order"), viewModel.state.value.items.map { it.id })
+
+            writeGate.complete(Unit)
+            runCurrent()
+            assertEquals(GridSortField.YEAR, fake.setLibraryGridPrefsCalls.single().prefs.sort.field)
+        }
+    }
+    // ---- docs/16 §4.3: genres load once any read settles, whichever read superseded the first ----
+
+    /** Entries that supersede the first load's read, and where that first read is held. */
+    private enum class Superseder { SCHEDULER_REFRESH, REQUERY }
+
+    private fun genresSettleAfterSupersededFirstLoad(superseder: Superseder, summaryInFlight: Boolean) = runTest {
+        val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
+        val fake = FakeCoreGateway(
+            libraryGridByView = mapOf("view-1" to listOf(testCard(id = "a"))),
+            libraryGenresByView = mapOf("view-1" to listOf("Action", "Comedy")),
+        )
+        val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+        val countsGate = CompletableDeferred<Unit>()
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = changes
+
+            override suspend fun libraryGridCounts(viewId: String, filters: GridFilters): GridCounts? {
+                if (summaryInFlight) countsGate.await()
+                return fake.libraryGridCounts(viewId, filters)
+            }
+        }
+        val itemsGate = CompletableDeferred<Unit>()
+        if (!summaryInFlight) fake.libraryGridGate = itemsGate
+
+        withLibraryViewModel(gateway, view) { viewModel ->
+            runCurrent()
+            when (superseder) {
+                Superseder.SCHEDULER_REFRESH -> changes.tryEmit(ChangeEvent.Upserted(ids = listOf("a"), libraryId = null))
+                Superseder.REQUERY -> viewModel.setSort(GridSortField.YEAR)
+            }
+            runCurrent()
+            countsGate.complete(Unit)
+            itemsGate.complete(Unit)
+            runCurrent()
+
+            assertEquals("$superseder summaryInFlight=$summaryInFlight", listOf("Action", "Comedy"), viewModel.state.value.genres)
+        }
+    }
+
+    @Test
+    fun `genres load after the first read is superseded by a scheduler refresh with its summary in flight`() =
+        genresSettleAfterSupersededFirstLoad(Superseder.SCHEDULER_REFRESH, summaryInFlight = true)
+
+    @Test
+    fun `genres load after the first read is superseded by a scheduler refresh with its items in flight`() =
+        genresSettleAfterSupersededFirstLoad(Superseder.SCHEDULER_REFRESH, summaryInFlight = false)
+
+    @Test
+    fun `genres load after the first read is superseded by a requery with its summary in flight`() =
+        genresSettleAfterSupersededFirstLoad(Superseder.REQUERY, summaryInFlight = true)
+
+    @Test
+    fun `genres load after the first read is superseded by a requery with its items in flight`() =
+        genresSettleAfterSupersededFirstLoad(Superseder.REQUERY, summaryInFlight = false)
+
+    @Test
+    fun `the latest sort intent is persisted though the screen is cleared before the write lands`() = runTest {
+        val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
+        val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to listOf(testCard(id = "a"))))
+        val persistScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        val viewModel = LibraryViewModel(fake, view, persistScope)
+        val writeGate = CompletableDeferred<Unit>()
+        fake.setLibraryGridPrefsGate = writeGate
+
+        viewModel.setSort(GridSortField.YEAR)
+        runCurrent()
+        viewModel.setSort(GridSortField.RUNTIME)
+        runCurrent()
+        val store = ViewModelStore()
+        store.put("library", viewModel)
+        store.clear()
+        writeGate.complete(Unit)
+        runCurrent()
+
+        assertEquals(GridSortField.RUNTIME, fake.getLibraryGridPrefs("view-1").sort.field)
     }
 }

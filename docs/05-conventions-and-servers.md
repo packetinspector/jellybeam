@@ -101,6 +101,10 @@ Comments are short contracts, not essays. A comment says only what the code cann
   contract is a list. A file whose comment lines exceed a quarter of its code
   lines is over budget.
 
+## Coroutines
+
+- Coroutine code catches with `runCatchingCancellable`; a bare `runCatching` swallows cancellation. `./build.sh check` enforces it (`tools/cancellation-allowlist.txt`). `runCatchingCancellable` catches `Exception` only, so an `Error` is never swallowed.
+
 ## Git
 
 - One commit per coherent change.

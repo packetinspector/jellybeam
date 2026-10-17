@@ -15,6 +15,9 @@ With the mini player on (Settings › Playback › "Mini player"):
   app, an external `tv.jellybeam.action.PLAY` intent, or a `jellybeam://play/<id>`
   deep link — stops the mini-player item (final position report), swaps the
   new item into the same player and expands back to fullscreen.
+- **Library sync waits** while the mini player plays (bulk sync yields to
+  playback), so Home shows no "Syncing…" pill until playback ends and the sync
+  resumes.
 - **Next Up** keeps working headlessly: the countdown runs in the ViewModel, so
   with autoplay on the next episode starts inside the mini player. With
   autoplay off the natural end closes the mini player.
@@ -56,6 +59,28 @@ The "singleInstance player" shape:
 - The MediaSession's `sessionActivity` PendingIntent carries
   `EXTRA_RESUME_SESSION`; an `onNewIntent` with that extra only brings the
   player forward and never restarts the item.
+- Media keys have one owner, the MediaSession: its player is a
+  `ForwardingPlayer` (`RoutedPlayer`) whose Stop ends the session like Back
+  (`PlaybackViewModel.stopFromRemote`: final position reported, Activity
+  closes, also during an autoplay or Play-intent transition, whose pending
+  title is then never loaded), whose FF / REW seek by the viewer's
+  skip-forward / skip-back settings (also its reported seek increments), whose
+  absolute seeks use the guarded seek path, and whose Play / Pause go through
+  the view model. It offers only play / pause, stop, in-item seeks and the
+  reads the session publishes (an allowlist granted in
+  `onConnect` to every controller, trusted or not, since a remote remapper or
+  the cast shell is an unverifiable app, and reported as the player's commands), so Media3 refuses any
+  other call before it reaches the ExoPlayer around the view model.
+  `PlaybackScreen` leaves every transport key unconsumed while a session
+  exists (`MediaKeys.route`), hidden OSD or not; `PlaybackActivity` swallows
+  them, key down and key up, while none does (before the first frame, after a
+  non-PiP `onStop` released it; a PiP `onStop` keeps the session, so PiP behind Home still answers the remote), so they never reach another app's session. The
+  session is created at the first rendered frame and again from `onStart`.
+- Every final stop (Back, natural end, "still watching?" stop, a fatal error
+  after playback began, a media-key Stop) is launched by `launchFinalStop`,
+  which registers the landing a replacement (`replaceItem`) awaits, so a
+  Play-from-Home into PiP never installs the new item before the old
+  session's Stopped has landed.
 - `PipController` (`player/PipController.kt`, process-local like
   `playbackActivityTracker`) holds: `isSupported(context)` (API 26+,
   `FEATURE_PICTURE_IN_PICTURE`, AppOps `PICTURE_IN_PICTURE` allowed),
@@ -76,7 +101,7 @@ The "singleInstance player" shape:
 |---|---|---|
 | Back → `BackAction.EXIT` | mini player on and first frame rendered → `enter()`; otherwise `finish()` | n/a (no key input) |
 | Home → `onUserLeaveHint` | mini player on, READY, not finishing, not leaving for a detail page → `enter()` | no-op |
-| `onStop` | as today: release MediaSession, `stopPlaybackOnce`, `finishAndRemoveTask` if not finishing | release MediaSession, cancel init jobs, **return** (dismissal is handled below; a transient stop such as screen-off keeps playing and `onStart` recreates the session once STARTED again) |
+| `onStop` | as today: release MediaSession, `stopPlaybackOnce`, `finishAndRemoveTask` if not finishing | keep the MediaSession (`sessionShouldSurviveStop`), cancel init jobs, **return** (dismissal is handled below; a transient stop such as screen-off keeps playing; `onDestroy` always releases the session) |
 | `onPictureInPictureModeChanged(true)` | — | `isInPip = true`, Compose `inPictureInPicture = true` (only the video surface is drawn), Coil memory cache cleared |
 | `onPictureInPictureModeChanged(false)` | — | `isInPip = false`; if `expandViaIntent` → clear the flag; else if lifecycle < STARTED → dismissed → `finishAndRemoveTask()` |
 | `onNewIntent` | resume-session extra → no-op; else `replaceItem` | same, plus `expandViaIntent = true` before the swap |
@@ -148,13 +173,13 @@ honest without them:
   change event naming it, so the header's Resume / remaining / watched state
   follows playback on every item type (before this, the episode and movie
   headers were frozen for the page's lifetime in every flow, PiP or not).
-- **A stop-report edge.** `PlaybackReports.stopEpoch` is bumped once the
-  core's final stop has returned, which is after the mirror write's commit
-  barrier. Home and Detail refresh on that edge in addition to their own
-  mirror change-event collector (whose buffer drops oldest under load), both
-  now running through `tv.jellybeam.ui.common.ChangeRefreshScheduler` --
-  docs/16-library-sort-filter.md §4.6 -- so the committed position is read
-  exactly once it exists. `DetailScreen` feeds its `isTop` into
-  `DetailViewModel.setActive` (the scheduler's visible/hidden sampling gate)
-  exactly as Home and Library do; the gate defaults `true` so a ViewModel
-  with no screen composed yet samples at the visible 500ms rate.
+- **The stop's own mirror write.** The core's final stop commits the
+  position to the mirror before it returns, and that write is an `Upserted`
+  change event naming the stopped item. Home refreshes on any item change (the
+  item may be about to enter Continue Watching); a Detail page refreshes only
+  for its own item or one it lists. Both run through
+  `tv.jellybeam.ui.common.ChangeRefreshScheduler` (docs/16 §4.6): a screen
+  that is not top only marks itself dirty and refreshes once when it is top
+  again. An item the mirror doesn't hold (an external play of an item not
+  yet synced) writes nothing, so its stop refreshes no screen until the
+  server's own change event arrives.

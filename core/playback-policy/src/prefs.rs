@@ -1,22 +1,83 @@
-//! Preference/settings types consumed by [`crate::tracks`], [`crate::segments`], and
-//! [`crate::preload`].
+//! Preference/settings types consumed by [`crate::tracks`] and [`crate::segments`].
 //!
-//! Persistence stays with each
-//! platform app (DataStore on Android) -- these are plain-data structs only.
+//! Plain data only; the app crate owns persistence.
 
 use serde::{Deserialize, Serialize};
 
 use jellyfin_api::models::MediaSegmentType;
 
-/// Per-series audio/subtitle track preference; persistence lives in the platform app, this crate
-/// only needs the shape for [`crate::tracks::resolve_track_selection`].
+/// Per-series audio/subtitle track preference; the app crate persists it, this crate only needs
+/// the shape for [`crate::tracks::resolve_track_selection`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SeriesTrackPref {
     /// Preferred audio track language/title key ([`crate::tracks::track_pref_key`]): matches
     /// `Track::lang` first, falling back to `Track::title`, since track ids aren't stable across
     /// items.
-    pub audio: Option<String>,
-    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub audio: TrackMemory,
+    #[serde(default)]
+    pub subtitle: TrackMemory,
+}
+
+/// One half of a series' remembered choice. On disk: `Unset` is `null`/absent and `Key` a bare
+/// string (the legacy shapes); `Off` is the tagged object `{"off":true}`, which no key string can
+/// collide with. Audio has no Off: its memory is `Unset` or `Key`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum TrackMemory {
+    #[default]
+    Unset,
+    Off,
+    Key(String),
+}
+
+impl TrackMemory {
+    /// The remembered track key, if the choice names one.
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            TrackMemory::Key(key) => Some(key),
+            TrackMemory::Unset | TrackMemory::Off => None,
+        }
+    }
+}
+
+/// The on-disk shape of a non-null [`TrackMemory`]: a bare key string or the `{"off":true}` tag;
+/// `Other` swallows any shape this build does not know so one odd entry cannot fail the whole map.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TrackMemoryRepr {
+    Key(String),
+    Off { off: bool },
+    Other(serde::de::IgnoredAny),
+}
+
+/// The write side of [`TrackMemoryRepr::Off`].
+#[derive(Serialize)]
+struct OffTag {
+    off: bool,
+}
+
+impl Serialize for TrackMemory {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            TrackMemory::Unset => serializer.serialize_none(),
+            TrackMemory::Off => OffTag { off: true }.serialize(serializer),
+            TrackMemory::Key(key) => serializer.serialize_str(key),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TrackMemory {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(
+            match Option::<TrackMemoryRepr>::deserialize(deserializer)? {
+                Some(TrackMemoryRepr::Off { off: true }) => TrackMemory::Off,
+                Some(TrackMemoryRepr::Key(key)) => TrackMemory::Key(key),
+                None | Some(TrackMemoryRepr::Off { off: false } | TrackMemoryRepr::Other(_)) => {
+                    TrackMemory::Unset
+                }
+            },
+        )
+    }
 }
 
 /// Subtitle behavior when no per-series memory applies yet; see

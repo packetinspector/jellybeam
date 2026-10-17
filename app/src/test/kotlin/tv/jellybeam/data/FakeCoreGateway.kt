@@ -4,8 +4,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import uniffi.jellybeam_core.AccountEpochs
 import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.AssOverlay
@@ -52,7 +55,10 @@ import uniffi.jellybeam_core.SeerrMovieDetail
 import uniffi.jellybeam_core.SeerrMyRequest
 import uniffi.jellybeam_core.SeerrPage
 import uniffi.jellybeam_core.SeerrPersonCredits
+import uniffi.jellybeam_core.SeerrActiveRequest
+import uniffi.jellybeam_core.SeerrRequestDetail
 import uniffi.jellybeam_core.SeerrRequestInput
+import uniffi.jellybeam_core.SeerrRequestStatus
 import uniffi.jellybeam_core.SeerrRequestOptions
 import uniffi.jellybeam_core.SeerrStatus
 import uniffi.jellybeam_core.SeerrTvDetail
@@ -75,6 +81,7 @@ import uniffi.jellybeam_core.TitleTmdbRef
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
+import uniffi.jellybeam_core.TrackMemoryFfi
 import uniffi.jellybeam_core.TrickplayMetaFfi
 import uniffi.jellybeam_core.TrickplayTileFfi
 import uniffi.jellybeam_core.ViewSnapshot
@@ -182,7 +189,7 @@ class FakeCoreGateway(
     /** When non-null, [nextEpisodeAfter] throws this instead of looking up [nextEpisodeByItemId]. */
     var nextEpisodeError: Throwable? = null,
     private val seriesEpisodesBySeriesId: Map<String, List<Card>> = emptyMap(),
-    /** [previousEpisodeBefore] results keyed by item id; unmapped ids fall back to `null`. */
+    /** [episodeNeighbors] previous results keyed by item id; unmapped ids fall back to `null`. */
     private val previousEpisodeByItemId: Map<String, Card?> = emptyMap(),
     /** [serverDisplayName] result; defaults to `null` ("not signed in"/no parseable host). */
     var serverDisplayNameValue: String? = null,
@@ -220,8 +227,8 @@ class FakeCoreGateway(
     var resolveTracksResult: TrackDecisionFfi = leaveEverythingAloneDecision(),
     /** The URL every [trickplayTileUrl] call returns; `null` simulates "not signed in". */
     var trickplayTileUrlResult: String? = "https://fake.test/trickplay-tile.jpg",
-    /** The manifest every [getTrickplay] call returns; `null` (default) is "not resolved yet". */
-    var getTrickplayResult: TrickplayMetaFfi? = null,
+    /** The trickplay manifest every [getPlaybackOsdDetail] answer carries; `null` (default) is "none". */
+    var osdTrickplay: TrickplayMetaFfi? = null,
     /** Sidecar text by index for [fetchExternalSubtitle]; a missing index fails. */
     var externalSubtitleText: Map<Int, String> = emptyMap(),
     // -- Seerr Discover (docs/14-seerr-discover.md) --------------------------
@@ -250,10 +257,10 @@ class FakeCoreGateway(
     /** [seerrRequestOptions] result; defaults to an empty server list (plain-Request-button
      * case). */
     var seerrRequestOptionsResult: Result<SeerrRequestOptions> = Result.success(SeerrRequestOptions(servers = emptyList())),
-    /** [seerrSubmitRequest] result; defaults to success. */
-    var seerrSubmitRequestResult: Result<Unit> = Result.success(Unit),
-    /** [seerrCancelRequest] result; defaults to success. */
-    var seerrCancelRequestResult: Result<Unit> = Result.success(Unit),
+    /** [seerrSubmitRequestDetail] result; `null` answers the title's configured detail with a pending request. */
+    var seerrSubmitRequestResult: Result<SeerrRequestDetail>? = null,
+    /** [seerrCancelRequestDetail] result; `null` answers the title's configured detail with no request. */
+    var seerrCancelRequestResult: Result<SeerrRequestDetail>? = null,
     /** [seerrMyRequests] result; defaults to an empty successful list. */
     var seerrMyRequestsResult: Result<List<SeerrMyRequest>> = Result.success(emptyList()),
     /** Queue of decisions successive [noteEpisodeFinished] calls return; empty falls back to
@@ -383,8 +390,8 @@ class FakeCoreGateway(
     private val _seriesEpisodesCalls = mutableListOf<String>()
     val seriesEpisodesCalls: List<String> get() = _seriesEpisodesCalls
 
-    private val _previousEpisodeBeforeCalls = mutableListOf<String>()
-    val previousEpisodeBeforeCalls: List<String> get() = _previousEpisodeBeforeCalls
+    private val _episodeNeighborsItemIds = mutableListOf<String>()
+    val episodeNeighborsItemIds: List<String> get() = _episodeNeighborsItemIds
 
     var serverDisplayNameCallCount: Int = 0
         private set
@@ -394,6 +401,10 @@ class FakeCoreGateway(
 
     private val _getPlaybackOsdDetailCalls = mutableListOf<String>()
     val getPlaybackOsdDetailCalls: List<String> get() = _getPlaybackOsdDetailCalls
+
+    /** The media source id of every [getPlaybackOsdDetail] call, in order. */
+    private val _getPlaybackOsdDetailMediaSources = mutableListOf<String>()
+    val getPlaybackOsdDetailMediaSources: List<String> get() = _getPlaybackOsdDetailMediaSources
 
     data class GetSimilarCall(val itemId: String, val limit: UInt)
 
@@ -412,20 +423,15 @@ class FakeCoreGateway(
      * one round trip open while a session change or manual pick runs ahead (docs/18 §3.1). */
     var resolveTracksGate: CompletableDeferred<Unit>? = null
 
-    data class RememberTrackChoiceCall(val seriesId: String, val kind: TrackKindFfi, val trackKey: String?)
+    data class RememberTrackMemoryCall(val seriesId: String, val kind: TrackKindFfi, val memory: TrackMemoryFfi)
 
-    private val _rememberTrackChoiceCalls = mutableListOf<RememberTrackChoiceCall>()
-    val rememberTrackChoiceCalls: List<RememberTrackChoiceCall> get() = _rememberTrackChoiceCalls
+    private val _rememberTrackMemoryCalls = mutableListOf<RememberTrackMemoryCall>()
+    val rememberTrackMemoryCalls: List<RememberTrackMemoryCall> get() = _rememberTrackMemoryCalls
 
     data class TrickplayTileUrlCall(val itemId: String, val width: UInt, val imageIndex: UInt)
 
     private val _trickplayTileUrlCalls = mutableListOf<TrickplayTileUrlCall>()
     val trickplayTileUrlCalls: List<TrickplayTileUrlCall> get() = _trickplayTileUrlCalls
-
-    data class GetTrickplayCall(val itemId: String, val mediaSourceId: String)
-
-    private val _getTrickplayCalls = mutableListOf<GetTrickplayCall>()
-    val getTrickplayCalls: List<GetTrickplayCall> get() = _getTrickplayCalls
 
     // -- Seerr Discover call logs ---------------------------------------------
 
@@ -472,25 +478,73 @@ class FakeCoreGateway(
     private val _seerrSubmitRequestCalls = mutableListOf<SeerrRequestInput>()
     val seerrSubmitRequestCalls: List<SeerrRequestInput> get() = _seerrSubmitRequestCalls
 
+    /** Held open at the top of [seerrMovie]/[seerrTv]/[seerrRequestOptions]/[seerrSubmitRequestDetail]/[seerrCancelRequestDetail] when set. */
+    var seerrMovieGate: CompletableDeferred<Unit>? = null
+    var seerrTvGate: CompletableDeferred<Unit>? = null
+    var seerrRequestOptionsGate: CompletableDeferred<Unit>? = null
+    var seerrSubmitRequestGate: CompletableDeferred<Unit>? = null
+    var seerrCancelRequestGate: CompletableDeferred<Unit>? = null
+
+    var seerrHomeGate: CompletableDeferred<Unit>? = null
+    var seerrMyRequestsGate: CompletableDeferred<Unit>? = null
+    var seerrHomeCallCount: Int = 0
+    var seerrMyRequestsCallCount: Int = 0
+
+    /** Bumped like the real gateway: after each successful Seerr request, cancel, connect and disconnect. */
+    override val seerrRevision = MutableStateFlow(0L)
+
     private val _seerrCancelRequestCalls = mutableListOf<Long>()
     val seerrCancelRequestCalls: List<Long> get() = _seerrCancelRequestCalls
 
     override suspend fun restoreSession(): AccountInfo? = null
 
-    override suspend fun signIn(serverUrl: String, username: String, password: String): AccountInfo =
+    /** When non-null, [signIn] awaits this (after counting) before it answers. */
+    var signInGate: CompletableDeferred<Unit>? = null
+
+    /** [signIn] calls begun, held at [signInGate] or not. */
+    var signInCallCount: Int = 0
+        private set
+
+    override suspend fun signIn(serverUrl: String, username: String, password: String): AccountInfo {
+        signInCallCount++
+        signInGate?.await()
         throw signInError ?: UnconfiguredFakeCall("FakeCoreGateway.signIn is not used by Library/Detail ViewModel tests")
+    }
 
-    override suspend fun reauthorizeSession(index: UInt, username: String, password: String): AccountInfo =
+    /** When non-null, [reauthorizeSession] awaits this (after counting) before it answers. */
+    var reauthorizeSessionGate: CompletableDeferred<Unit>? = null
+
+    /** [reauthorizeSession] calls begun, held at [reauthorizeSessionGate] or not. */
+    var reauthorizeSessionCallCount: Int = 0
+        private set
+
+    override suspend fun reauthorizeSession(index: UInt, username: String, password: String): AccountInfo {
+        reauthorizeSessionCallCount++
+        reauthorizeSessionGate?.await()
         throw UnconfiguredFakeCall("FakeCoreGateway.reauthorizeSession is not configured")
+    }
 
-    override suspend fun quickConnectEnabled(serverUrl: String): Boolean =
-        throw UnconfiguredFakeCall("FakeCoreGateway.quickConnectEnabled is not configured")
+    /** [initiateQuickConnect] answer; `null` throws [UnconfiguredFakeCall]. */
+    var initiateQuickConnectResult: QuickConnectSession? = null
+
+    /** [pollQuickConnect] answer after the gate; `null` throws [UnconfiguredFakeCall]. */
+    var pollQuickConnectResult: Boolean? = null
 
     override suspend fun initiateQuickConnect(serverUrl: String): QuickConnectSession =
-        throw UnconfiguredFakeCall("FakeCoreGateway.initiateQuickConnect is not configured")
+        initiateQuickConnectResult ?: throw UnconfiguredFakeCall("FakeCoreGateway.initiateQuickConnect is not configured")
 
-    override suspend fun pollQuickConnect(serverUrl: String, secret: String): Boolean =
-        throw UnconfiguredFakeCall("FakeCoreGateway.pollQuickConnect is not configured")
+    /** When non-null, [pollQuickConnect] awaits this (after counting) before it answers. */
+    var pollQuickConnectGate: CompletableDeferred<Unit>? = null
+
+    /** [pollQuickConnect] calls begun, held at [pollQuickConnectGate] or not. */
+    var pollQuickConnectCallCount: Int = 0
+        private set
+
+    override suspend fun pollQuickConnect(serverUrl: String, secret: String): Boolean {
+        pollQuickConnectCallCount++
+        pollQuickConnectGate?.await()
+        return pollQuickConnectResult ?: throw UnconfiguredFakeCall("FakeCoreGateway.pollQuickConnect is not configured")
+    }
 
     override suspend fun completeQuickConnect(serverUrl: String, secret: String): AccountInfo =
         throw UnconfiguredFakeCall("FakeCoreGateway.completeQuickConnect is not configured")
@@ -501,12 +555,14 @@ class FakeCoreGateway(
     var discoverServersCalls: Int = 0
         private set
 
+    /** Per-call replies for [discoverServers], consumed first to last; empty falls back to [discoveredServers]. */
+    val discoverServersGates = ArrayDeque<CompletableDeferred<List<DiscoveredServer>>>()
+
     override suspend fun discoverServers(): List<DiscoveredServer> {
         discoverServersCalls++
-        return discoveredServers
+        val gate = discoverServersGates.removeFirstOrNull() ?: return discoveredServers
+        return gate.await()
     }
-
-    override suspend fun signOut() = Unit
 
     override suspend fun listAccounts(): List<AccountInfo> = accountsList
 
@@ -601,8 +657,12 @@ class FakeCoreGateway(
     override suspend fun getLibraryGridPrefs(viewId: String): LibraryGridPrefs =
         libraryGridPrefsByView[viewId] ?: defaultLibraryGridPrefs()
 
+    /** When non-null, [setLibraryGridPrefs] awaits this after recording the call (a slow prefs write). */
+    var setLibraryGridPrefsGate: CompletableDeferred<Unit>? = null
+
     override suspend fun setLibraryGridPrefs(viewId: String, prefs: LibraryGridPrefs) {
         _setLibraryGridPrefsCalls.add(SetLibraryGridPrefsCall(viewId, prefs))
+        setLibraryGridPrefsGate?.await()
         libraryGridPrefsByView[viewId] = prefs
     }
 
@@ -614,6 +674,14 @@ class FakeCoreGateway(
     }
 
     override suspend fun views(): List<ViewSnapshot> = viewsError?.let { throw it } ?: viewsList
+
+    private val _viewsState = MutableStateFlow(viewsList)
+    override val viewsState: StateFlow<List<ViewSnapshot>> = _viewsState
+
+    /** Test hook: publishes a new library list to [viewsState], as a refreshed [RealCoreGateway] does. */
+    fun publishViews(views: List<ViewSnapshot>) {
+        _viewsState.value = views
+    }
 
     var hasFavoritesResult: Boolean = false
     override suspend fun hasFavorites(): Boolean = hasFavoritesResult
@@ -651,16 +719,27 @@ class FakeCoreGateway(
     private val _cardByIdCalls = mutableListOf<String>()
     val cardByIdCalls: List<String> get() = _cardByIdCalls
 
+    /** When non-null, [cardById] awaits this (after recording the call) before it answers. */
+    var cardByIdGate: CompletableDeferred<Unit>? = null
+
     override suspend fun cardById(itemId: String): Card? {
         _cardByIdCalls.add(itemId)
+        cardByIdGate?.await()
         return cardsByItemId[itemId]
     }
 
     override suspend fun cardsByIds(itemIds: List<String>): List<Card> = itemIds.mapNotNull { cardsByItemId[it] }
 
-    override suspend fun getPlaybackOsdDetail(itemId: String, accountEpoch: ULong?): PlaybackOsdDetail {
+    /** One gate per [getPlaybackOsdDetail] call, popped in call order; its value is that call's
+     * answer. An empty queue answers at once from [itemDetailResultsByItemId].
+     */
+    val playbackOsdDetailGates = ArrayDeque<CompletableDeferred<PlaybackOsdDetail>>()
+
+    override suspend fun getPlaybackOsdDetail(itemId: String, mediaSourceId: String, accountEpoch: ULong?): PlaybackOsdDetail {
         accountBoundCalls.add("getPlaybackOsdDetail" to accountEpoch)
         _getPlaybackOsdDetailCalls.add(itemId)
+        _getPlaybackOsdDetailMediaSources.add(mediaSourceId)
+        playbackOsdDetailGates.removeFirstOrNull()?.let { return it.await() }
         val result = itemDetailResultsByItemId[itemId]
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.getPlaybackOsdDetail($itemId): no result configured")
         val detail = result.getOrElse { throw it }
@@ -672,6 +751,7 @@ class FakeCoreGateway(
             // ItemDetail carries no file path; a test needing one builds PlaybackOsdDetail
             // directly.
             path = null,
+            trickplay = osdTrickplay,
         )
     }
 
@@ -680,9 +760,15 @@ class FakeCoreGateway(
         return similarResultsByItemId[itemId].orEmpty()
     }
 
+    /** One gate per [getMediaSegments] call, popped in call order; its value is that call's
+     * answer. An empty queue answers at once from [mediaSegmentsByItemId].
+     */
+    val mediaSegmentsGates = ArrayDeque<CompletableDeferred<List<MediaSegment>>>()
+
     override suspend fun getMediaSegments(itemId: String, accountEpoch: ULong?): List<MediaSegment> {
         accountBoundCalls.add("getMediaSegments" to accountEpoch)
         _getMediaSegmentsCalls.add(itemId)
+        mediaSegmentsGates.removeFirstOrNull()?.let { return it.await() }
         return mediaSegmentsByItemId[itemId].orEmpty()
     }
 
@@ -690,9 +776,29 @@ class FakeCoreGateway(
     override fun outroStartSecsFromSegments(segments: List<MediaSegment>): Double? =
         segments.firstOrNull { it.segmentType == MediaSegmentKind.OUTRO }?.let { it.startTicks / 10_000_000.0 }
 
-    override suspend fun getSettings(): Settings = settings
+    /** How many times [getSettings] was called. */
+    var getSettingsCallCount = 0
+        private set
+
+    override suspend fun getSettings(): Settings {
+        getSettingsCallCount++
+        return settings
+    }
+
+    /** When non-null, [setSettings] awaits this (after counting) before it is recorded. */
+    var setSettingsGate: CompletableDeferred<Unit>? = null
+
+    /** [setSettings] calls begun, held at [setSettingsGate] or not. */
+    var setSettingsEntered: Int = 0
+        private set
+
+    /** Thrown by [setSettings] while non-null, after the gate and before the record is kept. */
+    var setSettingsError: Throwable? = null
 
     override suspend fun setSettings(settings: Settings) {
+        setSettingsEntered++
+        setSettingsGate?.await()
+        setSettingsError?.let { throw it }
         _setSettingsCalls.add(settings)
         this.settings = settings
     }
@@ -704,23 +810,36 @@ class FakeCoreGateway(
     /** Requests passed to [preparePlayback]/[prepareTranscodeFallback], in call order. */
     val playbackRequests = mutableListOf<PlaybackRequest>()
 
-    /** Tests move the epoch to model an account change. */
-    override val accountEpoch = MutableStateFlow(0uL)
+    /** The pair the fake publishes; tests move it through [accountEpoch] and [parkedEpoch]. */
+    override val accountEpochs = MutableStateFlow(AccountEpochs(epoch = 0uL, parked = null))
 
-    /** Models an account call in flight (the gateway's ownership barrier). */
-    val accountCallInFlight = MutableStateFlow(false)
+    /** Tests move the epoch to model an account change. */
+    var accountEpoch: ULong
+        get() = accountEpochs.value.epoch
+        set(next) {
+            accountEpochs.update { it.copy(epoch = next) }
+        }
+
+    /** Moves the pair in one write, as the core publishes it (an account change that parks a playback). */
+    fun setEpochs(epoch: ULong, parked: ULong?) {
+        accountEpochs.value = AccountEpochs(epoch = epoch, parked = parked)
+    }
 
     /** Completed by default; a test replaces it to hold the first request until the restore. */
     var accountRestored = CompletableDeferred(Unit)
 
     override fun mintPlaybackRequest(accountEpoch: ULong?): PlaybackRequest =
-        PlaybackRequest(seq = ++lastPlaybackSeq, accountEpoch = accountEpoch ?: this.accountEpoch.value)
+        PlaybackRequest(seq = ++lastPlaybackSeq, accountEpoch = accountEpoch ?: this.accountEpoch)
 
     /** The epoch a playback kept across an account change owns, as the core reports it. */
-    override val parkedEpoch = MutableStateFlow<ULong?>(null)
+    var parkedEpoch: ULong?
+        get() = accountEpochs.value.parked
+        set(next) {
+            accountEpochs.update { it.copy(parked = next) }
+        }
 
     override fun playbackOwnershipOpen(accountEpoch: ULong): Boolean =
-        accountEpoch == this.accountEpoch.value || accountEpoch == parkedEpoch.value
+        accountEpochs.value.let { accountEpoch == it.epoch || accountEpoch == it.parked }
 
     /** [reauthorizationAccount]'s answers: the in-use accounts by identity. */
     val reauthorizationAccounts = mutableMapOf<AccountIdentity, AccountInfo>()
@@ -731,9 +850,7 @@ class FakeCoreGateway(
     /** Every account-bound call by name with the epoch it named (null: the current account). */
     val accountBoundCalls = java.util.concurrent.CopyOnWriteArrayList<Pair<String, ULong?>>()
 
-    override suspend fun awaitAccountCalls() {
-        accountCallInFlight.first { !it }
-    }
+    override suspend fun playbackOwnershipOpenNow(accountEpoch: ULong): Boolean = playbackOwnershipOpen(accountEpoch)
 
     override suspend fun awaitAccountRestored() = accountRestored.await()
 
@@ -789,15 +906,17 @@ class FakeCoreGateway(
         return seriesEpisodesBySeriesId[seriesId].orEmpty()
     }
 
-    override suspend fun previousEpisodeBefore(itemId: String): Card? {
-        _previousEpisodeBeforeCalls.add(itemId)
-        return previousEpisodeByItemId[itemId]
-    }
+    /** One gate per [episodeNeighbors] call, popped in call order; its value is that call's
+     * answer. An empty queue answers at once from the next/previous-episode maps.
+     */
+    val episodeNeighborsGates = ArrayDeque<CompletableDeferred<EpisodeNeighbors>>()
 
     override suspend fun episodeNeighbors(itemId: String, seriesId: String, accountEpoch: ULong?): EpisodeNeighbors {
         accountBoundCalls.add("episodeNeighbors" to accountEpoch)
+        _episodeNeighborsItemIds.add(itemId)
+        episodeNeighborsGates.removeFirstOrNull()?.let { return it.await() }
         return EpisodeNeighbors(
-            previous = previousEpisodeBefore(itemId),
+            previous = previousEpisodeByItemId[itemId],
             next = nextEpisodeAfter(itemId),
         )
     }
@@ -852,7 +971,16 @@ class FakeCoreGateway(
         _resetStillWatchingCalls.add(nowMs)
     }
 
+    /** When non-null, [reportPosition] awaits this (after counting) before it returns. */
+    var reportPositionGate: CompletableDeferred<Unit>? = null
+
+    /** [reportPosition] calls begun, held at [reportPositionGate] or not. */
+    var reportPositionEntered: Int = 0
+        private set
+
     override suspend fun reportPosition(playSessionId: String, ticks: Long) {
+        reportPositionEntered++
+        reportPositionGate?.await()
         _reportPositionCalls.add(ticks)
     }
 
@@ -879,8 +1007,8 @@ class FakeCoreGateway(
         return resolveTracksResult
     }
 
-    override suspend fun rememberTrackChoice(seriesId: String, kind: TrackKindFfi, trackKey: String?) {
-        _rememberTrackChoiceCalls.add(RememberTrackChoiceCall(seriesId, kind, trackKey))
+    override suspend fun rememberTrackMemory(seriesId: String, kind: TrackKindFfi, memory: TrackMemoryFfi) {
+        _rememberTrackMemoryCalls.add(RememberTrackMemoryCall(seriesId, kind, memory))
     }
 
     /** Test-only reimplementation of `track_pref_key_of` (lang, else title). */
@@ -915,12 +1043,6 @@ class FakeCoreGateway(
     override suspend fun loadAssSidecar(playSessionId: String, index: Int, overlay: AssOverlay, key: String, item: ULong): Boolean {
         loadAssSidecarCalls += Triple(playSessionId, index, key)
         return assSidecarLoads
-    }
-
-    override suspend fun getTrickplay(itemId: String, mediaSourceId: String, accountEpoch: ULong?): TrickplayMetaFfi? {
-        accountBoundCalls.add("getTrickplay" to accountEpoch)
-        _getTrickplayCalls.add(GetTrickplayCall(itemId, mediaSourceId))
-        return getTrickplayResult
     }
 
     /** Test-only reimplementation of `trickplay::locate`'s grid math; keep in sync with Rust. */
@@ -972,15 +1094,22 @@ class FakeCoreGateway(
         _seerrConnectCalls.add(SeerrConnectCall(url, method, identity, secret))
         val result = seerrConnectResult
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.seerrConnect: no result configured")
-        return result.getOrElse { throw it }
+        val status = result.getOrElse { throw it }
+        seerrRevision.update { it + 1 }
+        return status
     }
 
     override suspend fun seerrDisconnect() {
         seerrDisconnectCallCount++
         seerrStatusValue = notConfiguredSeerrStatus()
+        seerrRevision.update { it + 1 }
     }
 
-    override suspend fun seerrHome(): SeerrHome = seerrHomeResult.getOrElse { throw it }
+    override suspend fun seerrHome(): SeerrHome {
+        seerrHomeCallCount++
+        seerrHomeGate?.await()
+        return seerrHomeResult.getOrElse { throw it }
+    }
 
     override suspend fun seerrBrowse(kind: SeerrBrowseKind, page: Int, filters: SeerrBrowseFilters): SeerrPage {
         _seerrBrowseCalls.add(SeerrBrowseCall(kind, page, filters))
@@ -996,6 +1125,7 @@ class FakeCoreGateway(
 
     override suspend fun seerrMovie(tmdbId: Long): SeerrMovieDetail {
         _seerrMovieCalls.add(tmdbId)
+        seerrMovieGate?.await()
         val result = seerrMovieResultsByTmdbId[tmdbId]
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.seerrMovie($tmdbId): no result configured")
         return result.getOrElse { throw it }
@@ -1003,6 +1133,7 @@ class FakeCoreGateway(
 
     override suspend fun seerrTv(tmdbId: Long): SeerrTvDetail {
         _seerrTvCalls.add(tmdbId)
+        seerrTvGate?.await()
         val result = seerrTvResultsByTmdbId[tmdbId]
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.seerrTv($tmdbId): no result configured")
         return result.getOrElse { throw it }
@@ -1031,20 +1162,50 @@ class FakeCoreGateway(
 
     override suspend fun seerrRequestOptions(mediaType: SeerrMediaType, is4k: Boolean): SeerrRequestOptions {
         _seerrRequestOptionsCalls.add(SeerrRequestOptionsCall(mediaType, is4k))
+        seerrRequestOptionsGate?.await()
         return seerrRequestOptionsResult.getOrElse { throw it }
     }
 
-    override suspend fun seerrSubmitRequest(input: SeerrRequestInput) {
+    override suspend fun seerrSubmitRequestDetail(input: SeerrRequestInput): SeerrRequestDetail {
         _seerrSubmitRequestCalls.add(input)
-        seerrSubmitRequestResult.getOrThrow()
+        seerrSubmitRequestGate?.await()
+        return announcingChange { seerrSubmitRequestResult?.getOrThrow() ?: configuredRequestDetail(input.mediaType, input.tmdbId, requested = true) }
     }
 
-    override suspend fun seerrCancelRequest(requestId: Long) {
+    override suspend fun seerrCancelRequestDetail(mediaType: SeerrMediaType, tmdbId: Long, requestId: Long): SeerrRequestDetail {
         _seerrCancelRequestCalls.add(requestId)
-        seerrCancelRequestResult.getOrThrow()
+        seerrCancelRequestGate?.await()
+        return announcingChange { seerrCancelRequestResult?.getOrThrow() ?: configuredRequestDetail(mediaType, tmdbId, requested = false) }
     }
 
-    override suspend fun seerrMyRequests(): List<SeerrMyRequest> = seerrMyRequestsResult.getOrElse { throw it }
+    /** Bumps [seerrRevision] like [RealCoreGateway]: on success, and when the change landed but its detail could not be read. */
+    private inline fun announcingChange(call: () -> SeerrRequestDetail): SeerrRequestDetail =
+        try {
+            call().also { seerrRevision.update { it + 1 } }
+        } catch (e: CoreException.SeerrChangeUnconfirmed) {
+            seerrRevision.update { it + 1 }
+            throw e
+        }
+
+    /** The title's configured detail as the post-mutation read the core returns: sibling lists and scores empty. */
+    private fun configuredRequestDetail(mediaType: SeerrMediaType, tmdbId: Long, requested: Boolean): SeerrRequestDetail {
+        val active = if (requested) SeerrActiveRequest(requestId = 7L, status = SeerrRequestStatus.PENDING, is4k = false, seasons = emptyList()) else null
+        return if (mediaType == SeerrMediaType.MOVIE) {
+            val movie = seerrMovieResultsByTmdbId[tmdbId]?.getOrThrow()
+                ?: throw UnconfiguredFakeCall("FakeCoreGateway.seerrSubmit/CancelRequestDetail($tmdbId): no movie configured")
+            SeerrRequestDetail.Movie(movie.copy(activeRequest = active, canRequest = active == null, similar = emptyList(), recommendations = emptyList(), criticsScore = null, audienceScore = null))
+        } else {
+            val tv = seerrTvResultsByTmdbId[tmdbId]?.getOrThrow()
+                ?: throw UnconfiguredFakeCall("FakeCoreGateway.seerrSubmit/CancelRequestDetail($tmdbId): no tv configured")
+            SeerrRequestDetail.Tv(tv.copy(activeRequest = active, canRequest = active == null, similar = emptyList(), recommendations = emptyList(), criticsScore = null, audienceScore = null))
+        }
+    }
+
+    override suspend fun seerrMyRequests(): List<SeerrMyRequest> {
+        seerrMyRequestsCallCount++
+        seerrMyRequestsGate?.await()
+        return seerrMyRequestsResult.getOrElse { throw it }
+    }
 
     /** Matches [RealCoreGateway]'s contract: one shared, replay-0 flow, fed by [emitChange]. */
     private val _changeEvents = MutableSharedFlow<ChangeEvent>(replay = 0, extraBufferCapacity = 8)
@@ -1098,8 +1259,12 @@ class FakeCoreGateway(
     var listCollectionsCallCount: Int = 0
         private set
 
+    /** When non-null, [listCollections] awaits this (after counting) before it answers. */
+    var listCollectionsGate: CompletableDeferred<Unit>? = null
+
     override suspend fun listCollections(): List<CollectionInfo> {
         listCollectionsCallCount++
+        listCollectionsGate?.await()
         return collectionsResult
     }
 
@@ -1135,8 +1300,12 @@ class FakeCoreGateway(
     var isAdministratorCallCount: Int = 0
         private set
 
+    /** When non-null, [isAdministrator] awaits this (after counting) before it answers. */
+    var isAdministratorGate: CompletableDeferred<Unit>? = null
+
     override suspend fun isAdministrator(): Boolean {
         isAdministratorCallCount++
+        isAdministratorGate?.await()
         return isAdministratorResult
     }
 

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use jellybeam_core::{HomeLayout, HomeSnapshot, JellybeamCore, PlaybackRequest, ShelfSource};
 
 mod common;
+use common::ChildrenRows;
 
 const BASE_URL: &str = "http://localhost:8096";
 const USERNAME: &str = "jellybeam-user";
@@ -221,7 +222,7 @@ fn live_search() {
 /// Exercises trickplay end to end: find item "98" (one of the two long
 /// items the dev server's "Generate Trickplay Images" task targets),
 /// `prepare_playback` it once, then fetch trickplay separately via
-/// [`JellybeamCore::get_trickplay`] -- what `PlaybackViewModel.start()` does
+/// [`JellybeamCore::get_playback_osd_detail`] -- what `PlaybackViewModel.start()` does
 /// fire-and-forget after `load()`.
 ///
 /// Generation is async server-side and may still be running, so `None`
@@ -244,10 +245,15 @@ fn live_trickplay() {
         .unwrap_or_else(|e| panic!("prepare_playback({item_id}): {e}"));
 
     let poll_deadline = Instant::now() + Duration::from_secs(180);
-    let mut trickplay = core.get_trickplay(item_id.clone(), plan.media_source_id.clone(), None);
+    let fetch = || {
+        core.get_playback_osd_detail(item_id.clone(), plan.media_source_id.clone(), None)
+            .ok()
+            .and_then(|detail| detail.trickplay)
+    };
+    let mut trickplay = fetch();
     while trickplay.is_none() && Instant::now() < poll_deadline {
         std::thread::sleep(Duration::from_secs(5));
-        trickplay = core.get_trickplay(item_id.clone(), plan.media_source_id.clone(), None);
+        trickplay = fetch();
     }
 
     let Some(trickplay) = trickplay else {
@@ -396,6 +402,6 @@ fn latest_shelves(core: &JellybeamCore) -> Vec<(String, String)> {
 fn first_request(core: &JellybeamCore) -> PlaybackRequest {
     PlaybackRequest {
         seq: 1,
-        account_epoch: core.account_epoch(),
+        account_epoch: core.account_epochs().epoch,
     }
 }

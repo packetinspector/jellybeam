@@ -448,7 +448,7 @@ pub struct Settings {
     pub prefer_ffmpeg_dts_hd: bool,
     /// Include virtual (missing/unaired) placeholder rows in
     /// series/season episode listings. `false` (`bool`'s zero value)
-    /// hides them -- see [`crate::JellybeamCore::children`]. `true` restores
+    /// hides them -- see [`crate::JellybeamCore::children_read`]. `true` restores
     /// pre-toggle behavior.
     #[serde(default)]
     pub show_virtual_episodes: bool,

@@ -1,11 +1,15 @@
 package tv.jellybeam.ui.common
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -14,126 +18,165 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * docs/16-library-sort-filter.md §4.6, docs/17-mini-player.md §6, with a
- * virtual clock: refresh immediately, keep refreshing during a burst,
- * bound work while hidden, catch up on activation.
+ * docs/16 §4.6, with a virtual clock: a hidden screen only marks dirty, becoming active refreshes
+ * once if dirty, and an active screen refreshes on the leading event plus one trailing run after the rest.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChangeRefreshSchedulerTest {
 
-    /** Two never-completing coroutines; a child [Job], cancelled explicitly, keeps them from
-     * outliving `runTest`.
-     */
+    /** The scheduler's coroutines never complete; a child [Job], cancelled explicitly, keeps them from outliving `runTest`. */
     private fun CoroutineScope.newSchedulerScope(): Pair<CoroutineScope, Job> {
         val job = Job(coroutineContext[Job])
         return CoroutineScope(coroutineContext + job) to job
     }
 
-    @Test
-    fun `a single quiet event triggers exactly one refresh`() = runTest {
-        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
-        val active = MutableStateFlow(true)
+    private fun TestScope.settle(ms: Long) {
+        advanceTimeBy(ms)
+        runCurrent()
+    }
+
+    /** A scheduler over [events] and [active] counting its refreshes; [block] runs before the scope is cancelled. */
+    private fun TestScope.withScheduler(
+        active: Boolean,
+        refresh: suspend () -> Unit = {},
+        block: TestScope.(events: MutableSharedFlow<Unit>, active: MutableStateFlow<Boolean>, scheduler: ChangeRefreshScheduler<Unit>, count: () -> Int) -> Unit,
+    ) {
+        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
+        val activeFlow = MutableStateFlow(active)
         var refreshCount = 0
         val (scope, job) = newSchedulerScope()
-        ChangeRefreshScheduler(scope, events, active, refresh = { refreshCount++ })
+        val scheduler = ChangeRefreshScheduler(scope, events, activeFlow, refresh = { refreshCount++; refresh() })
         try {
             runCurrent()
-            assertEquals("nothing has happened yet", 0, refreshCount)
-
-            events.tryEmit(Unit)
-            runCurrent()
-            assertEquals("the leading event refreshes immediately, no debounce wait", 1, refreshCount)
-
-            advanceTimeBy(5_000)
-            runCurrent()
-            assertEquals("no further event landed -- no further refresh", 1, refreshCount)
+            block(events, activeFlow, scheduler) { refreshCount }
         } finally {
             job.cancel()
         }
     }
 
     @Test
-    fun `requestRefresh is served by the same loop, never overlapping an event refresh`() = runTest {
-        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
-        val active = MutableStateFlow(true)
+    fun `a single quiet event triggers exactly one refresh`() = runTest {
+        withScheduler(active = true) { events, _, _, count ->
+            assertEquals("nothing has happened yet", 0, count())
+            events.tryEmit(Unit)
+            runCurrent()
+            assertEquals("the leading event refreshes immediately, no debounce wait", 1, count())
+            settle(5_000)
+            assertEquals("no further event landed -- no further refresh", 1, count())
+        }
+    }
+
+    @Test
+    fun `events while hidden refresh nothing`() = runTest {
+        withScheduler(active = false) { events, _, _, count ->
+            repeat(40) {
+                events.tryEmit(Unit)
+                settle(100)
+            }
+            settle(10_000)
+            assertEquals("a hidden screen only marks itself dirty", 0, count())
+        }
+    }
+
+    @Test
+    fun `becoming active after hidden events refreshes exactly once`() = runTest {
+        withScheduler(active = false) { events, active, _, count ->
+            repeat(10) {
+                events.tryEmit(Unit)
+                settle(100)
+            }
+            active.value = true
+            runCurrent()
+            assertEquals("activation catches up at once", 1, count())
+            settle(5_000)
+            assertEquals("and only once", 1, count())
+        }
+    }
+
+    @Test
+    fun `becoming active with nothing dirty refreshes nothing`() = runTest {
+        withScheduler(active = false) { _, active, _, count ->
+            active.value = true
+            settle(5_000)
+            active.value = false
+            settle(100)
+            active.value = true
+            settle(5_000)
+            assertEquals(0, count())
+        }
+    }
+
+    @Test
+    fun `an active burst costs the leading refresh plus one trailing`() = runTest {
+        withScheduler(active = true) { events, _, _, count ->
+            repeat(5) {
+                events.tryEmit(Unit)
+                settle(50)
+            }
+            assertEquals("the leading event refreshed, the rest wait out the rest period", 1, count())
+            settle(5_000)
+            assertEquals("one trailing refresh covers every event inside the rest", 2, count())
+        }
+    }
+
+    @Test
+    fun `events during a refresh cost exactly one trailing refresh`() = runTest {
         val gate = CompletableDeferred<Unit>()
         var running = 0
         var maxRunning = 0
-        var refreshCount = 0
-        val (scope, job) = newSchedulerScope()
-        val scheduler = ChangeRefreshScheduler(
-            scope, events, active,
+        withScheduler(
+            active = true,
             refresh = {
                 running++
                 maxRunning = maxOf(maxRunning, running)
-                refreshCount++
-                if (refreshCount == 1) gate.await()
+                if (!gate.isCompleted) gate.await()
                 running--
             },
-        )
-        try {
-            scheduler.requestRefresh()
-            runCurrent()
-            assertEquals("the request runs like an event", 1, refreshCount)
-
+        ) { events, _, _, count ->
             events.tryEmit(Unit)
             runCurrent()
-            assertEquals("the event waits behind the held request", 1, refreshCount)
+            assertEquals(1, count())
+            repeat(3) { events.tryEmit(Unit) }
+            runCurrent()
+            assertEquals("events wait behind the running refresh", 1, count())
 
             gate.complete(Unit)
-            advanceTimeBy(1_000)
-            runCurrent()
-            assertEquals("then the event's own refresh runs", 2, refreshCount)
+            settle(5_000)
+            assertEquals(2, count())
             assertEquals("one at a time", 1, maxRunning)
-        } finally {
-            job.cancel()
         }
     }
 
     @Test
-    fun `an explicit request ends the rest early but an event keeps it`() = runTest {
-        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
-        val active = MutableStateFlow(true)
-        var refreshCount = 0
-        val (scope, job) = newSchedulerScope()
-        val scheduler = ChangeRefreshScheduler(scope, events, active, refresh = { refreshCount++ })
-        try {
-            runCurrent()
+    fun `leaving during the rest holds the trailing refresh until the screen is back`() = runTest {
+        withScheduler(active = true) { events, active, _, count ->
             events.tryEmit(Unit)
             runCurrent()
-            assertEquals(1, refreshCount)
-
             events.tryEmit(Unit)
-            advanceTimeBy(100)
-            runCurrent()
-            assertEquals("an event during the rest waits it out", 1, refreshCount)
+            active.value = false
+            settle(5_000)
+            assertEquals("no trailing refresh while hidden", 1, count())
 
-            scheduler.requestRefresh()
+            active.value = true
             runCurrent()
-            assertEquals("an explicit ask cuts the rest", 2, refreshCount)
-        } finally {
-            job.cancel()
+            assertEquals("the owed refresh runs on return", 2, count())
         }
     }
 
     @Test
-    fun `an ask during a refresh skips the rest entirely`() = runTest {
-        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
-        val active = MutableStateFlow(true)
-        val gate = CompletableDeferred<Unit>()
-        var refreshCount = 0
-        val (scope, job) = newSchedulerScope()
-        val scheduler = ChangeRefreshScheduler(scope, events, active, refresh = { if (++refreshCount == 1) gate.await() })
-        try {
+    fun `markDirty refreshes an active screen and waits for a hidden one`() = runTest {
+        withScheduler(active = false) { _, active, scheduler, count ->
+            scheduler.markDirty()
+            settle(5_000)
+            assertEquals(0, count())
+            active.value = true
             runCurrent()
-            events.tryEmit(Unit)
+            assertEquals(1, count())
+
+            settle(1_000)
+            scheduler.markDirty()
             runCurrent()
-            scheduler.requestRefresh()
-            gate.complete(Unit)
-            runCurrent()
-            assertEquals("the ask made mid-refresh runs with no rest", 2, refreshCount)
-        } finally {
-            job.cancel()
+            assertEquals(2, count())
         }
     }
 
@@ -155,13 +198,47 @@ class ChangeRefreshSchedulerTest {
             runCurrent()
             assertEquals(1, errors.size)
 
-            advanceTimeBy(1_000)
+            settle(1_000)
             events.tryEmit(Unit)
             runCurrent()
             assertEquals("the loop survived", 2, refreshCount)
         } finally {
             job.cancel()
         }
+    }
+
+    @Test
+    fun `cancelling the scope cancels a running refresh and ends the loop`() = runTest {
+        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+        val active = MutableStateFlow(true)
+        var refreshCount = 0
+        var cancelled = false
+        val errors = mutableListOf<Throwable>()
+        val (scope, job) = newSchedulerScope()
+        ChangeRefreshScheduler(
+            scope, events, active,
+            refresh = {
+                refreshCount++
+                try {
+                    CompletableDeferred<Unit>().await()
+                } catch (e: CancellationException) {
+                    cancelled = true
+                    throw e
+                }
+            },
+            onError = { errors += it },
+        )
+        runCurrent()
+        events.tryEmit(Unit)
+        runCurrent()
+        job.cancel()
+        runCurrent()
+        events.tryEmit(Unit)
+        settle(5_000)
+
+        assertTrue("the running refresh saw the cancellation", cancelled)
+        assertTrue("a cancellation is not a refresh error", errors.isEmpty())
+        assertEquals("nothing runs after the scope ends", 1, refreshCount)
     }
 
     @Test
@@ -175,11 +252,10 @@ class ChangeRefreshSchedulerTest {
         ChangeRefreshScheduler(scope, events, active, refresh = { seenByRefresh.add(latestValue) })
         try {
             runCurrent()
-            repeat(12) { // 12 * 250ms == 3s of a sustained sync burst, well under the 500ms period
+            repeat(12) { // 12 * 250ms == 3s of a sustained sync burst, well under the 500ms rest
                 latestValue++
                 events.tryEmit(Unit)
-                advanceTimeBy(250)
-                runCurrent()
+                settle(250)
             }
             assertTrue(
                 "a resetting debounce(500) would emit nothing while events keep arriving under 500ms apart -- " +
@@ -187,9 +263,7 @@ class ChangeRefreshSchedulerTest {
                 seenByRefresh.size > 1,
             )
 
-            // Let the trailing rest elapse so the last event's refresh lands.
-            advanceTimeBy(600)
-            runCurrent()
+            settle(600)
             assertEquals(
                 "the final refresh must reflect the very last event once the stream settles",
                 latestValue,
@@ -201,30 +275,46 @@ class ChangeRefreshSchedulerTest {
     }
 
     @Test
-    fun `hidden events are bounded to about one refresh per hidden period, and activation catches up immediately`() = runTest {
-        val events = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
-        val active = MutableStateFlow(false)
+    fun `a suspended relevance check does not make the scheduler miss later events`() = runTest {
+        // The gateway's bus: replay 0, 8 extra slots, DROP_OLDEST -- a subscriber held in its
+        // relevance check loses everything but the newest 8 unless the scheduler buffers itself.
+        val bus = MutableSharedFlow<Int>(extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+        val active = MutableStateFlow(true)
+        val gate = CompletableDeferred<Unit>()
+        val checked = mutableSetOf<Int>()
         var refreshCount = 0
-        val (scope, job) = newSchedulerScope()
-        ChangeRefreshScheduler(scope, events, active, refresh = { refreshCount++ }, hiddenPeriodMs = 3_000L)
+        val job = Job(coroutineContext[Job])
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + job)
+        ChangeRefreshScheduler(scope, bus, active, refresh = { refreshCount++ }, affects = { id -> checked += id; gate.await(); true })
         try {
             runCurrent()
-            repeat(40) { // a continuous burst while hidden, far more often than once per 3s
-                events.tryEmit(Unit)
-                advanceTimeBy(100)
-                runCurrent()
-            }
-            // ~4s elapsed hidden: a leading refresh plus at most one more per 3s.
-            assertTrue("hidden work must stay bounded to about one refresh per hiddenPeriodMs", refreshCount <= 2)
-
-            val countBeforeActivation = refreshCount
-            active.value = true
+            repeat(20) { bus.tryEmit(it) }
+            gate.complete(Unit)
             runCurrent()
-            assertEquals(
-                "becoming active with a dirty flag must refresh right away, not wait out the rest of the hidden period",
-                countBeforeActivation + 1,
-                refreshCount,
-            )
+
+            assertEquals("every one of the 20 ids reached the relevance check", (0 until 20).toSet(), checked)
+            assertTrue("and the burst refreshed", refreshCount >= 1)
+        } finally {
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun `an event the relevance check rejects refreshes nothing`() = runTest {
+        val events = MutableSharedFlow<Int>(extraBufferCapacity = 4)
+        val active = MutableStateFlow(true)
+        var refreshCount = 0
+        val (scope, job) = newSchedulerScope()
+        ChangeRefreshScheduler(scope, events, active, refresh = { refreshCount++ }, affects = { it % 2 == 0 })
+        try {
+            runCurrent()
+            events.tryEmit(1)
+            runCurrent()
+            assertEquals(0, refreshCount)
+
+            events.tryEmit(2)
+            runCurrent()
+            assertEquals(1, refreshCount)
         } finally {
             job.cancel()
         }

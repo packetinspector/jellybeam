@@ -112,14 +112,23 @@ pub(crate) enum WriteCmd {
     Barrier(oneshot::Sender<bool>),
 }
 
-#[derive(Clone)]
+/// The writer's queue, owned only by `MirrorState`; dropping it ends `run` once the queue drains.
 pub(crate) struct WriterHandle {
     tx: mpsc::Sender<WriteCmd>,
 }
 
 impl WriterHandle {
-    pub(crate) fn new(tx: mpsc::Sender<WriteCmd>) -> Self {
-        Self { tx }
+    /// Runs `run` on a named, detached thread: a forever loop on `spawn_blocking` hangs
+    /// `Runtime::drop`, and a join here would block whoever drops the mirror (often under a lock).
+    pub(crate) fn spawn(
+        conn: Connection,
+        changes: broadcast::Sender<MirrorChange>,
+    ) -> std::io::Result<Self> {
+        let (tx, rx) = mpsc::channel(256);
+        std::thread::Builder::new()
+            .name("mirror-writer".to_string())
+            .spawn(move || run(conn, rx, changes))?;
+        Ok(Self { tx })
     }
 
     #[cfg(test)]
@@ -296,7 +305,7 @@ impl WriterHandle {
 
     async fn send(&self, cmd: WriteCmd) {
         if self.tx.send(cmd).await.is_err() {
-            tracing::warn!("mirror writer task is gone; dropping write command");
+            tracing::warn!("mirror writer thread is gone; dropping write command");
         }
     }
 }
@@ -320,7 +329,7 @@ fn changed_ids(
     }
 }
 
-/// Runs on a `spawn_blocking` task for the lifetime of the `Mirror`. Blocking
+/// Runs on the `mirror-writer` thread ([`WriterHandle::spawn`]) until its queue closes. Blocking
 /// `rusqlite` calls belong here and nowhere else.
 pub(crate) fn run(
     mut conn: Connection,
@@ -529,7 +538,7 @@ pub(crate) fn run(
             }
         }
     }
-    tracing::debug!("mirror writer task exiting (channel closed)");
+    tracing::debug!("mirror writer thread exiting (channel closed)");
 }
 
 /// Upserts one `views` row -- the identical `INSERT ... ON CONFLICT` both [`apply_upsert_views`]
@@ -1397,10 +1406,8 @@ mod tests {
         let path = dir.path().join("mirror.db");
         let (conn, _) = open_and_prepare(&path).expect("open");
 
-        let (tx, rx) = mpsc::channel(64);
         let (changes, _changes_rx) = broadcast::channel(64);
-        let writer = tokio::task::spawn_blocking(move || run(conn, rx, changes));
-        let handle = WriterHandle::new(tx);
+        let handle = WriterHandle::spawn(conn, changes).expect("spawn writer");
 
         let id = "e2f5a5f1-1a0b-4b3a-9c2e-000000000001";
         // A batch ahead of the position write, so the barrier has something to wait behind.
@@ -1423,9 +1430,6 @@ mod tests {
             )
             .expect("row exists and the position write has committed");
         assert_eq!(position, 4_200);
-
-        drop(handle);
-        let _ = writer.await;
     }
 
     /// A favorites snapshot fetched before a newer favorite write -- a toggle or an item upsert
@@ -1435,10 +1439,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("mirror.db");
         let (conn, _) = open_and_prepare(&path).expect("open");
-        let (tx, rx) = mpsc::channel(64);
         let (changes, _changes_rx) = broadcast::channel(64);
-        let writer = tokio::task::spawn_blocking(move || run(conn, rx, changes));
-        let handle = WriterHandle::new(tx);
+        let handle = WriterHandle::spawn(conn, changes).expect("spawn writer");
         let toggled = "e2f5a5f1-1a0b-4b3a-9c2e-000000000001";
         let upserted = "e2f5a5f1-1a0b-4b3a-9c2e-000000000002";
         handle
@@ -1486,9 +1488,6 @@ mod tests {
             !is_favorite(toggled) && !is_favorite(upserted),
             "a fresh snapshot applies"
         );
-
-        drop(handle);
-        let _ = writer.await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1498,19 +1497,14 @@ mod tests {
         let (conn, _) = open_and_prepare(&path).expect("open");
         conn.execute("DROP TABLE meta", [])
             .expect("break meta writes");
-        let (tx, rx) = mpsc::channel(8);
         let (changes, _changes_rx) = broadcast::channel(8);
-        let writer = tokio::task::spawn_blocking(move || run(conn, rx, changes));
-        let handle = WriterHandle::new(tx);
+        let handle = WriterHandle::spawn(conn, changes).expect("spawn writer");
 
         handle.set_meta("cursor", "advanced".into()).await;
         assert!(
             !handle.barrier().await,
             "queue drain must not masquerade as transaction success"
         );
-
-        drop(handle);
-        let _ = writer.await;
     }
 
     fn item(id: &str, name: &str) -> BaseItemDto {
@@ -1827,10 +1821,8 @@ mod tests {
     async fn apply_user_state_command_replies_and_broadcasts() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (conn, _) = open_and_prepare(&dir.path().join("mirror.db")).expect("open");
-        let (tx, rx) = mpsc::channel(64);
         let (changes, mut changes_rx) = broadcast::channel(64);
-        let writer = tokio::task::spawn_blocking(move || run(conn, rx, changes));
-        let handle = WriterHandle::new(tx);
+        let handle = WriterHandle::spawn(conn, changes).expect("spawn writer");
         let id = uid(1);
         handle
             .upsert_items(vec![with_state(&id, BaseItemKind::Movie, false, 0, false)])
@@ -1851,8 +1843,6 @@ mod tests {
             changes_rx.recv().await,
             Ok(MirrorChange::Upserted { ids, .. }) if ids == vec![id]
         ));
-        drop(handle);
-        let _ = writer.await;
     }
 
     /// A byte-identical `/UserViews` snapshot -- same ids, names, types and order -- must
@@ -2213,10 +2203,8 @@ mod tests {
     async fn remove_items_broadcasts_only_ids_whose_row_was_actually_deleted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (conn, _) = open_and_prepare(&dir.path().join("mirror.db")).expect("open");
-        let (tx, rx) = mpsc::channel(8);
         let (changes, mut changes_rx) = broadcast::channel(8);
-        let writer = tokio::task::spawn_blocking(move || run(conn, rx, changes));
-        let handle = WriterHandle::new(tx);
+        let handle = WriterHandle::spawn(conn, changes).expect("spawn writer");
 
         let phantom_id = "e2f5a5f1-1a0b-4b3a-9c2e-000000000030".to_string();
         handle.remove_items(vec![phantom_id]).await;
@@ -2250,9 +2238,6 @@ mod tests {
             }
             other => panic!("expected a Removed change for the real id, got {other:?}"),
         }
-
-        drop(handle);
-        let _ = writer.await;
     }
 
     /// The guard's other arm: a genuine library move (a fresh breadth sync stamping the

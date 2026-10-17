@@ -45,6 +45,35 @@ pub(crate) fn normalize_sign_in_url(input: &str) -> Result<String, CoreError> {
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
+/// docs/13 "sign-in": the one place user-typed server text becomes a request base, so every step
+/// of a handshake (sign-in, Quick Connect) reaches the same normalized address.
+#[derive(Debug, Clone)]
+pub(crate) struct ServerBase {
+    url: String,
+    host: String,
+}
+
+impl ServerBase {
+    pub(crate) fn parse(input: &str) -> Result<Self, CoreError> {
+        let url = normalize_sign_in_url(input)?;
+        let host = host_for_display(&url);
+        Ok(Self { url, host })
+    }
+
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Display text only; never a request target.
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub(crate) fn into_url(self) -> String {
+        self.url
+    }
+}
+
 /// `host[:port]` for display in a [`CoreError`] variant, derived from an
 /// already-[`normalize_sign_in_url`]-ed URL. Falls back to the input
 /// verbatim if it somehow doesn't parse -- display text only, never reused
@@ -81,19 +110,34 @@ pub(crate) fn classify_sign_in_error(host: &str, err: jellyfin_api::ApiError) ->
     }
 }
 
+/// docs/13 "sign-in" (Quick Connect): a server with the feature off answers Initiate with 401, so
+/// there that status means "disabled", not bad credentials.
+pub(crate) fn classify_quick_connect_initiate_error(
+    host: &str,
+    err: jellyfin_api::ApiError,
+) -> CoreError {
+    match err {
+        jellyfin_api::ApiError::Unauthorized { .. } => CoreError::QuickConnectDisabled {
+            host: host.to_string(),
+        },
+        other => classify_sign_in_error(host, other),
+    }
+}
+
 /// Split out of [`classify_sign_in_error`] for the `Transport` arm's own
 /// substring heuristics (docs/13 "sign-in": no structured error info
 /// crosses the reqwest boundary, only `Display` text).
 fn classify_transport_error(host: &str, msg: &str) -> CoreError {
-    let https_not_offered = [
-        "InvalidContentType",
-        "corrupt message",
-        "handshake",
-        "certificate",
-    ]
-    .iter()
-    .any(|needle| msg.contains(needle));
-    if https_not_offered {
+    // Ordered: a certificate refusal also mentions "handshake", so it is checked first;
+    // "certificate" alone covers every TLS verification text (docs/13 sign-in).
+    const HTTPS_NOT_OFFERED: [&str; 3] = ["InvalidContentType", "corrupt message", "handshake"];
+    let has_any = |needles: &[&str]| needles.iter().any(|needle| msg.contains(needle));
+    if msg.contains("certificate") {
+        return CoreError::CertificateRejected {
+            host: host.to_string(),
+        };
+    }
+    if has_any(&HTTPS_NOT_OFFERED) {
         return CoreError::HttpsNotOffered {
             host: host.to_string(),
         };
@@ -351,6 +395,58 @@ mod tests {
                 assert_eq!(detail, "something unexpected happened");
             }
             other => panic!("expected ServerUnreachable, got {other:?}"),
+        }
+    }
+
+    const CERTIFICATE_TEXTS: [&str; 6] = [
+        "error sending request for url (https://jellyfin.example.test/System/Info/Public): client error (Connect): invalid peer certificate: UnknownIssuer",
+        "error sending request for url (https://jellyfin.example.test/System/Info/Public): client error (Connect): invalid peer certificate: Expired",
+        "error sending request for url (https://jellyfin.example.test/System/Info/Public): client error (Connect): invalid peer certificate: NotValidForName",
+        "error sending request for url (https://jellyfin.example.test/System/Info/Public): client error (Connect): certificate not valid for name \"jellyfin.example.test\"",
+        "error sending request for url (https://jellyfin.example.test/System/Info/Public): client error (Connect): error:0A000086:SSL routines::certificate verify failed (self-signed certificate)",
+        "error sending request for url (https://jellyfin.example.test/System/Info/Public): client error (Connect): tls handshake failed: invalid peer certificate: Expired",
+    ];
+
+    #[test]
+    fn classify_transport_refused_certificates_are_certificate_rejected_with_the_host() {
+        let failures: Vec<String> = CERTIFICATE_TEXTS
+            .iter()
+            .filter_map(|text| {
+                let err = classify_sign_in_error(
+                    "jellyfin.example.test",
+                    jellyfin_api::ApiError::Transport((*text).to_string()),
+                );
+                match err {
+                    CoreError::CertificateRejected { host } if host == "jellyfin.example.test" => {
+                        None
+                    }
+                    other => Some(format!("{text} -> {other:?}")),
+                }
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "certificate refusals must not read as HttpsNotOffered:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// A server that closed during the handshake said nothing about its certificate.
+    #[test]
+    fn classify_transport_plain_http_on_the_tls_port_stays_https_not_offered() {
+        let texts = [
+            "error sending request for url (https://jellyfin.example.test:8096/System/Info/Public): client error (Connect): received corrupt message of type InvalidContentType",
+            "error sending request for url (https://jellyfin.example.test:8096/System/Info/Public): client error (Connect): tls handshake eof",
+        ];
+        for text in texts {
+            let err = classify_sign_in_error(
+                "jellyfin.example.test:8096",
+                jellyfin_api::ApiError::Transport(text.to_string()),
+            );
+            assert!(
+                matches!(err, CoreError::HttpsNotOffered { .. }),
+                "{text} -> {err:?}"
+            );
         }
     }
 

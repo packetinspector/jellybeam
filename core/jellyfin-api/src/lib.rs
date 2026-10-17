@@ -42,9 +42,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// other crates with their own timeout/retry policy.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The REST client type, named so callers can hold one without depending on `reqwest`.
+pub use reqwest::Client as HttpClient;
+
 /// Builds the shared `reqwest::Client`. Panics only if the TLS backend
 /// fails to init, same as `reqwest::Client::new()` -- not a new panic surface.
-fn build_http_client() -> reqwest::Client {
+pub fn build_http_client() -> HttpClient {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
@@ -180,10 +183,20 @@ pub enum ApiError {
 }
 
 /// The account a token was issued to: a 401 on a request sent with it re-authorizes this account.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TokenOwner {
     pub server_url: String,
     pub user_id: String,
+}
+
+/// docs/18 §2.1: an error's Debug output reaches logs, so it never carries the server address.
+impl std::fmt::Debug for TokenOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenOwner")
+            .field("server_url", &"<redacted>")
+            .field("user_id", &self.user_id)
+            .finish()
+    }
 }
 
 /// Connection identity sent in the `Authorization: MediaBrowser ...` header.
@@ -472,13 +485,13 @@ async fn capped_body_text(mut resp: reqwest::Response, cap: usize) -> String {
 
 impl JellyfinClient {
     pub async fn authenticate_by_name(
+        http: &HttpClient,
         base_url: &str,
         identity: ClientIdentity,
         username: &str,
         password: &str,
     ) -> Result<(Self, AuthenticationResult), ApiError> {
         let base_url = base_url.trim_end_matches('/').to_string();
-        let http = build_http_client();
         let url = format!("{base_url}/Users/AuthenticateByName");
 
         let body = AuthenticateUserByName {
@@ -512,7 +525,7 @@ impl JellyfinClient {
                 base_url,
                 identity,
                 token,
-                http,
+                http: http.clone(),
                 user_id,
             }),
         };
@@ -523,11 +536,11 @@ impl JellyfinClient {
     /// -> AuthenticateWithQuickConnect). No prior authentication required. Returns the user-facing
     /// `code` (show it) and the `secret` (kept client-side, never shown).
     pub async fn quick_connect_initiate(
+        http: &HttpClient,
         base_url: &str,
         identity: &ClientIdentity,
     ) -> Result<QuickConnectResult, ApiError> {
         let base_url = base_url.trim_end_matches('/');
-        let http = build_http_client();
         let url = format!("{base_url}/QuickConnect/Initiate");
         let resp = http
             .post(&url)
@@ -545,12 +558,12 @@ impl JellyfinClient {
     /// A 404 (expired/invalid secret) surfaces as a normal `ApiError::Status` here, unlike
     /// [`Self::get_media_segments`]'s 404-as-empty.
     pub async fn quick_connect_poll(
+        http: &HttpClient,
         base_url: &str,
         identity: &ClientIdentity,
         secret: &str,
     ) -> Result<QuickConnectResult, ApiError> {
         let base_url = base_url.trim_end_matches('/');
-        let http = build_http_client();
         let url = format!("{base_url}/QuickConnect/Connect");
         let resp = http
             .get(&url)
@@ -563,35 +576,15 @@ impl JellyfinClient {
         read_json_capped(resp, "/QuickConnect/Connect").await
     }
 
-    /// `GET /QuickConnect/Enabled` -- whether the server has Quick Connect
-    /// turned on. Worth checking before showing the "Use Quick Connect"
-    /// toggle, since Initiate 401s outright when disabled.
-    pub async fn quick_connect_enabled(
-        base_url: &str,
-        identity: &ClientIdentity,
-    ) -> Result<bool, ApiError> {
-        let base_url = base_url.trim_end_matches('/');
-        let http = build_http_client();
-        let url = format!("{base_url}/QuickConnect/Enabled");
-        let resp = http
-            .get(&url)
-            .header("Authorization", auth_header(identity, None))
-            .send()
-            .await
-            .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
-        let resp = check_public_status(resp).await?;
-        read_json_capped(resp, "/QuickConnect/Enabled").await
-    }
-
     /// `GET /System/Info/Public` -- unauthenticated server info (docs/13 Server compatibility
     /// gating). Sends the `MediaBrowser` header with no `Token=` clause, for first-contact points
     /// (Connect screen) before [`Self::refresh_public_system_info`] applies.
     pub async fn public_system_info(
+        http: &HttpClient,
         base_url: &str,
         identity: &ClientIdentity,
     ) -> Result<PublicServerInfo, ApiError> {
         let base_url = base_url.trim_end_matches('/');
-        let http = build_http_client();
         let url = format!("{base_url}/System/Info/Public");
         let resp = http
             .get(&url)
@@ -607,12 +600,12 @@ impl JellyfinClient {
     /// [`Self::quick_connect_poll`] reports `authenticated: true`, exchanging the secret for a
     /// token. Mirrors [`Self::authenticate_by_name`]'s shape.
     pub async fn authenticate_with_quick_connect(
+        http: &HttpClient,
         base_url: &str,
         identity: ClientIdentity,
         secret: &str,
     ) -> Result<(Self, AuthenticationResult), ApiError> {
         let base_url = base_url.trim_end_matches('/').to_string();
-        let http = build_http_client();
         let url = format!("{base_url}/Users/AuthenticateWithQuickConnect");
 
         let secret_value: QuickConnectDtoSecret = secret
@@ -650,7 +643,7 @@ impl JellyfinClient {
                 base_url,
                 identity,
                 token,
-                http,
+                http: http.clone(),
                 user_id,
             }),
         };
@@ -1072,8 +1065,8 @@ impl JellyfinClient {
             .await
     }
 
-    /// The session's live BoxSet list -- docs/19-detail-action-menu.md §2.1. Capped at 200
-    /// (session-cached per §2.3, not a paged browse -- the cap just bounds a pathological library).
+    /// The session's live BoxSet list -- docs/19-detail-action-menu.md §2.1. Capped at 200,
+    /// not a paged browse -- the cap just bounds a pathological library.
     pub async fn list_collections(&self) -> Result<Vec<BaseItemDto>, ApiError> {
         let query = ItemQuery {
             include_item_types: vec!["BoxSet".to_string()],
@@ -1155,10 +1148,25 @@ impl JellyfinClient {
     }
 
     /// `GET /System/Info` (authenticated) -- docs/13 About > server info on-demand fetch. Requires
-    /// an admin-capable token on some server configs; a 401/403 is the caller's cue to fall back
-    /// to [`Self::refresh_public_system_info`].
+    /// an admin-capable token on some server configs; a 403 is the caller's cue to fall back to
+    /// [`Self::refresh_public_system_info`], a 401 is a revoked token.
     pub async fn system_info(&self) -> Result<ServerSystemInfo, ApiError> {
         self.get("/System/Info", &[]).await
+    }
+
+    /// `POST /Sessions/Logout` -- ends this token's server session (docs/18 §2.1).
+    pub async fn logout(&self) -> Result<(), ApiError> {
+        let url = format!("{}/Sessions/Logout", self.inner.base_url);
+        let resp = self
+            .inner
+            .http
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
+        self.check(resp).await?;
+        Ok(())
     }
 
     /// `GET /Items/Counts` -- docs/13 About > server info. `userId` sent whenever known, same as
@@ -1306,13 +1314,15 @@ impl JellyfinClient {
             .await
             // The transport message can embed the request URL; keep only that it failed.
             .map_err(|_| ApiError::Transport("delivery fetch failed".to_string()))?;
-        let status = resp.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(ApiError::Status {
-                code: status,
+        // docs/18 §2.1: the shared mapper names the token's owner on a 401; a status body is
+        // dropped because an error page can echo the request URL with its token.
+        let resp = self.check(resp).await.map_err(|e| match e {
+            ApiError::Status { code, .. } => ApiError::Status {
+                code,
                 body: String::new(),
-            });
-        }
+            },
+            other => other,
+        })?;
         read_capped_body(resp, max_bytes, "delivery text")
             .await
             .map_err(|e| match e {
@@ -1993,9 +2003,10 @@ mod tests {
         }
 
         let base_url = unauthorized_server().await;
-        let err = JellyfinClient::public_system_info(&base_url, &sample_identity())
-            .await
-            .expect_err("401");
+        let err =
+            JellyfinClient::public_system_info(&build_http_client(), &base_url, &sample_identity())
+                .await
+                .expect_err("401");
         assert!(
             matches!(err, ApiError::Unauthorized { owner: None }),
             "{err:?}"
@@ -2084,6 +2095,74 @@ mod tests {
                 .await,
             Err(ApiError::Decode(_))
         ));
+    }
+
+    /// docs/18 §2.1: a sidecar fetch's 401 names the account whose token was rejected, like every owned 401.
+    #[tokio::test]
+    async fn a_delivery_fetch_401_names_the_account_and_never_leaks_the_url() {
+        const TOKEN: &str = "synthetic-delivery-token";
+        for with_user in [true, false] {
+            for as_text in [true, false] {
+                let base_url = unauthorized_server().await;
+                let mut client = JellyfinClient::from_token(&base_url, sample_identity(), TOKEN);
+                if with_user {
+                    client = client.with_user_id("user-1");
+                }
+                let err = if as_text {
+                    client
+                        .fetch_delivery_text("/Videos/x/s/0.srt", 1024)
+                        .await
+                        .expect_err("401")
+                } else {
+                    client
+                        .fetch_delivery_bytes("/Videos/x/s/0.srt", 1024)
+                        .await
+                        .expect_err("401")
+                };
+                let row = format!("with_user={with_user} as_text={as_text}: {err:?}");
+                let expected_owner = with_user.then(|| TokenOwner {
+                    server_url: base_url.clone(),
+                    user_id: "user-1".to_string(),
+                });
+                assert!(
+                    matches!(&err, ApiError::Unauthorized { owner } if *owner == expected_owner),
+                    "a delivery 401 must be Unauthorized naming the token's owner; {row}"
+                );
+                let address = base_url.trim_start_matches("http://");
+                for text in [err.to_string(), format!("{err:?}")] {
+                    assert!(
+                        !text.contains(address) && !text.contains(TOKEN),
+                        "error text must carry no address or token: {text}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// docs/18 §2.1: a failed sidecar connection reports that it failed, never the URL with its token.
+    #[tokio::test]
+    async fn a_delivery_fetch_transport_failure_never_leaks_the_url() {
+        const TOKEN: &str = "synthetic-delivery-token";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener);
+        let client =
+            JellyfinClient::from_token(&format!("http://{addr}"), sample_identity(), TOKEN);
+
+        let err = client
+            .fetch_delivery_text("/Videos/x/s/0.srt", 1024)
+            .await
+            .expect_err("nothing is listening");
+
+        assert!(matches!(err, ApiError::Transport(_)), "{err:?}");
+        for text in [err.to_string(), format!("{err:?}")] {
+            assert!(
+                !text.contains(&addr.to_string()) && !text.contains(TOKEN),
+                "error text must carry no address or token: {text}"
+            );
+        }
     }
 
     #[test]
@@ -3015,6 +3094,7 @@ mod tests {
         let raw = include_str!("../tests/fixtures/authentication_result.json");
         let (base_url, _rx) = capturing_json_server(raw.to_string()).await;
         let (client, result) = JellyfinClient::authenticate_by_name(
+            &build_http_client(),
             &base_url,
             sample_identity(),
             "jellybeam-admin",
@@ -3051,9 +3131,13 @@ mod tests {
     async fn quick_connect_initiate_returns_code_and_secret_from_fixture() {
         let raw = include_str!("../tests/fixtures/quick_connect_result.json");
         let (base_url, rx) = capturing_json_server(raw.to_string()).await;
-        let result = JellyfinClient::quick_connect_initiate(&base_url, &sample_identity())
-            .await
-            .expect("quick_connect_initiate against mock server");
+        let result = JellyfinClient::quick_connect_initiate(
+            &build_http_client(),
+            &base_url,
+            &sample_identity(),
+        )
+        .await
+        .expect("quick_connect_initiate against mock server");
         assert_eq!(result.code.as_deref(), Some("123456"));
         assert_eq!(result.secret.as_deref(), Some("the-quick-connect-secret"));
         assert_eq!(result.authenticated, Some(false));
@@ -3084,6 +3168,7 @@ mod tests {
         let (base_url, rx) = capturing_json_server(authenticated_raw.to_string()).await;
 
         let result = JellyfinClient::quick_connect_poll(
+            &build_http_client(),
             &base_url,
             &sample_identity(),
             "the-quick-connect-secret",
@@ -3104,24 +3189,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quick_connect_enabled_deserializes_bare_bool() {
-        let (base_url, _rx) = capturing_json_server("true".to_string()).await;
-        let enabled = JellyfinClient::quick_connect_enabled(&base_url, &sample_identity())
-            .await
-            .expect("quick_connect_enabled against mock server");
-        assert!(enabled);
-    }
-
-    #[tokio::test]
     async fn quick_connect_poll_surfaces_404_as_unknown_secret_error() {
         // Unlike get_media_segments's 404-as-empty, an expired secret is a
         // real error the poll loop should stop on.
         let (base_url, _rx) =
             capturing_status_server("404 Not Found", r#"{"title":"unknown secret"}"#.to_string())
                 .await;
-        let result =
-            JellyfinClient::quick_connect_poll(&base_url, &sample_identity(), "expired-secret")
-                .await;
+        let result = JellyfinClient::quick_connect_poll(
+            &build_http_client(),
+            &base_url,
+            &sample_identity(),
+            "expired-secret",
+        )
+        .await;
         assert!(
             matches!(result, Err(ApiError::Status { code: 404, .. })),
             "{result:?}"
@@ -3133,6 +3213,7 @@ mod tests {
         let raw = include_str!("../tests/fixtures/authentication_result.json");
         let (base_url, rx) = capturing_json_server(raw.to_string()).await;
         let (client, result) = JellyfinClient::authenticate_with_quick_connect(
+            &build_http_client(),
             &base_url,
             sample_identity(),
             "the-quick-connect-secret",
@@ -3256,9 +3337,10 @@ mod tests {
         .to_string();
         let (base_url, rx) = capturing_json_server(body).await;
 
-        let info = JellyfinClient::public_system_info(&base_url, &sample_identity())
-            .await
-            .expect("public_system_info against mock server");
+        let info =
+            JellyfinClient::public_system_info(&build_http_client(), &base_url, &sample_identity())
+                .await
+                .expect("public_system_info against mock server");
         assert_eq!(info.version.as_deref(), Some("10.11.10"));
         assert_eq!(
             info.parsed_version(),

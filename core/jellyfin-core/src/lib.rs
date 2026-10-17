@@ -12,7 +12,7 @@ pub use device_profile::{
     allow_ass_sidecars, android_direct_play_video_codecs, android_tv_profile, AndroidTvCaps,
     VideoCodec, VideoCodecCaps, VideoProfileLevel,
 };
-pub use event_bus::{EventBus, EventBusHandle};
+pub use event_bus::{BusConnection, EventBus, EventBusHandle};
 pub use reporting::{
     pending_local_item_ids, supersede, FinalDelivery, ReportingSession, Superseded,
 };
@@ -114,13 +114,11 @@ pub struct ReportContext {
     pub play_method: jellyfin_api::ReportPlayMethod,
 }
 
-/// Connection-state + forwarded server events emitted by [`EventBus::spawn`].
-/// media-cache listens for `NeedsReconcile` to trigger its resync pass.
+/// Forwarded server events plus the reconcile trigger emitted by [`EventBus::spawn`]; connection
+/// state is its [`BusConnection`] watch. media-cache listens for `NeedsReconcile` to resync.
 #[derive(Debug, Clone)]
 pub enum BusEvent {
     Server(ServerEvent),
-    Connected,
-    Disconnected,
     /// Emitted after every (re)connect — reconciliation trigger.
     NeedsReconcile,
 }
@@ -282,10 +280,11 @@ mod tests {
     #[tokio::test]
     async fn recv_bus_passes_through_ordinary_events() {
         let (tx, mut rx) = broadcast::channel(8);
-        tx.send(BusEvent::Connected).expect("send");
+        tx.send(BusEvent::Server(ServerEvent::ForceKeepAlive))
+            .expect("send");
         match recv_bus(&mut rx).await {
-            Some(BusEvent::Connected) => {}
-            other => panic!("expected Connected, got {other:?}"),
+            Some(BusEvent::Server(ServerEvent::ForceKeepAlive)) => {}
+            other => panic!("expected the server event, got {other:?}"),
         }
     }
 
@@ -295,7 +294,7 @@ mod tests {
         // subscribed to the same channel) is guaranteed to lag.
         let (tx, mut rx) = broadcast::channel(2);
         for _ in 0..5 {
-            let _ = tx.send(BusEvent::Disconnected);
+            let _ = tx.send(BusEvent::Server(ServerEvent::ForceKeepAlive));
         }
         match recv_bus(&mut rx).await {
             Some(BusEvent::NeedsReconcile) => {}
@@ -304,7 +303,7 @@ mod tests {
         // The stream is not over; a bare `while let Ok(e) = rx.recv().await` would have silently
         // ended here.
         match recv_bus(&mut rx).await {
-            Some(BusEvent::Disconnected) => {}
+            Some(BusEvent::Server(ServerEvent::ForceKeepAlive)) => {}
             other => panic!("expected the stream to continue after lag, got {other:?}"),
         }
     }

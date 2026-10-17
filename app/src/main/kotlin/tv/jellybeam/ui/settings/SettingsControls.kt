@@ -24,7 +24,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -71,6 +70,13 @@ import tv.jellybeam.ui.focus.focusKey
  * outside that provider skips [focusKey] registration.
  */
 internal val LocalSettingsFocusMemory = compositionLocalOf<FocusMemory?> { null }
+
+/**
+ * The active section's rail row (docs/15-focus-and-selection.md §2): the first chip of a row
+ * returns Left here itself, because the pane's spatial search could otherwise pick a control that
+ * happens to sit left of it (Discover's Connect) before the pane's own exit applies.
+ */
+internal val LocalSettingsRailEntry = compositionLocalOf<FocusRequester?> { null }
 
 /** A row's namespace segment (docs/15-focus-and-selection.md §5 key scheme,
  * "<section>/<rowId>"), provided by [ChipFieldRow] so each [SettingsChip] only names its own
@@ -128,10 +134,6 @@ internal fun Modifier.paneEntry(target: SettingsPaneEntryTarget?, rowKey: String
 
 // Static: the target is stable per section, and a section switch recomposes the whole pane anyway.
 internal val LocalSettingsPaneEntryKey = staticCompositionLocalOf<SettingsPaneEntryTarget?> { null }
-
-/** The retained layer's focus gate (see [tv.jellybeam.MainActivity]), for a section that must place
- * focus itself after the focused control left composition. */
-internal val LocalSettingsFocusGate = compositionLocalOf<MutableState<Boolean>?> { null }
 
 /** docs/15-focus-and-selection.md §2: D-pad entry into a [ChipFieldRow] lands on its selected
  * chip, not the spatially nearest one. [attachedCount] tracks whether any chip currently carries
@@ -400,6 +402,8 @@ internal fun SettingsChip(
     key: String = label,
     focusRequester: FocusRequester? = null,
     swatch: Color? = null,
+    /** Where Left goes from this chip when it is the first of its row; `null` leaves the spatial search. */
+    leftTarget: FocusRequester? = null,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -429,6 +433,7 @@ internal fun SettingsChip(
                 .let { it.paneEntry(entryTarget, fullKey, canClaim = selected) }
                 .let { if (selected && selectedChip != null) it.focusRequester(selectedChip.requester) else it }
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
+                .let { if (leftTarget != null) it.focusProperties { left = leftTarget } else it }
                 .clickable(interactionSource = interactionSource, indication = null, onClick = onSelect)
                 .padding(horizontal = CHIP_HPADDING),
         ) {
@@ -581,9 +586,10 @@ internal fun <T> PresetChipRow(
     swatch: ((T) -> Color)? = null,
     selectedFocusRequester: FocusRequester? = null,
 ) {
+    val railEntry = LocalSettingsRailEntry.current
     ChipFieldRow(label = label, description = description, key = key, modifier = modifier) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(CHIP_GAP, Alignment.End)) {
-            options.forEach { option ->
+            options.forEachIndexed { index, option ->
                 val isSelected = option == selected
                 SettingsChip(
                     label = chipLabel(option),
@@ -592,6 +598,7 @@ internal fun <T> PresetChipRow(
                     key = chipKey(option),
                     focusRequester = if (isSelected) selectedFocusRequester else null,
                     swatch = swatch?.invoke(option),
+                    leftTarget = if (index == 0) railEntry else null,
                 )
             }
         }

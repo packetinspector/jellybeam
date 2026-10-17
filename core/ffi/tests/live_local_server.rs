@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod common;
+use common::ChildrenRows;
 
 /// How long both tests give the websocket path after the second session's
 /// mutation -- one constant so the two windows can never drift apart.
@@ -40,7 +41,7 @@ const EVENT_WINDOW: Duration = Duration::from_secs(10);
 /// still fine to hold.
 static SERIAL: Mutex<()> = Mutex::new(());
 
-use jellybeam_core::{ChangeEvent, ChangeListener, JellybeamCore};
+use jellybeam_core::{AccountIdentity, CallbackError, ChangeEvent, ChangeListener, JellybeamCore};
 use jellyfin_api::{ClientIdentity, ItemQuery, JellyfinClient};
 
 const ADMIN_USER: &str = "jellybeam-admin";
@@ -58,11 +59,16 @@ struct RecordingListener {
 }
 
 impl ChangeListener for RecordingListener {
-    fn on_change(&self, event: ChangeEvent) {
+    fn on_change(&self, event: ChangeEvent) -> Result<(), CallbackError> {
         self.events
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(event);
+        Ok(())
+    }
+
+    fn on_unauthorized(&self, _account: AccountIdentity) -> Result<(), CallbackError> {
+        Ok(())
     }
 }
 
@@ -191,6 +197,7 @@ fn websocket_delivers_a_change_made_by_another_session() {
     let net_rt = tokio::runtime::Runtime::new().expect("tokio runtime for the second client");
     let (second_client, _auth) = net_rt
         .block_on(JellyfinClient::authenticate_by_name(
+            &jellyfin_api::build_http_client(),
             &base_url,
             other_session_identity(),
             ADMIN_USER,
@@ -285,6 +292,7 @@ fn websocket_disabled_bus_delivers_no_event() {
     let net_rt = tokio::runtime::Runtime::new().expect("tokio runtime for the second client");
     let (second_client, _auth) = net_rt
         .block_on(JellyfinClient::authenticate_by_name(
+            &jellyfin_api::build_http_client(),
             &base_url,
             other_session_identity(),
             ADMIN_USER,

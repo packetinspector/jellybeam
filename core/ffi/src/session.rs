@@ -5,10 +5,10 @@
 //! `<data_dir>/sessions.json`; `SessionFile` also carries `mirror_dir` --
 //! see [`mirror_dir_name`] for why every session gets its own.
 //!
-//! **Migration**: a pre-list install (a lone `session.json`) is
-//! transparently upgraded the first time [`load_list`] runs, pinned to the
-//! legacy `"mirror"` directory via [`legacy_mirror_dir_name`] and written
-//! out as `sessions.json`; the legacy file stays as a rollback fallback.
+//! **Migration**: a pre-list install (a lone `session.json`) reads as a one-account list,
+//! pinned to the legacy `"mirror"` directory via [`legacy_mirror_dir_name`]; the first
+//! writer ([`mutate`]) saves it as `sessions.json` and the legacy file stays as a rollback
+//! fallback. Readers ([`load_list`], [`load`]) never write (docs/18 §2.1).
 //!
 //! Contains real access tokens: never logged, never included in errors.
 
@@ -38,11 +38,24 @@ pub(crate) struct SessionFile {
     pub server_name: Option<String>,
 }
 
+impl SessionFile {
+    /// docs/18 §2.1: whether this row is the account `(server_url, user_id)` names; a trailing
+    /// slash on either address is not a different server.
+    pub(crate) fn is_account(&self, server_url: &str, user_id: &str) -> bool {
+        same_server(&self.server_url, server_url) && self.user_id == user_id
+    }
+}
+
+/// Whether two saved or live server addresses name one server (they differ only by trailing
+/// slashes); the one compare every account lookup uses.
+pub(crate) fn same_server(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
 /// Every signed-in `(server, user)` session plus which one is currently
 /// active. `active` is a plain index, kept in range by
-/// [`SessionList::add_or_update`]/[`remove_active`]/[`remove_at`] so
-/// callers never re-clamp it themselves.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// [`SessionList::add_or_update`]/[`SessionList::remove_at`] so callers never re-clamp it themselves.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SessionList {
     pub sessions: Vec<SessionFile>,
     pub active: usize,
@@ -58,12 +71,14 @@ impl SessionList {
     /// `mirror_dir` is overwritten with the *existing* entry's value, not
     /// the caller's guess, so a re-authentication never orphans an
     /// already-synced cache; `server_version`/`server_name` get the same
-    /// carry-over, each only when the caller left it `None`.
+    /// carry-over, each only when the caller left it `None`. The address is stored without a
+    /// trailing `/`, so the one writer saves one spelling (docs/18 §2.1).
     pub(crate) fn add_or_update(&mut self, mut session: SessionFile) {
+        session.server_url = session.server_url.trim_end_matches('/').to_string();
         if let Some(ix) = self
             .sessions
             .iter()
-            .position(|s| s.server_url == session.server_url && s.user_id == session.user_id)
+            .position(|s| s.is_account(&session.server_url, &session.user_id))
         {
             session.mirror_dir = self.sessions[ix].mirror_dir.clone();
             if session.server_version.is_none() {
@@ -78,20 +93,6 @@ impl SessionList {
             self.sessions.push(session);
             self.active = self.sessions.len() - 1;
         }
-    }
-
-    /// Removes the *active* session (`sign_out`'s semantics): if any
-    /// remain, the first becomes active -- always acts on whichever
-    /// session is currently active, never a caller-chosen index. Returns
-    /// the removed entry, or `None` if the list was already empty.
-    pub(crate) fn remove_active(&mut self) -> Option<SessionFile> {
-        if self.sessions.is_empty() {
-            return None;
-        }
-        let active = self.active.min(self.sessions.len() - 1);
-        let removed = self.sessions.remove(active);
-        self.active = 0;
-        Some(removed)
     }
 
     /// Removes an arbitrary saved account, shifting the active index to
@@ -145,40 +146,80 @@ fn list_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("sessions.json")
 }
 
-/// Load the full multi-server/user session list. Reads `sessions.json`
-/// first; falls back to migrating the legacy `session.json`, or an empty
-/// list if neither exists -- never `None`.
-pub(crate) fn load_list(data_dir: &std::path::Path) -> SessionList {
-    if let Ok(bytes) = std::fs::read(list_path(data_dir)) {
-        match serde_json::from_slice::<SessionList>(&bytes) {
-            Ok(list) => return list,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    bytes_len = bytes.len(),
-                    "sessions.json failed to parse; falling back to the legacy \
-                     single-session blob (or an empty session list)"
-                );
-            }
-        }
-    }
+/// What `sessions.json` holds right now; the one classification every reader
+/// and writer goes through (docs/18 §2.1: a saved account is never silently lost).
+enum StoredList {
+    Missing,
+    Unreadable(std::io::Error),
+    /// Unparseable; carries the byte length for the quarantine log.
+    Corrupt(usize),
+    Ok(SessionList),
+}
 
-    match load_legacy(data_dir) {
-        Some(mut legacy) => {
-            // The legacy blob predates `mirror_dir`; serde's default
-            // already filled it, but pin it explicitly here too in case a
-            // newer-format blob is ever found at the legacy path.
-            legacy.mirror_dir = legacy_mirror_dir_name();
-            let list = SessionList {
-                sessions: vec![legacy],
-                active: 0,
-            };
-            if let Err(e) = save_list(data_dir, &list) {
-                tracing::warn!(error = %e, "failed to persist migrated sessions.json");
-            }
-            list
+fn read_stored(data_dir: &std::path::Path) -> StoredList {
+    match std::fs::read(list_path(data_dir)) {
+        Ok(bytes) => match serde_json::from_slice::<SessionList>(&bytes) {
+            Ok(list) => StoredList::Ok(list),
+            Err(_) => StoredList::Corrupt(bytes.len()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StoredList::Missing,
+        Err(e) => StoredList::Unreadable(e),
+    }
+}
+
+/// Renames an unparseable `sessions.json` to `sessions.json.corrupt-<unix_ms>`
+/// so no write can replace its bytes (docs/18 §2.1).
+fn quarantine_corrupt(data_dir: &std::path::Path, bytes_len: usize) -> std::io::Result<()> {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let aside = data_dir.join(format!("sessions.json.corrupt-{ms}"));
+    std::fs::rename(list_path(data_dir), aside)?;
+    tracing::warn!(
+        bytes_len,
+        "sessions.json failed to parse; kept aside as sessions.json.corrupt-*"
+    );
+    Ok(())
+}
+
+/// The lone legacy `session.json` as a one-account list, if any; reads only.
+fn legacy_list(data_dir: &std::path::Path) -> Option<SessionList> {
+    let mut legacy = load_legacy(data_dir)?;
+    // The legacy blob predates `mirror_dir`; serde's default already filled
+    // it, but pin it explicitly in case a newer-format blob sits at the
+    // legacy path.
+    legacy.mirror_dir = legacy_mirror_dir_name();
+    Some(SessionList {
+        sessions: vec![legacy],
+        active: 0,
+    })
+}
+
+/// docs/18 §2.1: saved addresses carry no trailing slash and `active` is in range; the flag says
+/// the stored bytes differ, so a writer saves it.
+fn canonical(mut list: SessionList) -> (SessionList, bool) {
+    let before = list.clone();
+    list.active = list.active.min(list.sessions.len().saturating_sub(1));
+    for row in &mut list.sessions {
+        row.server_url = row.server_url.trim_end_matches('/').to_string();
+    }
+    let changed = list != before;
+    (list, changed)
+}
+
+/// The session list as a reader sees it: `sessions.json`, else the legacy `session.json` as a
+/// one-account list, else empty. Never writes -- an unparseable `sessions.json` is left for the next
+/// writer to set aside -- and an unreadable one reads as empty; [`mutate`] refuses it (docs/18 §2.1).
+pub(crate) fn load_list(data_dir: &std::path::Path) -> SessionList {
+    match read_stored(data_dir) {
+        StoredList::Ok(list) => canonical(list).0,
+        StoredList::Unreadable(e) => {
+            tracing::warn!(error = %e, "sessions.json could not be read; treating as empty");
+            SessionList::default()
         }
-        None => SessionList::default(),
+        StoredList::Corrupt(_) | StoredList::Missing => {
+            legacy_list(data_dir).map_or_else(SessionList::default, |list| canonical(list).0)
+        }
     }
 }
 
@@ -199,53 +240,103 @@ pub(crate) fn load(data_dir: &std::path::Path) -> Option<SessionFile> {
     load_list(data_dir).active_session().cloned()
 }
 
+/// Why [`mutate`] did not commit.
+#[derive(Debug)]
+pub(crate) enum MutateError<E> {
+    /// The list could not be read or the result could not be written.
+    Storage(std::io::Error),
+    /// The caller's closure refused; nothing was written.
+    Refused(E),
+}
+
+impl From<MutateError<crate::error::CoreError>> for crate::error::CoreError {
+    fn from(err: MutateError<crate::error::CoreError>) -> Self {
+        match err {
+            MutateError::Storage(e) => Self::Cache {
+                detail: format!("failed to update the session list: {e}"),
+            },
+            MutateError::Refused(e) => e,
+        }
+    }
+}
+
+/// The one writer of `sessions.json` (docs/18 §2.1): under `lock` it sets an unparseable list
+/// aside, migrates a lone legacy `session.json`, applies `change`, and saves only a changed list;
+/// an unreadable list or a refusal from `change` saves none.
+pub(crate) fn mutate<T, E>(
+    data_dir: &std::path::Path,
+    lock: &std::sync::Mutex<()>,
+    change: impl FnOnce(&mut SessionList) -> Result<T, E>,
+) -> Result<T, MutateError<E>> {
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut list, migrated) = open_for_write(data_dir).map_err(MutateError::Storage)?;
+    let before = list.clone();
+    let value = change(&mut list).map_err(MutateError::Refused)?;
+    if migrated || list != before {
+        save_list(data_dir, &list).map_err(MutateError::Storage)?;
+    }
+    Ok(value)
+}
+
+/// The list a writer starts from, and whether it came from the legacy file (so must be saved).
+fn open_for_write(data_dir: &std::path::Path) -> std::io::Result<(SessionList, bool)> {
+    match read_stored(data_dir) {
+        StoredList::Ok(list) => return Ok(canonical(list)),
+        StoredList::Unreadable(e) => return Err(e),
+        StoredList::Corrupt(len) => quarantine_corrupt(data_dir, len)?,
+        StoredList::Missing => {}
+    }
+    Ok(legacy_list(data_dir).map_or_else(
+        || (SessionList::default(), false),
+        |list| (canonical(list).0, true),
+    ))
+}
+
 /// Insert-or-replace `session` into the on-disk list and make it active,
 /// returning the finalized entry actually persisted -- `add_or_update`
 /// may have overwritten the caller's guessed `mirror_dir` with an
-/// existing entry's real one.
+/// existing entry's real one. Refuses (`Err`, nothing written) when
+/// `sessions.json` is unreadable.
 #[cfg(test)]
 pub(crate) fn add_or_update(
     data_dir: &std::path::Path,
     session: SessionFile,
 ) -> std::io::Result<SessionFile> {
-    let mut list = load_list(data_dir);
-    list.add_or_update(session);
-    let saved = list
-        .active_session()
-        .cloned()
-        .expect("add_or_update always leaves `active` pointing at the just-inserted entry");
-    save_list(data_dir, &list)?;
-    Ok(saved)
+    mutate(data_dir, &std::sync::Mutex::new(()), |list| {
+        list.add_or_update(session);
+        Ok::<_, std::convert::Infallible>(
+            list.active_session()
+                .cloned()
+                .expect("add_or_update always leaves `active` pointing at the just-inserted entry"),
+        )
+    })
+    .map_err(|e| match e {
+        MutateError::Storage(e) => e,
+        MutateError::Refused(never) => match never {},
+    })
 }
 
-/// Remove the currently active session (`sign_out`'s semantics): if
-/// others remain, the first becomes active; `sessions.json` is rewritten,
-/// including as an explicit empty list (deleting it would resurrect a
-/// retained legacy `session.json`). Best-effort: a filesystem error is
-/// logged and swallowed.
-pub(crate) fn remove_active(data_dir: &std::path::Path) {
-    let mut list = load_list(data_dir);
-    if list.remove_active().is_none() {
-        return;
-    }
-    if let Err(e) = save_list(data_dir, &list) {
-        tracing::warn!(error = %e, "failed to persist sessions.json after sign-out");
-    }
+/// Test-only: removes the active session, writing even an empty list (deleting the file would
+/// resurrect a legacy `session.json`); `None` on an empty or unreadable list.
+#[cfg(test)]
+pub(crate) fn remove_active(data_dir: &std::path::Path) -> Option<SessionFile> {
+    mutate(data_dir, &std::sync::Mutex::new(()), |list| {
+        let active = list.active;
+        list.remove_at(active).ok_or(())
+    })
+    .ok()
 }
 
-/// Remove a caller-selected saved account and durably persist the result.
-/// Unlike [remove_active], errors are returned: the management UI must
-/// not claim success while credentials are still on disk.
-pub(crate) fn remove_at(
-    data_dir: &std::path::Path,
-    index: usize,
-) -> std::io::Result<Option<SessionFile>> {
-    let mut list = load_list(data_dir);
-    let Some(removed) = list.remove_at(index) else {
-        return Ok(None);
-    };
-    save_list(data_dir, &list)?;
-    Ok(Some(removed))
+/// Test-only: leaves `session` as the lone legacy `session.json`.
+#[cfg(test)]
+pub(crate) fn write_legacy(data_dir: &std::path::Path, session: &SessionFile) {
+    std::fs::write(
+        legacy_path(data_dir),
+        serde_json::to_vec(session).expect("serialize"),
+    )
+    .expect("write legacy");
 }
 
 #[cfg(test)]
@@ -340,43 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_active_falls_back_to_the_first_remaining_session() {
-        let mut list = SessionList::default();
-        list.add_or_update(sample_for("http://s1.test", "u1"));
-        list.add_or_update(sample_for("http://s2.test", "u1"));
-        list.add_or_update(sample_for("http://s3.test", "u1"));
-        list.active = 2; // s3 active
-
-        let removed = list.remove_active().expect("list was non-empty");
-        assert_eq!(removed.server_url, "http://s3.test");
-        assert_eq!(list.sessions.len(), 2);
-        assert_eq!(list.active, 0, "first remaining session becomes active");
-        assert_eq!(list.sessions[list.active].server_url, "http://s1.test");
-    }
-
-    #[test]
-    fn remove_active_on_an_empty_list_returns_none() {
-        let mut list = SessionList::default();
-        assert!(list.remove_active().is_none());
-    }
-
-    #[test]
-    fn remove_active_clamps_an_out_of_range_active_index() {
-        let mut list = SessionList::default();
-        list.add_or_update(sample_for("http://s1.test", "u1"));
-        list.add_or_update(sample_for("http://s2.test", "u2"));
-        list.active = 9; // e.g. a hand-edited or truncated sessions.json
-
-        let removed = list.remove_active().expect("list was non-empty");
-        assert_eq!(
-            removed.server_url, "http://s2.test",
-            "clamped to the last entry"
-        );
-        assert_eq!(list.sessions.len(), 1);
-        assert_eq!(list.active, 0);
-    }
-
-    #[test]
     fn remove_at_keeps_the_same_active_account_when_an_earlier_row_is_removed() {
         let mut list = SessionList::default();
         list.add_or_update(sample_for("http://s1.test", "u1"));
@@ -393,6 +447,74 @@ mod tests {
                 .server_url,
             "http://s3.test"
         );
+    }
+
+    #[test]
+    fn a_trailing_slash_is_the_same_account() {
+        let mut list = SessionList::default();
+        list.add_or_update(sample_for("http://s1.test/jf/", "u1"));
+        list.add_or_update(sample_for("http://s1.test/jf", "u1"));
+        assert_eq!(list.sessions.len(), 1);
+    }
+
+    fn stored(dir: &std::path::Path, sessions: Vec<SessionFile>, active: usize) {
+        save_list(dir, &SessionList { sessions, active }).expect("save list");
+    }
+
+    #[test]
+    fn readers_and_the_writer_see_identical_rows_from_every_source() {
+        for url in ["http://h/jf/", "http://h/jf"] {
+            for source in ["legacy", "legacy-behind-corrupt-list", "list"] {
+                let dir = tempfile::tempdir().expect("tempdir");
+                match source {
+                    "legacy" => write_legacy(dir.path(), &sample_for(url, "u1")),
+                    "legacy-behind-corrupt-list" => {
+                        write_legacy(dir.path(), &sample_for(url, "u1"));
+                        std::fs::write(list_path(dir.path()), b"not json").expect("corrupt");
+                    }
+                    _ => stored(dir.path(), vec![sample_for(url, "u1")], 0),
+                }
+                let read = load_list(dir.path());
+                let (write, _) = open_for_write(dir.path()).expect("open");
+                assert_eq!(read, write, "{source} {url}");
+                assert_eq!(read.sessions[0].server_url, "http://h/jf", "{source} {url}");
+            }
+        }
+    }
+
+    #[test]
+    fn add_or_update_stores_the_trimmed_address() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let saved = add_or_update(dir.path(), sample_for("http://h/jf/", "u1")).expect("add");
+        assert_eq!(saved.server_url, "http://h/jf");
+        let raw: SessionList =
+            serde_json::from_slice(&std::fs::read(list_path(dir.path())).expect("bytes"))
+                .expect("parse");
+        assert_eq!(raw.sessions[0].server_url, "http://h/jf");
+    }
+
+    #[test]
+    fn a_slashed_row_reads_trimmed_and_the_read_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        stored(dir.path(), vec![sample_for("http://h/jf/", "u1")], 0);
+        let before = std::fs::read(list_path(dir.path())).expect("bytes");
+
+        let list = load_list(dir.path());
+        assert_eq!(list.sessions[0].server_url, "http://h/jf");
+        assert_eq!(std::fs::read(list_path(dir.path())).expect("bytes"), before);
+    }
+
+    #[test]
+    fn the_next_write_persists_the_canonical_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        stored(dir.path(), vec![sample_for("http://h/jf/", "u1")], 0);
+
+        mutate(dir.path(), &std::sync::Mutex::new(()), |_| Ok::<_, ()>(())).expect("no-op write");
+        let raw: SessionList =
+            serde_json::from_slice(&std::fs::read(list_path(dir.path())).expect("bytes"))
+                .expect("parse");
+        assert_eq!(raw.sessions.len(), 1);
+        assert_eq!(raw.sessions[0].server_url, "http://h/jf");
     }
 
     #[test]
@@ -593,14 +715,15 @@ mod tests {
             "migrated entry must keep using the pre-existing mirror directory"
         );
 
-        // sessions.json now exists and is what a subsequent load reads --
-        // the legacy file is left in place (rollback fallback) but never
-        // consulted again once the list blob exists.
-        assert!(list_path(dir.path()).exists());
+        // A reader only views the migration: it is saved by the first writer, and the
+        // legacy file stays in place (rollback fallback).
+        assert!(!list_path(dir.path()).exists());
         assert!(legacy_path(dir.path()).exists());
+        assert_eq!(load_list(dir.path()).sessions.len(), 1);
 
-        let reloaded = load_list(dir.path());
-        assert_eq!(reloaded.sessions.len(), 1);
+        add_or_update(dir.path(), sample_for("http://new.test", "u9")).expect("first writer");
+        assert!(list_path(dir.path()).exists());
+        assert_eq!(load_list(dir.path()).sessions.len(), 2);
     }
 
     #[test]
@@ -654,5 +777,242 @@ mod tests {
                 .into_owned();
             assert!(!name.contains(".tmp-"), "temp file left behind: {name}");
         }
+    }
+
+    // --- saved accounts are never silently lost (docs/18 §2.1) ---
+
+    const GARBAGE: &[u8] = b"\x00\xff\xfenot json {{";
+    const WRONG_SHAPE: &[u8] = br#"{"accounts":[{"server":"x"}]}"#;
+
+    #[derive(Debug, Clone, Copy)]
+    enum Op {
+        Load,
+        AddOrUpdate,
+        RemoveActive,
+    }
+
+    /// Runs `op`; a refused write surfaces as `Err`, an accepted add as the saved entry.
+    fn run(op: Op, dir: &std::path::Path) -> std::io::Result<Option<SessionFile>> {
+        match op {
+            Op::Load => {
+                let _ = load_list(dir);
+                Ok(None)
+            }
+            Op::AddOrUpdate => add_or_update(dir, sample_for("http://new.test", "u9")).map(Some),
+            Op::RemoveActive => {
+                remove_active(dir);
+                Ok(None)
+            }
+        }
+    }
+
+    fn write_legacy_sample(dir: &std::path::Path) {
+        write_legacy(dir, &sample_for("http://legacy.test", "u1"));
+    }
+
+    /// True when some regular file in `dir` still holds exactly `original`.
+    fn original_bytes_survive(dir: &std::path::Path, original: &[u8]) -> bool {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .flatten()
+            .any(|entry| std::fs::read(entry.path()).is_ok_and(|bytes| bytes == original))
+    }
+
+    /// Runs `op` over every corrupt `sessions.json` shape and reports each case that lost the bytes.
+    fn corrupt_list_failures(op: Op, with_legacy: bool) -> Vec<String> {
+        let mut failures = Vec::new();
+        for (label, original) in [("garbage", GARBAGE), ("wrong shape", WRONG_SHAPE)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(list_path(dir.path()), original).expect("write sessions.json");
+            if with_legacy {
+                write_legacy_sample(dir.path());
+            }
+            let outcome = run(op, dir.path());
+            if !original_bytes_survive(dir.path(), original) {
+                failures.push(format!("{label}: original bytes gone after {op:?}"));
+                continue;
+            }
+            if outcome.is_err()
+                && std::fs::read(list_path(dir.path())).ok().as_deref() != Some(original)
+            {
+                failures.push(format!("{label}: {op:?} refused but changed sessions.json"));
+            }
+            if let Ok(Some(saved)) = outcome {
+                if load(dir.path()) != Some(saved) {
+                    failures.push(format!(
+                        "{label}: {op:?} reported success but did not persist"
+                    ));
+                }
+            }
+        }
+        failures
+    }
+
+    fn assert_corrupt_list_survives(op: Op, with_legacy: bool) {
+        let failures = corrupt_list_failures(op, with_legacy);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn add_or_update_keeps_the_bytes_of_an_unparseable_sessions_json() {
+        assert_corrupt_list_survives(Op::AddOrUpdate, false);
+    }
+
+    #[test]
+    fn remove_active_keeps_the_bytes_of_an_unparseable_sessions_json() {
+        assert_corrupt_list_survives(Op::RemoveActive, false);
+    }
+
+    #[test]
+    fn load_keeps_the_bytes_of_an_unparseable_sessions_json() {
+        assert_corrupt_list_survives(Op::Load, false);
+    }
+
+    #[test]
+    fn add_or_update_keeps_an_unparseable_sessions_json_even_with_a_legacy_file() {
+        assert_corrupt_list_survives(Op::AddOrUpdate, true);
+    }
+
+    #[test]
+    fn remove_active_keeps_an_unparseable_sessions_json_even_with_a_legacy_file() {
+        assert_corrupt_list_survives(Op::RemoveActive, true);
+    }
+
+    #[test]
+    fn load_keeps_an_unparseable_sessions_json_even_with_a_legacy_file() {
+        assert_corrupt_list_survives(Op::Load, true);
+    }
+
+    #[cfg(unix)]
+    fn assert_unreadable_list_survives(op: Op) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(list_path(dir.path()), GARBAGE).expect("write sessions.json");
+        let Some(unreadable) =
+            crate::persistence::ChmodGuard::unreadable_file(&list_path(dir.path()))
+        else {
+            return;
+        };
+        let _ = run(op, dir.path());
+        drop(unreadable);
+        assert!(
+            original_bytes_survive(dir.path(), GARBAGE),
+            "{op:?} replaced an unreadable sessions.json"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_or_update_never_replaces_an_unreadable_sessions_json() {
+        assert_unreadable_list_survives(Op::AddOrUpdate);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_active_never_replaces_an_unreadable_sessions_json() {
+        assert_unreadable_list_survives(Op::RemoveActive);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_never_replaces_an_unreadable_sessions_json() {
+        assert_unreadable_list_survives(Op::Load);
+    }
+
+    #[test]
+    fn add_or_update_fails_and_leaves_a_directory_named_sessions_json_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(list_path(dir.path())).expect("mkdir sessions.json");
+        let outcome = add_or_update(dir.path(), sample());
+        assert!(outcome.is_err(), "writer must refuse, got {outcome:?}");
+        assert!(list_path(dir.path()).is_dir());
+    }
+
+    #[test]
+    fn remove_active_and_load_leave_a_directory_named_sessions_json_in_place() {
+        for op in [Op::RemoveActive, Op::Load] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::create_dir(list_path(dir.path())).expect("mkdir sessions.json");
+            let _ = run(op, dir.path());
+            assert!(
+                list_path(dir.path()).is_dir(),
+                "{op:?} replaced the directory"
+            );
+        }
+    }
+
+    fn write_two_accounts_with_active(dir: &std::path::Path, active: usize) {
+        let list = SessionList {
+            sessions: vec![
+                sample_for("http://s1.test", "u1"),
+                sample_for("http://s2.test", "u2"),
+            ],
+            active,
+        };
+        std::fs::write(
+            list_path(dir),
+            serde_json::to_vec(&list).expect("serialize"),
+        )
+        .expect("write sessions.json");
+    }
+
+    #[test]
+    fn load_clamps_an_out_of_range_active_index_without_losing_an_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_two_accounts_with_active(dir.path(), 9);
+        let list = load_list(dir.path());
+        assert_eq!(list.sessions.len(), 2);
+        assert!(
+            list.active < list.sessions.len(),
+            "active left out of range"
+        );
+        assert!(
+            load(dir.path()).is_some(),
+            "an account exists but none is active"
+        );
+    }
+
+    #[test]
+    fn add_or_update_with_an_out_of_range_active_index_keeps_every_saved_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_two_accounts_with_active(dir.path(), 9);
+        add_or_update(dir.path(), sample_for("http://s3.test", "u3")).expect("save");
+        let list = load_list(dir.path());
+        assert_eq!(list.sessions.len(), 3);
+        assert_eq!(
+            list.active_session().expect("active").server_url,
+            "http://s3.test"
+        );
+    }
+
+    #[test]
+    fn remove_active_with_an_out_of_range_active_index_keeps_the_other_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_two_accounts_with_active(dir.path(), 9);
+        remove_active(dir.path());
+        assert_eq!(load_list(dir.path()).sessions.len(), 1);
+    }
+
+    #[test]
+    fn add_or_update_creates_sessions_json_when_none_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        add_or_update(dir.path(), sample()).expect("save");
+        assert!(list_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn remove_active_writes_nothing_when_no_sessions_json_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        remove_active(dir.path());
+        assert!(!list_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn add_or_update_on_a_legacy_only_install_keeps_the_migrated_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_legacy_sample(dir.path());
+        add_or_update(dir.path(), sample_for("http://new.test", "u9")).expect("save");
+        let list = load_list(dir.path());
+        assert_eq!(list.sessions.len(), 2);
+        assert_eq!(list.sessions[0].server_url, "http://legacy.test");
     }
 }

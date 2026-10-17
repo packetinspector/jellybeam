@@ -9,6 +9,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.jellybeam_core.AccountEpochs
 import uniffi.jellybeam_core.JellybeamCoreInterface
 
 /** docs/07 Watch state: the foreground notice reaches the core once, off the caller's thread. */
@@ -18,7 +19,7 @@ class RealCoreGatewayForegroundTest {
         delegate: JellybeamCoreInterface = Proxy.newProxyInstance(
             JellybeamCoreInterface::class.java.classLoader,
             arrayOf(JellybeamCoreInterface::class.java),
-        ) { _, method, _ -> if (method.name.substringBefore('-') == "accountEpoch") 0L else null } as JellybeamCoreInterface,
+        ) { _, method, _ -> if (method.name.substringBefore('-') == "accountEpochs") AccountEpochs(epoch = 0uL, parked = null) else null } as JellybeamCoreInterface,
     ) : JellybeamCoreInterface by delegate {
         val threads = mutableListOf<Thread>()
         override fun onForeground() {

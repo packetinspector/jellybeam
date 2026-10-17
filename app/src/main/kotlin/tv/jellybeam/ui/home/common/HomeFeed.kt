@@ -1,23 +1,24 @@
 package tv.jellybeam.ui.home.common
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import tv.jellybeam.R
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.LaunchWarmup
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.ui.common.ChangeRefreshScheduler
 import tv.jellybeam.ui.common.serverHostLabel
+import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.HomeSnapshot
 import uniffi.jellybeam_core.ResumeArt
@@ -68,6 +69,11 @@ data class HomeChrome(
  * frame rather than flashing the empty state between them.
  */
 data class HomeFeedState<U>(val chrome: HomeChrome, val content: U)
+
+/** No hero and no card: a first sync's still-empty mirror keeps the skeleton rather than the empty-library state. */
+internal fun HomeSnapshot.isEmpty(): Boolean = when (this) {
+    is HomeSnapshot.Classic -> home.hero == null && home.shelves.all { it.cards.isEmpty() }
+}
 
 /** [HomeChrome.loadingStatusText]'s pure mapping. Library names pass through verbatim, never
  * prettified. [tickCount] is [HomeFeed.pollSyncStatus]'s poll-loop counter, not a wall-clock read.
@@ -127,26 +133,15 @@ internal fun <T : Any, U> seedFromWarmup(
 }
 
 /**
- * docs/25 §5.4: the layout-agnostic half of a Home ViewModel, owned by composition. Fetches
- * [layout]'s snapshot and the shared chrome, and hands the snapshot to the layout through
- * [extract] (this layout's record, `null` for another layout's) and [reduce] (the layout's own
- * mapping, which reuses unchanged sections).
- *
- * [refreshSnapshot] and [pollSyncing] are independent loops, so a syncing-flag flip never
- * re-fetches [CoreGateway.homeSnapshot].
- *
- * docs/16-library-sort-filter.md §4.6, docs/17-mini-player.md §6: a resetting `debounce(500)`
- * never fires while a sync burst keeps events under 500ms apart. [changeRefreshScheduler] drives
- * [refreshSnapshot] instead: leading refresh, bounded periodic sampling, and a guaranteed trailing
- * refresh, gated by [setActive] so a hidden Home samples at a slower, bounded rate.
+ * docs/25 §5.4: the layout-agnostic half of a Home ViewModel; hands [layout]'s snapshot to the layout through [extract]
+ * and [reduce]. Refreshes after the first load go through [changeRefreshScheduler] (docs/16 §4.6), so a syncing-flag
+ * flip never re-fetches; the library list is [CoreGateway.viewsState] (docs/07 §5).
  */
 class HomeFeed<T : Any, U>(
     private val scope: CoroutineScope,
     private val gateway: CoreGateway,
     private val layout: HomeLayout,
     initialContent: U,
-    /** docs/17-mini-player.md §6: the mini-player dismissal edge. */
-    stopEpoch: Flow<Long>,
     /** The cold-start prefetch; the first load takes it instead of marshalling its own. */
     private val launchWarmup: LaunchWarmup?,
     private val strings: UiStrings,
@@ -170,18 +165,17 @@ class HomeFeed<T : Any, U>(
 
     val state: StateFlow<HomeFeedState<U>> = _state.asStateFlow()
 
-    /** docs/17-mini-player.md §6: true while Home is top of its stack and the host Activity is
-     * resumed. Drives [changeRefreshScheduler]'s sampling rate and gates the FFI call in
-     * [pollSyncing]/[pollSyncStatus].
-     */
+    /** True while Home is top of its stack and the host Activity is resumed; gates every refresh and poll. */
     private val active = MutableStateFlow(false)
 
     fun setActive(isActive: Boolean) {
         active.value = isActive
     }
 
-    /** See [ChangeRefreshScheduler] for the sampling contract. */
-    private val changeRefreshScheduler = ChangeRefreshScheduler(
+    /** The first load (init) and the scheduler's runs share this, so two never overlap. */
+    private val refreshLock = Mutex()
+
+    private val changeRefreshScheduler: ChangeRefreshScheduler<ChangeEvent> = ChangeRefreshScheduler(
         scope = scope,
         events = gateway.changeEvents(),
         active = active.asStateFlow(),
@@ -189,93 +183,52 @@ class HomeFeed<T : Any, U>(
     )
 
     init {
+        scope.launch { gateway.viewsState.collect(::publishViews) }
         scope.launch { refreshSnapshot() }
         scope.launch { pollSyncing() }
         scope.launch { pollSyncStatus() }
-        // docs/17-mini-player.md §6: dismissing the PiP window has no other edge back into Home.
-        // `drop(1)`: the flow's seed value at collection time isn't itself a stop that just landed.
-        scope.launch {
-            stopEpoch.drop(1).collect { refreshSnapshot() }
-        }
     }
 
-    /**
-     * Immediate refresh for returns to Home and explicit invalidations, bypassing the event
-     * scheduler. [onHostResume] skips only the initial lifecycle replay; init owns that load.
-     */
-    fun refreshNow() {
-        scope.launch { refreshSnapshot() }
-    }
+    private suspend fun refreshSnapshot(): Unit = refreshLock.withLock { refreshSnapshotOnce() }
 
-    private var receivedHostResume = false
-
-    /** Init owns the first load; later host resumes must catch up even without a mirror event. */
-    fun onHostResume() {
-        if (receivedHostResume) refreshNow()
-        receivedHostResume = true
-    }
-
-    /**
-     * Conflation guard: init, a later host resume, a return to Home, and a change-event can all
-     * fire within the same window. Both flags are only touched from [scope]'s main-confined
-     * coroutines, so plain vars suffice. A refresh requested while one is in flight isn't dropped
-     * -- it runs once more after.
-     */
-    private var refreshInFlight = false
-    private var refreshQueued = false
-
-    private suspend fun refreshSnapshot() {
-        if (refreshInFlight) {
-            refreshQueued = true
-            return
-        }
-        refreshInFlight = true
-        try {
-            do {
-                refreshQueued = false
-                refreshSnapshotOnce()
-            } while (refreshQueued)
-        } finally {
-            refreshInFlight = false
-        }
+    private fun publishViews(views: List<ViewSnapshot>) {
+        _state.update { it.copy(chrome = it.chrome.copy(views = reuseIfUnchanged(it.chrome.views, views))) }
     }
 
     /** Fills [HomeChrome.serverHost] for the empty-library state; a no-op once known. */
     fun loadServerHost() {
         if (_state.value.chrome.serverHost != null) return
         scope.launch {
-            val host = runCatching { serverHostLabel(gateway.serverInfoSnapshot().serverUrl) }
-                .onFailure { if (it is CancellationException) throw it }
+            val host = runCatchingCancellable { serverHostLabel(gateway.serverInfoSnapshot().serverUrl) }
                 .getOrNull() ?: return@launch
             _state.update { it.copy(chrome = it.chrome.copy(serverHost = host)) }
         }
     }
 
-    private suspend fun refreshSnapshotOnce() = coroutineScope {
+    private suspend fun refreshSnapshotOnce(): Unit = coroutineScope {
         val seeded = seededSnapshot
         seededSnapshot = null
-        // views()/getSettings() are independent of homeSnapshot(); fetched concurrently so these
-        // cheap reads don't queue behind the expensive ~300-Card marshal on the cold-start path.
-        // A seeded first load already holds them.
-        val viewsDeferred = if (seeded == null) async { gateway.views() } else null
+        // getSettings() is independent of homeSnapshot(); fetched concurrently so this cheap read
+        // doesn't queue behind the expensive ~300-Card marshal on the cold-start path. A seeded
+        // first load already holds it.
         val settingsDeferred = if (seeded == null) async { gateway.getSettings() } else null
         // [changeRefreshScheduler] is already subscribed, so a stale prefetch owes exactly the
-        // one trailing pass queued here.
+        // one trailing pass requested here.
         val prefetched = launchWarmup?.takeHome()
-        if (prefetched?.stale == true) refreshQueued = true
+        if (prefetched?.stale == true) changeRefreshScheduler.markDirty()
         if (seeded != null && prefetched?.snapshot === seeded) {
             // Already on screen from [seed]; only the stale flag above is owed.
             return@coroutineScope
         }
         // docs/25 §6.3: a prefetch built for another layout is dropped for this layout's own.
-        val incoming = prefetched?.snapshot?.let(extract) ?: extract(gateway.homeSnapshot(layout))
-        val views = viewsDeferred?.await() ?: gateway.views()
+        val snapshot = prefetched?.snapshot?.takeIf { extract(it) != null } ?: gateway.homeSnapshot(layout)
+        val incoming = extract(snapshot)
+        val firstSyncPending = snapshot.isEmpty() && gateway.isSyncing()
         val settings = settingsDeferred?.await() ?: gateway.getSettings()
         _state.update { current ->
             HomeFeedState(
                 chrome = current.chrome.copy(
-                    isLoading = false,
-                    views = reuseIfUnchanged(current.chrome.views, views),
+                    isLoading = current.chrome.isLoading && firstSyncPending,
                     showClock = settings.showClock,
                     resumeArt = settings.homeResumeArt,
                 ),
@@ -317,6 +270,8 @@ class HomeFeed<T : Any, U>(
             if (active.value) {
                 val status = gateway.syncStatus()
                 _state.update { it.copy(chrome = it.chrome.copy(loadingStatusText = loadingStatusText(strings, status, tick))) }
+                // No change event marks a first sync that wrote nothing; its idle status ends the wait.
+                if (status is SyncStatus.Idle && tick > 0) refreshSnapshot()
                 tick++
             }
             delay(SYNC_STATUS_POLL_INTERVAL_MS)

@@ -8,6 +8,6 @@ import tv.jellybeam.ui.home.HomeLayoutSpec
 object ClassicLayout : HomeLayoutSpec {
     @Composable
     override fun Screen(args: HomeHostArgs) {
-        ClassicHomeScreen(onOpenDetail = args.onOpenDetail, isTop = args.isTop, focusGate = args.focusGate)
+        ClassicHomeScreen(onOpenDetail = args.onOpenDetail, isTop = args.isTop)
     }
 }

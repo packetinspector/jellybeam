@@ -1,7 +1,6 @@
 package tv.jellybeam.ui.home
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.MutableState
 import tv.jellybeam.ui.home.classic.ClassicLayout
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.HomeLayout
@@ -12,8 +11,6 @@ import uniffi.jellybeam_core.HomeLayout
 data class HomeHostArgs(
     val onOpenDetail: (Card) -> Unit,
     val isTop: Boolean,
-    /** JellybeamRoot's focus gate; see [tv.jellybeam.MainActivity]'s `RetainedScreenLayer`. */
-    val focusGate: MutableState<Boolean>,
 )
 
 /** docs/25 §5.2: a layout's single entry point on the UI side. */

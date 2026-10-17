@@ -25,7 +25,6 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,9 +60,11 @@ import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.diag.ReportServer
 import tv.jellybeam.diag.ReportSnapshot
 import tv.jellybeam.diag.SummaryInputs
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
 import uniffi.jellybeam_core.PlaybackQuality
 
@@ -107,9 +108,6 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 fun ReportScreen(
     onExit: () -> Unit,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate for this entry -- see [tv.jellybeam.ui.settings.SettingsScreen]'s own
-     * param doc. Only the "Turn diagnostic logging off now?" dialog places focus explicitly. */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     gateway: CoreGateway = AppGraph.gateway,
 ) {
     val context = LocalContext.current
@@ -150,7 +148,7 @@ fun ReportScreen(
         val snapshot = withContext(Dispatchers.IO) {
             val packageManager = context.packageManager
             val packageInfo = packageManager.getPackageInfo(context.packageName, 0)
-            val settings = runCatching { gateway.getSettings() }.getOrNull()
+            val settings = runCatchingCancellable { gateway.getSettings() }.getOrNull()
             val inputs = SummaryInputs(
                 appVersion = packageInfo.versionName ?: "unknown",
                 buildNumber = PackageInfoCompat.getLongVersionCode(packageInfo),
@@ -158,8 +156,8 @@ fun ReportScreen(
                 sdkInt = android.os.Build.VERSION.SDK_INT,
                 manufacturer = android.os.Build.MANUFACTURER,
                 model = android.os.Build.MODEL,
-                serverVersion = runCatching { gateway.serverVersion() }.getOrNull(),
-                serverCount = runCatching { gateway.listAccounts().size }.getOrDefault(1).coerceAtLeast(1),
+                serverVersion = runCatchingCancellable { gateway.serverVersion() }.getOrNull(),
+                serverCount = runCatchingCancellable { gateway.listAccounts().size }.getOrDefault(1).coerceAtLeast(1),
                 playbackMode = playbackModeName(settings?.playbackQuality),
             )
             ReportSnapshot(inputs, AppGraph.diag, AppGraph.crash)
@@ -196,7 +194,7 @@ fun ReportScreen(
 
     // docs/21 §1.2 step 7: only when a download actually happened this visit, and only if logging
     // is still on -- turning it off already happened, or was never on, needs no prompt.
-    BackHandler(enabled = !showLoggingOffDialog) {
+    BackHandler(enabled = isTop && !showLoggingOffDialog) {
         if (logDownloaded && AppGraph.diag.enabled) {
             showLoggingOffDialog = true
         } else {
@@ -252,17 +250,14 @@ fun ReportScreen(
 
         if (showLoggingOffDialog) {
             LoggingOffDialog(
-                focusGate = focusGate,
+                isTop = isTop,
                 onTurnOff = {
                     AppGraph.diag.setEnabled(false)
-                    // docs/21 §1.2 step 7: fired on `processScope`, not this composable's own
+                    // docs/21 §1.2 step 7, docs/09: written through the one settings store, fired on `processScope`, not this composable's own
                     // scope -- onExit() below disposes this screen (and any rememberCoroutineScope
                     // job with it) before a `composableScope`-launched write could land.
                     AppGraph.processScope.launch(Dispatchers.IO) {
-                        runCatching {
-                            val current = gateway.getSettings()
-                            gateway.setSettings(current.copy(diagnosticLoggingEnabled = false))
-                        }
+                        runCatchingCancellable { AppGraph.settingsStore.update { it.copy(diagnosticLoggingEnabled = false) } }
                     }
                     showLoggingOffDialog = false
                     onExit()
@@ -320,10 +315,11 @@ private fun QrCode(url: String, modifier: Modifier = Modifier) {
  * logging". */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun LoggingOffDialog(focusGate: MutableState<Boolean>, onTurnOff: () -> Unit, onKeepLogging: () -> Unit) {
+private fun LoggingOffDialog(isTop: Boolean, onTurnOff: () -> Unit, onKeepLogging: () -> Unit) {
     val keepLoggingRequester = remember { FocusRequester() }
+    val focusGate = LocalFocusGate.current
     LaunchedEffect(Unit) { requestFocusUntilSuccess(focusGate) { keepLoggingRequester.requestFocus() } }
-    BackHandler(onBack = onKeepLogging)
+    BackHandler(enabled = isTop, onBack = onKeepLogging)
 
     Box(
         modifier = Modifier

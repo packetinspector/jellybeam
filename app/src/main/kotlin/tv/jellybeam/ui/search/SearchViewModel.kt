@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,11 +13,10 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import tv.jellybeam.data.runCatchingCancellable
 import uniffi.jellybeam_core.Card
 
-/** Debounce window on query changes -- shorter than the 500ms mirror-change debounce since this is
- * keystroke-driven, not a sync burst.
- */
+/** Debounce window on query changes: short, since it is keystroke-driven. */
 private const val QUERY_DEBOUNCE_MS = 300L
 
 /** `JellybeamCoreGateway.search`'s `limit` -- generous for a TV-sized results grid without pulling the
@@ -150,8 +148,7 @@ class SearchViewModel(private val gateway: CoreGateway) : ViewModel() {
         // answer is already on screen refreshes in place instead of flashing "searching".
         if (lastAnswer?.first != query) publishDiscover(DiscoverSection.Searching)
         discoverJob = viewModelScope.launch {
-            val answer = runCatching { gateway.seerrSearch(query, 1).cards }
-                .onFailure { if (it is CancellationException) throw it }
+            val answer = runCatchingCancellable { gateway.seerrSearch(query, 1).cards }
                 .fold({ DiscoverSection.Results(it) }, { DiscoverSection.Unavailable })
             if (generation != discoverGeneration) return@launch
             lastAnswer = query to answer

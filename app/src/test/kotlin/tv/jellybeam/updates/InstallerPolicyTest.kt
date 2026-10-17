@@ -60,6 +60,68 @@ class InstallerPolicyTest {
         assertEquals(PlaybackGate.Launch, playbackGate(committed = false, resumed = true))
         assertEquals(PlaybackGate.Launch, playbackGate(committed = false, resumed = false))
     }
+    @Test fun `play launches at once unless uncommitted staging needs abandoning afterwards`() {
+        // (staging exists, core phase) -> plan; a download or verification is never Play's to cancel (docs/26 §1).
+        val table = listOf(
+            Triple(false, "Idle", PlayLaunchPlan.LaunchNow),
+            Triple(false, "Current", PlayLaunchPlan.LaunchNow),
+            Triple(false, "Available", PlayLaunchPlan.LaunchNow),
+            Triple(false, "Downloading", PlayLaunchPlan.LaunchNow),
+            Triple(false, "Verifying", PlayLaunchPlan.LaunchNow),
+            Triple(false, "Ready", PlayLaunchPlan.LaunchNow),
+            Triple(false, "AwaitingConfirmation", PlayLaunchPlan.LaunchNow),
+            Triple(false, "", PlayLaunchPlan.LaunchNow),
+            Triple(true, "Preparing", PlayLaunchPlan.LaunchThenAbandonStaging),
+            Triple(true, "Staging", PlayLaunchPlan.LaunchThenAbandonStaging),
+            Triple(true, "Ready", PlayLaunchPlan.LaunchThenAbandonStaging),
+            Triple(false, "Preparing", PlayLaunchPlan.LaunchThenAbandonStaging),
+            Triple(false, "Staging", PlayLaunchPlan.LaunchThenAbandonStaging),
+        )
+        val wrong = table.filter { (staging, phase, expected) -> playLaunchPlan(staging, phase) != expected }
+        assertEquals(emptyList<Any>(), wrong)
+    }
+    @Test fun `play from either entry cancels only install preparation and never a download, verification or check`() {
+        // (staging exists, core phase, running work) -> (abandon staging, cancel core, cancel work); launchPlayback and playbackChanged(true) apply this one plan.
+        data class Row(val staging: Boolean, val phase: String, val work: WorkKind?, val abandon: Boolean, val core: Boolean, val cancelWork: Boolean)
+        val phases = listOf("Idle", "Checking", "Current", "Available", "Downloading", "Verifying", "Ready", "Preparing", "Staging", "AwaitingConfirmation", "Error")
+        val table = phases.flatMap { phase ->
+            listOf(false, true).flatMap { staging ->
+                listOf(null, WorkKind.Verify, WorkKind.Prepare, WorkKind.Stage).map { work ->
+                    val preparing = phase == "Preparing" || phase == "Staging"
+                    val preparationWork = work == WorkKind.Prepare || work == WorkKind.Stage
+                    Row(staging, phase, work, abandon = staging || preparing || preparationWork, core = preparing || preparationWork, cancelWork = preparationWork)
+                }
+            }
+        }
+        val wrong = table.filter { row ->
+            val plan = playPlan(row.staging, row.phase, row.work)
+            (plan.launch == PlayLaunchPlan.LaunchThenAbandonStaging) != row.abandon ||
+                plan.cancelCore != row.core || plan.cancelWork != row.cancelWork
+        }
+        assertEquals(emptyList<Any>(), wrong.map { "${it.staging}/${it.phase}/${it.work}" })
+        for (phase in listOf("Downloading", "Verifying")) for (staging in listOf(false, true)) for (work in listOf(null, WorkKind.Verify)) {
+            val plan = playPlan(staging, phase, work)
+            assertFalse("$phase/$staging/$work: Play never cancels the core", plan.cancelCore)
+            assertFalse("$phase/$staging/$work: Play never cancels the work", plan.cancelWork)
+        }
+    }
+    @Test fun `an interrupted stage is reported canceled and never failed, and a committed session keeps its own report`() {
+        for (cancellation in listOf(true, false)) for (jobActive in listOf(true, false)) for (committed in listOf(true, false)) {
+            val canceled = cancellation || !jobActive
+            val expected = if (canceled) (if (committed) null else "canceled") else "failed"
+            assertEquals("cancellation=$cancellation jobActive=$jobActive committed=$committed", expected, stageOutcome(cancellation, jobActive, committed))
+        }
+    }
+    @Test fun `an abandoned staging session is no longer staging and a committed one never is`() {
+        // (staging id held in memory, session key in the journal, committed flag) -> the uncommitted session
+        assertNull("fresh", uncommittedSessionId(null, -1, false))
+        assertEquals("staged", 7, uncommittedSessionId(7, 7, false))
+        assertEquals("staged, held only in the journal after a restart", 7, uncommittedSessionId(null, 7, false))
+        assertNull("staged then abandoned", uncommittedSessionId(null, journalSessionAfterAbandon(7, 7), false))
+        assertEquals("a different session's key is left alone", 9, journalSessionAfterAbandon(9, 7))
+        assertNull("committed", uncommittedSessionId(7, 7, true))
+        assertNull("committed then cleared", uncommittedSessionId(null, -1, false))
+    }
     @Test fun `pause keeps transfers and verification and only stops pre-commit staging`() {
         assertEquals(PausePlan(true, false), pausePlan(false, false, "Downloading"))
         assertEquals(PausePlan(true, false), pausePlan(false, false, "Verifying"))

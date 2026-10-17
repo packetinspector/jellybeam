@@ -15,7 +15,8 @@ import uniffi.jellybeam_core.UpdateSnapshot
 internal class AndroidUpdateInstaller(private val context: Context) {
     private val manager = context.packageManager.packageInstaller
     private val journal = context.getSharedPreferences("update-installer", Context.MODE_PRIVATE)
-    private var stagingId: Int? = null
+    /** Written by the staging and abandoning threads, read by the main thread's [hasStaging]. */
+    @Volatile private var stagingId: Int? = null
     val committedGeneration: ULong? get() = journal.getLong("generation", -1).takeIf { it >= 0 && journal.getBoolean("committed", false) }?.toULong()
     val targetCode: Long get() = journal.getLong("target", 0)
     @Suppress("DEPRECATION")
@@ -81,9 +82,16 @@ internal class AndroidUpdateInstaller(private val context: Context) {
         && matchesSession(journal.getInt("session", -1), committedGeneration,
             intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1), intent.getLongExtra("operation", -1))
     fun sessionExists(): Boolean = manager.getSessionInfo(journal.getInt("session", -1)) != null
+    private fun uncommittedSessionId(): Int? =
+        uncommittedSessionId(stagingId, journal.getInt("session", -1), journal.getBoolean("committed", false))
+    /** Whether an uncommitted installer session exists; an in-memory journal read, safe on the main thread. */
+    fun hasStaging(): Boolean = uncommittedSessionId() != null
     fun abandonStaging() {
-        val id = stagingId ?: journal.getInt("session", -1).takeIf { it >= 0 && !journal.getBoolean("committed", false) }
-        if (id != null) runCatching { manager.abandonSession(id) }
+        val id = uncommittedSessionId()
+        if (id != null) {
+            runCatching { manager.abandonSession(id) }
+            journal.edit().putInt("session", journalSessionAfterAbandon(journal.getInt("session", -1), id)).commit()
+        }
         stagingId = null
     }
     fun removeOrphans() {

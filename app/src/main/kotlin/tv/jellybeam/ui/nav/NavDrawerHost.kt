@@ -8,6 +8,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +28,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.derivedStateOf
@@ -60,6 +62,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -71,7 +74,11 @@ import androidx.compose.ui.util.lerp
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
 import tv.jellybeam.nav.Screen
+import tv.jellybeam.ui.cards.FOCUS_RING_EXTENT
 import tv.jellybeam.ui.cards.focusRing
+import tv.jellybeam.ui.focus.LocalFocusGate
+import tv.jellybeam.ui.focus.LocalFocusSeat
+import tv.jellybeam.ui.focus.ringClearBringIntoViewSpec
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -162,8 +169,6 @@ fun NavDrawerHost(
     onNavigate: (Screen) -> Unit,
     /** Whether this retained layer is visible; hidden layers cancel any pending content restore. */
     isTop: Boolean = true,
-    /** Retained-layer entry gate, opened only around an explicit content restore. */
-    focusGate: MutableState<Boolean>? = null,
     /** Every locally known account, verbatim; empty until [tv.jellybeam.MainActivity] loads them. */
     accounts: List<AccountInfo> = emptyList(),
     /** Index into [accounts] of the currently active session, or `null` before that's known. */
@@ -183,6 +188,7 @@ fun NavDrawerHost(
     content: @Composable () -> Unit,
 ) {
     var isOpen by remember { mutableStateOf(false) }
+    val focusGate = LocalFocusGate.current
     val contentFocusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val leftEdgeSuppressed = remember { mutableStateOf(false) }
@@ -248,9 +254,25 @@ fun NavDrawerHost(
         }
     }
 
+    fun openDrawer() {
+        contentRestoreJob?.cancel()
+        isOpen = true
+        // Called synchronously (not from a LaunchedEffect) so it runs before DrawerPanel's
+        // initial-focus effect can steal focus onto a drawer row.
+        drawerFocusCoordinator.onDrawerOpened()
+    }
+
+    // docs/15 §4: a page that places nothing on the root's re-entry still opens the drawer on Left.
+    val seat = LocalFocusSeat.current
+    DisposableEffect(seat) {
+        val edge: () -> Unit = { if (!isOpen) openDrawer() }
+        seat?.leftEdge = edge
+        onDispose { if (seat?.leftEdge === edge) seat.leftEdge = null }
+    }
+
     // Registers later than MainActivity's back-stack-pop BackHandler, so it wins (LIFO): Back
-    // closes the drawer instead of popping a screen.
-    BackHandler(enabled = isOpen) { closeDrawer(navigatingAway = false) }
+    // closes the drawer instead of popping a screen; a hidden layer's drawer never takes Back.
+    BackHandler(enabled = isTop && isOpen) { closeDrawer(navigatingAway = false) }
 
     Box(
         modifier = Modifier
@@ -261,13 +283,7 @@ fun NavDrawerHost(
                     !isOpen && event.key == Key.DirectionLeft -> {
                         // See [LocalDrawerLeftEdgeSuppressed]: the content owns Left right now.
                         if (leftEdgeSuppressed.value) return@onPreviewKeyEvent false
-                        if (!focusManager.moveFocus(FocusDirection.Left)) {
-                            contentRestoreJob?.cancel()
-                            isOpen = true
-                            // Called synchronously (not from a LaunchedEffect) so it runs before
-                            // DrawerPanel's initial-focus effect can steal focus onto a drawer row.
-                            drawerFocusCoordinator.onDrawerOpened()
-                        }
+                        if (!focusManager.moveFocus(FocusDirection.Left)) openDrawer()
                         true
                     }
                     isOpen && event.key == Key.DirectionRight -> {
@@ -329,6 +345,7 @@ fun NavDrawerHost(
  * [DrawerSectionLabel] renders once immediately before it, without a second, separately-indexed
  * list.
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun DrawerPanel(
     entries: List<DrawerEntry>,
@@ -355,10 +372,12 @@ private fun DrawerPanel(
     // deliberately lands on the nav entry first: the drawer opens from an on-screen section.
     val currentIndex = remember(entries) { entries.indexOfFirst { it.isCurrent } }
 
+    // docs/15 §4: under the layer's gate, so a drawer opened from a page holding no focus still lands a row.
+    val focusGate = LocalFocusGate.current
     LaunchedEffect(isOpen) {
         if (isOpen) {
             val target = currentIndex.takeIf { it >= 0 } ?: 0
-            requestFocusUntilSuccess {
+            requestFocusUntilSuccess(focusGate) {
                 entryFocusRequesters.getOrNull(target)?.requestFocus() ?: false
             }
         }
@@ -405,36 +424,41 @@ private fun DrawerPanel(
                 }
             },
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer { alpha = drawerContentAlpha(open.value) }
-                // Scrollable: the Servers section can push the row count past what the panel holds.
-                .verticalScroll(rememberScrollState())
-                .padding(vertical = 24.dp, horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(ENTRY_GAP),
-        ) {
-            entries.forEachIndexed { index, entry ->
-                if (index == serverSectionStart) {
-                    DrawerSectionLabel(serversSectionLabel)
+        // docs/15 §0.3: a row scrolled to the panel edge brings its whole ring into view, not just its bounds.
+        val ringExtentPx = with(LocalDensity.current) { FOCUS_RING_EXTENT.toPx() }
+        val ringClearSpec = remember(ringExtentPx) { ringClearBringIntoViewSpec(ringExtentPx) }
+        CompositionLocalProvider(LocalBringIntoViewSpec provides ringClearSpec) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = drawerContentAlpha(open.value) }
+                    // Scrollable: the Servers section can push the row count past what the panel holds.
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 24.dp, horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(ENTRY_GAP),
+            ) {
+                entries.forEachIndexed { index, entry ->
+                    if (index == serverSectionStart) {
+                        DrawerSectionLabel(serversSectionLabel)
+                    }
+                    val isFocused by remember(index) { derivedStateOf { focusedIndex == index } }
+                    DrawerRow(
+                        label = entry.label,
+                        isFocused = isFocused,
+                        isCurrent = entry.isCurrent,
+                        enabled = isOpen,
+                        modifier = Modifier
+                            .focusRequester(entryFocusRequesters[index])
+                            .onFocusChanged { focusState ->
+                                if (focusState.isFocused) {
+                                    focusedIndex = index
+                                } else if (focusedIndex == index) {
+                                    focusedIndex = null
+                                }
+                            },
+                        onClick = { onSelect(entry) },
+                    )
                 }
-                val isFocused by remember(index) { derivedStateOf { focusedIndex == index } }
-                DrawerRow(
-                    label = entry.label,
-                    isFocused = isFocused,
-                    isCurrent = entry.isCurrent,
-                    enabled = isOpen,
-                    modifier = Modifier
-                        .focusRequester(entryFocusRequesters[index])
-                        .onFocusChanged { focusState ->
-                            if (focusState.isFocused) {
-                                focusedIndex = index
-                            } else if (focusedIndex == index) {
-                                focusedIndex = null
-                            }
-                        },
-                    onClick = { onSelect(entry) },
-                )
             }
         }
     }

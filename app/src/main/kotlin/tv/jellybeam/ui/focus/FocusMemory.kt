@@ -2,12 +2,15 @@ package tv.jellybeam.ui.focus
 
 import android.util.Log
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -22,8 +25,9 @@ import androidx.compose.ui.focus.requestFocus
 import androidx.compose.ui.node.DelegatingNode
 import androidx.compose.ui.node.ModifierNodeElement
 import androidx.compose.ui.platform.InspectorInfo
-import kotlin.coroutines.coroutineContext
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import tv.jellybeam.perf.PerfLog
 
 /**
@@ -40,8 +44,9 @@ internal interface FocusTarget {
  *
  * [lastKey]/[invokerKey] are `mutableStateOf`-backed since [Saver] must persist them across a
  * configuration change; every other field is plain, written far more often than read.
- * - [frozen]: while true, [noteFocused] does not write [lastKey] -- default-focus churn during a
- *   pop or in-flight restore must not corrupt the record.
+ * - [frozen]: derived, never written -- true while any placer holds a [PlacementToken] or the
+ *   screen is [offTop]; [noteFocused] does not write [lastKey] then, so default-focus churn during
+ *   a pop or an in-flight placement cannot corrupt the record.
  * - [seeded]: true once focus has been placed at least once via [FocusRestorer]; tells a first
  *   mount apart from a later becoming-top restore.
  * - [scrollTo]: brings a not-yet-composed [key] into a lazy list's window before [placeByKeys]
@@ -54,10 +59,34 @@ internal class FocusMemory(lastKey: String?, invokerKey: String?) {
     var lastKey: String? by mutableStateOf(lastKey)
     var invokerKey: String? by mutableStateOf(invokerKey)
 
-    var frozen: Boolean = false
+    /** Set by [FocusRestorer] when the screen loses top, cleared once it has placed for the new top period. */
+    var offTop: Boolean = false
     var seeded: Boolean = false
 
+    private val placers = HashSet<PlacementToken>()
+
+    /** docs/15 §5: one source for "do not record focus now"; see [beginPlacement]. */
+    val frozen: Boolean get() = placers.isNotEmpty() || offTop
+
+    /** True while any placer (restore, re-entry, drawer, key placement) holds a token. */
+    val isPlacing: Boolean get() = placers.isNotEmpty()
+
+    /** Frozen by something other than [own] tokens the caller itself holds. */
+    fun frozenBesides(own: Int): Boolean = offTop || placers.size > own
+
+    /** Every programmatic placement holds one token for its whole run; [endPlacement] always runs. */
+    fun beginPlacement(): PlacementToken = PlacementToken().also(placers::add)
+
+    /** Idempotent per token. */
+    fun endPlacement(token: PlacementToken) {
+        placers.remove(token)
+    }
+
     var scrollTo: (suspend (key: String) -> Boolean)? = null
+
+    /** The key whose element holds focus right now, frozen or not; null once it loses focus. */
+    var focusedKey: String? = null
+        private set
 
     /** Registered outside composition; read only by [placeByKeys] (not snapshot state). */
     private val registry: MutableMap<String, FocusTarget> = HashMap()
@@ -80,9 +109,19 @@ internal class FocusMemory(lastKey: String?, invokerKey: String?) {
         if (!frozen) lastKey = key
     }
 
-    /** §4: captures the invoker -- the key focused right before a nested surface opens. */
+    /** A keyed element's focus event: tracks [focusedKey] always, [lastKey] only when not [frozen]. */
+    fun noteFocusEvent(key: String, hasFocus: Boolean) {
+        if (hasFocus) {
+            focusedKey = key
+            noteFocused(key)
+        } else if (focusedKey == key) {
+            focusedKey = null
+        }
+    }
+
+    /** §4: captures the invoker -- the key focused right before a nested surface opens ([invokerFor]). */
     fun captureInvoker() {
-        invokerKey = lastKey
+        invokerKey = invokerFor(focusedKey, lastKey)
     }
 
     fun clearInvoker() {
@@ -96,6 +135,25 @@ internal class FocusMemory(lastKey: String?, invokerKey: String?) {
         )
     }
 }
+
+/** One placer's claim on [FocusMemory.frozen] (docs/15 §5). */
+internal class PlacementToken internal constructor()
+
+/** Runs [block] holding a placement token, released however it ends (cancellation included). */
+internal inline fun <T> FocusMemory.withPlacement(block: () -> T): T {
+    val token = beginPlacement()
+    try {
+        return block()
+    } finally {
+        endPlacement(token)
+    }
+}
+
+/**
+ * docs/15 §4: the invoker is the element focused when the surface opens; [FocusMemory.lastKey] is
+ * only the fallback, since a placement made while frozen (a seed or restore) never writes it.
+ */
+internal fun invokerFor(focusedKey: String?, lastKey: String?): String? = focusedKey ?: lastKey
 
 /** A saveable [FocusMemory], scoped like any other `rememberSaveable` by [inputs]. */
 @Composable
@@ -145,12 +203,10 @@ internal fun FocusRequester.asFocusTarget(): FocusTarget = object : FocusTarget 
 }
 
 /**
- * The placement work §2/§5 describe: freeze, resolve §2's precedence order, place by key (falling
- * back through §2 rule 3's declared primary), clear the invoker, mark [memory] seeded, log,
- * unfreeze. Extracted from [FocusRestorer]'s becoming-top effect so a second, non-`isTop` restore
- * trigger (e.g. a drawer closing) can reuse the same logic. Callers own their own
- * freeze-around-the-trigger and `ready`-style gating; only [FocusRestorer] gates on
- * `seeded`/`wasTop`.
+ * The placement work §2/§5 describe: resolve §2's precedence order, place by key (falling back
+ * through §2 rule 3's declared primary), clear the invoker, mark [memory] seeded, log -- all under
+ * one [PlacementToken]. Shared by [FocusRestorer]'s becoming-top effect, drawer-close and refresh
+ * restores; callers own their own `ready`-style gating.
  *
  * @return the key that was placed, or null if every candidate missed and placement fell through to
  *         [fallback].
@@ -160,94 +216,151 @@ internal suspend fun FocusMemory.restoreNow(
     selectedKey: () -> String? = { null },
     fallback: () -> FocusTarget?,
     tag: String = "",
-): String? {
-    frozen = true
-    try {
-        val keys = resolveRestoreOrder(lastKey, invokerKey, selectedKey())
-        val placed = placeByKeys(keys, focusGate)
-        if (placed == null) {
-            fallback()?.let { target ->
-                requestFocusUntilSuccess(focusGate) { target.requestFocus() }
-            }
+): String? = withPlacement {
+    val keys = resolveRestoreOrder(lastKey, invokerKey, selectedKey())
+    val placed = placeByKeys(keys, focusGate)
+    if (placed == null) {
+        fallback()?.let { target ->
+            requestFocusUntilSuccess(focusGate) { target.requestFocus() }
         }
-        invokerKey = null
-        seeded = true
-        if (PerfLog.enabled) {
-            Log.d(PerfLog.TAG, "focus restore tag=$tag placed=${placed ?: "fallback"}")
-        }
-        return placed
-    } finally {
-        // Only a run that finished on its own may unfreeze; a cancelled run resumes here after
-        // the replacement `!isTop` run already froze the memory.
-        if (coroutineContext.isActive) frozen = false
     }
+    invokerKey = null
+    seeded = true
+    if (PerfLog.enabled) {
+        Log.d(PerfLog.TAG, "focus restore tag=$tag placed=${placed ?: "fallback"}")
+    }
+    placed
 }
 
 /**
  * Pure eligibility check for a screen's second, same-composition restore trigger (alongside
  * [FocusRestorer]'s becoming-top effect) for "a live data refresh dropped the focused item and
- * left focus nowhere". A `frozen` left true by a cancelled refresh-restore job must not block its
- * own replacement, while a freeze belonging to something else still must.
- *
- * @param ownsFreeze true only while a refresh-restore coroutine that itself set `memory.frozen =
- *   true` has not yet had its own [restoreNow] call return normally.
+ * left focus nowhere". [frozenByOthers] is [FocusMemory.frozenBesides] the refresh owner's own
+ * running restore, so a refresh supersedes its predecessor but never a drawer or navigation.
  */
 internal fun refreshGuardEligible(
     isTop: Boolean,
     seeded: Boolean,
     resumed: Boolean,
     hasFocus: Boolean,
-    frozen: Boolean,
-    ownsFreeze: Boolean,
-): Boolean = isTop && seeded && resumed && !hasFocus && (!frozen || ownsFreeze)
+    frozenByOthers: Boolean,
+): Boolean = isTop && seeded && resumed && !hasFocus && !frozenByOthers
 
 /**
  * docs/15-focus-and-selection.md §2-§5's one becoming-top restore effect. Screens delete their
  * own `LaunchedEffect(isTop)` restore blocks and call this once, at the top of their composable.
  * Cancelled by navigation like any becoming-top effect, so an outgoing retained layer can't keep
- * re-opening [focusGate] or steal focus from the new top screen.
+ * placing focus into a layer that no longer owns it. Also the layer's [FocusSeat.place] for the
+ * root's D-pad re-entry (docs/15 §4); placements open the layer's [LocalFocusGate].
  *
  * @param ready gates the restore on data the screen needs (e.g. a list still loading); while
- *   false, nothing is placed and [memory] stays frozen only while `!isTop`.
+ *   false, nothing is placed and [memory] stays [FocusMemory.offTop] if it was.
  * @param selectedKey §2 rule 2 -- resolved lazily, once, only if reached.
  * @param fallback §2 rule 3, this surface's one declared primary action.
  * @param tag a short label for the [PerfLog] line; empty is fine.
+ * @param modal a dialog inside the page that owns placement while open: becoming top and re-entry
+ *   land on it, and the invoker stays for its close.
  */
 @Composable
 internal fun FocusRestorer(
     memory: FocusMemory,
     isTop: Boolean,
-    focusGate: MutableState<Boolean>,
     ready: Boolean = true,
     selectedKey: () -> String? = { null },
     fallback: () -> FocusTarget?,
     tag: String = "",
     /** A new value is a fresh landing (e.g. Retry): placement runs again even if [ready] never flips. */
     reloadKey: Any? = null,
+    modal: () -> FocusTarget? = { null },
 ) {
-    var wasTop by remember { mutableStateOf(isTop) }
-    var placedFor by remember { mutableStateOf(reloadKey) }
-    LaunchedEffect(isTop, ready, reloadKey) {
-        if (reloadKey != placedFor) {
-            placedFor = reloadKey
-            memory.seeded = false
-        }
-        if (!isTop) {
-            memory.frozen = true
-            wasTop = false
-            return@LaunchedEffect
-        }
-        // Top but not ready: keep the freeze state, and keep wasTop as-is so the ready flip still
-        // counts as a becoming-top.
-        if (!ready) return@LaunchedEffect
-        if (memory.seeded && wasTop) {
-            // A reload finished while already top: nothing to place, but tracking must stay live.
-            memory.frozen = false
-            return@LaunchedEffect
-        }
-        memory.restoreNow(focusGate, selectedKey, fallback, tag)
-        wasTop = true
+    val focusGate = LocalFocusGate.current
+    val reentry = rememberReentryHandler(memory, focusGate, ready, selectedKey, fallback, modal)
+    // docs/15 §4: a new reloadKey is a fresh landing; applied at commit, before the effect below restarts.
+    DisposableEffect(reloadKey) {
+        memory.seeded = false
+        onDispose {}
     }
+    LaunchedEffect(isTop, ready, reloadKey) {
+        reentry.cancel()
+        if (!isTop) {
+            memory.offTop = true
+            return@LaunchedEffect
+        }
+        // Top but not ready: stay offTop if hidden before, so the ready flip still counts as becoming top.
+        if (!ready) return@LaunchedEffect
+        // Placed and still top (a reload finished while top): nothing to place, tracking is live.
+        if (memory.seeded && !memory.offTop) return@LaunchedEffect
+        val dialog = modal()
+        if (dialog != null) {
+            memory.withPlacement { requestFocusUntilSuccess(focusGate) { dialog.requestFocus() } }
+        } else {
+            memory.restoreNow(focusGate, selectedKey, fallback, tag)
+        }
+        // Only a placement that finished lifts offTop; a cancelled one leaves the screen frozen.
+        memory.offTop = false
+    }
+}
+
+/** [FocusRestorer]'s re-entry job, cancelled on every isTop/ready change. */
+private class ReentryState(private val scope: CoroutineScope) {
+    private var job: Job? = null
+
+    fun launch(block: suspend () -> Unit) {
+        job = scope.launch { block() }
+    }
+
+    fun cancel() {
+        job?.cancel()
+        job = null
+    }
+}
+
+/**
+ * Registers this screen's answer to the root's D-pad re-entry (docs/15 §4, [reentryAction]) as its
+ * layer's [FocusSeat.place]; a restore runs in a job [FocusRestorer] cancels on every isTop/ready
+ * change, so it never outlives the screen's ownership.
+ */
+@Composable
+private fun rememberReentryHandler(
+    memory: FocusMemory,
+    focusGate: MutableState<Boolean>,
+    ready: Boolean,
+    selectedKey: () -> String?,
+    fallback: () -> FocusTarget?,
+    modal: () -> FocusTarget?,
+): ReentryState {
+    val scope = rememberCoroutineScope()
+    val state = remember(memory) { ReentryState(scope) }
+    val latestReady by rememberUpdatedState(ready)
+    val latestSelectedKey by rememberUpdatedState(selectedKey)
+    val latestFallback by rememberUpdatedState(fallback)
+    val latestModal by rememberUpdatedState(modal)
+    val seat = LocalFocusSeat.current
+    DisposableEffect(seat, state) {
+        val place: (() -> Unit) -> Boolean = place@{ onMiss ->
+            latestModal()?.let { dialog ->
+                state.launch { memory.withPlacement { if (!requestFocusWithRetry(focusGate) { dialog.requestFocus() }) onMiss() } }
+                return@place true
+            }
+            val action = reentryAction(latestReady, memory.seeded, memory.isPlacing)
+            when (action) {
+                Reentry.Default -> false
+                Reentry.Swallow -> true
+                Reentry.Restore -> {
+                    state.launch {
+                        if (!memory.reenterNow(focusGate, latestSelectedKey, latestFallback)) onMiss()
+                    }
+                    true
+                }
+            }
+        }
+        seat?.place = place
+        onDispose {
+            state.cancel()
+            if (seat?.place === place) seat.place = null
+        }
+    }
+    return state
 }
 
 /**
@@ -269,6 +382,7 @@ private data class FocusKeyElement(
     override fun update(node: FocusKeyNode) {
         if (node.memory !== memory || node.key != key) {
             node.memory.unregister(node.key, node.target)
+            node.memory.noteFocusEvent(node.key, hasFocus = false)
             node.memory = memory
             node.key = key
             node.memory.register(node.key, node.target)
@@ -300,12 +414,13 @@ private class FocusKeyNode(
 
     override fun onDetach() {
         memory.unregister(key, target)
+        memory.noteFocusEvent(key, hasFocus = false)
     }
 
     /** `hasFocus`, not `isFocused`: most keyed elements wrap an inner focusable, and only report a
      * descendant as focused.
      */
     override fun onFocusEvent(focusState: FocusState) {
-        if (focusState.hasFocus) memory.noteFocused(key)
+        memory.noteFocusEvent(key, focusState.hasFocus)
     }
 }

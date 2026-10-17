@@ -37,14 +37,17 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -75,12 +78,15 @@ import tv.jellybeam.ui.cards.PlaceholderTile
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberHeaderPageBringIntoViewSpec
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.placeByKeys
 import tv.jellybeam.ui.focus.rememberFocusMemory
+import tv.jellybeam.ui.focus.withPlacement
+import tv.jellybeam.ui.nav.LocalDrawerFocusCoordinator
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
 import uniffi.jellybeam_core.SeerrAvailability
 import uniffi.jellybeam_core.SeerrCard
@@ -99,14 +105,6 @@ private val PAGE_MARGIN = 32.dp
 private const val GROUP_SIMILAR = "similar"
 private const val GROUP_RECOMMENDED = "recommended"
 
-/** Stable per-action ids, keyed `"action:<id>"` in [tv.jellybeam.ui.focus.FocusMemory]; independent
- * of display order so a remembered action is still found if row composition order changes. */
-private const val ACTION_GO_TO_LIBRARY = "go-to-library"
-private const val ACTION_CANCEL_REQUEST = "cancel-request"
-private const val ACTION_REQUEST = "request"
-private const val ACTION_REQUEST_4K = "request-4k"
-private const val ACTION_TRAILER = "trailer"
-
 /** [SeerrAvailability]'s detail-line text (docs/14's availability-line rule), one string per
  * state. */
 @Composable
@@ -118,13 +116,40 @@ private fun SeerrAvailability.detailLabel(): String = when (this) {
     SeerrAvailability.AVAILABLE -> stringResource(R.string.discover_availability_available)
 }
 
+/** docs/15 §2: the one branch the detail page renders; the render `when` and [FocusRestorer] both read it. */
+internal enum class DiscoverDetailPage { Loading, NotConfigured, Error, Content }
+
+/** Render order: a known card outranks a refresh error; not-configured outranks both. */
+internal fun discoverDetailPage(isLoading: Boolean, notConfigured: Boolean, hasError: Boolean, hasCard: Boolean): DiscoverDetailPage = when {
+    isLoading -> DiscoverDetailPage.Loading
+    notConfigured -> DiscoverDetailPage.NotConfigured
+    hasCard -> DiscoverDetailPage.Content
+    hasError -> DiscoverDetailPage.Error
+    else -> DiscoverDetailPage.Loading
+}
+
+/** §2 rule 3's declared target per page, always one that page renders; none while nothing focusable is drawn. */
+internal enum class DiscoverDetailFallback { None, Retry, Actions }
+
+internal fun discoverDetailFallback(page: DiscoverDetailPage): DiscoverDetailFallback = when (page) {
+    DiscoverDetailPage.Loading, DiscoverDetailPage.NotConfigured -> DiscoverDetailFallback.None
+    DiscoverDetailPage.Error -> DiscoverDetailFallback.Retry
+    DiscoverDetailPage.Content -> DiscoverDetailFallback.Actions
+}
+
+/** docs/15 §4: the page places focus (dialog seeds, invoker return, dialog Back) only while top with its drawer closed. */
+internal fun discoverPageOwnsFocus(isTop: Boolean, drawerOpen: Boolean): Boolean = isTop && !drawerOpen
+
+/** An in-place drawer close with a dialog open hands focus to the dialog, not the drawer's content restore. */
+internal fun drawerCloseHandledByDialog(navigatingAway: Boolean, dialogOpen: Boolean): Boolean = !navigatingAway && dialogOpen
+
 /** One action-row pill's identity + behavior, built once per composition so the row and the
  * becoming-top restore effect agree on the same [id]/order. */
 private data class ActionSpec(
     val id: String,
     val label: String,
     val onClick: () -> Unit,
-    val enabled: Boolean = true,
+    val actionable: Boolean = true,
     val primary: Boolean = false,
 )
 
@@ -140,9 +165,8 @@ private data class ActionSpec(
  * `!state.isLoading && state.card != null`.
  *
  * §4: [RequestOptionsDialog]/[ConfirmDialog] are overlay `Box`es in the same retained layer, not
- * a Compose `Dialog`, so opening one doesn't flip `isTop`; the invoker is captured via
- * [FocusMemory.captureInvoker] before either opens and restored via [FocusMemory.placeByKeys] on
- * close.
+ * a Compose `Dialog`, so opening one doesn't flip `isTop`; the invoking pill records its own key as
+ * the invoker and focus returns to it (or its replacement) via [FocusMemory.placeByKeys] on close.
  */
 @Composable
 fun DiscoverDetailScreen(
@@ -154,13 +178,11 @@ fun DiscoverDetailScreen(
      * Jellyfin Detail page; fails open if resolution fails. */
     onGoToLibrary: (itemId: String) -> Unit,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate for this entry -- see [tv.jellybeam.ui.library.LibraryScreen]'s own
-     * param doc. */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: DiscoverDetailViewModel = viewModel(
         factory = DiscoverDetailViewModelFactory(AppGraph.gateway, AppGraph.strings, mediaType, tmdbId),
     ),
 ) {
+    val focusGate = LocalFocusGate.current
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     val firstActionRequester = remember { FocusRequester() }
@@ -199,14 +221,27 @@ fun DiscoverDetailScreen(
         }
     }
 
-    // §2 rule 3: a stale key whose cast/shelf group still has members restores to that group's
-    // nearest visible member; an empty/gone group or fresh entry falls to the first action pill.
+    // §2 rule 3 per [DiscoverDetailPage]: a stale key whose cast/shelf group still has members
+    // restores to that group's nearest visible member, else the first action pill; an error page
+    // seeds its Retry; a not-configured page draws nothing focusable, so it declares none. A Retry
+    // is a fresh landing ([reloadKey]), so a page that comes back lands on its first action.
+    val errorRetryRequester = remember { FocusRequester() }
+    val page = discoverDetailPage(state.isLoading, state.notConfigured, state.error != null, state.card != null)
+    val dialogOpen = state.requestDialogVisible || state.cancelDialogVisible
+    // One seed for whichever dialog is open: the dialog owns placement while it is up (docs/15 §4).
+    val dialogSeedRequester = remember { FocusRequester() }
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
-        ready = !state.isLoading && state.card != null,
+        ready = page != DiscoverDetailPage.Loading,
+        reloadKey = state.loadGeneration,
+        modal = { if (dialogOpen) dialogSeedRequester.asFocusTarget() else null },
         fallback = {
+            when (discoverDetailFallback(page)) {
+                DiscoverDetailFallback.None -> return@FocusRestorer null
+                DiscoverDetailFallback.Retry -> return@FocusRestorer errorRetryRequester.asFocusTarget()
+                DiscoverDetailFallback.Actions -> Unit
+            }
             val staleKey = memory.lastKey
             val nearby = when {
                 staleKey?.startsWith("person:") == true && state.cast.isNotEmpty() -> {
@@ -230,15 +265,34 @@ fun DiscoverDetailScreen(
         tag = "discover-detail",
     )
 
-    // §4: places the captured invoker back once the dialog closes, then clears it.
-    val dialogOpen = state.requestDialogVisible || state.cancelDialogVisible
-    var wasDialogOpen by remember { mutableStateOf(dialogOpen) }
-    LaunchedEffect(dialogOpen) {
-        if (!dialogOpen && wasDialogOpen) {
-            memory.placeByKeys(listOfNotNull(memory.invokerKey), focusGate)
-            memory.invokerKey = null
+    // docs/15 §4: an open drawer holds focus inside this layer, so the page's own placements (a
+    // dialog's seed, the invoker return) wait for it; an in-place close with a dialog open hands
+    // focus to the dialog's seed instead of the drawer's generic content restore.
+    var drawerOpen by remember { mutableStateOf(false) }
+    val latestDialogOpen by rememberUpdatedState(dialogOpen)
+    val drawerFocusCoordinator = LocalDrawerFocusCoordinator.current
+    if (drawerFocusCoordinator != null) {
+        SideEffect {
+            drawerFocusCoordinator.onDrawerOpened = { drawerOpen = true }
+            drawerFocusCoordinator.onDrawerClosed = { navigatingAway ->
+                drawerOpen = false
+                drawerCloseHandledByDialog(navigatingAway, latestDialogOpen)
+            }
         }
-        wasDialogOpen = dialogOpen
+    }
+    val ownsFocus = discoverPageOwnsFocus(isTop, drawerOpen)
+
+    // §4: a busy pill keeps its focus, so this only re-places focus that a closed dialog or a vanished
+    // pill took with it: on the invoker, else the pill that replaced it ([actionFocusKeys]).
+    val actionKeys = state.actionKeys()
+    var pageHasFocus by remember { mutableStateOf(false) }
+    LaunchedEffect(ownsFocus, dialogOpen, state.busy, actionKeys) {
+        val invoker = memory.invokerKey
+        if (!ownsFocus || dialogOpen || state.busy || invoker == null) return@LaunchedEffect
+        // One frame so a detached node's focus loss has reached [pageHasFocus].
+        withFrameNanos { }
+        memory.withPlacement { memory.placeByKeys(actionFocusKeys(invoker, actionKeys, pageHasFocus), focusGate) }
+        memory.invokerKey = null
     }
 
     LaunchedEffect(state.transientEvent) {
@@ -251,12 +305,12 @@ fun DiscoverDetailScreen(
         viewModel.dismissTransientEvent()
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(JellybeamTheme.Notte)) {
-        when {
-            state.isLoading -> Unit // blank Notte, same "between-screens" convention as SettingsScreen
-            state.notConfigured -> DiscoverMessage(stringResource(R.string.discover_not_configured))
-            state.card == null && state.error != null -> DiscoverErrorMessage(state.error!!, onRetry = viewModel::retry)
-            state.card != null -> DiscoverDetailContent(
+    Box(modifier = Modifier.fillMaxSize().background(JellybeamTheme.Notte).onFocusChanged { pageHasFocus = it.hasFocus }) {
+        when (page) {
+            DiscoverDetailPage.Loading -> Unit // blank Notte, same "between-screens" convention as SettingsScreen
+            DiscoverDetailPage.NotConfigured -> DiscoverMessage(stringResource(R.string.discover_not_configured))
+            DiscoverDetailPage.Error -> DiscoverErrorMessage(state.error.orEmpty(), onRetry = viewModel::retry, retryFocusRequester = errorRetryRequester)
+            DiscoverDetailPage.Content -> DiscoverDetailContent(
                 state = state,
                 viewModel = viewModel,
                 onOpenDetail = onOpenDetail,
@@ -271,16 +325,17 @@ fun DiscoverDetailScreen(
         }
 
         if (state.requestDialogVisible) {
-            RequestOptionsDialog(state = state, viewModel = viewModel, focusGate = focusGate)
+            RequestOptionsDialog(state = state, viewModel = viewModel, ownsFocus = ownsFocus, firstFocusRequester = dialogSeedRequester)
         }
         if (state.cancelDialogVisible) {
             ConfirmDialog(
-                focusGate = focusGate,
+                ownsFocus = ownsFocus,
+                dismissRequester = dialogSeedRequester,
                 title = stringResource(R.string.discover_cancel_request_title),
                 body = stringResource(R.string.discover_cancel_request_body),
-                confirmLabel = stringResource(if (state.isCancelling) R.string.discover_cancelling else R.string.discover_cancel_request_confirm),
+                confirmLabel = stringResource(if (state.busy) R.string.discover_cancelling else R.string.discover_cancel_request_confirm),
                 dismissLabel = stringResource(R.string.discover_cancel_request_dismiss),
-                busy = state.isCancelling,
+                busy = state.busy,
                 onConfirm = viewModel::confirmCancel,
                 onDismiss = viewModel::dismissCancelDialog,
             )
@@ -382,61 +437,44 @@ private fun DiscoverDetailContent(
                     )
                 }
 
-                val actions = buildList {
-                    if (card.jellyfinItemId != null) {
-                        add(
-                            ActionSpec(
-                                id = ACTION_GO_TO_LIBRARY,
-                                label = stringResource(R.string.discover_action_go_to_library),
-                                onClick = { onGoToLibrary(card.jellyfinItemId!!) },
-                                primary = true,
-                            ),
+                val actions = state.actionSlots().map { slot ->
+                    when (slot.id) {
+                        ACTION_GO_TO_LIBRARY -> ActionSpec(
+                            id = slot.id,
+                            label = stringResource(R.string.discover_action_go_to_library),
+                            onClick = { onGoToLibrary(card.jellyfinItemId!!) },
+                            primary = slot.primary,
                         )
-                    }
-                    if (state.activeRequest != null) {
-                        add(
-                            ActionSpec(
-                                id = ACTION_CANCEL_REQUEST,
-                                label = stringResource(R.string.discover_action_cancel_request),
-                                // §4: capture the invoker before the confirm dialog opens.
-                                onClick = { memory.captureInvoker(); viewModel.openCancelDialog() },
-                            ),
+                        ACTION_CANCEL_REQUEST -> ActionSpec(
+                            id = slot.id,
+                            label = stringResource(R.string.discover_action_cancel_request),
+                            // §4: the invoker is the pill itself, not lastKey, which a seeded focus never wrote.
+                            onClick = { memory.invokerKey = "action:${slot.id}"; viewModel.openCancelDialog() },
+                            actionable = slot.actionable,
                         )
-                    }
-                    if (state.canRequest) {
-                        add(
-                            ActionSpec(
-                                id = ACTION_REQUEST,
-                                label = stringResource(R.string.discover_action_request),
-                                onClick = { memory.captureInvoker(); viewModel.startRequest(false) },
-                                enabled = !state.isStartingRequest && !state.isSubmittingRequest,
-                                primary = card.jellyfinItemId == null,
-                            ),
+                        ACTION_REQUEST -> ActionSpec(
+                            id = slot.id,
+                            label = stringResource(R.string.discover_action_request),
+                            onClick = { memory.invokerKey = "action:${slot.id}"; viewModel.startRequest(false) },
+                            actionable = slot.actionable,
+                            primary = slot.primary,
                         )
-                    }
-                    if (state.canRequest4k) {
-                        add(
-                            ActionSpec(
-                                id = ACTION_REQUEST_4K,
-                                label = stringResource(R.string.discover_action_request_4k),
-                                onClick = { memory.captureInvoker(); viewModel.startRequest(true) },
-                                enabled = !state.isStartingRequest && !state.isSubmittingRequest,
-                            ),
+                        ACTION_REQUEST_4K -> ActionSpec(
+                            id = slot.id,
+                            label = stringResource(R.string.discover_action_request_4k),
+                            onClick = { memory.invokerKey = "action:${slot.id}"; viewModel.startRequest(true) },
+                            actionable = slot.actionable,
                         )
-                    }
-                    state.trailerUrl?.let { trailerUrl ->
-                        add(
-                            ActionSpec(
-                                id = ACTION_TRAILER,
-                                label = stringResource(R.string.discover_action_trailer),
-                                onClick = {
-                                    try {
-                                        context.startActivity(Intent(Intent.ACTION_VIEW, trailerUrl.toUri()))
-                                    } catch (_: ActivityNotFoundException) {
-                                        // Fail open: no player installed for this link.
-                                    }
-                                },
-                            ),
+                        else -> ActionSpec(
+                            id = slot.id,
+                            label = stringResource(R.string.discover_action_trailer),
+                            onClick = {
+                                try {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, state.trailerUrl!!.toUri()))
+                                } catch (_: ActivityNotFoundException) {
+                                    // Fail open: no player installed for this link.
+                                }
+                            },
                         )
                     }
                 }
@@ -447,20 +485,23 @@ private fun DiscoverDetailContent(
                     modifier = Modifier.onGloballyPositioned { headerBottomPx = it.boundsInRoot().bottom + pageScrollState.value },
                 ) {
                     actions.forEachIndexed { index, action ->
-                        var pillModifier: Modifier = Modifier.focusKey(memory, "action:${action.id}")
-                        // First-open seed only (§2 rule 3's fallback); FocusRestorer owns every
-                        // later restore.
-                        if (index == 0) pillModifier = pillModifier.focusRequester(firstActionRequester)
-                        ActionPill(
-                            label = action.label,
-                            onClick = action.onClick,
-                            enabled = action.enabled,
-                            primary = action.primary,
-                            modifier = pillModifier,
-                        )
+                        // docs/15 §4: one node per slot, so Request turning into Cancel request keeps its focus.
+                        key(index) {
+                            var pillModifier: Modifier = Modifier.focusKey(memory, "action:${action.id}")
+                            // First-open seed only (§2 rule 3's fallback); FocusRestorer owns every
+                            // later restore.
+                            if (index == 0) pillModifier = pillModifier.focusRequester(firstActionRequester)
+                            ActionPill(
+                                label = action.label,
+                                onClick = action.onClick,
+                                inert = !action.actionable,
+                                primary = action.primary,
+                                modifier = pillModifier,
+                            )
+                        }
                     }
                 }
-                state.requestError?.let { error ->
+                (state.requestError ?: state.cancelError ?: state.error)?.let { error ->
                     BasicText(text = error, style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 13.sp))
                 }
             }
@@ -647,16 +688,30 @@ private fun CardShelf(
 
 /** House pill-button recipe (fill-on-focus vocabulary shared with
  * [tv.jellybeam.ui.signin.SignInScreen]'s `SignInButton`/settings chips); `primary` spends the one
- * Pistacchio-filled action per row when idle. */
+ * Pistacchio-filled action per row when idle. `enabled = false` takes the pill out of focus;
+ * `inert` keeps it focusable but ignores Select, so a busy state never strands focus (docs/15 §4). */
 @Composable
-private fun ActionPill(label: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, primary: Boolean = false, selected: Boolean = false) {
+private fun ActionPill(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    inert: Boolean = false,
+    primary: Boolean = false,
+    selected: Boolean = false,
+) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
     // One green per meaning: focused pill is the only fill, `primary` is the only green border,
     // `selected` is accent text on the ordinary hairline chip.
-    val background = if (isFocused) JellybeamTheme.Pistacchio else Color.Transparent
+    val background = when {
+        !isFocused -> Color.Transparent
+        inert -> JellybeamTheme.Pistacchio.copy(alpha = 0.5f)
+        else -> JellybeamTheme.Pistacchio
+    }
     val textColor = when {
         isFocused -> JellybeamTheme.Notte
+        inert -> JellybeamTheme.Grigio
         selected -> JellybeamTheme.Pistacchio
         else -> JellybeamTheme.Panna
     }
@@ -665,7 +720,7 @@ private fun ActionPill(label: String, onClick: () -> Unit, modifier: Modifier = 
         modifier = modifier
             .background(background, RoundedCornerShape(50))
             .then(if (!isFocused) Modifier.border(1.dp, if (primary) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline, RoundedCornerShape(50)) else Modifier)
-            .clickable(interactionSource = interactionSource, indication = null, enabled = enabled, onClick = onClick)
+            .clickable(interactionSource = interactionSource, indication = null, enabled = enabled, onClick = { if (!inert) onClick() })
             .padding(horizontal = 18.dp, vertical = 10.dp),
     ) {
         // Every pill label is a single line, ellipsized, never letter-wrapped.
@@ -687,7 +742,8 @@ private fun ActionPill(label: String, onClick: () -> Unit, modifier: Modifier = 
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun ConfirmDialog(
-    focusGate: MutableState<Boolean>,
+    ownsFocus: Boolean,
+    dismissRequester: FocusRequester,
     title: String,
     body: String,
     confirmLabel: String,
@@ -696,11 +752,12 @@ private fun ConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val dismissRequester = remember { FocusRequester() }
-    // The RetainedScreenLayer's focus gate only admits placements made while it's held open; an
-    // ungated requestFocus() from an overlay would return false forever.
-    LaunchedEffect(Unit) { requestFocusUntilSuccess(focusGate) { dismissRequester.requestFocus() } }
-    BackHandler(onBack = onDismiss)
+    // Seeds only while its page owns focus (top, drawer closed); the page's FocusRestorer places
+    // this seed itself when the layer becomes top again (docs/15 §4).
+    val focusGate = LocalFocusGate.current
+    LaunchedEffect(ownsFocus) { if (ownsFocus) requestFocusUntilSuccess(focusGate) { dismissRequester.requestFocus() } }
+    // An open drawer owns Back inside this layer; its handler registered first, so this one yields.
+    BackHandler(enabled = ownsFocus, onBack = onDismiss)
 
     Box(
         modifier = Modifier
@@ -717,8 +774,8 @@ private fun ConfirmDialog(
             BasicText(text = title, style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = JellybeamTheme.Panna, fontSize = 22.sp))
             BasicText(text = body, style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 14.sp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                ActionPill(label = dismissLabel, onClick = onDismiss, enabled = !busy, modifier = Modifier.focusRequester(dismissRequester))
-                ActionPill(label = confirmLabel, onClick = onConfirm, enabled = !busy, primary = true)
+                ActionPill(label = dismissLabel, onClick = onDismiss, inert = busy, modifier = Modifier.focusRequester(dismissRequester))
+                ActionPill(label = confirmLabel, onClick = onConfirm, inert = busy, primary = true)
             }
         }
     }
@@ -739,15 +796,21 @@ private fun ConfirmDialog(
  */
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
-private fun RequestOptionsDialog(state: DiscoverDetailUiState, viewModel: DiscoverDetailViewModel, focusGate: MutableState<Boolean>) {
+private fun RequestOptionsDialog(
+    state: DiscoverDetailUiState,
+    viewModel: DiscoverDetailViewModel,
+    ownsFocus: Boolean,
+    firstFocusRequester: FocusRequester,
+) {
     val options = state.requestOptions
     val isTv = state.seasons.isNotEmpty()
-    val submitEnabled = !state.isSubmittingRequest && (!isTv || canSubmitSeasonRequest(state.seasons, state.seasonSelection))
+    // A missing season pick takes Submit out of focus; a busy state only makes it inert (docs/15 §4).
+    val submitEnabled = !isTv || canSubmitSeasonRequest(state.seasons, state.seasonSelection)
 
-    val firstFocusRequester = remember { FocusRequester() }
-    // Gated for the same reason as ConfirmDialog's seed.
-    LaunchedEffect(Unit) { requestFocusUntilSuccess(focusGate) { firstFocusRequester.requestFocus() } }
-    BackHandler(onBack = viewModel::dismissRequestDialog)
+    // Gated on ownership for the same reason as ConfirmDialog's seed.
+    val focusGate = LocalFocusGate.current
+    LaunchedEffect(ownsFocus) { if (ownsFocus) requestFocusUntilSuccess(focusGate) { firstFocusRequester.requestFocus() } }
+    BackHandler(enabled = ownsFocus, onBack = viewModel::dismissRequestDialog)
 
     // Fresh every recomposition -- exactly one candidate claims [firstFocusRequester] per pass,
     // whichever eligible element appears first in layout order.
@@ -862,13 +925,14 @@ private fun RequestOptionsDialog(state: DiscoverDetailUiState, viewModel: Discov
                 ActionPill(
                     label = stringResource(R.string.discover_request_dialog_cancel),
                     onClick = viewModel::dismissRequestDialog,
-                    enabled = !state.isSubmittingRequest,
+                    inert = state.busy,
                     modifier = Modifier.seedFocusIfFirst(),
                 )
                 ActionPill(
                     label = stringResource(R.string.discover_request_dialog_submit),
                     onClick = viewModel::confirmRequestDialog,
                     enabled = submitEnabled,
+                    inert = state.busy,
                     primary = true,
                 )
             }

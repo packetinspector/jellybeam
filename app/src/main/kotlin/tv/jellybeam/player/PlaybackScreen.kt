@@ -3,7 +3,6 @@ package tv.jellybeam.player
 import android.graphics.Typeface
 import android.view.accessibility.CaptioningManager
 import android.text.format.DateFormat
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -114,7 +113,6 @@ import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import java.util.Locale
-import kotlin.math.ceil
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import tv.jellybeam.AppGraph
@@ -132,12 +130,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.GlideSeek
 import uniffi.jellybeam_core.MediaSegment
-import uniffi.jellybeam_core.MediaSegmentKind
 import uniffi.jellybeam_core.MediaStreamKind
 import uniffi.jellybeam_core.OsdDetailSetting
 import uniffi.jellybeam_core.PlaybackOsdDetail
@@ -206,9 +202,6 @@ private const val IDLE_TICK_MS = 250L
  * surface advances far more often than the OSD's idle clock. */
 private const val GLIDE_TICK_MS = 33L
 private val SELECT_KEYS = setOf(Key.DirectionCenter, Key.Enter)
-
-/** docs/12 "Skip intro/credits": "live 5s" -- the post-skip Undo toast's auto-hide window. */
-private const val SKIP_UNDO_WINDOW_MS = 5_000L
 
 /** docs/12 §2: how far the OSD's reserved zone extends above the bottom, keeping the next-up
  * card/skip pill clear of it. */
@@ -677,8 +670,6 @@ private val CENTER_FLASH_ICON_SIZE = 48.dp
 
 private data class CenterFlashContent(val text: String? = null, val icon: TransportGlyph? = null, val numeral: String? = null)
 
-private data class SkipUndoState(val preSkipPositionTicks: Long, val segmentType: MediaSegmentKind)
-
 private val TRACK_PICKER_WIDTH = 320.dp
 private val TRACK_ROW_H_PADDING = 16.dp
 
@@ -699,20 +690,12 @@ private val TRACK_ROW_H_PADDING = 16.dp
 @Composable
 fun PlaybackScreen(
     viewModel: PlaybackViewModel,
-    onFinish: () -> Unit,
-    onReauthorizationRequired: (account: AccountIdentity?) -> Unit,
     focusRestoreEpoch: Long = 0L,
-    /**
-     * docs/12 §13: fired for [PlaybackEvent.FinishToDetail] instead of [onFinish] -- routes to the
-     * given episode's detail page rather than exiting playback.
-     */
-    onFinishToDetail: (itemId: String) -> Unit = { onFinish() },
     /** docs/17 §2/§3: true for the span between PiP enter/exit; gates everything below the player
      * surface so the PiP window shows only bare video. */
     inPictureInPicture: Boolean = false,
-    /** [BackAction.EXIT]'s handler. Defaults to [onFinish]; [PlaybackActivity] overrides it to try
-     * PiP first, falling back to [onFinish] (docs/17 §3). */
-    onExitRequested: () -> Unit = onFinish,
+    /** [BackAction.EXIT]'s handler: [PlaybackActivity] tries PiP first, else finishes (docs/17 §3). */
+    onExitRequested: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
     val previewTile by viewModel.previewTile.collectAsState()
@@ -742,7 +725,6 @@ fun PlaybackScreen(
      * [focusedButton] is cleared, consumed by `restoreInvokerFocus` on close. */
     var menuInvoker by remember { mutableStateOf<ControlButton?>(null) }
     var activeSegment by remember { mutableStateOf<MediaSegment?>(null) }
-    var skipUndo by remember { mutableStateOf<SkipUndoState?>(null) }
     /** docs/12 §9, docs/18 §3.2: bumped per notice event; each bump restarts the toast with [noticeText]. */
     var noticeToken by remember { mutableIntStateOf(0) }
     var noticeText by remember { mutableIntStateOf(R.string.player_seek_unavailable) }
@@ -914,16 +896,8 @@ fun PlaybackScreen(
                 glideActive = glide?.isGliding == true,
             )
         ) {
-            BackAction.CLOSE_MENU -> {
-                if (current.speedMenuOpen) viewModel.closeSpeedMenu() else viewModel.closeChaptersMenu()
-                restoreInvokerFocus(current)
-            }
-            BackAction.CLOSE_PICKER -> {
-                viewModel.closeTrackPicker()
-                restoreInvokerFocus(current)
-            }
-            BackAction.CLOSE_SHEET -> {
-                if (current.statsSheetLive != null) viewModel.closeInfoOverlay() else viewModel.closeLibraryInfoOverlay()
+            BackAction.CLOSE_MENU, BackAction.CLOSE_PICKER, BackAction.CLOSE_SHEET -> {
+                viewModel.closeSurface()
                 restoreInvokerFocus(current)
             }
             BackAction.STOP_STILL_WATCHING -> viewModel.stillWatchingStop()
@@ -951,7 +925,7 @@ fun PlaybackScreen(
             osdVisible = osd.isVisible
             trickplayPreview.tick()
             trickplayPreviewState = trickplayPreview.preview
-            activeSegment = if (skipUndo == null) {
+            activeSegment = if (viewModel.state.value.skipUndo == null) {
                 SkipSegment.activeSegment(state.mediaSegments, viewModel.positionTicks.value)
                     ?.takeIf {
                         SeekGuard.segmentDecision(
@@ -979,11 +953,7 @@ fun PlaybackScreen(
     }
 
     // docs/12 §9's "never auto-hide while..." list, minus paused (handled above).
-    val pinned = state.trackPicker != null ||
-        state.statsSheetLive != null ||
-        state.libraryInfoOverlay != null ||
-        state.speedMenuOpen ||
-        state.chaptersMenuOpen ||
+    val pinned = state.openSurface !is OpenSurface.None ||
         state.nextUp != null ||
         state.stillWatching != null ||
         trickplayPreviewState != null ||
@@ -1020,7 +990,7 @@ fun PlaybackScreen(
         }
     }
     LaunchedEffect(state.chaptersMenuOpen) {
-        if (state.chaptersMenuOpen) chaptersMenuFocusIndex = 0
+        if (state.chaptersMenuOpen) chaptersMenuFocusIndex = Chapters.currentChapterIndex(state.chapters, viewModel.positionTicks.value) ?: 0
     }
 
     // docs/12 §14: a pill that vanishes or an OSD that hides hands the ring back to the buttons.
@@ -1058,30 +1028,17 @@ fun PlaybackScreen(
         }
     }
 
-    LaunchedEffect(skipUndo) {
-        if (skipUndo != null) {
-            delay(SKIP_UNDO_WINDOW_MS)
-            skipUndo = null
-        }
-    }
-
+    // Terminal events are PlaybackActivity's, collected for its whole lifetime.
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
             when (event) {
-                PlaybackEvent.Finish -> onFinish()
-                is PlaybackEvent.FinishToDetail -> onFinishToDetail(event.itemId)
-                is PlaybackEvent.ReauthorizationRequired -> onReauthorizationRequired(event.account)
+                PlaybackEvent.Finish, is PlaybackEvent.FinishToDetail, is PlaybackEvent.ReauthorizationRequired, is PlaybackEvent.FinishWithMessage -> Unit
                 PlaybackEvent.SeekUnavailable, PlaybackEvent.SubtitleUnavailable -> {
                     noticeText = if (event == PlaybackEvent.SeekUnavailable) R.string.player_seek_unavailable else R.string.player_subtitle_unavailable
                     noticeToken++
                     viewModel.noticeShown()
                 }
-                is PlaybackEvent.FinishWithMessage -> {
-                    Toast.makeText(context, event.message, Toast.LENGTH_LONG).show()
-                    onFinish()
-                }
                 is PlaybackEvent.AutoSkipped -> {
-                    skipUndo = SkipUndoState(event.preSkipPositionTicks, event.segmentType)
                     activeSegment = null
                     // docs/12 §14: like a manual skip, an auto-skip closes the bare OSD so the
                     // toast shows and Select undoes; a menu, a card or a pause is left alone.
@@ -1117,6 +1074,17 @@ fun PlaybackScreen(
 
             // `repeatCount == 0` avoids spamming the FFI call on a held key.
             if (event.nativeKeyEvent.repeatCount == 0) viewModel.noteUserInput()
+
+            // docs/12 §9, docs/17 §2: transport keys are the MediaSession's alone, even under a menu
+            // (PlaybackActivity swallows them while there is none); a hidden FF / REW also reveals the OSD.
+            when (MediaKeys.route(event.key, osdVisible)) {
+                MediaKeyRoute.NOT_TRANSPORT -> Unit
+                MediaKeyRoute.SESSION -> return@keyHandler false
+                MediaKeyRoute.SESSION_REVEAL_OSD -> {
+                    revealOsdToPlayPause()
+                    return@keyHandler false
+                }
+            }
 
             val current = viewModel.state.value
             val currentButtons = currentVisibleButtons(current)
@@ -1195,17 +1163,15 @@ fun PlaybackScreen(
             }
 
             // docs/12 §14: an arrow key makes the Undo toast stale; Select then follows the focus ring.
-            if (SkipSelectRouting.dismissesUndoToast(event.key)) skipUndo = null
+            if (SkipSelectRouting.dismissesUndoToast(event.key)) viewModel.dismissSkipUndo()
 
             // docs/12 §14: a skip never reveals the OSD, so Select stays one-press while hidden.
-            fun undoSkipNow(undo: SkipUndoState) {
-                viewModel.undoSkip(undo.preSkipPositionTicks)
-                skipUndo = null
+            fun undoSkipNow() {
+                viewModel.undoSkip()
                 if (osdVisible) osd.onKeyEvent()
             }
             fun skipSegmentNow(segment: MediaSegment) {
-                val before = viewModel.skipSegment(segment) ?: return
-                skipUndo = SkipUndoState(before, segment.segmentType)
+                viewModel.skipSegment(segment) ?: return
                 activeSegment = null
                 pillFocused = false
                 // docs/12 §14: a skip from the focused pill hides the OSD so "Select to undo" is
@@ -1217,19 +1183,14 @@ fun PlaybackScreen(
                 }
             }
 
-            // Most keys wake a hidden OSD; Left/Right are silent seek
-            // shortcuts. Media play/pause keys are the one exception (docs/12 §9)
-            // -- they fall through unconsumed to [MediaSessionHolder]'s own
-            // callback instead of waking the OSD.
+            // Most keys wake a hidden OSD; Left/Right are silent seek shortcuts, and the media
+            // transport keys never get here ([MediaKeys.route] above).
             if (!osdVisible) {
-                if (event.key == Key.MediaPlayPause || event.key == Key.MediaPlay || event.key == Key.MediaPause) {
-                    return@keyHandler false
-                }
                 // Back is a navigation level, not an OSD-wake key -- must reach BackHandler when
                 // hidden.
                 if (event.key == Key.Back || event.key == Key.Escape) return@keyHandler false
                 if (event.key in SELECT_KEYS) {
-                    val undo = skipUndo
+                    val undo = viewModel.state.value.skipUndo
                     val segment = activeSegment
                     // A held Select must not skip and then undo itself.
                     when (
@@ -1242,7 +1203,7 @@ fun PlaybackScreen(
                             stillWatchingShown = current.stillWatching != null,
                         )
                     ) {
-                        SelectRoute.UNDO -> if (event.nativeKeyEvent.repeatCount == 0 && undo != null) undoSkipNow(undo)
+                        SelectRoute.UNDO -> if (event.nativeKeyEvent.repeatCount == 0 && undo != null) undoSkipNow()
                         SelectRoute.SKIP_SEGMENT -> if (event.nativeKeyEvent.repeatCount == 0 && segment != null) skipSegmentNow(segment)
                         SelectRoute.PLAY_NEXT, SelectRoute.ACTIVATE_FOCUSED, SelectRoute.REVEAL_OSD -> revealOsdToPlayPause()
                     }
@@ -1268,7 +1229,7 @@ fun PlaybackScreen(
             if (current.speedMenuOpen) {
                 when (event.key) {
                     Key.Escape, Key.Menu -> {
-                        viewModel.closeSpeedMenu()
+                        viewModel.closeSurface()
                         restoreInvokerFocus(current)
                     }
                     Key.DirectionUp -> speedMenuFocusIndex = (speedMenuFocusIndex - 1).coerceAtLeast(0)
@@ -1283,7 +1244,7 @@ fun PlaybackScreen(
                 val rowCount = current.chapters.size
                 when (event.key) {
                     Key.Escape, Key.Menu -> {
-                        viewModel.closeChaptersMenu()
+                        viewModel.closeSurface()
                         restoreInvokerFocus(current)
                     }
                     Key.DirectionUp -> chaptersMenuFocusIndex = (chaptersMenuFocusIndex - 1).coerceAtLeast(0)
@@ -1306,7 +1267,7 @@ fun PlaybackScreen(
                 val rowCount = picker.audioTracks.size + picker.subtitleTracks.size
                 when (event.key) {
                     Key.Escape, Key.Menu -> {
-                        viewModel.closeTrackPicker()
+                        viewModel.closeSurface()
                         restoreInvokerFocus(current)
                     }
                     Key.DirectionUp -> pickerFocusIndex = (pickerFocusIndex - 1).coerceAtLeast(0)
@@ -1327,7 +1288,7 @@ fun PlaybackScreen(
             if (current.statsSheetLive != null || current.libraryInfoOverlay != null) {
                 when (event.key) {
                     Key.Escape, Key.Menu -> {
-                        if (current.statsSheetLive != null) viewModel.closeInfoOverlay() else viewModel.closeLibraryInfoOverlay()
+                        viewModel.closeSurface()
                         restoreInvokerFocus(current)
                     }
                     Key.DirectionUp -> scope.launch {
@@ -1382,7 +1343,7 @@ fun PlaybackScreen(
                         osdVisible = true,
                         pillFocused = pillFocused,
                         segmentShown = current.skipPillVisible(segment),
-                        undoShown = skipUndo != null,
+                        undoShown = viewModel.state.value.skipUndo != null,
                         nextUpShown = current.nextUp != null,
                         stillWatchingShown = current.stillWatching != null,
                     )
@@ -1763,7 +1724,7 @@ fun PlaybackScreen(
             if (noticeShown) {
                 NoticeToast(text = noticeText, modifier = Modifier.align(Alignment.TopCenter))
             } else {
-                skipUndo?.takeIf {
+                state.skipUndo?.takeIf {
                     SkipSelectRouting.undoToastVisible(true, osdVisible, state.nextUp != null || state.stillWatching != null)
                 }?.let { undo ->
                     SkipUndoToast(
@@ -2996,10 +2957,7 @@ private fun NextUpCard(
     val strings = rememberUiStrings()
     val seasonEpisode = remember(strings, card.id) { CardFormatting.seasonEpisodeLabel(strings, card.parentIndexNumber, card.indexNumber) }
     val title = if (seasonEpisode != null) "$seasonEpisode · ${card.name}" else card.name
-    val detail = card.runtimeTicks?.let { ticks ->
-        val minutes = ceil(ticks / 10_000_000.0 / 60.0).toLong()
-        stringResource(R.string.next_up_runtime_min, minutes)
-    }
+    val detail = card.runtimeTicks?.let { CardFormatting.formatRuntime(strings, it) }
 
     // Keyed on the countdown's identity and seeded from the live position so a fresh card never
     // shows a stale frame from the previous one.
@@ -3191,7 +3149,7 @@ private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, modifier: Mo
 
 /** docs/12 §12: a player menu or sheet is open over the OSD. */
 private val PlaybackUiState.playerMenuOpen: Boolean
-    get() = trackPicker != null || speedMenuOpen || chaptersMenuOpen || statsSheetLive != null || libraryInfoOverlay != null
+    get() = openSurface !is OpenSurface.None
 
 /** docs/12 §14: whether the skip pill is drawn, the one test drawing, focus and Select all share. */
 private fun PlaybackUiState.skipPillVisible(segment: MediaSegment?): Boolean =

@@ -276,12 +276,38 @@ pub struct AccountInfo {
     pub user_name: String,
 }
 
+impl AccountInfo {
+    /// The tokenless identity `saved` holds.
+    pub(crate) fn of(saved: &crate::session::SessionFile) -> Self {
+        Self {
+            server_url: saved.server_url.clone(),
+            user_id: saved.user_id.clone(),
+            user_name: saved.user_name.clone(),
+        }
+    }
+}
+
 /// docs/18 §2.1: the saved account a rejected token was issued to, carried by
 /// [`crate::CoreError::Unauthorized`] so a 401 re-authorizes the account that sent it.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct AccountIdentity {
     pub server_url: String,
     pub user_id: String,
+}
+
+impl AccountIdentity {
+    /// The account `saved` holds.
+    pub(crate) fn of(saved: &crate::session::SessionFile) -> Self {
+        Self {
+            server_url: saved.server_url.clone(),
+            user_id: saved.user_id.clone(),
+        }
+    }
+
+    /// Whether `saved` is this account, however its address is slashed (docs/18 §2.1).
+    pub(crate) fn names(&self, saved: &crate::session::SessionFile) -> bool {
+        saved.is_account(&self.server_url, &self.user_id)
+    }
 }
 
 impl From<jellyfin_api::TokenOwner> for AccountIdentity {
@@ -291,6 +317,18 @@ impl From<jellyfin_api::TokenOwner> for AccountIdentity {
             user_id: owner.user_id,
         }
     }
+}
+
+/// docs/07 §5: the three outcomes of a mirror browse read, kept apart so a screen never settles on a
+/// failure (or a read before the mirror opens) as an empty list.
+#[derive(uniffi::Enum, Debug, Clone, PartialEq)]
+pub enum BrowseRead {
+    /// The mirror is not open yet; retry once it is.
+    NotReady,
+    /// The query failed.
+    Failed,
+    /// The rows, genuinely empty or not.
+    Items { cards: Vec<Card> },
 }
 
 /// One in-progress Jellyfin Quick Connect handshake. `code` is shown on the
@@ -568,18 +606,27 @@ pub struct PlaybackOsdDetail {
     pub container: Option<String>,
     pub media_streams: Vec<MediaStreamInfo>,
     pub chapters: Vec<ChapterInfoFfi>,
-    /// The primary `MediaSource`'s file size in bytes -- the stats sheet's
+    /// The playing `MediaSource`'s file size in bytes -- the stats sheet's
     /// CONTAINER row (§8b). Requires the `MediaSources` field.
     pub size_bytes: Option<i64>,
-    /// The primary `MediaSource`'s file path, verbatim -- the stats
+    /// The playing `MediaSource`'s file path, verbatim -- the stats
     /// sheet's FILE row (§8b), the one place a release tag surfaces.
     /// `None` if the server sent no media sources.
     pub path: Option<String>,
+    /// The scrub-preview manifest for the playing media source, so one fetch serves the OSD and
+    /// the seek bar; `None` when the server has none usable.
+    pub trickplay: Option<TrickplayMetaFfi>,
 }
 
-impl From<&jellyfin_api::models::BaseItemDto> for PlaybackOsdDetail {
-    fn from(dto: &jellyfin_api::models::BaseItemDto) -> Self {
-        let primary_source = dto.media_sources.first();
+impl PlaybackOsdDetail {
+    /// `media_source_id` is the playing source, which picks that source's size, path and trickplay
+    /// manifest; an id the server did not list falls back to the first source.
+    pub fn of(dto: &jellyfin_api::models::BaseItemDto, media_source_id: &str) -> Self {
+        let primary_source = dto
+            .media_sources
+            .iter()
+            .find(|source| source.id.as_deref() == Some(media_source_id))
+            .or_else(|| dto.media_sources.first());
         PlaybackOsdDetail {
             container: dto.container.clone(),
             media_streams: dto
@@ -590,6 +637,11 @@ impl From<&jellyfin_api::models::BaseItemDto> for PlaybackOsdDetail {
             chapters: dto.chapters.iter().map(ChapterInfoFfi::from).collect(),
             size_bytes: primary_source.and_then(|source| source.size),
             path: primary_source.and_then(|source| source.path.clone()),
+            trickplay: playback_policy::trickplay::resolve_trickplay_meta(
+                &dto.trickplay,
+                media_source_id,
+            )
+            .map(TrickplayMetaFfi::from),
         }
     }
 }
@@ -1579,6 +1631,25 @@ pub enum TrackKindFfi {
     Video,
     Audio,
     Subtitle,
+}
+
+/// One half of a series' remembered track choice (docs/18 §3.1): `Off` is a choice, `Unset`
+/// forgets it. Mirrors `playback_policy::prefs::TrackMemory`.
+#[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
+pub enum TrackMemoryFfi {
+    Unset,
+    Off,
+    Key { key: String },
+}
+
+impl From<TrackMemoryFfi> for playback_policy::prefs::TrackMemory {
+    fn from(memory: TrackMemoryFfi) -> Self {
+        match memory {
+            TrackMemoryFfi::Unset => Self::Unset,
+            TrackMemoryFfi::Off => Self::Off,
+            TrackMemoryFfi::Key { key } => Self::Key(key),
+        }
+    }
 }
 
 impl From<TrackKindFfi> for playback_policy::tracks::TrackKind {
@@ -2684,7 +2755,7 @@ mod tests {
     #[test]
     fn playback_osd_detail_maps_only_container_streams_and_chapters() {
         let dto = sample_series_dto();
-        let detail = PlaybackOsdDetail::from(&dto);
+        let detail = PlaybackOsdDetail::of(&dto, "ms-1");
         assert_eq!(detail.container.as_deref(), Some("mkv"));
         assert_eq!(detail.media_streams.len(), 1);
         assert_eq!(detail.media_streams[0].codec.as_deref(), Some("h264"));
@@ -2697,10 +2768,35 @@ mod tests {
         );
     }
 
+    /// The stats sheet describes the playing file: a multi-version item's size and path come from
+    /// the source being played, not the first one listed.
+    #[test]
+    fn playback_osd_detail_size_and_path_come_from_the_playing_media_source() {
+        let source = |id: &str, size: i64| jellyfin_api::models::MediaSourceInfo {
+            id: Some(id.to_string()),
+            size: Some(size),
+            path: Some(format!("/data/{id}.mkv")),
+            ..Default::default()
+        };
+        let dto = jellyfin_api::models::BaseItemDto {
+            media_sources: vec![source("ms-1", 1), source("ms-2", 2)],
+            ..Default::default()
+        };
+        let playing = PlaybackOsdDetail::of(&dto, "ms-2");
+        assert_eq!(playing.size_bytes, Some(2));
+        assert_eq!(playing.path.as_deref(), Some("/data/ms-2.mkv"));
+        let unknown = PlaybackOsdDetail::of(&dto, "ms-9");
+        assert_eq!(
+            unknown.size_bytes,
+            Some(1),
+            "falls back to the first source"
+        );
+    }
+
     #[test]
     fn playback_osd_detail_size_bytes_and_path_are_none_when_the_server_sent_no_media_sources() {
         let dto = jellyfin_api::models::BaseItemDto::default();
-        let detail = PlaybackOsdDetail::from(&dto);
+        let detail = PlaybackOsdDetail::of(&dto, "ms-1");
         assert_eq!(detail.size_bytes, None);
         assert_eq!(detail.path, None);
     }

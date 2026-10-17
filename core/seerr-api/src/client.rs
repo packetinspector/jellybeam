@@ -2,8 +2,8 @@
 //! Auth (`docs/14-seerr-discover.md` "Auth"): JELLYFIN/LOCAL log in via `POST`, capturing
 //! `connect.sid` from `Set-Cookie` manually (no reqwest cookie-store); API_KEY sends
 //! `X-Api-Key` and never re-authenticates. A 401 on a cookie-authenticated request retries once
-//! via re-login, else `SeerrError::Unauthorized`. `Inner`/`AuthState` skip `Debug` so secrets
-//! never print.
+//! via re-login, else `SeerrError::Unauthorized`, or the transport error when the login got no
+//! answer. `Inner`/`AuthState` skip `Debug` so secrets never print.
 
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
@@ -53,6 +53,37 @@ enum AuthState {
         secret: String,
         cookie: Mutex<Option<String>>,
     },
+}
+
+impl AuthState {
+    fn cookie(
+        method: SeerrAuthMethod,
+        identity: &str,
+        secret: &str,
+        cookie: Option<String>,
+    ) -> Self {
+        AuthState::Cookie {
+            method,
+            identity: identity.to_string(),
+            secret: secret.to_string(),
+            cookie: Mutex::new(cookie),
+        }
+    }
+
+    fn duplicate(&self) -> Self {
+        match self {
+            AuthState::ApiKey(key) => AuthState::ApiKey(key.clone()),
+            AuthState::Cookie {
+                method,
+                identity,
+                secret,
+                cookie,
+            } => {
+                let cookie = cookie.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                AuthState::cookie(*method, identity, secret, cookie)
+            }
+        }
+    }
 }
 
 struct Inner {
@@ -222,17 +253,30 @@ impl SeerrClient {
                         base_url,
                         user_id: user.id,
                         http,
-                        auth: AuthState::Cookie {
-                            method,
-                            identity: identity.to_string(),
-                            secret: secret.to_string(),
-                            cookie: Mutex::new(Some(cookie)),
-                        },
+                        auth: AuthState::cookie(method, identity, secret, Some(cookie)),
                     }),
                 };
                 Ok((client, user))
             }
         }
+    }
+
+    /// The same connection (user, credentials, current cookie) on a fresh HTTP client with
+    /// `connect_timeout`/`request_timeout`. A connect probes with tight timeouts, then keeps
+    /// the connection under the normal ones (docs/14 "Auth").
+    pub fn with_timeouts(
+        &self,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self, SeerrError> {
+        Ok(SeerrClient {
+            inner: Arc::new(Inner {
+                base_url: self.inner.base_url.clone(),
+                user_id: self.inner.user_id,
+                http: build_http_client(connect_timeout, request_timeout)?,
+                auth: self.inner.auth.duplicate(),
+            }),
+        })
     }
 
     async fn login_cookie(
@@ -316,8 +360,9 @@ impl SeerrClient {
             .map_err(|e| SeerrError::Transport(describe_error_chain(&e)))
     }
 
-    /// Retries once on a 401 from a cookie-authenticated client (see the
-    /// auth note above); an API-key client or a failed re-login returns the 401.
+    /// Retries once on a 401 from a cookie-authenticated client (see the auth note above); an
+    /// API-key client or a refused re-login returns the 401, a re-login that got no answer its
+    /// transport error.
     async fn send_with_relogin(
         &self,
         method: reqwest::Method,
@@ -338,7 +383,7 @@ impl SeerrClient {
         else {
             return Ok(resp);
         };
-        let Ok((new_cookie, _user)) = Self::login_cookie(
+        let new_cookie = match Self::login_cookie(
             &self.inner.http,
             &self.inner.base_url,
             *auth_method,
@@ -346,8 +391,10 @@ impl SeerrClient {
             secret,
         )
         .await
-        else {
-            return Ok(resp);
+        {
+            Ok((new_cookie, _user)) => new_cookie,
+            Err(SeerrError::Transport(message)) => return Err(SeerrError::Transport(message)),
+            Err(_) => return Ok(resp),
         };
         *cookie.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_cookie);
         self.execute(method, path, query, &body).await

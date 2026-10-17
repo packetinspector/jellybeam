@@ -28,6 +28,7 @@ import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import tv.jellybeam.data.runCatchingCancellable
 import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.TrickplayMetaFfi
@@ -364,10 +365,10 @@ class OkHttpSheetFetcher(client: OkHttpClient, private val dir: File) : SheetFet
         val file = File(dir, hash(url) + ".jpg")
         if (file.isFile) {
             file.setLastModified(System.currentTimeMillis())
-            return runCatching { file.readBytes() }.getOrNull()
+            return runCatchingCancellable { file.readBytes() }.getOrNull()
         }
         val bytes = client.newCall(Request.Builder().url(url).build()).awaitBytes() ?: return null
-        runCatching {
+        runCatchingCancellable {
             dir.mkdirs()
             val tmp = File.createTempFile("sheet-", ".part", dir)
             try {

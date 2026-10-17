@@ -3,12 +3,10 @@ package tv.jellybeam.ui.home.classic
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.LaunchWarmup
 import tv.jellybeam.i18n.UiStrings
-import tv.jellybeam.player.PlaybackReports
 import tv.jellybeam.ui.home.common.HomeFeed
 import tv.jellybeam.ui.home.common.HomeFeedState
 import tv.jellybeam.ui.home.common.reuseIfUnchanged
@@ -35,8 +33,6 @@ data class ClassicContent(
 class ClassicHomeViewModel(
     gateway: CoreGateway,
     strings: UiStrings,
-    /** docs/17-mini-player.md §6: injected so a test can drive it instead of [PlaybackReports]. */
-    stopEpoch: Flow<Long> = PlaybackReports.stopEpoch,
     launchWarmup: LaunchWarmup? = null,
 ) : ViewModel() {
 
@@ -45,7 +41,6 @@ class ClassicHomeViewModel(
         gateway = gateway,
         layout = HomeLayout.CLASSIC,
         initialContent = ClassicContent(),
-        stopEpoch = stopEpoch,
         launchWarmup = launchWarmup,
         strings = strings,
         extract = ::classic,
@@ -55,10 +50,6 @@ class ClassicHomeViewModel(
     val state: StateFlow<HomeFeedState<ClassicContent>> = feed.state
 
     fun setActive(active: Boolean) = feed.setActive(active)
-
-    fun refreshNow() = feed.refreshNow()
-
-    fun onHostResume() = feed.onHostResume()
 
     fun loadServerHost() = feed.loadServerHost()
 }

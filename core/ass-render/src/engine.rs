@@ -104,15 +104,18 @@ enum Cmd {
     AddFont {
         name: String,
         data: Vec<u8>,
+        item: u64,
     },
     AddTrack {
         key: String,
         header: Vec<u8>,
+        item: u64,
     },
     /// (media time µs, payload) in stream order.
     AddSamples {
         key: String,
         samples: Vec<(i64, Vec<u8>)>,
+        item: u64,
     },
     AddScript {
         key: String,
@@ -120,9 +123,15 @@ enum Cmd {
         item: u64,
         done: SyncSender<bool>,
     },
-    Select(Option<String>),
+    Select {
+        key: Option<String>,
+        item: u64,
+    },
     /// Deselects this track only if it is still the selected one.
-    Unselect(String),
+    Unselect {
+        key: String,
+        item: u64,
+    },
     Position {
         pos_us: i64,
         playing: bool,
@@ -197,24 +206,27 @@ impl Engine {
         self.item.load(Ordering::SeqCst)
     }
 
-    pub fn add_font(&self, name: String, data: Vec<u8>) {
-        self.send(Cmd::AddFont { name, data });
+    /// An attachment for `item`; dropped once `item` has ended.
+    pub fn add_font(&self, name: String, data: Vec<u8>, item: u64) {
+        self.send(Cmd::AddFont { name, data, item });
     }
 
-    pub fn add_track(&self, key: String, header: Vec<u8>) {
-        self.send(Cmd::AddTrack { key, header });
+    /// Track `key`'s header for `item`; dropped once `item` has ended.
+    pub fn add_track(&self, key: String, header: Vec<u8>, item: u64) {
+        self.send(Cmd::AddTrack { key, header, item });
     }
 
-    /// Media3 SSA samples of track `key` in stream order, (media time µs, payload), as one command.
-    pub fn add_samples(&self, key: String, samples: Vec<(i64, Vec<u8>)>) {
+    /// Media3 SSA samples of track `key` of `item` in stream order, (media time µs, payload), as one
+    /// command; dropped once `item` has ended.
+    pub fn add_samples(&self, key: String, samples: Vec<(i64, Vec<u8>)>, item: u64) {
         if !samples.is_empty() {
-            self.send(Cmd::AddSamples { key, samples });
+            self.send(Cmd::AddSamples { key, samples, item });
         }
     }
 
     #[cfg(test)]
     pub(crate) fn add_sample(&self, key: String, time_us: i64, data: Vec<u8>) {
-        self.add_samples(key, vec![(time_us, data)]);
+        self.add_samples(key, vec![(time_us, data)], self.item());
     }
 
     /// docs/18 §3.2: a whole script (a sidecar file) as track `key` of `item`, replacing that item's
@@ -231,13 +243,15 @@ impl Engine {
         result.recv().unwrap_or(false)
     }
 
-    pub fn select(&self, key: Option<String>) {
-        self.send(Cmd::Select(key));
+    /// Selects track `key` (or none) of `item`; dropped once `item` has ended.
+    pub fn select(&self, key: Option<String>, item: u64) {
+        self.send(Cmd::Select { key, item });
     }
 
-    /// Deselects `key` unless another track was selected since, whichever thread asked first.
-    pub fn unselect(&self, key: String) {
-        self.send(Cmd::Unselect(key));
+    /// Deselects `key` of `item` unless another track was selected since, whichever thread asked
+    /// first; dropped once `item` has ended.
+    pub fn unselect(&self, key: String, item: u64) {
+        self.send(Cmd::Unselect { key, item });
     }
 
     pub fn set_position(&self, pos_us: i64, playing: bool) {
@@ -469,11 +483,19 @@ impl Worker {
                 self.item += 1;
                 self.end_item();
             }
-            Cmd::AddFont { name, data } => self.add_font(name, data),
-            Cmd::AddTrack { key, header } => self.add_track(key, &header),
-            Cmd::AddSamples { key, samples } => {
+            Cmd::AddFont { name, data, item } => {
+                if item == self.item {
+                    self.add_font(name, data);
+                }
+            }
+            Cmd::AddTrack { key, header, item } => {
+                if item == self.item {
+                    self.add_track(key, &header);
+                }
+            }
+            Cmd::AddSamples { key, samples, item } => {
                 // An unknown track drops the batch unparsed; stats publish once, not per refusal.
-                if self.tracks.contains_key(&key) {
+                if item == self.item && self.tracks.contains_key(&key) {
                     let mut refused = false;
                     for (time_us, data) in &samples {
                         refused |= self.add_sample(&key, *time_us, data);
@@ -492,9 +514,13 @@ impl Worker {
                 let added = item == self.item && self.add_script(key, &data);
                 let _ = done.send(added);
             }
-            Cmd::Select(key) => self.select(key),
-            Cmd::Unselect(key) => {
-                if self.selected.as_ref() == Some(&key) {
+            Cmd::Select { key, item } => {
+                if item == self.item {
+                    self.select(key);
+                }
+            }
+            Cmd::Unselect { key, item } => {
+                if item == self.item && self.selected.as_ref() == Some(&key) {
                     self.select(None);
                 }
             }

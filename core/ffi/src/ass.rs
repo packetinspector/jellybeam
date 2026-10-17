@@ -97,35 +97,40 @@ impl AssOverlay {
         self.engine.begin_item();
     }
 
-    /// The current item, captured before a sidecar fetch so a script can't land on the next one.
+    /// The current item, captured where it begins and carried by every feed so none lands on the next.
     pub fn item(&self) -> u64 {
         self.engine.item()
     }
 
-    /// A Matroska font attachment; held, not loaded, until a styled track is shown.
-    pub fn add_font(&self, name: String, data: Vec<u8>) {
-        self.engine.add_font(name, data);
+    /// A Matroska font attachment for `item`; held, not loaded, until a styled track is shown, and
+    /// dropped once `item` has ended.
+    pub fn add_font_for(&self, name: String, data: Vec<u8>, item: u64) {
+        self.engine.add_font(name, data, item);
     }
 
-    /// A track's `[Script Info]`/`[V4+ Styles]` header (Media3 `initializationData[1]`).
-    pub fn add_track(&self, key: String, header: Vec<u8>) {
-        self.engine.add_track(key, header);
+    /// A track's `[Script Info]`/`[V4+ Styles]` header (Media3 `initializationData[1]`) for `item`;
+    /// dropped once `item` has ended.
+    pub fn add_track_for(&self, key: String, header: Vec<u8>, item: u64) {
+        self.engine.add_track(key, header, item);
     }
 
-    /// docs/13: Media3 SSA samples in stream order, in one call: a heavy script holds tens of
-    /// thousands in its first seconds, and a call each held the first frame.
-    pub fn add_samples(&self, key: String, samples: Vec<AssSample>) {
+    /// docs/13: Media3 SSA samples of `item` in stream order, in one call: a heavy script holds
+    /// tens of thousands in its first seconds, and a call each held the first frame. Dropped once
+    /// `item` has ended.
+    pub fn add_samples_for(&self, key: String, samples: Vec<AssSample>, item: u64) {
         let samples = samples.into_iter().map(|s| (s.time_us, s.data)).collect();
-        self.engine.add_samples(key, samples);
+        self.engine.add_samples(key, samples, item);
     }
 
-    pub fn select(&self, key: Option<String>) {
-        self.engine.select(key);
+    /// Selects track `key` (or none) of `item`; dropped once `item` has ended.
+    pub fn select_for(&self, key: Option<String>, item: u64) {
+        self.engine.select(key, item);
     }
 
-    /// Deselects `key` only if no other track was selected since (docs/18 §3.2).
-    pub fn unselect(&self, key: String) {
-        self.engine.unselect(key);
+    /// Deselects `key` of `item` only if no other track was selected since (docs/18 §3.2); dropped
+    /// once `item` has ended.
+    pub fn unselect_for(&self, key: String, item: u64) {
+        self.engine.unselect(key, item);
     }
 
     pub fn set_position(&self, position_us: i64, playing: bool) {
@@ -228,4 +233,38 @@ pub unsafe extern "system" fn Java_tv_jellybeam_player_ass_AssSurfaces_nativeAcq
     surface: *mut std::ffi::c_void,
 ) -> i64 {
     ass_render::NativeWindowSink::acquire(env, surface)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    const HEADER: &str = "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 360\n\n\
+[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n\
+Style: Default,Noto Sans,36,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,20,1\n\n\
+[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+
+    /// Smoke: the exported `item` argument reaches the engine, which drops the ended item's feeds
+    /// (engine behaviour itself is pinned in `ass-render`).
+    #[test]
+    fn the_item_argument_is_forwarded_to_the_engine() {
+        let overlay = AssOverlay::new().unwrap();
+        overlay.begin_item();
+        let ended = overlay.item();
+        overlay.begin_item();
+        let live = overlay.item();
+        overlay.add_track_for("t".into(), HEADER.as_bytes().to_vec(), ended);
+        overlay.select_for(Some("t".into()), ended);
+        assert!(!overlay.add_script("barrier".into(), Vec::new(), live));
+        assert!(!overlay.stats().track_selected, "no track to select");
+        overlay.add_track_for("t".into(), HEADER.as_bytes().to_vec(), live);
+        overlay.select_for(Some("t".into()), live);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !overlay.stats().track_selected {
+            assert!(std::time::Instant::now() < deadline, "timed out selecting");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }

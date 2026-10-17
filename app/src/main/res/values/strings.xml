@@ -58,6 +58,7 @@
 
     <!-- Series detail page's season selector (docs/11). -->
     <string name="detail_seasons">SEASONS</string>
+    <string name="detail_lists_error">Couldn\'t load the seasons and episodes.</string>
 
     <!-- Series detail page's Specials season chip label: never the raw
          index "0" (spec §3 item 6: "reachable by D-pad like any other,
@@ -438,9 +439,6 @@
     <string name="next_up_eyebrow">UP NEXT</string>
     <string name="next_up_back_to_dismiss">BACK TO DISMISS</string>
     <string name="next_up_play_next">Play Next</string>
-    <!-- "22 MIN": next-up's third line; omitted when the item has no
-         known runtime. -->
-    <string name="next_up_runtime_min">%1$d MIN</string>
     <!-- Shared by both cards' action row: "SELECT" and the "IN {numeral}"
          countdown ("8S" under a minute, "1:30" at or past it). -->
     <string name="card_select">SELECT</string>
@@ -479,6 +477,7 @@
     <string name="discover_search_field_label">Search Discover</string>
     <string name="discover_search_empty_hint">Search movies and TV to request</string>
     <string name="discover_search_no_results">No matches</string>
+    <string name="discover_search_unavailable">Search isn\'t available right now</string>
 
     <!-- Discover detail: availability line + request/cancel actions. Card
          titles/genres/overview are server-provided verbatim, not resources. -->

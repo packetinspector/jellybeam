@@ -18,21 +18,24 @@ use crate::library_prefs::LibraryGridPrefsFile;
 use crate::settings::{PlaybackQuality, Settings};
 use crate::track_prefs::TrackPrefsFile;
 use crate::types::{
-    AccountIdentity, AccountInfo, Card, ChangeEvent, CollectionInfo, DeviceCaps, EpisodeNeighbors,
-    FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort, ImageKind, ImageUrlPrefix,
-    ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MirrorItemCounts, MirrorLibrary,
-    MirrorStats, PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan, PlaybackRequest,
+    AccountIdentity, AccountInfo, BrowseRead, Card, ChangeEvent, CollectionInfo, DeviceCaps,
+    EpisodeNeighbors, FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort, ImageKind,
+    ImageUrlPrefix, ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MirrorItemCounts,
+    MirrorLibrary, MirrorStats, PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan, PlaybackRequest,
     QuickConnectSession, ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus,
-    TrackDecisionFfi, TrackInfo, TrackKindFfi, TrickplayMetaFfi, ViewSnapshot,
+    TrackDecisionFfi, TrackInfo, TrackKindFfi, TrackMemoryFfi, ViewSnapshot,
 };
 use crate::{device_id, library_prefs, session, settings, signin, track_prefs};
 
 /// Foreign-implemented sink for mirror change notifications. Kotlin hands an
 /// instance to [`JellybeamCore::set_change_listener`]; `on_change` is called from
 /// a background task on `JellybeamCore`'s own runtime, never the caller's thread.
-#[uniffi::export(with_foreign)]
+#[uniffi::export(foreign)]
 pub trait ChangeListener: Send + Sync {
-    fn on_change(&self, event: ChangeEvent);
+    fn on_change(&self, event: ChangeEvent) -> Result<(), crate::error::CallbackError>;
+    /// docs/18 §2.1: the installed bus's socket rejected `account`'s token, at most once per bus;
+    /// called on a runtime thread that a core teardown may be joining, so it must not call the core.
+    fn on_unauthorized(&self, account: AccountIdentity) -> Result<(), crate::error::CallbackError>;
 }
 
 /// Local resume checkpoints are independent of Jellyfin's network progress
@@ -45,12 +48,8 @@ const LOCAL_PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
 /// cache TTL -- one live BoxSet list per session, re-read after ten minutes.
 const COLLECTIONS_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// How often [`JellybeamCore::spawn_server_version_reconnect_watch`] polls
-/// `/System/Info/Public` on its own, independent of the `bus_tx` `Connected`
-/// event it also listens for (docs/13 Server compatibility).
-/// Backstops the gaps with no bus running (before the first `open_mirror`,
-/// or between sessions); once a bus is running, its `Connected` event fires
-/// this same refresh immediately instead. Shortened under `cfg(test)`.
+/// docs/13 Server compatibility: how often [`JellybeamCore::spawn_server_version_poll`] refreshes
+/// `/System/Info/Public`, the backstop beside each bus `Connected` refresh; shortened under `cfg(test)`.
 #[cfg(not(test))]
 const SERVER_VERSION_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 #[cfg(test)]
@@ -86,6 +85,10 @@ impl LocalProgressCheckpoint {
 /// stale resume/server state is unlikely -- not a long-lived cache.
 const PRELOAD_CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// docs/18 §2: a repeated dwell trigger renegotiates a cache this old, so a long dwell re-armed
+/// every TTL never sits on a dead entry; Play still consumes one until [`PRELOAD_CACHE_TTL`].
+const PRELOAD_REFRESH_AFTER: Duration = Duration::from_secs(PRELOAD_CACHE_TTL.as_secs() / 2);
+
 /// docs/18 §2.1: playback ownership. A request is admitted under the lock, and only the admitted
 /// claim may install; a failed request's claim is inert, since the next admission replaces it.
 #[derive(Default)]
@@ -94,31 +97,27 @@ struct PlaybackOwner {
     highest_seq: u64,
     /// The admitted request still allowed to install, cleared by install, revocation and reset.
     claim: Option<PlaybackClaim>,
-    /// Advanced by every account reset; a request minted under another epoch is refused.
-    account_epoch: u64,
     /// The session a pending fallback took over. It keeps reporting (and its stream keeps
     /// playing) until the claim resolves, so it is stopped where the viewer actually left it.
     retiring: Option<Retiring>,
     /// The session the installed one replaced: a stop sent before the caller learned the new id
     /// still names it, and ends the installed session where the viewer left.
     installed_replaces: Option<String>,
-    /// The epoch of the newest admitted request: the account the newest playback plays on.
-    playing_epoch: Option<u64>,
     /// The account a live playback kept across an account change, with the epoch its own requests
     /// still carry (next-up included, which stops before it prepares); cleared when a playback on
     /// the current account installs or its own account is left.
     parked: Option<ParkedAccount>,
 }
 
-impl PlaybackOwner {
-    /// docs/18 §2.1: whether the newest playback is the parked one, so leaving its account ends
-    /// it; a parked account whose playback a newer one replaced is only dropped.
-    fn parked_plays(&self) -> bool {
-        self.parked
-            .as_ref()
-            .is_some_and(|parked| self.playing_epoch == Some(parked.epoch))
-    }
-}
+/// docs/18 §2.1: how long the logout waits for the account's final reports; a Stopped still
+/// retrying after this would be refused once the token is revoked anyway.
+#[cfg(not(test))]
+const FINAL_REPORT_SETTLE_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const FINAL_REPORT_SETTLE_BUDGET: Duration = Duration::from_secs(3);
+
+/// Resolves when one session's final Stopped report has landed, given up or been cancelled.
+type FinalSettled = tokio::sync::oneshot::Receiver<()>;
 
 /// [`PlaybackOwner::parked`].
 struct ParkedAccount {
@@ -136,7 +135,8 @@ impl ParkedAccount {
     /// fresh token, a switch back).
     /// A field the installed one lacks (a mirror still opening after a switch back) stays its own.
     fn resolve(&self, state: &State) -> SessionAccount {
-        if self.account.mirror_dir.is_some() && self.is_account(state.mirror_dir.as_deref()) {
+        let installed_dir = state.account.installed().map(|i| i.mirror_dir.as_str());
+        if self.account.mirror_dir.is_some() && self.is_account(installed_dir) {
             self.account.refreshed_by(SessionAccount::of(state))
         } else {
             self.account.clone()
@@ -149,8 +149,6 @@ struct PlaybackClaim {
     seq: u64,
     /// The account epoch it was minted under, which names the account it installs on.
     epoch: u64,
-    /// [`PlaybackOwner::playing_epoch`] before it was admitted, restored if it fails.
-    prior_playing_epoch: Option<u64>,
     /// The session a fallback took over on admission, so stopping or abandoning it revokes.
     retires: Option<String>,
 }
@@ -193,13 +191,121 @@ impl SessionAccount {
         }
     }
 
+    /// Its client and open mirror, read together, or why it has none.
+    fn require_open(
+        self,
+    ) -> Result<(jellyfin_api::JellyfinClient, media_cache::Mirror), CoreError> {
+        let client = self.client.ok_or(CoreError::NotSignedIn)?;
+        Ok((client, self.mirror.ok_or(CoreError::MirrorNotOpen)?))
+    }
+
     fn of(state: &State) -> Self {
+        let installed = state.account.installed();
         Self {
-            mirror: state.mirror.clone(),
-            client: state.client.clone(),
-            mirror_dir: state.mirror_dir.clone(),
+            mirror: state.account.bundle().map(|g| g.mirror.clone()),
+            client: installed.map(|i| i.client.clone()),
+            mirror_dir: installed.map(|i| i.mirror_dir.clone()),
         }
     }
+}
+
+/// docs/18 §2.1 / docs/19 §2.3: per-account caches, replaced wholesale at every account change;
+/// a fetch stores into them only through [`JellybeamCore::store_if_epoch`].
+#[derive(Default)]
+pub(crate) struct AccountCaches {
+    /// The live Seerr Discover connection, built lazily on first use (docs/14 "zero startup
+    /// cost").
+    pub(crate) seerr: Option<crate::seerr::SeerrHandle>,
+    /// `(fetched_at, collections)`, re-fetched by [`JellybeamCore::list_collections`] after ten
+    /// minutes.
+    collections: Option<(Instant, Vec<CollectionInfo>)>,
+    /// [`JellybeamCore::is_administrator`]'s answer, cached only when the server stated it.
+    is_admin: Option<bool>,
+}
+
+/// docs/18 §2.1: the installed account and its epoch; [`JellybeamCore::reset_account_state_locked`]
+/// is the only writer of either, and the epoch outlives the account so a removal still moves it.
+#[derive(Default)]
+pub(crate) struct AccountSlot {
+    epoch: u64,
+    installed: Option<Installed>,
+}
+
+impl AccountSlot {
+    pub(crate) fn installed(&self) -> Option<&Installed> {
+        self.installed.as_ref()
+    }
+
+    /// The installed account's client with the epoch a result fetched with it is tagged by.
+    fn current_client(&self) -> Option<(u64, jellyfin_api::JellyfinClient)> {
+        Some((self.epoch, self.installed.as_ref()?.client.clone()))
+    }
+
+    /// The installed account's open bundle; `None` while signed out or Closed.
+    fn bundle(&self) -> Option<&BusBundle> {
+        self.installed.as_ref()?.bundle.as_ref()
+    }
+
+    /// docs/18 §2.1: the installed account only while `epoch` is still current -- the one gate a
+    /// result tagged with the epoch it was fetched under passes.
+    fn installed_mut(&mut self, epoch: u64) -> Option<&mut Installed> {
+        self.installed.as_mut().filter(|_| self.epoch == epoch)
+    }
+}
+
+/// docs/18 §2.1: one saved account as installed -- its client and everything known about it.
+pub(crate) struct Installed {
+    account: AccountInfo,
+    device_id: String,
+    mirror_dir: String,
+    client: jellyfin_api::JellyfinClient,
+    /// docs/13 Server compatibility: last-known version and name, seeded offline from the saved
+    /// record; `None` is "unknown", never "old server".
+    server_version: Option<jellyfin_api::ServerVersion>,
+    server_name: Option<String>,
+    pub(crate) caches: AccountCaches,
+    /// docs/18 §2.1: its open mirror and bus; `None` is Closed. Taken whole, never dropped under
+    /// the state lock: [`JellybeamCore::stop_event_bus`] is its one teardown.
+    bundle: Option<BusBundle>,
+}
+
+impl Installed {
+    /// `saved` installed with `client`, its caches empty and its facts as saved.
+    fn of(saved: &session::SessionFile, client: jellyfin_api::JellyfinClient) -> Self {
+        Self {
+            account: AccountInfo::of(saved),
+            device_id: saved.device_id.clone(),
+            mirror_dir: saved.mirror_dir.clone(),
+            client,
+            server_version: saved.server_version.as_deref().and_then(|v| v.parse().ok()),
+            server_name: saved.server_name.clone(),
+            caches: AccountCaches::default(),
+            bundle: None,
+        }
+    }
+
+    fn identity(&self) -> AccountIdentity {
+        AccountIdentity {
+            server_url: self.account.server_url.clone(),
+            user_id: self.account.user_id.clone(),
+        }
+    }
+}
+
+/// [`JellybeamCore::installed_identity`]'s result: the installed account, stamped with its epoch.
+pub(crate) struct InstalledIdentity {
+    pub(crate) epoch: u64,
+    pub(crate) account: AccountIdentity,
+}
+
+/// docs/18 §2.1: the epochs Kotlin re-reads after every account call, read under one lock so
+/// they always describe the same instant.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct AccountEpochs {
+    /// The current account's epoch, the one a [`PlaybackRequest`] must carry.
+    pub epoch: u64,
+    /// The epoch a live playback kept across an account change still owns playback under.
+    pub parked: Option<u64>,
 }
 
 /// The core's [`State`], reachable only through [`StateGuard`] so no lock can skip its release.
@@ -218,9 +324,7 @@ struct AdmittedPlay {
     caps: jellyfin_core::AndroidTvCaps,
     tolerate_mislabeled_levels: bool,
     quality: PlaybackQuality,
-    cached: Option<PreloadCache>,
-    joinable_task: Option<tokio::task::JoinHandle<()>>,
-    stale_task: Option<tokio::task::JoinHandle<()>>,
+    preload: PreloadForPlay,
 }
 
 /// [`SharedState::lock`]'s guard. Releasing it re-derives the shared sync-yield flag from the
@@ -304,6 +408,11 @@ struct AccountReset {
     retiring: Option<Retiring>,
     /// The outgoing account, so its sessions' final writes stay with it.
     account: SessionAccount,
+    /// The outgoing account's bundle, torn down after the final reports start.
+    bundle: Option<BusBundle>,
+    /// docs/13 Server compatibility: the incoming account's epoch and client, whose facts are
+    /// refreshed last.
+    refresh: Option<(u64, jellyfin_api::JellyfinClient)>,
 }
 
 /// One-slot cache of a focus-dwell preload's negotiation result. Only ever
@@ -311,7 +420,10 @@ struct AccountReset {
 /// §2: "preload_playback caches DirectPlay plans only") -- a `Transcode`
 /// result's `url` embeds the negotiation's start position, so it isn't safe
 /// to reuse the way a Direct Play url is.
+#[derive(Clone)]
 struct PreloadCache {
+    /// The request that produced it: [`State::preload_publish`] gates on it, and
+    /// [`State::preload_take_joined`] clears the slot copy of the generation a joiner consumed.
     generation: u64,
     item_id: String,
     source: jellyfin_api::models::MediaSourceInfo,
@@ -327,7 +439,7 @@ struct PreloadCache {
 }
 
 /// Complete immutable input for one speculative negotiation. Keeping the
-/// newest request in [`State::preload_pending`] lets rapid focus changes
+/// newest request in [`PreloadTask::pending`] lets rapid focus changes
 /// coalesce without starting concurrent server work.
 struct PreloadRequest {
     generation: u64,
@@ -342,20 +454,93 @@ struct PreloadRequest {
 }
 
 impl PreloadCache {
-    fn is_fresh_for(&self, generation: u64, item_id: &str, now: Instant) -> bool {
-        self.generation == generation
-            && self.item_id == item_id
-            && now.saturating_duration_since(self.created_at) < PRELOAD_CACHE_TTL
+    fn age(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.created_at)
+    }
+
+    /// Whether Play may consume it for `item_id`.
+    fn serves(&self, item_id: &str, now: Instant) -> bool {
+        self.item_id == item_id && self.age(now) < PRELOAD_CACHE_TTL
     }
 }
 
-/// One mirror's own event relay: everything a real `jellyfin_core::EventBus`
-/// emits for that mirror's client is copied here, and `Mirror::open`
-/// subscribes on `tx`, never on [`JellybeamCore::bus_tx`] directly, so two
-/// accounts' bundles briefly alive at once (during
-/// [`JellybeamCore::install_authenticated_session`]'s swap window) can never
+/// docs/18 §2: the one speculative worker, bounding focus-driven negotiation to one active
+/// server request however many cancelled coroutines unwind late. It lives in
+/// [`State::preload_task`] exactly while a negotiation is outstanding.
+struct PreloadTask {
+    handle: tokio::task::JoinHandle<()>,
+    /// The item the running negotiation is for, which is all a Play may join.
+    running_item: String,
+    /// The running request's; a result is published only while it still names the task.
+    generation: u64,
+    /// The newest target asked for meanwhile, replaced in place so intermediate cards never queue.
+    pending: Option<PreloadRequest>,
+    /// The running negotiation's result for a joining Play: set by [`State::preload_publish`],
+    /// and dropped (waking every joiner) when the negotiation ends however it ends.
+    settled: tokio::sync::watch::Sender<Option<PreloadCache>>,
+    /// Set by the Play that joined: the result is single-use, so no second Play may share it.
+    joined: bool,
+    /// The item the newest trigger or Play named, which [`State::preload_publish`] weighs against
+    /// the slot to decide whether this negotiation's result is still wanted there.
+    newest_target: String,
+}
+
+/// A Play's hold on the negotiation it joined: the result of that generation alone.
+struct PreloadJoin {
+    settled: tokio::sync::watch::Receiver<Option<PreloadCache>>,
+    /// [`State::preload_epoch`] at the join; a later invalidation voids the result.
+    epoch: u64,
+}
+
+/// What [`State::preload_take_for_play`] hands [`JellybeamCore::prepare_playback`].
+#[derive(Default)]
+struct PreloadForPlay {
+    /// A cache that serves this item, single-use.
+    cached: Option<PreloadCache>,
+    /// The running negotiation for this very item, awaited instead of renegotiating.
+    join: Option<PreloadJoin>,
+    /// A speculative worker for anything else, aborted outside the lock.
+    abort: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// What [`State::preload_publish`] tells the worker to do next.
+enum PreloadNext {
+    /// The slot moved on without this request; stop without touching it.
+    Stale,
+    /// Nothing more was asked for.
+    Idle,
+    /// The newest target asked for meanwhile.
+    Run(PreloadRequest),
+}
+
+/// Clears the slot if the worker dies without publishing (a panic), so a dead task never
+/// coalesces later triggers away.
+struct PreloadExit {
+    shared: Arc<SharedState>,
+    generation: u64,
+}
+
+impl Drop for PreloadExit {
+    fn drop(&mut self) {
+        let mut state = self.shared.lock();
+        if state
+            .preload_task
+            .as_ref()
+            .is_some_and(|task| task.generation == self.generation)
+        {
+            state.preload_task = None;
+        }
+    }
+}
+
+/// One open mirror with its own event relay: everything a real `jellyfin_core::EventBus`
+/// emits for that mirror's client is copied here and nowhere else, and `Mirror::open`
+/// subscribes on `tx`, so two accounts' bundles briefly alive at once can never
 /// cross-deliver a `UserDataChanged` between them.
 struct BusBundle {
+    mirror: media_cache::Mirror,
+    /// The listener's forwarding task over `mirror`, if a listener was bound at commit or since.
+    listener_task: Option<tokio::task::JoinHandle<()>>,
     /// Per-bundle relay every event the real bus emits is copied onto; the
     /// mirror's receiver is subscribed here. Kept alive here (not only in the
     /// forwarder) so the mirror's receiver never sees `Closed` while the
@@ -364,6 +549,9 @@ struct BusBundle {
     /// exists for.
     #[allow(dead_code)]
     tx: tokio::sync::broadcast::Sender<jellyfin_core::BusEvent>,
+    /// docs/13 About > server info: the supervisor's connection watch, which `live_events_connected`
+    /// reads via `borrow()` so a lagging broadcast consumer can never lose it.
+    connection: tokio::sync::watch::Receiver<jellyfin_core::BusConnection>,
     handle: Option<jellyfin_core::EventBusHandle>,
     forwarder: Option<tokio::task::JoinHandle<()>>,
 }
@@ -374,47 +562,13 @@ struct BusBundle {
 /// than holding the guard across a `block_on`/foreign call.
 #[derive(Default)]
 pub(crate) struct State {
-    client: Option<jellyfin_api::JellyfinClient>,
-    mirror: Option<media_cache::Mirror>,
-    /// The active session's `SessionFile::mirror_dir` (`session.rs`): which
-    /// subdirectory of `data_dir` [`JellybeamCore::open_mirror`] opens `mirror.db`
-    /// inside. Set alongside `client` by every install path, cleared by
-    /// [`JellybeamCore::sign_out`]; kept in memory so it can never drift from
-    /// whichever session `client` was built from.
-    mirror_dir: Option<String>,
-    /// The active session's last-known server version (docs/13 Server
-    /// compatibility), read by [`JellybeamCore::server_version`]/
-    /// [`JellybeamCore::server_at_least`]. Seeded synchronously offline from the
-    /// saved session record by every install path, then kept fresh by
-    /// [`JellybeamCore::refresh_server_version_once`]'s periodic poll and bus
-    /// `Connected` triggers. `None` means "unknown", never "old server":
-    /// `server_at_least` fails closed on either.
-    server_version: Option<jellyfin_api::ServerVersion>,
-    /// The active session's last-known server name (docs/13 About > server info), shown
-    /// verbatim -- never renamed/prettified (CLAUDE.md). Seeded/cleared/refreshed alongside
-    /// [`Self::server_version`], but a name-only change never fires [`ChangeEvent::Refresh`]
-    /// (see [`JellybeamCore::apply_public_server_info`]).
-    server_name: Option<String>,
-    /// Live-events connection state for [`JellybeamCore::server_info_snapshot`]'s
-    /// `live_events_connected` -- set by the reconnect watch's `Connected`/`Disconnected`
-    /// bus events, cleared at every session-end point ([`JellybeamCore::stop_event_bus`]/
-    /// `sign_out`/switch/remove).
-    bus_connected: bool,
-    /// Kept independently of `listener_task` so a listener registered before
+    /// docs/18 §2.1: the installed account; every "is this the installed account" decision keys
+    /// on it, never the saved list's `active`. `pub(crate)` so `seerr.rs` can reach its caches.
+    pub(crate) account: AccountSlot,
+    /// Kept apart from any bundle so a listener registered before
     /// [`JellybeamCore::open_mirror`] is still bound once the mirror opens, and
-    /// rebinds automatically across a sign-out + fresh sign-in.
+    /// rebinds automatically across a removal + fresh sign-in.
     listener: Option<Arc<dyn ChangeListener>>,
-    /// The forwarding task started by [`JellybeamCore::spawn_listener_task`],
-    /// if a listener is currently bound to an open mirror.
-    listener_task: Option<tokio::task::JoinHandle<()>>,
-    /// The [`BusBundle`] bound to the currently open mirror's client, if
-    /// any -- created by [`JellybeamCore::open_mirror_with_bus`] right before it
-    /// opens the mirror, torn down at every session-end point via
-    /// [`JellybeamCore::stop_event_bus`]. `None` before the first successful
-    /// `open_mirror` and after every teardown. Kept here (not only in the
-    /// forwarder closure) so teardown can actually stop the reconnect loop
-    /// instead of leaking it across a session switch.
-    event_bus: Option<BusBundle>,
     /// Set by [`JellybeamCore::set_device_caps`]; read by
     /// [`JellybeamCore::prepare_playback`]. Never called means
     /// `jellyfin_core::AndroidTvCaps::default()`'s conservative floor.
@@ -434,7 +588,7 @@ pub(crate) struct State {
     /// can read `Settings::still_watching` through [`JellybeamCore::lock_state`].
     pub(crate) settings: Settings,
     /// Per-series audio/subtitle track memory, loaded once (tolerant load)
-    /// and kept in sync by [`JellybeamCore::remember_track_choice`]; read by
+    /// and kept in sync by [`JellybeamCore::remember_track_memory`]; read by
     /// [`JellybeamCore::resolve_tracks`].
     track_prefs: TrackPrefsFile,
     track_prefs_revision: u64,
@@ -449,16 +603,13 @@ pub(crate) struct State {
     /// holding the lock across the write) keeps a slow writer from clobbering
     /// a newer one.
     library_grid_prefs_revision: u64,
-    /// [`JellybeamCore::preload_playback`]'s one-slot result cache, consumed
-    /// (taken, never merely read) by [`JellybeamCore::prepare_playback`].
-    /// Cleared on every session-swap point so a preload negotiated against
-    /// one account's server can never be consumed by a different one.
+    /// Bumped under the state lock by each [`JellybeamCore::set_settings`]; orders the disk write.
+    settings_revision: u64,
+    /// docs/18 §2: [`JellybeamCore::preload_playback`]'s one-slot result cache, consumed
+    /// (taken, never merely read) by [`JellybeamCore::prepare_playback`]. It outlives a refresh
+    /// until the refreshed entry publishes, and is cleared at every session-swap point so one
+    /// account's preload is never consumed by another.
     preload_cache: Option<PreloadCache>,
-    /// Monotonic ownership token for speculative playback negotiation. Every
-    /// replacement, real prepare, session swap, or profile change advances
-    /// it; a background task may publish only while its captured generation
-    /// is still current.
-    preload_generation: u64,
     /// docs/18 §2.1: which playback request may install the next reporting session.
     playback_owner: PlaybackOwner,
     /// docs/18 §2.1: the sync-yield flag every mirror this core opens shares, kept equal to
@@ -467,30 +618,14 @@ pub(crate) struct State {
     /// docs/18 §3.2: the installed session's sidecar URLs for
     /// [`JellybeamCore::fetch_external_subtitle`]; cleared with the account.
     sidecars: Option<crate::types::SessionSidecars>,
-    /// The sole speculative worker, bounding focus-driven negotiation to one
-    /// active server request regardless of cancelled coroutines unwinding late.
-    preload_task: Option<tokio::task::JoinHandle<()>>,
-    /// Item owned by `preload_task`, coalescing duplicate high-signal
-    /// triggers without restarting the same request.
-    preload_target_item_id: Option<String>,
-    /// Latest target requested while `preload_task` still negotiates an
-    /// older item; replaced in place so intermediate cards never queue up.
-    preload_pending: Option<PreloadRequest>,
-    /// The active account's live Seerr Discover connection, if any -- built
-    /// lazily on first Seerr call, never at startup (docs/14-seerr-discover.md's
-    /// "zero startup cost" rule). Cleared at every session-swap point, same
-    /// discipline as `preload_cache`. `pub(crate)` so `seerr.rs`'s sibling
-    /// `impl JellybeamCore` block can reach it through `JellybeamCore::lock_state`.
-    pub(crate) seerr: Option<crate::seerr::SeerrHandle>,
-    /// docs/19-detail-action-menu.md §2.3: the session's cached BoxSet
-    /// ("collection") list -- `(fetched_at, collections)`, re-fetched by
-    /// [`JellybeamCore::list_collections`] once older than ten minutes. Cleared
-    /// at every session-swap point, same discipline as `preload_cache`/`seerr`.
-    collections: Option<(Instant, Vec<CollectionInfo>)>,
-    /// docs/19-detail-action-menu.md §2.3: [`JellybeamCore::is_administrator`]'s
-    /// per-session cache. Cleared at the same session-swap points as
-    /// [`Self::collections`].
-    is_admin: Option<bool>,
+    /// The negotiation outstanding, if any; a speculative one is never awaited by anything but
+    /// a Play for its own item.
+    preload_task: Option<PreloadTask>,
+    /// Bumped by every [`Self::preload_invalidate`], so a joined result outlives no invalidation.
+    preload_epoch: u64,
+    /// The last [`PreloadRequest::generation`] handed out; unique per request, so a task that
+    /// outlived its slot can never publish into the next one, and never reset.
+    preload_generation: u64,
     /// "Still watching?" inactivity counters for the current play-next chain
     /// (docs/feature-dev/spec-still-watching-and-lan-discovery.md Feature A).
     /// Lives only as long as this `JellybeamCore` instance's current playback
@@ -499,6 +634,165 @@ pub(crate) struct State {
     /// player-session construction anyway. `pub(crate)` for the same
     /// cross-module reason as [`Self::seerr`].
     pub(crate) still_watching: playback_policy::still_watching::InactivityState,
+}
+
+impl State {
+    /// docs/18 §2: a dwell trigger for `request.item_id`. Returns without work while a cache
+    /// younger than [`PRELOAD_REFRESH_AFTER`] serves the item or its negotiation already runs;
+    /// otherwise starts `spawn` when idle, or replaces the pending target of the running one.
+    /// A cache for the item is kept until its refresh publishes; one for another item is dropped.
+    fn preload_request(
+        &mut self,
+        request: PreloadRequest,
+        now: Instant,
+        spawn: impl FnOnce(PreloadRequest) -> tokio::task::JoinHandle<()>,
+    ) {
+        match self.preload_cache.as_ref() {
+            Some(cache) if cache.item_id == request.item_id => {
+                if cache.age(now) < PRELOAD_REFRESH_AFTER {
+                    // Back on a cached item: whatever else runs is no longer wanted, and
+                    // [`Self::preload_publish`] won't let it overwrite this item's cache.
+                    if let Some(task) = self.preload_task.as_mut() {
+                        task.pending = None;
+                        task.newest_target.clone_from(&request.item_id);
+                    }
+                    return;
+                }
+            }
+            _ => self.preload_cache = None,
+        }
+        if let Some(task) = self.preload_task.as_mut() {
+            // Back on the running item: a newer target for another card is no longer wanted.
+            task.newest_target.clone_from(&request.item_id);
+            task.pending = (task.running_item != request.item_id).then_some(request);
+            return;
+        }
+        let running_item = request.item_id.clone();
+        let generation = request.generation;
+        let (settled, _) = tokio::sync::watch::channel(None);
+        self.preload_task = Some(PreloadTask {
+            handle: spawn(request),
+            newest_target: running_item.clone(),
+            running_item,
+            generation,
+            pending: None,
+            settled,
+            joined: false,
+        });
+    }
+
+    /// docs/18 §2: what Play for `item_id` takes from the slot. A serving cache is consumed; the
+    /// running negotiation for this very item is joined; anything else speculative is aborted, so
+    /// Play never waits on another item's reply.
+    fn preload_take_for_play(
+        &mut self,
+        item_id: &str,
+        on_current: bool,
+        now: Instant,
+    ) -> PreloadForPlay {
+        let cached = self
+            .preload_cache
+            .take()
+            .filter(|cache| on_current && cache.serves(item_id, now));
+        let joinable = self
+            .preload_task
+            .as_mut()
+            .filter(|task| on_current && cached.is_none() && task.running_item == item_id);
+        if let Some(task) = joinable {
+            task.pending = None;
+            task.newest_target.clone_from(&task.running_item);
+            // The result is single-use: a second Play negotiates on its own, and must not abort
+            // the task the first is awaiting.
+            let join = (!std::mem::replace(&mut task.joined, true)).then(|| PreloadJoin {
+                settled: task.settled.subscribe(),
+                epoch: self.preload_epoch,
+            });
+            return PreloadForPlay {
+                cached: None,
+                join,
+                abort: None,
+            };
+        }
+        PreloadForPlay {
+            cached,
+            join: None,
+            abort: self.preload_task.take().map(|task| task.handle),
+        }
+    }
+
+    /// What a Play that joined a negotiation reads once it ends: that generation's own result if
+    /// it serves `item_id` and no invalidation came between, never whatever the slot holds now.
+    /// The slot's copy of the same generation goes with it, so the result stays single-use.
+    fn preload_take_joined(
+        &mut self,
+        join: &PreloadJoin,
+        item_id: &str,
+        now: Instant,
+    ) -> Option<PreloadCache> {
+        if join.epoch != self.preload_epoch {
+            return None;
+        }
+        let joined = join.settled.borrow().clone()?;
+        if self
+            .preload_cache
+            .as_ref()
+            .is_some_and(|cache| cache.generation == joined.generation)
+        {
+            self.preload_cache = None;
+        }
+        Some(joined).filter(|cache| cache.serves(item_id, now))
+    }
+
+    /// docs/18 §2: the worker for `generation` ends its negotiation with `cache`; published only while the slot
+    /// still names that request and never over a cache serving the newest target. The newest pending target runs
+    /// next, else the slot goes idle.
+    fn preload_publish(
+        &mut self,
+        generation: u64,
+        cache: Option<PreloadCache>,
+        now: Instant,
+    ) -> PreloadNext {
+        let Some(task) = self
+            .preload_task
+            .as_mut()
+            .filter(|task| task.generation == generation)
+        else {
+            return PreloadNext::Stale;
+        };
+        if let Some(cache) = cache {
+            debug_assert_eq!(cache.generation, generation);
+            let unwanted = task.newest_target != task.running_item
+                && self
+                    .preload_cache
+                    .as_ref()
+                    .is_some_and(|slot| slot.serves(&task.newest_target, now));
+            // Only a joined Play reads `settled`; without one, the slot gets the only copy.
+            if task.settled.receiver_count() > 0 {
+                task.settled.send_replace(Some(cache.clone()));
+            }
+            if !unwanted {
+                self.preload_cache = Some(cache);
+            }
+        }
+        if let Some(next) = task.pending.take() {
+            // `pending` is always the newest target, so `newest_target` already names it.
+            task.running_item.clone_from(&next.item_id);
+            task.generation = next.generation;
+            task.settled = tokio::sync::watch::channel(None).0;
+            task.joined = false;
+            PreloadNext::Run(next)
+        } else {
+            self.preload_task = None;
+            PreloadNext::Idle
+        }
+    }
+
+    /// Drops the cache and the negotiation; the caller aborts the returned handle outside the lock.
+    fn preload_invalidate(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.preload_cache = None;
+        self.preload_epoch = self.preload_epoch.wrapping_add(1);
+        self.preload_task.take().map(|task| task.handle)
+    }
 }
 
 /// Extra (non-default) `Fields` [`JellybeamCore::live_children`] requests --
@@ -526,36 +820,10 @@ pub(crate) fn live_children_fields() -> Vec<String> {
 pub struct JellybeamCore {
     data_dir: PathBuf,
     device_id: String,
-    /// This `JellybeamCore`'s own long-lived *status-only* relay: connection
-    /// state, never a per-account [`jellyfin_core::BusEvent::Server`]
-    /// payload. [`Self::new`] subscribes
-    /// [`Self::spawn_server_version_reconnect_watch`] to it once, for the
-    /// process lifetime. Each [`JellybeamCore::open_mirror_with_bus`] call
-    /// creates its own [`BusBundle`] instead of subscribing here, whose
-    /// forwarder relays only `Connected`/`Disconnected`/`NeedsReconcile`
-    /// onward onto this sender -- which therefore carries no data that could
-    /// cross an account boundary between two briefly-overlapping mirrors.
-    bus_tx: tokio::sync::broadcast::Sender<jellyfin_core::BusEvent>,
-    // NOTE ordering: `state` (which can transitively hold a `Mirror`, and so
-    // a live handle into the writer's mpsc channel) MUST be declared --
-    // and therefore dropped -- before `runtime`. `Mirror::open` parks a
-    // writer thread on `runtime`'s blocking pool that only returns once every
-    // `Sender` clone is dropped; `Runtime::drop` joins that pool and blocks
-    // forever if a live `Sender` outlives it. Rust drops fields in
-    // declaration order, so this alone drops `state` first; the explicit
-    // `Drop` impl below additionally handles the listener task's own
-    // `Mirror` clone (not a struct field, so declaration order misses it).
     state: Arc<SharedState>,
-    /// Serializes every read-modify-write of the on-disk session list
-    /// across every mutating site -- without this, a version refresh that
-    /// loaded the list before a concurrent sign-out/switch/remove could write
-    /// its own stale snapshot back, resurrecting a removed account or an old
-    /// token. Held only for one load-modify-save sequence, never across
-    /// network I/O or [`Self::state`]'s own lock (the reverse nesting --
-    /// taking `state` briefly inside a held `session_lock` -- is fine as long
-    /// as nothing takes them in the opposite order). An `Arc` so a
-    /// background refresh task can hold its own clone without keeping a
-    /// whole `JellybeamCore` alive.
+    /// docs/18 §2.1: serializes every read-modify-write of the session list so a stale snapshot
+    /// is never written back; held for one load-modify-save, never across network I/O and never
+    /// nested with the state lock. An `Arc` so a background task can hold its own clone.
     session_lock: Arc<Mutex<()>>,
     /// Serializes a throttled progress checkpoint with the final stop write.
     /// A report that won the state lock before `stop_playback` also takes
@@ -567,9 +835,17 @@ pub struct JellybeamCore {
     /// with `state`, so a save in flight never blocks `image_url`/
     /// `get_library_grid_prefs` on disk (docs/16-library-sort-filter.md §5).
     library_grid_prefs_save: crate::persistence::RevisionWriter,
+    settings_save: crate::persistence::RevisionWriter,
     track_prefs_save: crate::persistence::RevisionWriter,
     seerr_config: crate::seerr::SeerrConfigStore,
     updater: Mutex<Option<Arc<crate::updates::AppUpdater>>>,
+    /// Calls into `open_mirror`, so tests can pin how often a flow opens a mirror.
+    #[cfg(test)]
+    mirror_opens: std::sync::atomic::AtomicUsize,
+    /// docs/13 "sign-in": one client for every pre-auth request (sign-in, Quick Connect, discovery
+    /// probes) so the poll loop reuses its connection; per-core, never process-global, because
+    /// its pool is tied to this core's runtime.
+    pre_auth_http: std::sync::OnceLock<jellyfin_api::HttpClient>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -605,8 +881,6 @@ impl JellybeamCore {
             .build()
             .expect("jellybeam-core tokio runtime should always build");
 
-        let (bus_tx, _bus_rx) = tokio::sync::broadcast::channel::<jellyfin_core::BusEvent>(16);
-
         let state = Arc::new(SharedState(Mutex::new(State {
             settings: loaded_settings,
             track_prefs: loaded_track_prefs,
@@ -615,17 +889,9 @@ impl JellybeamCore {
         })));
         let session_lock = Arc::new(Mutex::new(()));
 
-        // docs/13 Server compatibility -- periodic poll (backstop
-        // for gaps with no bus running) plus the bus `Connected` event once
-        // `open_mirror` has spawned a real websocket `EventBus`. Spawned
-        // exactly once here (not per-session like `listener_task`): `bus_tx`
-        // outlives every sign-in/switch/sign-out, so one long-lived task
-        // covers every account. Holds no `Mirror`/writer-channel handle, so
-        // unlike `listener_task` it needs no `JoinHandle` kept for
-        // abort/join on drop -- it exits on its own once `bus_tx` drops.
-        Self::spawn_server_version_reconnect_watch(
-            bus_tx.subscribe(),
-            state.clone(),
+        // docs/13 Server compatibility: one poll for the process, following whichever client is installed.
+        Self::spawn_server_version_poll(
+            Arc::downgrade(&state),
             data_dir.clone(),
             session_lock.clone(),
             &runtime,
@@ -634,14 +900,17 @@ impl JellybeamCore {
         Arc::new(Self {
             data_dir,
             device_id,
-            bus_tx,
             state,
             session_lock,
             playback_write: Mutex::new(()),
             library_grid_prefs_save: crate::persistence::RevisionWriter::default(),
+            settings_save: crate::persistence::RevisionWriter::default(),
             track_prefs_save: crate::persistence::RevisionWriter::default(),
             seerr_config: crate::seerr::SeerrConfigStore::default(),
             updater: Mutex::new(None),
+            #[cfg(test)]
+            mirror_opens: std::sync::atomic::AtomicUsize::new(0),
+            pre_auth_http: std::sync::OnceLock::new(),
             runtime,
         })
     }
@@ -668,20 +937,20 @@ impl JellybeamCore {
         username: String,
         password: String,
     ) -> Result<AccountInfo, CoreError> {
-        let server_url = signin::normalize_sign_in_url(&server_url)?;
-        let host = signin::host_for_display(&server_url);
-        let identity = self.client_identity(&server_url);
+        let base = signin::ServerBase::parse(&server_url)?;
+        let identity = self.client_identity(base.url());
         let (client, auth) = self
             .runtime
             .block_on(jellyfin_api::JellyfinClient::authenticate_by_name(
-                &server_url,
+                self.pre_auth_http(),
+                base.url(),
                 identity,
                 &username,
                 &password,
             ))
-            .map_err(|e| signin::classify_sign_in_error(&host, e))?;
+            .map_err(|e| signin::classify_sign_in_error(base.host(), e))?;
 
-        self.install_authenticated_session(server_url, client, auth)
+        self.install_authenticated_session(base.into_url(), client, auth)
     }
 
     /// Replaces the credential for one already-saved account without
@@ -700,6 +969,7 @@ impl JellybeamCore {
         let (client, auth) = self
             .runtime
             .block_on(jellyfin_api::JellyfinClient::authenticate_by_name(
+                self.pre_auth_http(),
                 &target.server_url,
                 identity,
                 &username,
@@ -710,36 +980,22 @@ impl JellybeamCore {
         self.install_reauthenticated_session(index, target, client, auth)
     }
 
-    /// Whether this server currently permits Quick Connect: one bounded
-    /// request. Android owns the cancellable poll loop.
-    pub fn quick_connect_enabled(&self, server_url: String) -> Result<bool, CoreError> {
-        let server_url = signin::normalize_sign_in_url(&server_url)?;
-        let host = signin::host_for_display(&server_url);
-        let identity = self.client_identity(&server_url);
-        self.runtime
-            .block_on(jellyfin_api::JellyfinClient::quick_connect_enabled(
-                &server_url,
-                &identity,
-            ))
-            .map_err(|e| signin::classify_sign_in_error(&host, e))
-    }
-
     /// Starts a Quick Connect request. The secret is returned only for
     /// [Self::quick_connect_poll]/[Self::complete_quick_connect]; never persisted.
     pub fn initiate_quick_connect(
         &self,
         server_url: String,
     ) -> Result<QuickConnectSession, CoreError> {
-        let server_url = signin::normalize_sign_in_url(&server_url)?;
-        let host = signin::host_for_display(&server_url);
-        let identity = self.client_identity(&server_url);
+        let base = signin::ServerBase::parse(&server_url)?;
+        let identity = self.client_identity(base.url());
         let result = self
             .runtime
             .block_on(jellyfin_api::JellyfinClient::quick_connect_initiate(
-                &server_url,
+                self.pre_auth_http(),
+                base.url(),
                 &identity,
             ))
-            .map_err(|e| signin::classify_sign_in_error(&host, e))?;
+            .map_err(|e| signin::classify_quick_connect_initiate_error(base.host(), e))?;
         let code = result
             .code
             .filter(|value| !value.is_empty())
@@ -762,11 +1018,13 @@ impl JellybeamCore {
         server_url: String,
         secret: String,
     ) -> Result<bool, CoreError> {
-        let identity = self.client_identity(&server_url);
+        let base = signin::ServerBase::parse(&server_url)?;
+        let identity = self.client_identity(base.url());
         let result = self
             .runtime
             .block_on(jellyfin_api::JellyfinClient::quick_connect_poll(
-                &server_url,
+                self.pre_auth_http(),
+                base.url(),
                 &identity,
                 &secret,
             ))?;
@@ -780,20 +1038,20 @@ impl JellybeamCore {
         server_url: String,
         secret: String,
     ) -> Result<AccountInfo, CoreError> {
-        let server_url = signin::normalize_sign_in_url(&server_url)?;
-        let host = signin::host_for_display(&server_url);
-        let identity = self.client_identity(&server_url);
+        let base = signin::ServerBase::parse(&server_url)?;
+        let identity = self.client_identity(base.url());
         let (client, auth) = self
             .runtime
             .block_on(
                 jellyfin_api::JellyfinClient::authenticate_with_quick_connect(
-                    &server_url,
+                    self.pre_auth_http(),
+                    base.url(),
                     identity,
                     &secret,
                 ),
             )
-            .map_err(|e| signin::classify_sign_in_error(&host, e))?;
-        self.install_authenticated_session(server_url, client, auth)
+            .map_err(|e| signin::classify_sign_in_error(base.host(), e))?;
+        self.install_authenticated_session(base.into_url(), client, auth)
     }
 
     /// Completes Quick Connect for a selected saved account. Unlike normal
@@ -811,6 +1069,7 @@ impl JellybeamCore {
             .runtime
             .block_on(
                 jellyfin_api::JellyfinClient::authenticate_with_quick_connect(
+                    self.pre_auth_http(),
                     &target.server_url,
                     identity,
                     &secret,
@@ -824,47 +1083,9 @@ impl JellybeamCore {
     /// (offline-first): a stale/revoked token is only found once a real
     /// request fails.
     pub fn restore_session(&self) -> Option<AccountInfo> {
-        let saved = session::load(&self.data_dir)?;
-        let identity = Self::saved_identity(&saved);
-        let client =
-            jellyfin_api::JellyfinClient::from_token(&saved.server_url, identity, &saved.token)
-                .with_user_id(&saved.user_id);
-
-        let reset = {
-            let mut state = self.lock_state();
-            // docs/18 §2.1: restoring the account already installed (a recreated Activity, a failed
-            // switch) is not an account change, so live playback and its caches stay.
-            if state
-                .client
-                .as_ref()
-                .is_some_and(|installed| installed.same_account(&client))
-                && state.mirror_dir.as_deref() == Some(saved.mirror_dir.as_str())
-            {
-                return Some(AccountInfo {
-                    server_url: saved.server_url,
-                    user_id: saved.user_id,
-                    user_name: saved.user_name,
-                });
-            }
-            // First, while `state` still holds the outgoing account.
-            let reset = Self::reset_account_state_locked(&mut state, AccountChange::Replace);
-            state.client = Some(client);
-            state.mirror_dir = Some(saved.mirror_dir.clone());
-            // docs/13 Server compatibility -- seeded offline from
-            // whatever was last persisted, so `server_at_least` has an
-            // answer before the refresh below reaches the network.
-            state.server_version = saved.server_version.as_deref().and_then(|v| v.parse().ok());
-            state.server_name = saved.server_name.clone();
-            reset
-        };
-        self.dispose_account_reset(reset);
-        self.spawn_server_version_refresh();
-
-        Some(AccountInfo {
-            server_url: saved.server_url,
-            user_id: saved.user_id,
-            user_name: saved.user_name,
-        })
+        // docs/18 §2.1: the tag is read before the saved list, so a switch landing between wins.
+        let tag = self.account_epoch();
+        self.restore_finish(tag, session::load(&self.data_dir)?)
     }
 
     /// Read-only "who is signed in" check: unlike
@@ -874,53 +1095,40 @@ impl JellybeamCore {
     /// field for it.
     pub fn current_account(&self) -> Option<AccountInfo> {
         let saved = session::load(&self.data_dir)?;
-        Some(AccountInfo {
-            server_url: saved.server_url,
-            user_id: saved.user_id,
-            user_name: saved.user_name,
-        })
+        Some(AccountInfo::of(&saved))
     }
 
-    /// The active session's last-known server version string, or `None` if
+    /// The installed account's last-known server version string, or `None` if
     /// nobody is signed in or no refresh has completed (docs/13 Server
-    /// compatibility). Reads in-memory `State::server_version`, never
-    /// a fresh network call. Also gated on `state.client.is_some()`, not just
-    /// `server_version`, as a backstop should a future teardown clear one
-    /// without the other.
+    /// compatibility); never a network call.
     pub fn server_version(&self) -> Option<String> {
         let state = self.lock_state();
-        state.client.as_ref()?;
-        state.server_version.map(|v| v.to_string())
+        let version = state.account.installed()?.server_version;
+        version.map(|v| v.to_string())
     }
 
-    /// Whether the active session's server is known to be at least
+    /// Whether the installed account's server is known to be at least
     /// `major.minor` (docs/13 Server compatibility). **Fails
     /// closed**: `false` whenever the version isn't known yet -- never
-    /// assumes a floor for "unknown". Also checks `state.client.is_some()`,
-    /// same reasoning as [`Self::server_version`].
+    /// assumes a floor for "unknown".
     pub fn server_at_least(&self, major: u32, minor: u32) -> bool {
         let state = self.lock_state();
-        state.client.is_some()
-            && state
-                .server_version
-                .is_some_and(|v| v.at_least(major, minor))
+        state
+            .account
+            .installed()
+            .and_then(|i| i.server_version)
+            .is_some_and(|v| v.at_least(major, minor))
     }
 
     /// The playback stats sheet's SOURCE row
     /// (`docs/jellybeam-osd-handoff/handoff/JELLYBEAM-TV-OSD-SPEC.md` §8b) needs a
-    /// server name; nothing persists Jellyfin's own `ServerName`, so this
-    /// derives a display name from the session's `server_url` instead of an
-    /// extra round trip -- see [`host_from_server_url`]. Same read-only,
-    /// tolerant-load contract as [`Self::current_account`]; `None` if nobody
-    /// is signed in or the URL has no parseable host.
+    /// server name; this derives a display name from the account's server address
+    /// instead of an extra round trip -- see [`host_from_server_url`]. `None` if that account is
+    /// not signed in or the URL has no parseable host.
     /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
     pub fn server_display_name(&self, account_epoch: Option<u64>) -> Option<String> {
-        if let Some(epoch) = account_epoch.filter(|&epoch| epoch != self.account_epoch()) {
-            let client = self.read_account(Some(epoch)).ok()?.client?;
-            return host_from_server_url(client.base_url());
-        }
-        let saved = session::load(&self.data_dir)?;
-        host_from_server_url(&saved.server_url)
+        let client = self.read_account(account_epoch).ok()?.client?;
+        host_from_server_url(client.base_url())
     }
 
     /// docs/13 About > server info: the offline snapshot the About page renders
@@ -929,17 +1137,21 @@ impl JellybeamCore {
     pub fn server_info_snapshot(&self) -> ServerInfoSnapshot {
         // Clone out of the lock before the disk and SQLite reads below (the `state` field's
         // rule: never hold the guard across I/O).
-        let (signed_in, mirror_handle, server_name, server_version, bus_connected) = {
+        let (installed, mirror_handle, live_events_connected) = {
             let state = self.lock_state();
             (
-                state.client.is_some(),
-                state.mirror.clone(),
-                state.server_name.clone(),
-                state.server_version,
-                state.bus_connected,
+                state.account.installed().map(|i| {
+                    let facts = (i.server_version, i.server_name.clone());
+                    (i.account.clone(), i.device_id.clone(), facts)
+                }),
+                state.account.bundle().map(|g| g.mirror.clone()),
+                // Derived from the installed bus only, so a taken bundle never reaches the snapshot.
+                state.account.bundle().is_some_and(|bus| {
+                    *bus.connection.borrow() == jellyfin_core::BusConnection::Connected
+                }),
             )
         };
-        if !signed_in {
+        let Some((account, device_id, (server_version, server_name))) = installed else {
             return ServerInfoSnapshot {
                 server_url: None,
                 server_name: None,
@@ -950,9 +1162,8 @@ impl JellybeamCore {
                 mirror: None,
                 libraries: Vec::new(),
             };
-        }
+        };
 
-        let saved = session::load(&self.data_dir);
         let mirror = mirror_handle.as_ref().map(|mirror| MirrorStats {
             item_count: mirror.item_count(),
             db_bytes: mirror.db_size_bytes(),
@@ -978,12 +1189,12 @@ impl JellybeamCore {
             .unwrap_or_default();
 
         ServerInfoSnapshot {
-            server_url: saved.as_ref().map(|s| s.server_url.clone()),
+            server_url: Some(account.server_url),
             server_name,
             server_version: server_version.map(|v| v.to_string()),
-            user_name: saved.as_ref().map(|s| s.user_name.clone()),
-            device_id: saved.as_ref().map(|s| s.device_id.clone()),
-            live_events_connected: bus_connected,
+            user_name: Some(account.user_name),
+            device_id: Some(device_id),
+            live_events_connected,
             mirror,
             libraries,
         }
@@ -991,19 +1202,33 @@ impl JellybeamCore {
 
     /// docs/13 About > server info: the on-demand refresh behind the About page's refresh
     /// action. Tries the authenticated `GET /System/Info` first (richer than the pre-auth
-    /// `/System/Info/Public`); a server that refuses it to a non-admin user
-    /// (401/403) falls back to `/System/Info/Public` with `system_info_available: false` and
-    /// the extra fields left `None`. Whichever version/name came back is handed to
+    /// `/System/Info/Public`); a server that refuses it to a non-admin user (403, or the cached
+    /// non-admin role) falls back to `/System/Info/Public` with `system_info_available: false`
+    /// and the extra fields left `None`. Whichever version/name came back is handed to
     /// [`Self::apply_public_server_info`], so this refresh also refreshes the version gate and
     /// persists the server name -- the same reason `server_version`/`server_name` are never
     /// stale for long even without this being called.
     pub fn fetch_server_details(&self) -> Result<ServerDetails, CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
-
+        // docs/18 §2.1: a known non-admin never asks the admin endpoint; a 403 is the role, a 401 a
+        // revoked token that must reach re-authorization rather than the public fallback.
+        let (epoch, client, known_non_admin) = {
+            let state = self.lock_state();
+            let installed = state.account.installed().ok_or(CoreError::NotSignedIn)?;
+            (
+                state.account.epoch,
+                installed.client.clone(),
+                installed.caches.is_admin == Some(false),
+            )
+        };
+        let admin_info = if known_non_admin {
+            None
+        } else {
+            match self.runtime.block_on(client.system_info()) {
+                Ok(info) => Some(info),
+                Err(jellyfin_api::ApiError::Status { code: 403, .. }) => None,
+                Err(e) => return Err(e.into()),
+            }
+        };
         let (
             system_info_available,
             name,
@@ -1013,8 +1238,8 @@ impl JellybeamCore {
             architecture,
             has_pending_restart,
             has_update_available,
-        ) = match self.runtime.block_on(client.system_info()) {
-            Ok(info) => (
+        ) = match admin_info {
+            Some(info) => (
                 true,
                 info.server_name,
                 info.version,
@@ -1024,10 +1249,7 @@ impl JellybeamCore {
                 info.has_pending_restart,
                 info.has_update_available,
             ),
-            Err(
-                jellyfin_api::ApiError::Unauthorized { .. }
-                | jellyfin_api::ApiError::Status { code: 403, .. },
-            ) => {
+            None => {
                 let info = self.runtime.block_on(client.refresh_public_system_info())?;
                 (
                     false,
@@ -1040,10 +1262,10 @@ impl JellybeamCore {
                     None,
                 )
             }
-            Err(e) => return Err(e.into()),
         };
 
         self.runtime.block_on(Self::apply_public_server_info(
+            epoch,
             &client,
             version.clone(),
             name.clone(),
@@ -1064,52 +1286,13 @@ impl JellybeamCore {
         })
     }
 
-    /// Signs out the *active* account only (multiple accounts can be signed
-    /// in at once). Removes it from the on-disk list; if others remain, the
-    /// first becomes active on disk but its client is deliberately **not**
-    /// installed -- Kotlin decides what to show next.
-    pub fn sign_out(&self) {
-        let (client, mirror, task, bundle, reset) = {
-            let mut state = self.lock_state();
-            // First, while `mirror_dir` still names the account leaving.
-            let reset = Self::reset_account_state_locked(&mut state, AccountChange::Leave);
-            state.mirror_dir = None;
-            // Cleared alongside `client`, same as every other per-session
-            // cache -- otherwise `server_version`/`server_at_least` would
-            // keep answering from a dead session until the next sign-in.
-            state.server_version = None;
-            state.server_name = None;
-            (
-                state.client.take(),
-                state.mirror.take(),
-                state.listener_task.take(),
-                state.event_bus.take(),
-                reset,
-            )
-        };
-        self.dispose_account_reset(reset);
-        self.stop_task(task);
-        self.stop_event_bus(bundle);
-        drop(mirror);
-        drop(client);
-        // Routed through `session_lock` so a `refresh_server_version_once`
-        // persist that loaded the list before this sign-out can never write
-        // a stale snapshot back and resurrect the account just removed.
-        let _guard = self.session_lock.lock().unwrap_or_else(|e| e.into_inner());
-        session::remove_active(&self.data_dir);
-    }
-
     /// Every signed-in account, in on-disk order (index `i` is what
     /// [`Self::switch_session`] expects). Never carries a token.
     pub fn list_accounts(&self) -> Vec<AccountInfo> {
         session::load_list(&self.data_dir)
             .sessions
-            .into_iter()
-            .map(|s| AccountInfo {
-                server_url: s.server_url,
-                user_id: s.user_id,
-                user_name: s.user_name,
-            })
+            .iter()
+            .map(AccountInfo::of)
             .collect()
     }
 
@@ -1124,68 +1307,23 @@ impl JellybeamCore {
         }
     }
 
-    /// Switches the active account to `index` and installs its client, but
-    /// like [`Self::restore_session`] with **no network validation**.
-    /// Persists the new `active` index first, then tears down whatever
-    /// client/mirror/listener is bound before installing the target's
-    /// client. Does **not** call [`Self::open_mirror`] itself.
+    /// Switches the active account to `index` and installs its client with **no network validation** (like
+    /// [`Self::restore_session`]): persists the new `active` index first, then resets the account and tears down the
+    /// outgoing mirror/listener. Does **not** call [`Self::open_mirror`].
     pub fn switch_session(&self, index: u32) -> Result<AccountInfo, CoreError> {
         let ix = index as usize;
-        // The load-mutate-save of the active index is one read-modify-write
-        // of the session list, routed through `session_lock` like every other.
-        let target = {
-            let _guard = self.session_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let mut list = session::load_list(&self.data_dir);
+        // docs/18 §2.1: the active index is saved before anything is installed, and a failed
+        // save refuses the switch -- nothing may run that the saved list does not name.
+        let target = session::mutate(&self.data_dir, &self.session_lock, |list| {
             if ix >= list.sessions.len() {
                 return Err(CoreError::InvalidSessionIndex { index });
             }
             list.active = ix;
-            if let Err(e) = session::save_list(&self.data_dir, &list) {
-                tracing::warn!(error = %e, "failed to persist active session index");
-            }
-            list.sessions[ix].clone()
-        };
+            Ok(list.sessions[ix].clone())
+        })?;
 
-        let (old_mirror, old_task, old_bundle, reset) = {
-            let mut state = self.lock_state();
-            let reset = Self::reset_account_state_locked(&mut state, AccountChange::Replace);
-            (
-                state.mirror.take(),
-                state.listener_task.take(),
-                state.event_bus.take(),
-                reset,
-            )
-        };
-        self.dispose_account_reset(reset);
-        self.stop_task(old_task);
-        self.stop_event_bus(old_bundle);
-        drop(old_mirror);
-
-        let identity = Self::saved_identity(&target);
-        let client =
-            jellyfin_api::JellyfinClient::from_token(&target.server_url, identity, &target.token)
-                .with_user_id(&target.user_id);
-
-        {
-            let mut state = self.lock_state();
-            state.client = Some(client);
-            state.mirror_dir = Some(target.mirror_dir);
-            // docs/13 Server compatibility -- offline seed from
-            // this account's own last-persisted value, not the previously
-            // active account's.
-            state.server_version = target
-                .server_version
-                .as_deref()
-                .and_then(|v| v.parse().ok());
-            state.server_name = target.server_name.clone();
-        }
-        self.spawn_server_version_refresh();
-
-        Ok(AccountInfo {
-            server_url: target.server_url,
-            user_id: target.user_id,
-            user_name: target.user_name,
-        })
+        self.install_account(Self::installed_from_saved(&target));
+        Ok(AccountInfo::of(&target))
     }
 
     /// Permanently removes one saved account and its isolated local mirror.
@@ -1193,129 +1331,74 @@ impl JellybeamCore {
     /// a disk failure leaves the current account fully usable.
     pub fn remove_session(&self, index: u32) -> Result<bool, CoreError> {
         let ix = index as usize;
-        // The bounds/active check and the removal are one read-modify-write
-        // of the session list, routed through `session_lock` so a concurrent
-        // version-refresh persist can never re-add this row in between.
-        let (removed_active, removed) = {
-            let _guard = self.session_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let list_before = session::load_list(&self.data_dir);
-            if ix >= list_before.sessions.len() {
-                return Err(CoreError::InvalidSessionIndex { index });
-            }
-            let removed_active = ix == list_before.active;
-            let removed = session::remove_at(&self.data_dir, ix)
-                .map_err(|e| CoreError::Cache {
-                    detail: format!("failed to remove saved session: {e}"),
-                })?
-                .ok_or(CoreError::InvalidSessionIndex { index })?;
-            (removed_active, removed)
-        };
+        // The bounds check and the removal are one read-modify-write of the session list, so a
+        // concurrent version-refresh persist can never re-add this row in between.
+        let (removed, was_listed_active, next_active) =
+            session::mutate(&self.data_dir, &self.session_lock, |list| {
+                let was_listed_active = ix == list.active;
+                let removed = list
+                    .remove_at(ix)
+                    .ok_or(CoreError::InvalidSessionIndex { index })?;
+                Ok((removed, was_listed_active, list.active_session().cloned()))
+            })?;
 
-        if removed_active {
-            let (client, mirror, task, bundle, reset) = {
-                let mut state = self.lock_state();
-                // First, while `mirror_dir` still names the account leaving.
-                let reset = Self::reset_account_state_locked(&mut state, AccountChange::Leave);
-                state.mirror_dir = None;
-                // Cleared alongside `client` -- same reasoning as
-                // `sign_out`'s own comment on this field.
-                state.server_version = None;
-                state.server_name = None;
-                (
-                    state.client.take(),
-                    state.mirror.take(),
-                    state.listener_task.take(),
-                    state.event_bus.take(),
-                    reset,
-                )
+        self.prune_seerr_entry(&removed.server_url, &removed.user_id);
+
+        // docs/18 §2.1: the removed row is the installed account by identity, decided under the
+        // lock that tears it down; the saved list's active row stands in only while no account
+        // is installed. The list's next active row is installed in the same change, so the app
+        // sees one account change and its relaunch restore finds the account installed.
+        let next = next_active.as_ref().map(Self::installed_from_saved);
+        let torn_down = {
+            let mut state = self.lock_state();
+            let is_installed = match state.account.installed() {
+                Some(installed) => installed.identity().names(&removed),
+                None => was_listed_active,
             };
-            self.dispose_account_reset(reset);
-            self.stop_task(task);
-            self.stop_event_bus(bundle);
-            drop(mirror);
-            drop(client);
+            is_installed
+                .then(|| Self::reset_account_state_locked(&mut state, next, AccountChange::Leave))
+        };
+        let removed_installed = torn_down.is_some();
+
+        let final_reports = if let Some(reset) = torn_down {
+            self.dispose_account_reset(reset)
         } else {
             // docs/18 §2.1: removing the account a parked playback plays on ends that playback.
             let ended = {
                 let mut state = self.lock_state();
-                let owner = &mut state.playback_owner;
-                let parked_on_removed = owner
+                let parked_on_removed = state
+                    .playback_owner
                     .parked
                     .as_ref()
                     .is_some_and(|parked| parked.is_account(Some(&removed.mirror_dir)));
                 if !parked_on_removed {
                     None
-                } else if owner.parked_plays() {
+                } else if Self::parked_plays_locked(&state) {
                     Some(Self::end_playback_locked(&mut state))
                 } else {
-                    owner.parked = None;
+                    state.playback_owner.parked = None;
                     None
                 }
             };
-            if let Some(ended) = ended {
-                self.dispose_account_reset(ended);
-            }
-        }
+            ended.map_or_else(Vec::new, |ended| self.dispose_account_reset(ended))
+        };
 
+        self.spawn_logout(&removed, final_reports);
         self.remove_mirror_dir_if_safe(&removed.mirror_dir);
-        Ok(removed_active)
+        Ok(removed_installed)
     }
 
-    /// Opens the mirror (starting sync automatically) against the currently
-    /// signed-in client, replacing any mirror already open. Also spawns the
-    /// real websocket `EventBus` and a forwarder relaying its events onto a
-    /// fresh per-mirror [`BusBundle`] via [`Self::open_mirror_with_bus`] --
-    /// both this and `install_authenticated_session` share the one bundle,
-    /// so a first sign-in never runs with no live updates. The old bus, if
-    /// any, is torn down via [`Self::stop_event_bus`] up front.
+    /// Opens the mirror (starting sync automatically) against the installed account, replacing
+    /// any mirror already open, with the real websocket `EventBus` and a forwarder relaying its
+    /// events onto a fresh [`BusBundle`]; the one open per account install. docs/18 §2.1: an open
+    /// that spans an account change installs nothing and fails [`CoreError::AccountChanged`].
     ///
-    /// No Android lifecycle hook is needed: the bus's capped-backoff
-    /// supervisor reconnects on its own, and every reconnect emits
-    /// `NeedsReconcile`, which `media_cache::sync` turns into a full heal.
+    /// The bus's capped-backoff supervisor reconnects a closed socket, and every reconnect
+    /// emits `NeedsReconcile`, which `media_cache::sync` turns into a full heal.
     pub fn open_mirror(&self) -> Result<(), CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
-
-        let (old_mirror, old_task, old_bundle, listener) = {
-            let mut state = self.lock_state();
-            (
-                state.mirror.take(),
-                state.listener_task.take(),
-                state.event_bus.take(),
-                state.listener.clone(),
-            )
-        };
-        self.stop_task(old_task);
-        self.stop_event_bus(old_bundle);
-        drop(old_mirror);
-
-        // `state.mirror_dir` is set alongside `state.client` by every
-        // install path; the `"mirror"` fallback is defensive only and
-        // shouldn't be reachable in practice.
-        let mirror_dir = self
-            .lock_state()
-            .mirror_dir
-            .clone()
-            .unwrap_or_else(|| "mirror".to_string());
-        let dir = self.data_dir.join(mirror_dir);
-        let (mirror, bundle) = self.open_mirror_with_bus(client, dir)?;
-
-        // Settings survive sign-in/mirror cycles: push the current Next Up
-        // filtering onto the freshly opened mirror rather than leaving it at
-        // `media_cache`'s unfiltered default.
-        let next_up_settings = self.lock_state().settings.clone();
-        mirror.set_next_up_options(next_up_options_from(&next_up_settings));
-
-        let new_task = listener.map(|l| self.spawn_listener_task(mirror.clone(), l));
-
-        let mut state = self.lock_state();
-        state.mirror = Some(mirror);
-        state.listener_task = new_task;
-        state.event_bus = Some(bundle);
-        Ok(())
+        let (epoch, client, dir) = self.open_begin()?;
+        let built = self.build_bundle(&client, dir)?;
+        self.open_finish(epoch, &client, built)
     }
 
     pub fn views(&self) -> Vec<ViewSnapshot> {
@@ -1355,33 +1438,42 @@ impl JellybeamCore {
     /// unit-testable without a live `Mirror`. Every caller today asks for the
     /// whole list in one page, so filtering after LIMIT/OFFSET never
     /// truncates a page short.
-    pub fn children(
+    ///
+    /// docs/07 §5: "mirror not open yet", "query failed" and "genuinely empty" stay apart, so a
+    /// screen never settles on a failure as an empty folder.
+    pub fn children_read(
         &self,
         parent_id: String,
         sort: SortOrder,
         offset: u32,
         limit: u32,
-    ) -> Vec<Card> {
+    ) -> BrowseRead {
         let Ok(mirror) = self.require_mirror() else {
-            return Vec::new();
+            return BrowseRead::NotReady;
         };
         let show_virtual_episodes = self.lock_state().settings.show_virtual_episodes;
-        let cards: Vec<Card> = mirror
-            .children_checked(&parent_id, sort.into(), offset, limit)
-            .unwrap_or_default()
-            .into_iter()
-            .map(Card::from)
-            .collect();
+        let Some(rows) = mirror.children_checked(&parent_id, sort.into(), offset, limit) else {
+            tracing::warn!("children query failed");
+            return BrowseRead::Failed;
+        };
+        let cards: Vec<Card> = rows.into_iter().map(Card::from).collect();
         // This is a Series -> Seasons listing only when at least one
         // returned card is a Season -- every other listing shape skips the
         // extra query entirely.
         let cards = if cards.iter().any(|c| c.item_type == "Season") {
-            let counts = mirror.season_episode_counts(&parent_id).unwrap_or_default();
+            // Without the counts an all-virtual season would be listed as real, so a failure here
+            // fails the read.
+            let Some(counts) = mirror.season_episode_counts(&parent_id) else {
+                tracing::warn!("season episode counts query failed");
+                return BrowseRead::Failed;
+            };
             filter_all_virtual_seasons(cards, &counts, show_virtual_episodes)
         } else {
             cards
         };
-        filter_virtual_episodes(cards, show_virtual_episodes)
+        BrowseRead::Items {
+            cards: filter_virtual_episodes(cards, show_virtual_episodes),
+        }
     }
 
     /// docs/16-library-sort-filter.md §3/§2.2/§4.6: the sorted/filtered
@@ -1457,7 +1549,7 @@ impl JellybeamCore {
     /// no network fallback. Gets the same real art every browse row carries,
     /// instead of a degraded `Card` reconstructed from `get_item_detail`'s DTO.
     ///
-    /// Unlike `children`/`search`, returns a `Result`:
+    /// Unlike `children_read`/`search`, returns a `Result`:
     /// `Err(CoreError::MirrorNotOpen)` before `open_mirror` succeeds, while
     /// `Ok(None)` covers an id the mirror simply doesn't know.
     pub fn card_by_id(&self, item_id: String) -> Result<Option<Card>, CoreError> {
@@ -1484,7 +1576,7 @@ impl JellybeamCore {
 
     pub fn is_syncing(&self) -> bool {
         self.require_mirror()
-            .map(|m| m.is_syncing())
+            .map(|m| shown_as_syncing(m.is_syncing(), m.playback_active()))
             .unwrap_or(false)
     }
 
@@ -1525,10 +1617,7 @@ impl JellybeamCore {
     /// The current account's pair Kotlin formats image URLs from, read under one lock with the
     /// epoch it belongs to; `None` when signed out.
     pub fn image_url_prefix(&self) -> Option<ImageUrlPrefix> {
-        let (epoch, client) = {
-            let state = self.lock_state();
-            (state.playback_owner.account_epoch, state.client.clone()?)
-        };
+        let (epoch, client) = self.lock_state().account.current_client()?;
         Some(ImageUrlPrefix {
             epoch,
             base_url: client.base_url().to_string(),
@@ -1558,16 +1647,17 @@ impl JellybeamCore {
         Some(client.trickplay_tile_url(&item_id, width, image_index, None))
     }
 
-    /// Fetches only the chapter/stream metadata used by the playback OSD,
-    /// plus the primary media source's size/path for the stats sheet's
-    /// CONTAINER/FILE rows (`docs/jellybeam-osd-handoff/handoff/JELLYBEAM-TV-OSD-SPEC.md`
-    /// §8b). `MediaSources` is requested explicitly -- without it the server
-    /// omits media sources and both fields come back `None` regardless.
+    /// Playback's one enrichment fetch (docs/18 §3): the chapter/stream metadata the OSD uses, the
+    /// playing media source's size/path for the stats sheet's CONTAINER/FILE rows
+    /// (`docs/jellybeam-osd-handoff/handoff/JELLYBEAM-TV-OSD-SPEC.md` §8b), and the trickplay
+    /// manifest of `media_source_id`. `MediaSources` and `Trickplay` are requested explicitly --
+    /// without them the server omits both and the fields come back empty regardless.
     /// Deliberately narrow: full detail belongs to [`Self::get_item_detail`].
     /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
     pub fn get_playback_osd_detail(
         &self,
         item_id: String,
+        media_source_id: String,
         account_epoch: Option<u64>,
     ) -> Result<PlaybackOsdDetail, CoreError> {
         let client = self
@@ -1583,6 +1673,7 @@ impl JellybeamCore {
                         "MediaStreams".to_string(),
                         "Chapters".to_string(),
                         "MediaSources".to_string(),
+                        "Trickplay".to_string(),
                     ],
                     limit: 1,
                     ..jellyfin_api::ItemQuery::default()
@@ -1597,20 +1688,12 @@ impl JellybeamCore {
                 })
         })?;
 
-        Ok(PlaybackOsdDetail::from(&dto))
+        Ok(PlaybackOsdDetail::of(&dto, &media_source_id))
     }
 
-    /// Fetches a single item's full detail record for the Detail page and
-    /// playback library-info panel (docs/11-detail-ux-spec.md,
-    /// docs/12-osd-ux-spec.md) -- fields the bulk mirror sync deliberately
-    /// never asks for. A live per-visit fetch, never persisted to the mirror;
-    /// `DateCreated`/`MediaSources`/`RecursiveItemCount`/`ChildCount` are
-    /// requested explicitly or those [`ItemDetail`] fields come back `None`.
-    ///
-    /// Requires a signed-in client ([`CoreError::NotSignedIn`]), no open
-    /// mirror. Errors ([`CoreError::Api`]) rather than degrading to a
-    /// default, unlike [`Self::get_media_segments`]: worth surfacing.
-    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
+    /// An item's full detail record (docs/11, docs/12): a live per-visit fetch, never persisted, needing a signed-in
+    /// client and no open mirror; errors ([`CoreError::Api`]) rather than degrading. `account_epoch` names the
+    /// player's account (docs/18 §2.1); `None` is the current one.
     pub fn get_item_detail(
         &self,
         item_id: String,
@@ -1676,11 +1759,7 @@ impl JellybeamCore {
     /// item missing its own `Id` is silently dropped rather than failing the
     /// whole call.
     pub fn get_similar(&self, item_id: String, limit: u32) -> Result<Vec<Card>, CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
+        let client = self.require_client()?;
         let items = self.runtime.block_on(client.get_similar(&item_id, limit))?;
         Ok(items
             .iter()
@@ -1706,11 +1785,7 @@ impl JellybeamCore {
         limit: u32,
         sort: LiveSort,
     ) -> Result<Vec<Card>, CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
+        let client = self.require_client()?;
         let (sort_by, sort_order) = match sort {
             LiveSort::ServerOrder => (None, None),
             LiveSort::NameAsc => (Some("SortName".to_string()), Some("Ascending".to_string())),
@@ -1765,39 +1840,6 @@ impl JellybeamCore {
             .collect()
     }
 
-    /// Trickplay scrub-preview manifest, fetched separately from
-    /// [`Self::prepare_playback`] since it's only consumed on a seek.
-    /// Kotlin's `PlaybackViewModel.start()` calls this fire-and-forget right
-    /// after `load()`.
-    ///
-    /// Fails open to `None`, same non-fatal contract as
-    /// [`Self::get_media_segments`]: not signed in, an older server, a
-    /// transport hiccup, or genuinely no manifest all look identical here.
-    /// `account_epoch` names the player's account (docs/18 §2.1); `None` is the current one.
-    pub fn get_trickplay(
-        &self,
-        item_id: String,
-        media_source_id: String,
-        account_epoch: Option<u64>,
-    ) -> Option<TrickplayMetaFfi> {
-        let client = self.read_account(account_epoch).ok()?.client?;
-        let trickplay_by_source = self
-            .runtime
-            .block_on(client.get_items(&jellyfin_api::ItemQuery {
-                ids: vec![item_id],
-                fields: vec!["Trickplay".to_string()],
-                limit: 1,
-                ..jellyfin_api::ItemQuery::default()
-            }))
-            .ok()?
-            .items
-            .into_iter()
-            .next()?
-            .trickplay;
-        playback_policy::trickplay::resolve_trickplay_meta(&trickplay_by_source, &media_source_id)
-            .map(TrickplayMetaFfi::from)
-    }
-
     /// docs/18 §3.2: sidecar `index`'s text for `play_session_id`; `None` on a stale session, an
     /// unknown index or any failure, logged by class only (the URL carries the token).
     pub fn fetch_external_subtitle(&self, play_session_id: String, index: i32) -> Option<String> {
@@ -1829,21 +1871,24 @@ impl JellybeamCore {
         .is_some_and(|data| overlay.add_script(key, data, item))
     }
 
-    /// Registers (or replaces) the change listener. If a mirror is already
-    /// open, starts forwarding immediately; otherwise remembered and bound
-    /// on the next successful [`Self::open_mirror`]. Replacing aborts the
-    /// prior forwarding task first.
+    /// Registers (or replaces) the change listener. If a mirror is open, its forwarding task is
+    /// swapped for one to `listener` under one lock and the old one joined outside it; otherwise
+    /// remembered and bound by the next successful [`Self::open_mirror`].
     pub fn set_change_listener(&self, listener: Arc<dyn ChangeListener>) {
-        let mirror = self.require_mirror().ok();
         let old_task = {
             let mut state = self.lock_state();
             state.listener = Some(listener.clone());
-            state.listener_task.take()
+            let bundle = state
+                .account
+                .installed
+                .as_mut()
+                .and_then(|i| i.bundle.as_mut());
+            bundle.and_then(|g| {
+                let task = self.spawn_listener_task(g.mirror.clone(), listener);
+                g.listener_task.replace(task)
+            })
         };
         self.stop_task(old_task);
-
-        let new_task = mirror.map(|m| self.spawn_listener_task(m, listener));
-        self.lock_state().listener_task = new_task;
     }
 
     /// Records this device's playback capabilities, used by the next
@@ -1855,7 +1900,7 @@ impl JellybeamCore {
         let preload_task = {
             let mut state = self.lock_state();
             state.caps = caps.into();
-            Self::invalidate_preload_locked(&mut state)
+            state.preload_invalidate()
         };
         Self::abort_task(preload_task);
     }
@@ -1867,38 +1912,35 @@ impl JellybeamCore {
         self.lock_state().settings.clone()
     }
 
-    /// Persists `settings`, stores it as current in-memory state, and
-    /// applies the side effects entirely `JellybeamCore`'s own to apply:
-    /// `next_up_cutoff_days`/`next_up_rewatching` map onto
-    /// `media_cache::NextUpOptions` and push to the open mirror if any
-    /// (else deferred to the next `open_mirror`).
-    /// `hidden_library_ids`/`hide_watched_in_latest`/`home_shelf_size` need no push --
-    /// [`Self::home_snapshot`] reads settings directly. Every other field is
-    /// Kotlin-consumed state with no Rust-side effect yet (docs/09 steps 2-3).
-    ///
-    /// Whole-record, no per-field setter. A disk write failure is logged and
-    /// swallowed: in-memory state and the mirror side effect still apply
-    /// even if persistence failed.
+    /// docs/09: the record, its revision and the mirror's Next Up options change under the state
+    /// lock, then a revision-ordered write persists it (a failure is logged, never raised); a
+    /// changed Next Up option asks the mirror's refresher to re-query without blocking.
     pub fn set_settings(&self, new_settings: Settings) {
-        if let Err(e) = settings::save(&self.data_dir, &new_settings) {
-            tracing::warn!(error = %e, "failed to persist settings to disk");
-        }
-
-        let (mirror, preload_task, next_up_options) = {
+        let (revision, mirror, preload_task, next_up_changed) = {
             let mut state = self.lock_state();
-            let next_up_options = changed_next_up_options(&state.settings, &new_settings);
+            let next_up_changed = changed_next_up_options(&state.settings, &new_settings).is_some();
             state.settings = new_settings.clone();
-            let preload_task = Self::invalidate_preload_locked(&mut state);
-            (state.mirror.clone(), preload_task, next_up_options)
+            state.settings_revision += 1;
+            Self::push_next_up_options_locked(&state);
+            let preload_task = state.preload_invalidate();
+            (
+                state.settings_revision,
+                state.account.bundle().map(|g| g.mirror.clone()),
+                preload_task,
+                next_up_changed,
+            )
         };
         Self::abort_task(preload_task);
 
-        if let (Some(mirror), Some(options)) = (mirror, next_up_options) {
-            mirror.set_next_up_options(options);
-            // Re-query Next Up immediately so a cutoff/rewatching change is
-            // visible on the next home_snapshot, firing a MirrorChange the
-            // UI's change listener already reacts to.
-            self.runtime.block_on(mirror.refresh_next_up());
+        if let Err(e) = self
+            .settings_save
+            .save(revision, || settings::save(&self.data_dir, &new_settings))
+        {
+            tracing::warn!(error = %e, "failed to persist settings to disk");
+        }
+
+        if let Some(mirror) = mirror.filter(|_| next_up_changed) {
+            mirror.request_next_up_refresh();
         }
     }
 
@@ -1969,10 +2011,10 @@ impl JellybeamCore {
     /// cache hit never mis-resumes. A fresh
     /// [`Self::preload_playback`] `DirectPlay` result for this `item_id` is
     /// consumed here (single-use) in place of a fresh negotiation round
-    /// trip; a same-item preload still negotiating is joined instead of
+    /// trip; a preload still negotiating this same item is joined instead of
     /// aborted (§2), so Play reuses it rather than starting over. A preload
-    /// for any other item is stale the moment a real Play arrives, and is
-    /// aborted as before.
+    /// for any other item is stale the moment a real Play arrives: it is
+    /// aborted and Play negotiates at once, never waiting on it.
     pub fn prepare_playback(
         &self,
         item_id: String,
@@ -1983,55 +2025,22 @@ impl JellybeamCore {
             let mut state = self.lock_state();
             // docs/18 §2.1: a playback kept across an account change goes on with its own account.
             let account = Self::account_for_epoch_locked(&state, request.account_epoch)?;
-            let on_current = request.account_epoch == state.playback_owner.account_epoch;
-            let client = account.client.ok_or(CoreError::NotSignedIn)?;
-            let mirror = account.mirror.ok_or(CoreError::MirrorNotOpen)?;
+            let on_current = request.account_epoch == state.account.epoch;
+            let (client, mirror) = account.require_open()?;
             let caps = state.caps.clone();
             let tolerate_mislabeled_levels = state.settings.tolerate_mislabeled_levels;
             let quality = state.settings.playback_quality;
             let claim = Self::admit_playback_request(&mut state, request, None)?;
 
-            // Single-use regardless of match: a slot for a different item is
-            // stale the moment a real call arrives for THIS item -- no
-            // reason to keep it for a hypothetical future call.
             // Preloads negotiate on the current account only.
-            let cached = state.preload_cache.take().filter(|c| {
-                on_current && c.is_fresh_for(state.preload_generation, &item_id, Instant::now())
-            });
-
-            // A preload already negotiating THIS item is joined below rather
-            // than aborted, so Play reuses its in-flight handshake instead
-            // of renegotiating from zero. Anything else (a different item,
-            // or nothing in flight) is stale the instant a real call
-            // arrives, exactly as before.
-            let same_item = on_current
-                && cached.is_none()
-                && state.preload_target_item_id.as_deref() == Some(item_id.as_str());
-            let joinable_task = if same_item {
-                state.preload_task.take()
-            } else {
-                None
-            };
-            let stale_task = if same_item {
-                None
-            } else {
-                let task = state.preload_task.take();
-                if task.is_some() {
-                    state.preload_generation = state.preload_generation.wrapping_add(1);
-                }
-                task
-            };
-            state.preload_target_item_id = None;
-            state.preload_pending = None;
+            let preload = state.preload_take_for_play(&item_id, on_current, Instant::now());
             let admitted = AdmittedPlay {
                 client,
                 mirror,
                 caps,
                 tolerate_mislabeled_levels,
                 quality,
-                cached,
-                joinable_task,
-                stale_task,
+                preload,
             };
             (admitted, claim)
         };
@@ -2052,52 +2061,37 @@ impl JellybeamCore {
     ///
     /// No-ops before touching the network when the setting is off, nobody is
     /// signed in, the mirror isn't open, quality is `Cap { .. }` (its plan's
-    /// `url` is position-dependent, never reusable), or a fresh cache entry
-    /// for this `item_id` already exists.
+    /// `url` is position-dependent, never reusable), a cache entry for this
+    /// `item_id` is younger than [`PRELOAD_REFRESH_AFTER`], or its negotiation
+    /// already runs.
     ///
     /// Only replaces a background task and returns; never waits on the
     /// server. Exactly one speculative worker is retained; newer focus
     /// targets replace the pending slot rather than racing requests. A real
-    /// `prepare_playback` aborts any unfinished speculation first, and each
-    /// request's generation is checked before publishing, so a cancellation,
-    /// account swap, or profile change can never be undone by a late response.
+    /// `prepare_playback` for another item aborts any unfinished speculation,
+    /// and each request's generation is checked before publishing, so a
+    /// cancellation, account swap, or profile change can never be undone by a
+    /// late response.
     /// `account_epoch` names the player's account; a preload only ever runs on the current one.
     pub fn preload_playback(&self, item_id: String, account_epoch: Option<u64>) {
         let mut state = self.lock_state();
         if !state.settings.preload_on_focus
-            || account_epoch.is_some_and(|epoch| epoch != state.playback_owner.account_epoch)
+            || account_epoch.is_some_and(|epoch| epoch != state.account.epoch)
         {
             return;
         }
-        let Some(client) = state.client.clone() else {
+        let Some(client) = state.account.installed().map(|i| i.client.clone()) else {
             return;
         };
-        let Some(mirror) = state.mirror.clone() else {
+        let Some(mirror) = state.account.bundle().map(|g| g.mirror.clone()) else {
             return;
         };
         if matches!(state.settings.playback_quality, PlaybackQuality::Cap { .. }) {
             return;
         }
-        if state.preload_cache.as_ref().is_some_and(|cache| {
-            cache.is_fresh_for(state.preload_generation, &item_id, Instant::now())
-        }) {
-            return;
-        }
-        if state
-            .preload_task
-            .as_ref()
-            .is_some_and(|task| !task.is_finished())
-            && state.preload_target_item_id.as_deref() == Some(item_id.as_str())
-        {
-            return;
-        }
-
-        state.preload_generation = state.preload_generation.wrapping_add(1);
-        let generation = state.preload_generation;
-        state.preload_cache = None;
-        state.preload_target_item_id = Some(item_id.clone());
+        state.preload_generation += 1;
         let request = PreloadRequest {
-            generation,
+            generation: state.preload_generation,
             item_id,
             client,
             mirror,
@@ -2105,25 +2099,11 @@ impl JellybeamCore {
             tolerate_mislabeled_levels: state.settings.tolerate_mislabeled_levels,
             quality: state.settings.playback_quality,
         };
-
-        if state
-            .preload_task
-            .as_ref()
-            .is_some_and(|task| !task.is_finished())
-        {
-            state.preload_pending = Some(request);
-            return;
-        }
-
-        // A retained finished handle means the worker panicked before
-        // cleanup; drop it and recover with a fresh worker.
-        Self::abort_task(state.preload_task.take());
-        state.preload_pending = None;
         let shared_state = Arc::clone(&self.state);
-        let task = self
-            .runtime
-            .spawn(Self::run_preload_worker(shared_state, request));
-        state.preload_task = Some(task);
+        state.preload_request(request, Instant::now(), |request| {
+            self.runtime
+                .spawn(Self::run_preload_worker(shared_state, request))
+        });
     }
 
     /// Forwards a position update to the active reporting session and
@@ -2262,8 +2242,7 @@ impl JellybeamCore {
                 return Err(CoreError::WouldTranscode { reasons: reason });
             }
             let account = Self::account_for_epoch_locked(&state, request.account_epoch)?;
-            let client = account.client.ok_or(CoreError::NotSignedIn)?;
-            let mirror = account.mirror.ok_or(CoreError::MirrorNotOpen)?;
+            let (client, mirror) = account.require_open()?;
             let caps = state.caps.clone();
             let tolerate_mislabeled_levels = state.settings.tolerate_mislabeled_levels;
             let quality = state.settings.playback_quality;
@@ -2433,26 +2412,23 @@ impl JellybeamCore {
     /// for a played-state refresh. Parked mirrors are not notified; never blocks or touches the
     /// network inline (docs/01 §4).
     pub fn on_foreground(&self) {
-        let mirror = self.lock_state().mirror.clone();
-        if let Some(mirror) = mirror {
+        if let Ok(mirror) = self.require_mirror() {
             mirror.request_user_state_refresh(media_cache::UserStateReason::Foreground);
         }
     }
 
-    /// docs/18 §2.1: the epoch a [`PlaybackRequest`] must carry; Kotlin re-reads it after every
-    /// account call.
-    pub fn account_epoch(&self) -> u64 {
-        self.lock_state().playback_owner.account_epoch
-    }
-
-    /// docs/18 §2.1: the epoch a live playback kept across an account change still owns
-    /// playback under, beside [`Self::account_epoch`]; Kotlin re-reads it after every account call.
-    pub fn parked_account_epoch(&self) -> Option<u64> {
-        self.lock_state()
-            .playback_owner
-            .parked
-            .as_ref()
-            .map(|parked| parked.epoch)
+    /// docs/18 §2.1: both epochs read under one lock, so Kotlin never pairs the current epoch
+    /// with a parked one from another instant.
+    pub fn account_epochs(&self) -> AccountEpochs {
+        let state = self.lock_state();
+        AccountEpochs {
+            epoch: state.account.epoch,
+            parked: state
+                .playback_owner
+                .parked
+                .as_ref()
+                .map(|parked| parked.epoch),
+        }
     }
 
     /// docs/18 §2.1: the saved account to re-authorize for a token rejected for `rejected` -- while
@@ -2467,27 +2443,21 @@ impl JellybeamCore {
     ) -> Option<AccountInfo> {
         let in_use: Vec<String> = {
             let state = self.lock_state();
-            let owner = &state.playback_owner;
-            let running = Self::playback_live_locked(&state) || owner.claim.is_some();
-            let playing = owner
+            let playing = state
+                .playback_owner
                 .parked
                 .as_ref()
-                .filter(|_| running && owner.parked_plays())
+                .filter(|_| Self::parked_plays_locked(&state))
                 .and_then(|parked| parked.account.mirror_dir.clone());
-            state.mirror_dir.iter().cloned().chain(playing).collect()
+            let installed = state.account.installed().map(|i| i.mirror_dir.clone());
+            installed.into_iter().chain(playing).collect()
         };
         session::load_list(&self.data_dir)
             .sessions
             .into_iter()
-            .find(|saved| {
-                saved.server_url == rejected.server_url && saved.user_id == rejected.user_id
-            })
+            .find(|saved| rejected.names(saved))
             .filter(|saved| failed_playback || in_use.contains(&saved.mirror_dir))
-            .map(|saved| AccountInfo {
-                server_url: saved.server_url,
-                user_id: saved.user_id,
-                user_name: saved.user_name,
-            })
+            .map(|saved| AccountInfo::of(&saved))
     }
 
     /// Credits-aware next-up: for an `Episode` in the mirror, the next
@@ -2499,17 +2469,6 @@ impl JellybeamCore {
     pub fn next_episode_after(&self, item_id: String) -> Option<Card> {
         let mirror = self.require_mirror().ok()?;
         crate::next_episode::next_episode_after(&mirror, &item_id)
-    }
-
-    /// OSD v2's `PREVIOUS` transport button
-    /// (`docs/jellybeam-osd-handoff/handoff/JELLYBEAM-TV-OSD-SPEC.md` §6): the
-    /// previous episode within its series, skipping virtual entries,
-    /// crossing backward into the previous season. `None` under the mirror
-    /// [`Self::next_episode_after`] contract, substituting "first" for
-    /// "last". See [`crate::next_episode::previous_episode_before`].
-    pub fn previous_episode_before(&self, item_id: String) -> Option<Card> {
-        let mirror = self.require_mirror().ok()?;
-        crate::next_episode::previous_episode_before(&mirror, &item_id)
     }
 
     /// Resolves both episode-edge transport targets in one call. The local
@@ -2588,17 +2547,21 @@ impl JellybeamCore {
     /// button finds an in-progress/next-unplayed episode in any season.
     ///
     /// One local-mirror-only round trip per Detail page open (never per
-    /// season-tab switch); empty if the mirror isn't open, the query fails,
-    /// or the series genuinely has no episodes.
-    pub fn series_episodes(&self, series_id: String) -> Vec<Card> {
+    /// season-tab switch). docs/07 §5: "mirror not open yet", "query failed" and "series has no
+    /// episodes" stay apart.
+    pub fn series_episodes_read(&self, series_id: String) -> BrowseRead {
         let Ok(mirror) = self.require_mirror() else {
-            return Vec::new();
+            return BrowseRead::NotReady;
         };
-        crate::next_episode::all_episodes_of_series(&mirror, &series_id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(Card::from)
-            .collect()
+        match crate::next_episode::all_episodes_of_series(&mirror, &series_id) {
+            Some(rows) => BrowseRead::Items {
+                cards: rows.into_iter().map(Card::from).collect(),
+            },
+            None => {
+                tracing::warn!("series episodes query failed");
+                BrowseRead::Failed
+            }
+        }
     }
 
     /// Automatic track selection (docs/09 step 3): converts `tracks` to
@@ -2628,31 +2591,22 @@ impl JellybeamCore {
         .into()
     }
 
-    /// Persists one half (audio or subtitle -- `kind: TrackKindFfi::Video`
-    /// is a documented no-op) of `series_id`'s remembered track choice,
-    /// immediately updating the in-memory copy [`Self::resolve_tracks`]
-    /// reads. `track_key: None` clears that half rather than leaving a stale
-    /// key. `track_key` must already be the result of
-    /// [`crate::track_pref_key_of`]. A disk write failure is logged and
-    /// swallowed, same contract as [`Self::set_settings`].
-    pub fn remember_track_choice(
+    /// Persists one half (audio or subtitle; `Video` is a no-op)
+    /// of `series_id`'s remembered track choice, immediately updating the in-memory copy
+    /// [`Self::resolve_tracks`] reads. `Unset` clears that half, `Off` remembers "no subtitles"
+    /// (docs/18 §3.1; audio has no Off, so an audio `Off` is refused, as is `Video`). A `Key` must already be the result of
+    /// [`crate::track_pref_key_of`]. A disk write failure is logged and swallowed, same contract
+    /// as [`Self::set_settings`].
+    pub fn remember_track_memory(
         &self,
         series_id: String,
         kind: TrackKindFfi,
-        track_key: Option<String>,
+        memory: TrackMemoryFfi,
     ) {
         let (revision, snapshot) = {
             let mut state = self.lock_state();
-            let entry = state.track_prefs.entry(series_id).or_default();
-            match kind {
-                TrackKindFfi::Audio => entry.audio = track_key,
-                TrackKindFfi::Subtitle => entry.subtitle = track_key,
-                TrackKindFfi::Video => {
-                    tracing::warn!(
-                        "remember_track_choice called with TrackKindFfi::Video; no-op -- \
-                         there is no per-series video-track preference"
-                    );
-                }
+            if !track_prefs::remember(&mut state.track_prefs, series_id, kind, memory.into()) {
+                return;
             }
             state.track_prefs_revision += 1;
             (state.track_prefs_revision, state.track_prefs.clone())
@@ -2672,12 +2626,7 @@ impl JellybeamCore {
     /// [`media_cache::Mirror::refresh_items`] for its season/series without
     /// blocking this call.
     pub fn set_played(&self, item_id: String, played: bool) -> Result<(), CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
-        let mirror = self.require_mirror()?;
+        let (client, mirror) = self.read_account(None)?.require_open()?;
 
         // docs/07 Watch state, Ordering: this mark is the newest action on the item; a failed mark
         // drops the guard, so the paused Stopped resumes.
@@ -2704,19 +2653,11 @@ impl JellybeamCore {
         Ok(())
     }
 
-    /// Bulk mark for a Series or Season scope (docs/19 §1.1). Marks the
-    /// scope on the server first, then applies the mark *locally*
-    /// (optimistic) to every non-virtual episode in scope. Returns once
-    /// those local applies are enqueued; a background task then waits for
-    /// them to commit and re-fetches the scope plus its season(s)/series for
-    /// authoritative counts.
+    /// Bulk mark for a Series or Season scope (docs/19 §1.1): marks it on the server, applies it locally (optimistic)
+    /// to every non-virtual episode, and returns once those applies are enqueued; a background task then re-fetches
+    /// the scope for authoritative counts.
     pub fn set_played_recursive(&self, scope_id: String, played: bool) -> Result<(), CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
-        let mirror = self.require_mirror()?;
+        let (client, mirror) = self.read_account(None)?.require_open()?;
 
         let scope_item = mirror.item(&scope_id);
         let is_series = scope_item
@@ -2788,12 +2729,7 @@ impl JellybeamCore {
     /// the menu passes the *series'* id here (docs/19 §1.1); this method
     /// itself has no scope concept.
     pub fn set_favorite(&self, item_id: String, favorite: bool) -> Result<(), CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
-        let mirror = self.require_mirror()?;
+        let (client, mirror) = self.read_account(None)?.require_open()?;
 
         let data = self
             .runtime
@@ -2807,17 +2743,16 @@ impl JellybeamCore {
     /// §1.3/§2.1) -- cached ten minutes per session. Names are shown
     /// verbatim (CLAUDE.md's "server-configured names verbatim" rule).
     pub fn list_collections(&self) -> Result<Vec<CollectionInfo>, CoreError> {
-        if let Some((fetched_at, cached)) = self.lock_state().collections.clone() {
-            if fetched_at.elapsed() < COLLECTIONS_CACHE_TTL {
-                return Ok(cached);
+        let (epoch, client) = {
+            let state = self.lock_state();
+            let installed = state.account.installed().ok_or(CoreError::NotSignedIn)?;
+            if let Some((fetched_at, cached)) = &installed.caches.collections {
+                if fetched_at.elapsed() < COLLECTIONS_CACHE_TTL {
+                    return Ok(cached.clone());
+                }
             }
-        }
-
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
+            (state.account.epoch, installed.client.clone())
+        };
         let items = self.runtime.block_on(client.list_collections())?;
         let collections: Vec<CollectionInfo> = items
             .into_iter()
@@ -2829,7 +2764,9 @@ impl JellybeamCore {
             })
             .collect();
 
-        self.lock_state().collections = Some((Instant::now(), collections.clone()));
+        self.store_if_epoch(epoch, |caches| {
+            caches.collections = Some((Instant::now(), collections.clone()));
+        });
         Ok(collections)
     }
 
@@ -2843,15 +2780,19 @@ impl JellybeamCore {
         collection_id: String,
         item_id: String,
     ) -> Result<(), CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
+        let current = self.lock_state().account.current_client();
+        let (epoch, client) = current.ok_or(CoreError::NotSignedIn)?;
         self.runtime
             .block_on(client.add_to_collection(&collection_id, &item_id))?;
 
-        if let Some(mirror) = self.lock_state().mirror.clone() {
+        // docs/18 §2.1: the follow-up refreshes the mirror of the account that posted, only while
+        // it is still installed.
+        let mirror = {
+            let mut state = self.lock_state();
+            let installed = state.account.installed_mut(epoch);
+            installed.and_then(|i| Some(i.bundle.as_ref()?.mirror.clone()))
+        };
+        if let Some(mirror) = mirror {
             self.runtime.spawn(async move {
                 mirror.refresh_collection_membership(&collection_id).await;
             });
@@ -2861,7 +2802,7 @@ impl JellybeamCore {
 
     /// docs/19 §1.3/§2.3: which collections `item_id` is currently a member
     /// of, per the local mirror's `collection_members` table. Empty when the
-    /// mirror isn't open, same convention as [`Self::series_episodes`].
+    /// mirror isn't open, same convention as [`Self::series_episodes_read`].
     pub fn collection_ids_containing(&self, item_id: String) -> Vec<String> {
         let Ok(mirror) = self.require_mirror() else {
             return Vec::new();
@@ -2872,11 +2813,7 @@ impl JellybeamCore {
     /// Fire-and-forget metadata refresh (docs/19 §1.4); the mirror
     /// reconciles when `LibraryChanged` arrives.
     pub fn refresh_metadata(&self, item_id: String) -> Result<(), CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
+        let client = self.require_client()?;
         self.runtime.block_on(client.refresh_item(&item_id))?;
         Ok(())
     }
@@ -2885,11 +2822,7 @@ impl JellybeamCore {
     /// a revoked token goes unnoticed until the first Play; the app calls it at launch, account
     /// switch and return to foreground, and routes `Unauthorized` to re-authorization.
     pub fn validate_session(&self) -> Result<(), CoreError> {
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
+        let client = self.require_client()?;
         self.runtime.block_on(client.current_user())?;
         Ok(())
     }
@@ -2898,26 +2831,23 @@ impl JellybeamCore {
     /// -- cached per session, never re-fetched once known (unlike
     /// [`Self::list_collections`]'s ten-minute TTL).
     pub fn is_administrator(&self) -> Result<bool, CoreError> {
-        if let Some(cached) = self.lock_state().is_admin {
-            return Ok(cached);
-        }
-        let client = self
-            .lock_state()
-            .client
-            .clone()
-            .ok_or(CoreError::NotSignedIn)?;
+        let (epoch, client) = {
+            let state = self.lock_state();
+            let installed = state.account.installed().ok_or(CoreError::NotSignedIn)?;
+            if let Some(cached) = installed.caches.is_admin {
+                return Ok(cached);
+            }
+            (state.account.epoch, installed.client.clone())
+        };
         let user = self.runtime.block_on(client.current_user())?;
-        let is_admin = user
-            .policy
-            .and_then(|policy| policy.is_administrator)
-            .unwrap_or(false);
-        self.lock_state().is_admin = Some(is_admin);
+        // docs/19 §2.3: a reply without a policy proves nothing about the role, so it is not cached.
+        let Some(is_admin) = user.policy.and_then(|policy| policy.is_administrator) else {
+            return Ok(false);
+        };
+        self.store_if_epoch(epoch, |caches| caches.is_admin = Some(is_admin));
         Ok(is_admin)
     }
 }
-
-/// [`JellybeamCore::open_mirror_with_bus`]'s return shape.
-type MirrorWithBus = (media_cache::Mirror, BusBundle);
 
 /// [`JellybeamCore::negotiate_playback_source`]'s return shape: source, url,
 /// `play_session_id`, play method, transcode reason, server verdict.
@@ -2931,6 +2861,28 @@ type NegotiatedSource = (
 );
 
 impl JellybeamCore {
+    /// docs/18 §2.1: the current account's epoch; Kotlin reads it through [`Self::account_epochs`].
+    pub(crate) fn account_epoch(&self) -> u64 {
+        self.lock_state().account.epoch
+    }
+
+    /// docs/18 §2.1: the parked playback's epoch, as [`Self::account_epochs`] reports it.
+    #[cfg(test)]
+    pub(crate) fn parked_account_epoch(&self) -> Option<u64> {
+        self.account_epochs().parked
+    }
+
+    /// docs/09: gives the mirror the Next Up options of `state.settings`, called under the lock that
+    /// writes them or installs the mirror so they match the latest settings whatever order
+    /// concurrent saves finish in.
+    fn push_next_up_options_locked(state: &State) {
+        if let Some(bundle) = state.account.bundle() {
+            bundle
+                .mirror
+                .set_next_up_options(next_up_options_from(&state.settings));
+        }
+    }
+
     /// The playback client and authed URL of sidecar `index` in session `play_session_id`.
     fn sidecar_source(
         &self,
@@ -2990,8 +2942,9 @@ impl JellybeamCore {
     /// The signed-in client, cloned out of the state lock; `NotSignedIn` before sign-in.
     pub(crate) fn require_client(&self) -> Result<jellyfin_api::JellyfinClient, CoreError> {
         self.lock_state()
-            .client
-            .clone()
+            .account
+            .installed()
+            .map(|i| i.client.clone())
             .ok_or(CoreError::NotSignedIn)
     }
 
@@ -2999,10 +2952,59 @@ impl JellybeamCore {
         self.state.lock()
     }
 
+    /// docs/18 §2.1: applies `store` to the account caches only while `epoch`, captured with the
+    /// client the fetch used, is still the installed account's; returns whether it applied.
+    pub(crate) fn store_if_epoch(
+        &self,
+        epoch: u64,
+        store: impl FnOnce(&mut AccountCaches),
+    ) -> bool {
+        let mut state = self.lock_state();
+        let Some(installed) = state.account.installed_mut(epoch) else {
+            return false;
+        };
+        store(&mut installed.caches);
+        true
+    }
+
+    /// docs/18 §2.1: reads the account caches only while `epoch` is still the installed account's;
+    /// `None` once it is not, so a late fetch never answers with the next account's cache.
+    pub(crate) fn read_if_epoch<T>(
+        &self,
+        epoch: u64,
+        read: impl FnOnce(&AccountCaches) -> T,
+    ) -> Option<T> {
+        let mut state = self.lock_state();
+        state
+            .account
+            .installed_mut(epoch)
+            .map(|installed| read(&installed.caches))
+    }
+
+    /// docs/18 §2.1: the installed account's epoch, server and user, read under one lock so the
+    /// three always name the same account; the url is as saved, so it keys the Seerr config
+    /// exactly as written. `None` when no account is installed.
+    pub(crate) fn installed_identity(&self) -> Option<InstalledIdentity> {
+        Self::installed_identity_locked(&self.lock_state())
+    }
+
+    /// [`Self::installed_identity`] for a caller already holding the state lock.
+    pub(crate) fn installed_identity_locked(state: &State) -> Option<InstalledIdentity> {
+        Some(InstalledIdentity {
+            epoch: state.account.epoch,
+            account: state.account.installed()?.identity(),
+        })
+    }
+
     /// `pub(crate)` accessor for `seerr.rs`'s config-store path; see
     /// [`Self::lock_state`].
     pub(crate) fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    pub(crate) fn pre_auth_http(&self) -> &jellyfin_api::HttpClient {
+        self.pre_auth_http
+            .get_or_init(jellyfin_api::build_http_client)
     }
 
     /// `pub(crate)` accessor for `seerr.rs`'s `block_on` calls.
@@ -3014,35 +3016,25 @@ impl JellybeamCore {
         &self.seerr_config
     }
 
-    fn invalidate_preload_locked(state: &mut State) -> Option<tokio::task::JoinHandle<()>> {
-        state.preload_generation = state.preload_generation.wrapping_add(1);
-        state.preload_cache = None;
-        state.preload_target_item_id = None;
-        state.preload_pending = None;
-        state.preload_task.take()
-    }
-
-    /// Clears every per-account cache (`seerr`/`collections`/`is_admin`) and
-    /// invalidates any in-flight preload -- shared by every path that signs
-    /// in, switches, or removes an account, so none of them can leave a
-    /// previous account's cache readable under the new one.
-    /// Called before the caller replaces the client or mirror: it captures the outgoing account.
-    /// docs/18 §2.1: the epoch advances either way; a live playback is parked on its own account,
-    /// unless `change` leaves the account it plays on, which ends it.
-    fn reset_account_state_locked(state: &mut State, change: AccountChange) -> AccountReset {
+    /// docs/18 §2.1: the one account change: installs `next` (`None`: signed out) under the next
+    /// epoch and invalidates the preload; a live playback is parked on its own account unless
+    /// `change` leaves it, which ends it; the outgoing bundle goes out in the reset for teardown.
+    fn reset_account_state_locked(
+        state: &mut State,
+        next: Option<Installed>,
+        change: AccountChange,
+    ) -> AccountReset {
         let outgoing = SessionAccount::of(state);
-        state.seerr = None;
-        state.collections = None;
-        state.is_admin = None;
-        let owner = &state.playback_owner;
+        let epoch = state.account.epoch;
         // The newest playback is on the outgoing account, or on a parked one that came back.
-        let playing_here = owner.playing_epoch == Some(owner.account_epoch);
-        let parked_here = owner
+        let playing_here = Self::playing_epoch_locked(state) == Some(epoch);
+        let parked_here = state
+            .playback_owner
             .parked
             .as_ref()
             .is_some_and(|parked| parked.is_account(outgoing.mirror_dir.as_deref()));
-        let parked_plays = owner.parked_plays();
-        let preload_task = Self::invalidate_preload_locked(state);
+        let parked_plays = Self::parked_plays_locked(state);
+        let preload_task = state.preload_invalidate();
         let leaving = change == AccountChange::Leave;
         let mut reset = if leaving && (playing_here || parked_here && parked_plays) {
             Self::end_playback_locked(state)
@@ -3051,7 +3043,7 @@ impl JellybeamCore {
             if playing_here {
                 // A newer playback than any parked one: it alone keeps its account.
                 owner.parked = Some(ParkedAccount {
-                    epoch: owner.account_epoch,
+                    epoch,
                     account: outgoing,
                 });
             } else if leaving && parked_here {
@@ -3065,11 +3057,35 @@ impl JellybeamCore {
                 reporting: None,
                 retiring: None,
                 account: Self::playback_account_locked(state),
+                bundle: None,
+                refresh: None,
             }
         };
         reset.preload_task = preload_task;
-        state.playback_owner.account_epoch = state.playback_owner.account_epoch.wrapping_add(1);
+        reset.bundle = state.account.installed.take().and_then(|old| old.bundle);
+        state.account.epoch = epoch.wrapping_add(1);
+        reset.refresh = next
+            .as_ref()
+            .map(|i| (state.account.epoch, i.client.clone()));
+        state.account.installed = next;
         reset
+    }
+
+    /// docs/18 §2.1: installs `next`, read under epoch `tag`, unless the epoch has moved since or
+    /// `next` is already installed (a recreated Activity, a failed switch) -- neither is an account
+    /// change, so live playback and its caches stay. `None` when nothing changed.
+    fn restore_account_locked(
+        state: &mut State,
+        tag: u64,
+        next: Installed,
+    ) -> Option<AccountReset> {
+        let installed = state.account.installed().is_some_and(|i| {
+            i.mirror_dir == next.mirror_dir
+                && session::same_server(&i.account.server_url, &next.account.server_url)
+                && i.account.user_id == next.account.user_id
+        });
+        (tag == state.account.epoch && !installed)
+            .then(|| Self::reset_account_state_locked(state, Some(next), AccountChange::Replace))
     }
 
     /// docs/18 §2.1: ends the live playback -- its claim, sessions and sidecars -- for disposal
@@ -3080,7 +3096,6 @@ impl JellybeamCore {
         owner.claim = None;
         owner.installed_replaces = None;
         owner.parked = None;
-        owner.playing_epoch = None;
         let retiring = owner.retiring.take();
         state.sidecars = None;
         state.local_progress_checkpoint.reset();
@@ -3089,6 +3104,8 @@ impl JellybeamCore {
             reporting: state.reporting.take(),
             retiring,
             account,
+            bundle: None,
+            refresh: None,
         }
     }
 
@@ -3098,6 +3115,23 @@ impl JellybeamCore {
         state.reporting.is_some() || state.playback_owner.retiring.is_some()
     }
 
+    /// docs/18 §2.1: the epoch the newest playback plays on -- a negotiating claim's, else a live
+    /// stream's (the parked account's while one is parked) -- so a stopped playback owns nothing.
+    fn playing_epoch_locked(state: &State) -> Option<u64> {
+        let owner = &state.playback_owner;
+        owner.claim.as_ref().map(|claim| claim.epoch).or_else(|| {
+            Self::playback_live_locked(state)
+                .then(|| owner.parked.as_ref().map_or(state.account.epoch, |parked| parked.epoch))
+        })
+    }
+
+    /// docs/18 §2.1: whether the newest playback is the parked one, so leaving its account ends
+    /// it; a parked account whose playback ended or was replaced is only dropped.
+    fn parked_plays_locked(state: &State) -> bool {
+        let parked = state.playback_owner.parked.as_ref().map(|parked| parked.epoch);
+        parked.is_some() && Self::playing_epoch_locked(state) == parked
+    }
+
     /// docs/18 §2.1: a negotiation that fails undoes its admission if it still holds its claim,
     /// so a playback that never started neither owns playback nor gets parked by a switch.
     fn release_claim(&self, claim: &PlaybackClaim) {
@@ -3105,7 +3139,6 @@ impl JellybeamCore {
         let owner = &mut state.playback_owner;
         if owner.claim.as_ref() == Some(claim) {
             owner.claim = None;
-            owner.playing_epoch = claim.prior_playing_epoch;
         }
     }
 
@@ -3123,28 +3156,30 @@ impl JellybeamCore {
             caps,
             tolerate_mislabeled_levels,
             quality,
-            cached,
-            joinable_task,
-            stale_task,
+            preload,
         } = admitted;
+        let PreloadForPlay {
+            cached,
+            join,
+            abort,
+        } = preload;
         // Abort is deliberately not awaited: Play must enter its own
         // critical path immediately. The generation gate already prevents
         // the cancelled task from publishing even mid-poll.
-        Self::abort_task(stale_task);
+        Self::abort_task(abort);
 
-        // Same-item join: block on the negotiation already talking to the
+        // Same-item join: wait for the negotiation already talking to the
         // server, then consume whatever it published -- the same single-use
         // read a fresh cache hit would do, just delayed instead of skipped.
-        // A miss (the target changed underneath it, or it resolved to a
+        // A miss (the slot was invalidated underneath it, or it resolved to a
         // Transcode plan, which is never cached) falls through to a normal
         // negotiation below exactly like an expired cache entry would.
-        let cached = if let Some(task) = joinable_task {
-            let _ = self.runtime.block_on(task);
-            let mut state = self.lock_state();
-            state
-                .preload_cache
-                .take()
-                .filter(|c| c.is_fresh_for(state.preload_generation, &item_id, Instant::now()))
+        let cached = if let Some(mut join) = join {
+            self.runtime.block_on(async {
+                let _ = join.settled.changed().await;
+            });
+            self.lock_state()
+                .preload_take_joined(&join, &item_id, Instant::now())
         } else {
             cached
         };
@@ -3168,8 +3203,8 @@ impl JellybeamCore {
 
         // Outro timing and trickplay never touch this critical path: Kotlin
         // derives Outro start from its own fire-and-forgotten
-        // `get_media_segments` call, and fetches trickplay separately via
-        // [`Self::get_trickplay`]. `get_playback_info` + `decide_playback`
+        // `get_media_segments` call, and gets trickplay from
+        // [`Self::get_playback_osd_detail`]. `get_playback_info` + `decide_playback`
         // (skipped on a preload cache hit) are the only network-needing
         // steps left here.
         let (source, url, play_session_id, play_method, transcode_reason, server_verdict) = self
@@ -3237,7 +3272,7 @@ impl JellybeamCore {
     /// docs/18 §2.1: the account a request minted under `epoch` plays on -- the current one, or
     /// the parked one its playback kept; any other epoch is [`CoreError::AccountChanged`].
     fn account_for_epoch_locked(state: &State, epoch: u64) -> Result<SessionAccount, CoreError> {
-        if epoch == state.playback_owner.account_epoch {
+        if epoch == state.account.epoch {
             return Ok(SessionAccount::of(state));
         }
         state
@@ -3259,10 +3294,11 @@ impl JellybeamCore {
     }
 
     /// Outside the lock: aborts the preload and ends the outgoing sessions with the same final
-    /// writes as a stop (report, mirror), to the outgoing account. The installed one
-    /// ends at its last reported position (at most a second old); with none reported yet it is
-    /// abandoned instead, since a Stopped at 0 would overwrite the resume point.
-    fn dispose_account_reset(&self, reset: AccountReset) {
+    /// writes as a stop (report, mirror), to the outgoing account. The installed one ends at its
+    /// last reported position (at most a second old); with none reported yet it is abandoned
+    /// instead, since a Stopped at 0 would overwrite the resume point. The returned receivers
+    /// settle when each final report has landed (docs/18 §2.1).
+    fn dispose_account_reset(&self, reset: AccountReset) -> Vec<FinalSettled> {
         Self::abort_task(reset.preload_task);
         let end = |session, ticks| {
             Self::stop_session_and_sync_mirror(
@@ -3271,20 +3307,32 @@ impl JellybeamCore {
                 session,
                 ticks,
                 reset.account.clone(),
-            );
+            )
         };
+        let mut pending = Vec::new();
         if let Some(retiring) = reset.retiring {
             let ticks = retiring.left_at();
-            end(retiring.session, ticks);
+            pending.push(end(retiring.session, ticks));
         }
         match reset.reporting {
             Some(session) if session.last_position() > 0 => {
                 let ticks = session.last_position();
-                end(session, ticks);
+                pending.push(end(session, ticks));
             }
             Some(session) => session.abandon(),
             None => {}
         }
+        self.stop_event_bus(reset.bundle);
+        if let Some((epoch, client)) = reset.refresh {
+            self.runtime.spawn(Self::refresh_server_version_once(
+                epoch,
+                client,
+                self.data_dir.clone(),
+                self.state.clone(),
+                self.session_lock.clone(),
+            ));
+        }
+        pending
     }
 
     fn abort_task(task: Option<tokio::task::JoinHandle<()>>) {
@@ -3294,28 +3342,26 @@ impl JellybeamCore {
     }
 
     /// Drains one active request followed by at most the latest replacement
-    /// target; a focus change can replace `preload_pending` again but never
+    /// target; a focus change can replace the pending target again but never
     /// creates a second network worker.
     async fn run_preload_worker(shared_state: Arc<SharedState>, mut request: PreloadRequest) {
+        let mut exit = PreloadExit {
+            shared: Arc::clone(&shared_state),
+            generation: request.generation,
+        };
         loop {
-            let generation = request.generation;
             let cache = Self::build_preload_cache(&request).await;
-            let mut state = shared_state.lock();
-            if state.preload_generation == generation {
-                state.preload_task = None;
-                state.preload_target_item_id = None;
-                state.preload_pending = None;
-                state.preload_cache = cache;
-                return;
+            let next =
+                shared_state
+                    .lock()
+                    .preload_publish(request.generation, cache, Instant::now());
+            match next {
+                PreloadNext::Run(next) => {
+                    exit.generation = next.generation;
+                    request = next;
+                }
+                PreloadNext::Stale | PreloadNext::Idle => return,
             }
-
-            // A bumped generation with nothing pending means a newer caller already owns
-            // preload_task and its target (a worker spawned after a same-item join); leave them.
-            let Some(next) = state.preload_pending.take() else {
-                return;
-            };
-            request = next;
-            drop(state);
         }
     }
 
@@ -3382,6 +3428,33 @@ impl JellybeamCore {
         Self::identity_with(device_id::for_server(&self.device_id, server_url))
     }
 
+    /// docs/18 §2.1: asks the removed account's server to end its session with that account's own
+    /// token once `final_reports` have settled or [`FINAL_REPORT_SETTLE_BUDGET`] ends, fire-and-forget
+    /// (bounded by the client's request timeout), so a slow or dead server never delays removal.
+    fn spawn_logout(&self, session: &session::SessionFile, final_reports: Vec<FinalSettled>) {
+        let client = jellyfin_api::JellyfinClient::from_token(
+            &session.server_url,
+            Self::saved_identity(session),
+            &session.token,
+        )
+        .with_user_id(&session.user_id);
+        self.runtime.spawn(async move {
+            // The token is revoked only after the account's last Stopped has used it, or the
+            // settle budget has run out.
+            let finals = futures_util::future::join_all(final_reports);
+            if tokio::time::timeout(FINAL_REPORT_SETTLE_BUDGET, finals)
+                .await
+                .is_err()
+            {
+                tracing::debug!("final reports still pending; logging out anyway");
+            }
+            match client.logout().await {
+                Ok(()) => tracing::debug!("server session ended"),
+                Err(error) => tracing::debug!(%error, "server logout failed"),
+            }
+        });
+    }
+
     /// Identity for a saved token: the `DeviceId` it was issued to, which for sessions saved
     /// before per-server ids is the install id itself.
     fn saved_identity(saved: &session::SessionFile) -> jellyfin_api::ClientIdentity {
@@ -3405,14 +3478,13 @@ impl JellybeamCore {
         request: PlaybackRequest,
         retires: Option<String>,
     ) -> Result<PlaybackClaim, CoreError> {
+        let current_epoch = state.account.epoch;
         let owner = &mut state.playback_owner;
         let parked_epoch = owner.parked.as_ref().map(|parked| parked.epoch);
-        if request.account_epoch != owner.account_epoch
-            && Some(request.account_epoch) != parked_epoch
-        {
+        if request.account_epoch != current_epoch && Some(request.account_epoch) != parked_epoch {
             tracing::warn!(
                 request_epoch = request.account_epoch,
-                current_epoch = owner.account_epoch,
+                current_epoch,
                 "playback request from a previous account epoch refused"
             );
             return Err(CoreError::AccountChanged);
@@ -3424,7 +3496,6 @@ impl JellybeamCore {
         let claim = PlaybackClaim {
             seq: request.seq,
             epoch: request.account_epoch,
-            prior_playing_epoch: owner.playing_epoch.replace(request.account_epoch),
             retires,
         };
         owner.claim = Some(claim.clone());
@@ -3461,7 +3532,7 @@ impl JellybeamCore {
             // What it replaces belongs to the playback before it; a claim on the current account
             // starts a playback of its own, so nothing is parked any more.
             let account = Self::playback_account_locked(&state);
-            if claim.epoch == state.playback_owner.account_epoch {
+            if claim.epoch == state.account.epoch {
                 state.playback_owner.parked = None;
             }
             (state.reporting.replace(session), retired, account)
@@ -3524,25 +3595,17 @@ impl JellybeamCore {
         state.reporting.take().map(Taken::Active)
     }
 
-    /// Shared by [`Self::stop_playback`] and
-    /// [`Self::prepare_transcode_fallback`] (docs/18-playback-quality.md
-    /// §2): sends the session's final Stopped report, then applies the same
-    /// watch-state update locally to `mirror` so Home shelves update
-    /// instantly rather than waiting on an unreliable `UserDataChanged` event.
-    ///
-    /// `session.stop(..)`'s final report is fired via `spawn`, not
-    /// `block_on`'d: Kotlin no longer waits for that HTTP round trip before
-    /// starting the next item's negotiation. The mirror write below is still
-    /// `block_on`'d: a same-item resume must read back the position this
-    /// call is committing. It takes no `&self`: everything it writes comes from `account`, never
-    /// from the current state, which may already belong to another account.
+    /// docs/18 §2.1: the one stop path of `stop_playback`, `abandon_playback`, a transcode
+    /// fallback's retired session, a replaced claim and an account reset. Fires the session's
+    /// final Stopped (not awaited) and commits the position to `account`'s mirror before
+    /// returning; the [`FinalSettled`] resolves once that report has landed or been given up.
     fn stop_session_and_sync_mirror(
         runtime: &tokio::runtime::Runtime,
         playback_write: &Mutex<()>,
         session: jellyfin_core::ReportingSession,
         position_ticks: i64,
         account: SessionAccount,
-    ) {
+    ) -> FinalSettled {
         let SessionAccount { mirror, .. } = account;
         let item_id = session.context().item_id.clone();
         // The server recounts an episode's season/series only once the
@@ -3563,10 +3626,13 @@ impl JellybeamCore {
         );
         let stop = session.stop(report_ticks);
         let scope_mirror = mirror.clone();
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
         runtime.spawn(async move {
             // Waits for the Stopped to land, retries included: a recount before it reads the old
             // counts. A delivery cancelled by a newer action is recounted by that action instead.
-            if stop.await.settled().await {
+            let cancelled = stop.await.settled().await;
+            let _ = settled_tx.send(());
+            if cancelled {
                 return;
             }
             // An episode's scope is non-empty; its stop moves Next Up (docs/07 §1).
@@ -3587,6 +3653,7 @@ impl JellybeamCore {
                 tracing::error!(item_id, "final playback state did not commit to the mirror");
             }
         }
+        settled_rx
     }
 
     /// Shared by [`Self::prepare_playback`] and [`Self::preload_playback`]:
@@ -3835,26 +3902,67 @@ impl JellybeamCore {
             });
         }
 
+        // docs/18 §2.1: "browsed" means the installed account; the list's active row only stands in
+        // when nothing is installed.
+        let target_identity = AccountIdentity::of(&target);
+        let target_installed = self
+            .installed_identity()
+            .map(|installed| installed.account.names(&target));
         // Authentication is a network round trip. Re-read after it finishes
         // and refuse to resurrect an account removed while in flight;
         // locate by stable identity, not the original index.
-        let still_saved = session::load_list(&self.data_dir)
-            .sessions
-            .iter()
-            .any(|saved| saved.server_url == target.server_url && saved.user_id == target.user_id);
-        if !still_saved {
-            return Err(CoreError::InvalidSessionIndex {
-                index: original_index,
-            });
+        let replaced_parked = session::mutate(&self.data_dir, &self.session_lock, |list| {
+            let Some(ix) = list
+                .sessions
+                .iter()
+                .position(|saved| target_identity.names(saved))
+            else {
+                return Err(CoreError::InvalidSessionIndex {
+                    index: original_index,
+                });
+            };
+            Ok(if target_installed.unwrap_or(ix == list.active) {
+                None
+            } else {
+                // docs/18 §2.1: only the token (and name) of a parked account changes; the account
+                // being browsed stays active, no account change happens, and nothing is installed.
+                let token = access_token_of(&auth)?;
+                let row = &mut list.sessions[ix];
+                row.token = token;
+                if let Some(name) = auth.user.as_ref().and_then(|user| user.name.clone()) {
+                    row.user_name = name;
+                }
+                row.device_id = device_id::for_server(&self.device_id, &target.server_url);
+                Some(row.clone())
+            })
+        })?;
+        if let Some(row) = replaced_parked {
+            let mirror_dir = row.mirror_dir.clone();
+            // A live playback parked on this account keeps going, now with the fresh token.
+            {
+                let mut state = self.lock_state();
+                if let Some(parked) = state
+                    .playback_owner
+                    .parked
+                    .as_mut()
+                    .filter(|parked| parked.is_account(Some(&mirror_dir)))
+                {
+                    parked.account = parked.account.refreshed_by(SessionAccount {
+                        mirror: None,
+                        client: Some(client),
+                        mirror_dir: None,
+                    });
+                }
+            }
+            return Ok(AccountInfo::of(&row));
         }
 
         self.install_authenticated_session(target.server_url, client, auth)
     }
 
-    /// Shared commit path for password and Quick Connect authentication. A
-    /// candidate mirror is opened first; only after that succeeds is the
-    /// session list written and the live account swapped, so a mirror-open
-    /// failure can't strand a previously working account.
+    /// Shared commit path for password and Quick Connect authentication. Like
+    /// [`Self::switch_session`] it opens no mirror: the account change's
+    /// [`Self::open_mirror`] is the one open per install.
     fn install_authenticated_session(
         &self,
         server_url: String,
@@ -3867,9 +3975,7 @@ impl JellybeamCore {
             .ok_or_else(|| CoreError::Api {
                 detail: "sign-in response did not include a user id".to_string(),
             })?;
-        let token = auth.access_token.clone().ok_or_else(|| CoreError::Api {
-            detail: "sign-in response did not include an access token".to_string(),
-        })?;
+        let token = access_token_of(&auth)?;
         let user_name = auth
             .user
             .as_ref()
@@ -3883,107 +3989,36 @@ impl JellybeamCore {
             token,
             device_id: device_id::for_server(&self.device_id, &server_url),
             mirror_dir: session::mirror_dir_name(&server_url, &user_id),
-            // Not known yet -- `spawn_server_version_refresh` (called after
-            // this session is installed) fetches and persists it.
+            // Not known yet -- the install's `AccountReset::refresh` fetches and persists it.
             // `SessionList::add_or_update` carries over whatever version was
             // already on record so a re-authentication never wipes a known
             // value back to `None`. Same reasoning for `server_name`.
             server_version: None,
             server_name: None,
         };
-        // The directory `add_or_update` will settle on (carried over on a
-        // re-authentication, `to_persist`'s hash on a first sign-in), read
-        // under `session_lock` but opened outside it: the open is SQLite I/O
-        // plus migration, and the lock is for list read-modify-write only.
-        // The write below re-checks the directory it lands on.
-        let mirror_dir = {
-            let _guard = self.session_lock.lock().unwrap_or_else(|e| e.into_inner());
-            session::load_list(&self.data_dir)
-                .sessions
-                .iter()
-                .find(|s| s.server_url == to_persist.server_url && s.user_id == to_persist.user_id)
-                .map_or_else(|| to_persist.mirror_dir.clone(), |s| s.mirror_dir.clone())
-        };
-
-        // Goes through the same mirror+bus bundle `open_mirror` uses rather
-        // than opening a bare `media_cache::Mirror` with no bus -- otherwise
-        // a first sign-in that never separately calls `open_mirror` would
-        // run with no live updates. `candidate_bundle` and whatever bundle
-        // account A still has installed are both alive at once below, until
-        // the old one is retired -- harmless since each bundle carries its
-        // own channel. Opened before the session list is written, so a
-        // mirror-open failure can't strand a previously working account.
-        let (candidate_mirror, candidate_bundle) =
-            self.open_mirror_with_bus(client.clone(), self.data_dir.join(&mirror_dir))?;
-        let next_up_settings = self.lock_state().settings.clone();
-        candidate_mirror.set_next_up_options(next_up_options_from(&next_up_settings));
-
-        let persisted = {
-            let _guard = self.session_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let mut sessions = session::load_list(&self.data_dir);
+        let persisted = session::mutate(&self.data_dir, &self.session_lock, |sessions| {
             sessions.add_or_update(to_persist);
-            let persisted = sessions
-                .active_session()
-                .cloned()
-                .expect("add_or_update installs the new active session");
-            // A concurrent remove/re-add of this account between the peek and
-            // here would leave the opened mirror on a directory the list no
-            // longer names; refuse rather than install a mismatched pair.
-            if persisted.mirror_dir != mirror_dir {
-                return Err(CoreError::Cache {
-                    detail: "session list changed during sign-in; retry".to_string(),
-                });
-            }
-            session::save_list(&self.data_dir, &sessions).map_err(|e| CoreError::Cache {
-                detail: format!("failed to persist session: {e}"),
-            })?;
-            persisted
-        };
-
-        let (old_mirror, old_task, old_bundle, listener, reset) = {
-            let mut state = self.lock_state();
-            // First, while `state` still holds the outgoing account.
-            let reset = Self::reset_account_state_locked(&mut state, AccountChange::Replace);
-            state.client = Some(client);
-            state.mirror_dir = Some(persisted.mirror_dir.clone());
-            // docs/13 Server compatibility -- seeded from
-            // whatever `persisted` ended up with;
-            // `spawn_server_version_refresh` below fetches the current
-            // value in the background.
-            state.server_version = persisted
-                .server_version
-                .as_deref()
-                .and_then(|v| v.parse().ok());
-            state.server_name = persisted.server_name.clone();
-            let old_mirror = state.mirror.replace(candidate_mirror.clone());
-            let old_task = state.listener_task.take();
-            let old_bundle = state.event_bus.replace(candidate_bundle);
-            (
-                old_mirror,
-                old_task,
-                old_bundle,
-                state.listener.clone(),
-                reset,
+            Ok::<_, CoreError>(
+                sessions
+                    .active_session()
+                    .cloned()
+                    .expect("add_or_update installs the new active session"),
             )
-        };
-        self.dispose_account_reset(reset);
-        self.stop_task(old_task);
-        // Retires whatever bus/forwarder a previous session on this same
-        // `JellybeamCore` had running, so a re-entry never leaves a prior
-        // reconnect loop running alongside the new one.
-        self.stop_event_bus(old_bundle);
-        drop(old_mirror);
-        if let Some(listener) = listener {
-            let task = self.spawn_listener_task(candidate_mirror, listener);
-            self.lock_state().listener_task = Some(task);
-        }
-        self.spawn_server_version_refresh();
+        })?;
 
-        Ok(AccountInfo {
-            server_url,
-            user_id,
-            user_name,
-        })
+        self.install_account(Installed::of(&persisted, client));
+        Ok(AccountInfo::of(&persisted))
+    }
+
+    /// docs/18 §2.1: installs `next` in the lock that advances the epoch, so no fetch pairs the
+    /// outgoing client with the new epoch; the outgoing mirror, listener and bus stop here.
+    fn install_account(&self, next: Installed) {
+        let reset = Self::reset_account_state_locked(
+            &mut self.lock_state(),
+            Some(next),
+            AccountChange::Replace,
+        );
+        self.dispose_account_reset(reset);
     }
 
     /// Deletes only mirror directory names generated by this crate (plus
@@ -4013,29 +4048,74 @@ impl JellybeamCore {
     /// an empty/default value instead of propagating it.
     fn require_mirror(&self) -> Result<media_cache::Mirror, CoreError> {
         self.lock_state()
-            .mirror
-            .clone()
+            .account
+            .bundle()
+            .map(|g| g.mirror.clone())
             .ok_or(CoreError::MirrorNotOpen)
     }
 
-    /// Shared mirror-open-plus-bus bundle behind both [`Self::open_mirror`]
-    /// and [`Self::install_authenticated_session`]: creates a fresh
-    /// per-mirror [`BusBundle`], spawns the real websocket `EventBus` and
-    /// this crate's forwarder onto it, then opens the mirror against a
-    /// subscription on that bundle -- never [`Self::bus_tx`] directly. The
-    /// bundle's receiver is subscribed *before* `EventBus::spawn` so the
-    /// first `Connected`/`NeedsReconcile` pair is never missed.
-    ///
-    /// If `Mirror::open` fails, the freshly spawned bus/forwarder are torn
-    /// down before the error returns; the caller owns retiring any bundle
-    /// previously installed. `handle`/`forwarder` are `None` instead of
-    /// spawned under the `live-test-knobs` + `JELLYBEAM_DISABLE_EVENT_BUS=1`
-    /// test-only escape hatch (`live_local_server.rs`'s negative control).
-    fn open_mirror_with_bus(
+    /// Installs `saved` unless an account change landed since `tag` was read; answers with the
+    /// account installed afterwards either way.
+    fn restore_finish(&self, tag: u64, saved: session::SessionFile) -> Option<AccountInfo> {
+        let next = Self::installed_from_saved(&saved);
+        let (reset, now) = {
+            let mut state = self.lock_state();
+            let reset = Self::restore_account_locked(&mut state, tag, next);
+            (reset, state.account.installed().map(|i| i.account.clone()))
+        };
+        if let Some(reset) = reset {
+            self.dispose_account_reset(reset);
+        }
+        now
+    }
+
+    /// `saved` as installed with a client built from its token, no network validation.
+    fn installed_from_saved(saved: &session::SessionFile) -> Installed {
+        let identity = Self::saved_identity(saved);
+        let client =
+            jellyfin_api::JellyfinClient::from_token(&saved.server_url, identity, &saved.token)
+                .with_user_id(&saved.user_id);
+        Installed::of(saved, client)
+    }
+
+    /// [`Self::open_mirror`]'s first step: the epoch, client and directory it opens for, read
+    /// under one lock, with an already open bundle (re-entry) taken and torn down here.
+    fn open_begin(&self) -> Result<(u64, jellyfin_api::JellyfinClient, PathBuf), CoreError> {
+        let (opened, taken) = {
+            let mut state = self.lock_state();
+            let epoch = state.account.epoch;
+            let installed = state
+                .account
+                .installed
+                .as_mut()
+                .ok_or(CoreError::NotSignedIn)?;
+            let dir = self.data_dir.join(&installed.mirror_dir);
+            (
+                (epoch, installed.client.clone(), dir),
+                installed.bundle.take(),
+            )
+        };
+        self.stop_event_bus(taken);
+        Ok(opened)
+    }
+
+    /// Opens the mirror in `dir` and spawns its real bus, unlocked; the bus's receiver comes back
+    /// beside the bundle for the forwarder [`Self::open_finish`] spawns on commit.
+    fn build_bundle(
         &self,
-        client: jellyfin_api::JellyfinClient,
+        client: &jellyfin_api::JellyfinClient,
         dir: PathBuf,
-    ) -> Result<MirrorWithBus, CoreError> {
+    ) -> Result<
+        (
+            BusBundle,
+            Option<tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>>,
+        ),
+        CoreError,
+    > {
+        #[cfg(test)]
+        self.mirror_opens
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Subscribed before `EventBus::spawn`, so the first `NeedsReconcile` is never missed.
         let (bundle_tx, bundle_rx) = tokio::sync::broadcast::channel(16);
 
         #[cfg(feature = "live-test-knobs")]
@@ -4043,54 +4123,105 @@ impl JellybeamCore {
         #[cfg(not(feature = "live-test-knobs"))]
         let bus_disabled = false;
 
-        let real_bus = if bus_disabled {
-            None
+        let (real_bus, connection) = if bus_disabled {
+            // Rests at Disconnected: a disabled bus never reads connected.
+            let (_tx, connection) =
+                tokio::sync::watch::channel(jellyfin_core::BusConnection::Disconnected);
+            (None, connection)
         } else {
-            // `EventBus::spawn` isn't itself `async`, but calls
-            // `tokio::spawn` internally (its supervisor task), needing a
-            // runtime context on the calling thread.
+            // `EventBus::spawn` calls `tokio::spawn` for its supervisor, needing a runtime context.
             let _runtime_guard = self.runtime.enter();
-            let (real_bus_rx, bus_handle) = jellyfin_core::EventBus::spawn(client.clone());
-            let bus_forwarder =
-                self.spawn_bus_forwarder(real_bus_rx, bundle_tx.clone(), self.bus_tx.clone());
-            drop(_runtime_guard);
-            Some((bus_handle, bus_forwarder))
+            let (real_bus_rx, connection, bus_handle) =
+                jellyfin_core::EventBus::spawn(client.clone());
+            (Some((bus_handle, real_bus_rx)), connection)
         };
 
         // Read first: a guard in the `match` scrutinee would hold the state lock across the open.
         let playback_active = self.lock_state().playback_active.clone();
-        match self.runtime.block_on(media_cache::Mirror::open(
+        let opened = self.runtime.block_on(media_cache::Mirror::open(
             dir,
-            client,
+            client.clone(),
             bundle_rx,
             playback_active,
             // docs/07 Watch state: read from the session registry, never the state lock.
             Arc::new(jellyfin_core::pending_local_item_ids),
-        )) {
-            Ok(mirror) => {
-                let (handle, forwarder) = real_bus.unzip();
-                Ok((
-                    mirror,
-                    BusBundle {
-                        tx: bundle_tx,
-                        handle,
-                        forwarder,
-                    },
-                ))
-            }
+        ));
+        let (handle, real_bus_rx) = real_bus.unzip();
+        let mirror = match opened {
+            Ok(mirror) => mirror,
             Err(e) => {
-                // Don't leak the bus/forwarder just spawned above if the
-                // mirror itself fails to open.
-                if let Some((handle, forwarder)) = real_bus {
-                    self.stop_event_bus(Some(BusBundle {
-                        tx: bundle_tx,
-                        handle: Some(handle),
-                        forwarder: Some(forwarder),
-                    }));
+                // The bus just spawned stops with the failed open.
+                if let Some(handle) = handle {
+                    self.runtime.block_on(handle.shutdown());
                 }
-                Err(e.into())
+                return Err(e.into());
             }
+        };
+        // Seeds the first sync's Next Up fetch; the push at commit is authoritative, since a save
+        // landing in between cannot reach this mirror.
+        mirror.set_next_up_options(next_up_options_from(&self.lock_state().settings));
+        let bundle = BusBundle {
+            mirror,
+            listener_task: None,
+            tx: bundle_tx,
+            connection,
+            handle,
+            forwarder: None,
+        };
+        Ok((bundle, real_bus_rx))
+    }
+
+    /// docs/18 §2.1: commits a built bundle under the lock that checks `epoch`, spawning its
+    /// listener task and forwarder there (so every change the forwarder reads is of an installed
+    /// bus); a stale or redundant bundle is torn down outside the lock.
+    fn open_finish(
+        &self,
+        epoch: u64,
+        client: &jellyfin_api::JellyfinClient,
+        (bundle, real_bus_rx): (
+            BusBundle,
+            Option<tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>>,
+        ),
+    ) -> Result<(), CoreError> {
+        let refused = {
+            let mut state = self.lock_state();
+            let listener = state.listener.clone();
+            match Self::commit_bundle_locked(&mut state, epoch, bundle) {
+                Ok(installed) => {
+                    installed.listener_task =
+                        listener.map(|l| self.spawn_listener_task(installed.mirror.clone(), l));
+                    installed.forwarder = real_bus_rx.map(|rx| {
+                        let (tx, connection) = (installed.tx.clone(), installed.connection.clone());
+                        self.spawn_bus_forwarder(rx, tx, connection, client.clone(), epoch)
+                    });
+                    Self::push_next_up_options_locked(&state);
+                    None
+                }
+                Err(refused) => Some(refused),
+            }
+        };
+        let Some((bundle, result)) = refused else {
+            return Ok(());
+        };
+        self.stop_event_bus(Some(bundle));
+        result
+    }
+
+    /// docs/18 §2.1: installs `bundle` on the account `epoch` names, if that account is still
+    /// installed and Closed; otherwise hands it back for teardown with the open's result:
+    /// [`CoreError::AccountChanged`] when stale, `Ok` when a concurrent open of it committed first.
+    fn commit_bundle_locked(
+        state: &mut State,
+        epoch: u64,
+        bundle: BusBundle,
+    ) -> Result<&mut BusBundle, (BusBundle, Result<(), CoreError>)> {
+        let Some(installed) = state.account.installed_mut(epoch) else {
+            return Err((bundle, Err(CoreError::AccountChanged)));
+        };
+        if installed.bundle.is_some() {
+            return Err((bundle, Ok(())));
         }
+        Ok(installed.bundle.insert(bundle))
     }
 
     fn spawn_listener_task(
@@ -4101,72 +4232,130 @@ impl JellybeamCore {
         self.runtime.spawn(async move {
             let mut rx = mirror.changes();
             while let Some(change) = media_cache::recv_changes(&mut rx).await {
-                listener.on_change(ChangeEvent::from(change));
+                if let Err(error) = listener.on_change(ChangeEvent::from(change)) {
+                    tracing::warn!(error = %error, "change listener threw; next change still delivered");
+                }
             }
         })
     }
 
-    /// Relays every event off a real `EventBus`'s receiver onto
-    /// `bundle_tx` (that mirror's own [`BusBundle::tx`] -- everything,
-    /// including `Server(_)` payloads), and onward onto `status_tx`
-    /// (always this `JellybeamCore`'s [`Self::bus_tx`]) but **only**
-    /// `Connected`/`Disconnected`/`NeedsReconcile` -- never `Server(_)`,
-    /// since `status_tx` is process-wide and outlives any one mirror.
-    ///
-    /// Uses [`jellyfin_core::recv_bus`] so a consumer falling behind the
-    /// real bus's buffer (`Err(Lagged)`) is treated as a `NeedsReconcile`
-    /// forward instead of ending the relay; only `Err(Closed)` ends the
-    /// loop. `send` errors on either channel are ignored the same way every
-    /// other broadcast `send` in this crate is.
+    /// docs/13 Server compatibility, docs/18 §2.1: relays every event of one real bus onto its
+    /// bundle (a lag becomes `NeedsReconcile`) until the bus closes; while its bundle is installed,
+    /// each `Connected` refreshes the server version with that bus's `client`, tagged with the
+    /// `epoch` the bundle was committed under, and the first
+    /// `Unauthorized` asks the listener to reauthorize. Holds the state `Weak`; aborting it
+    /// (`stop_event_bus`) cancels an in-flight refresh, and joining it waits out a running ask.
     fn spawn_bus_forwarder(
         &self,
         mut real_bus_rx: tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>,
         bundle_tx: tokio::sync::broadcast::Sender<jellyfin_core::BusEvent>,
-        status_tx: tokio::sync::broadcast::Sender<jellyfin_core::BusEvent>,
+        mut connection: tokio::sync::watch::Receiver<jellyfin_core::BusConnection>,
+        client: jellyfin_api::JellyfinClient,
+        epoch: u64,
     ) -> tokio::task::JoinHandle<()> {
+        let state = Arc::downgrade(&self.state);
+        let data_dir = self.data_dir.clone();
+        let session_lock = self.session_lock.clone();
         self.runtime.spawn(async move {
-            while let Some(event) = jellyfin_core::recv_bus(&mut real_bus_rx).await {
-                let is_status = matches!(
-                    event,
-                    jellyfin_core::BusEvent::Connected
-                        | jellyfin_core::BusEvent::Disconnected
-                        | jellyfin_core::BusEvent::NeedsReconcile
-                );
-                if is_status {
-                    let _ = status_tx.send(event.clone());
+            // Off once the supervisor ends or rejects; the relay runs on until the real bus closes.
+            let mut watching = true;
+            loop {
+                tokio::select! {
+                    // A connection change is handled before any bus event sent after it.
+                    biased;
+                    changed = connection.changed(), if watching => {
+                        if changed.is_err() {
+                            watching = false;
+                            continue;
+                        }
+                        let now = connection.borrow_and_update().clone();
+                        match now {
+                            jellyfin_core::BusConnection::Connected => {
+                                let Some(state) = state.upgrade() else { break };
+                                let installed =
+                                    Self::installed_bus_locked(&state.lock(), &connection);
+                                if installed {
+                                    Self::refresh_server_version_once(
+                                        epoch,
+                                        client.clone(),
+                                        data_dir.clone(),
+                                        state,
+                                        session_lock.clone(),
+                                    )
+                                    .await;
+                                }
+                            }
+                            jellyfin_core::BusConnection::Disconnected => {}
+                            jellyfin_core::BusConnection::Unauthorized { .. } => {
+                                // Terminal: the supervisor stops, so this bus asks at most once.
+                                watching = false;
+                                let Some(state) = state.upgrade() else { break };
+                                let ask =
+                                    Self::bus_reauthorization_locked(&state.lock(), &connection, &now);
+                                if let Some((listener, account)) = ask {
+                                    if let Err(error) = listener.on_unauthorized(account) {
+                                        tracing::warn!(
+                                            error = %error,
+                                            "change listener threw on a socket rejection"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    event = jellyfin_core::recv_bus(&mut real_bus_rx) => {
+                        let Some(event) = event else { break };
+                        let _ = bundle_tx.send(event);
+                    }
                 }
-                let _ = bundle_tx.send(event);
             }
         })
     }
 
-    /// Tears down one [`BusBundle`] -- the shared body every session-end/
-    /// re-entry site runs alongside its `stop_task(listener_task)` call. The
-    /// forwarder is stopped first (abort + join); then
-    /// `handle.shutdown()` aborts the real bus's supervisor and awaits it,
-    /// which actually stops the capped-backoff reconnect loop -- without
-    /// this, every sign-out/session-switch/re-`open_mirror` would leak one
-    /// more unbounded reconnect loop. Dropping the bundle's `tx` last is
-    /// what finally lets the mirror's subscription see `Closed`.
+    /// Whether `bus` is the installed bundle's connection watch, the one bus whose changes count.
+    fn installed_bus_locked(
+        state: &State,
+        bus: &tokio::sync::watch::Receiver<jellyfin_core::BusConnection>,
+    ) -> bool {
+        state
+            .account
+            .bundle()
+            .is_some_and(|installed| installed.connection.same_channel(bus))
+    }
+
+    /// docs/18 §2.1: whom a socket rejection asks to reauthorize: the bound listener, naming the
+    /// rejected token's owner, only while `bus` is installed; an unnamed owner asks nobody.
+    fn bus_reauthorization_locked(
+        state: &State,
+        bus: &tokio::sync::watch::Receiver<jellyfin_core::BusConnection>,
+        now: &jellyfin_core::BusConnection,
+    ) -> Option<(Arc<dyn ChangeListener>, AccountIdentity)> {
+        let jellyfin_core::BusConnection::Unauthorized { owner: Some(owner) } = now else {
+            return None;
+        };
+        if !Self::installed_bus_locked(state, bus) {
+            return None;
+        }
+        Some((state.listener.clone()?, owner.clone().into()))
+    }
+
+    /// docs/18 §2.1: the one [`BusBundle`] teardown, never under the state lock: joins the
+    /// listener task and the forwarder, then awaits the real bus's shutdown (ending its reconnect
+    /// loop) and drops the mirror, whose writer ends once its last clone drops (R2).
     fn stop_event_bus(&self, bundle: Option<BusBundle>) {
         let Some(bundle) = bundle else { return };
-        self.lock_state().bus_connected = false;
+        self.stop_task(bundle.listener_task);
         self.stop_task(bundle.forwarder);
         if let Some(handle) = bundle.handle {
             self.runtime.block_on(handle.shutdown());
         }
     }
 
-    /// docs/13 Server compatibility -- one long-lived task from
-    /// [`Self::new`], `select!`ing over two triggers for
-    /// [`Self::refresh_server_version_once`]: a `SERVER_VERSION_REFRESH_INTERVAL`
-    /// tick (backstop for gaps with no bus running; first tick discarded
-    /// since every install path already refreshes), and `bus_tx`'s
-    /// `Connected` event once `open_mirror` has a real bus running.
-    /// `RecvError::Closed` ends the whole task.
-    fn spawn_server_version_reconnect_watch(
-        mut bus_rx: tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>,
-        state: Arc<SharedState>,
+    /// docs/13 Server compatibility: one task from [`Self::new`] refreshing the installed client's
+    /// server version every `SERVER_VERSION_REFRESH_INTERVAL` (the first, immediate tick skipped
+    /// since every install path refreshes); holds the state `Weak` and ends once the core drops.
+    fn spawn_server_version_poll(
+        state: std::sync::Weak<SharedState>,
         data_dir: PathBuf,
         session_lock: Arc<Mutex<()>>,
         runtime: &tokio::runtime::Runtime,
@@ -4174,78 +4363,33 @@ impl JellybeamCore {
         runtime.spawn(async move {
             let mut interval = tokio::time::interval(SERVER_VERSION_REFRESH_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            interval.tick().await; // first tick is immediate; every install path already refreshes on its own
-
+            interval.tick().await;
             loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        Self::refresh_active_client_server_version(&state, &data_dir, &session_lock).await;
-                    }
-                    event = bus_rx.recv() => {
-                        match event {
-                            Ok(jellyfin_core::BusEvent::Connected) => {
-                                state.lock().bus_connected = true;
-                                Self::refresh_active_client_server_version(&state, &data_dir, &session_lock).await;
-                            }
-                            Ok(jellyfin_core::BusEvent::Disconnected) => {
-                                state.lock().bus_connected = false;
-                            }
-                            Ok(_) => {}
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
+                interval.tick().await;
+                let Some(state) = state.upgrade() else { break };
+                let current = state.lock().account.current_client();
+                if let Some((epoch, client)) = current {
+                    Self::refresh_server_version_once(
+                        epoch,
+                        client,
+                        data_dir.clone(),
+                        state,
+                        session_lock.clone(),
+                    )
+                    .await;
                 }
             }
         });
     }
 
-    /// Shared body of both `select!` arms in
-    /// [`Self::spawn_server_version_reconnect_watch`]: refresh only if a
-    /// client is currently installed, against whichever client is active now.
-    async fn refresh_active_client_server_version(
-        state: &Arc<SharedState>,
-        data_dir: &Path,
-        session_lock: &Arc<Mutex<()>>,
-    ) {
-        let client = state.lock().client.clone();
-        if let Some(client) = client {
-            Self::refresh_server_version_once(
-                client,
-                data_dir.to_path_buf(),
-                state.clone(),
-                session_lock.clone(),
-            )
-            .await;
-        }
-    }
-
-    /// Kicks off [`Self::refresh_server_version_once`] for whichever client
-    /// is currently installed, without blocking the caller -- the shared
-    /// trigger every install path calls right after seeding
-    /// [`State::server_version`] from disk. A no-op if no client is installed.
-    fn spawn_server_version_refresh(&self) {
-        let Some(client) = self.lock_state().client.clone() else {
-            return;
-        };
-        let data_dir = self.data_dir.clone();
-        let state = self.state.clone();
-        let session_lock = self.session_lock.clone();
-        self.runtime.spawn(Self::refresh_server_version_once(
-            client,
-            data_dir,
-            state,
-            session_lock,
-        ));
-    }
-
-    /// Fetches `/System/Info/Public` and hands the result to
-    /// [`Self::apply_public_server_info`] -- the shared fetch-compare-persist-notify steps used
-    /// by [`Self::spawn_server_version_refresh`] and
-    /// [`Self::spawn_server_version_reconnect_watch`]. Always inside a spawned task since it
-    /// does network I/O. A fetch failure is debug-logged and leaves the stored value untouched
-    /// -- a transient failure must not blank out what `server_at_least` fails closed on.
+    /// Fetches `/System/Info/Public` with `client`, read under `epoch`, and hands the result to
+    /// [`Self::apply_public_server_info`] -- shared by every install ([`AccountReset::refresh`]),
+    /// [`Self::spawn_server_version_poll`] and [`Self::spawn_bus_forwarder`]. Always inside a
+    /// spawned task since it does network I/O. A fetch failure is debug-logged and leaves the
+    /// stored value untouched -- a transient failure must not blank out what `server_at_least`
+    /// fails closed on.
     async fn refresh_server_version_once(
+        epoch: u64,
         client: jellyfin_api::JellyfinClient,
         data_dir: PathBuf,
         state: Arc<SharedState>,
@@ -4268,6 +4412,7 @@ impl JellybeamCore {
             }
         };
         Self::apply_public_server_info(
+            epoch,
             &client,
             info.version,
             info.server_name,
@@ -4284,16 +4429,18 @@ impl JellybeamCore {
     /// steps, so an About-page refresh also refreshes the version gate and persists the name.
     ///
     /// The fetched values are persisted onto whichever `(server_url, user_id)` record `client`
-    /// actually authenticated as (identified from `client` itself, never `state.client` by
-    /// completion time), and `State`/the change-listener notification only update while
-    /// `client` is *still* active. The on-disk persist runs on `spawn_blocking`, re-reading the
-    /// session list inside `session_lock`, so a concurrent sign-out/switch/remove is never
-    /// clobbered. `version` that fails to parse is treated as absent throughout (never
-    /// persisted or applied) so an unparseable future format only fails to gate, never to load.
+    /// actually authenticated as (identified from `client` itself, never the installed client by
+    /// completion time) even when stale, while [`Installed`]/the change-listener notification
+    /// only update while `epoch`, read with `client`, is still current. The on-disk persist runs
+    /// on `spawn_blocking`, re-reading the session list inside `session_lock`, so a concurrent
+    /// switch/remove is never clobbered. `version` that fails to parse is treated as absent
+    /// throughout (never persisted or applied) so an unparseable future format only fails to gate,
+    /// never to load.
     /// A version change fires [`ChangeEvent::Refresh`] (it gates playback decisions); a
-    /// name-only change updates `State::server_name` with no event, since nothing but the About
+    /// name-only change updates the installed name with no event, since nothing but the About
     /// page reads it.
     async fn apply_public_server_info(
+        epoch: u64,
         client: &jellyfin_api::JellyfinClient,
         version: Option<String>,
         server_name: Option<String>,
@@ -4320,7 +4467,7 @@ impl JellybeamCore {
             None => None,
         };
         // Never persist/apply a version string that didn't parse -- an unparseable value must
-        // never land in `SessionFile::server_version`/`State::server_version`.
+        // never land in `SessionFile::server_version` or the installed facts.
         let version_to_persist = if parsed_version.is_some() {
             version
         } else {
@@ -4352,23 +4499,9 @@ impl JellybeamCore {
 
         let (version_changed, listener) = {
             let mut state = state.lock();
-            let still_active = state.client.as_ref().is_some_and(|active| {
-                active.base_url() == server_url && active.user_id() == Some(user_id.as_str())
-            });
-            if !still_active {
-                (false, None)
-            } else {
-                if server_name.is_some() {
-                    state.server_name = server_name;
-                }
-                match parsed_version {
-                    Some(parsed) if state.server_version != Some(parsed) => {
-                        state.server_version = Some(parsed);
-                        (true, state.listener.clone())
-                    }
-                    _ => (false, None),
-                }
-            }
+            let changed =
+                Self::apply_server_facts_locked(&mut state, epoch, parsed_version, server_name);
+            (changed, state.listener.clone().filter(|_| changed))
         };
         if version_changed {
             // A version number is not identifying (CLAUDE.md's redaction
@@ -4377,9 +4510,33 @@ impl JellybeamCore {
                 tracing::info!(version = %parsed, "server version changed");
             }
             if let Some(listener) = listener {
-                listener.on_change(ChangeEvent::Refresh);
+                if let Err(error) = listener.on_change(ChangeEvent::Refresh) {
+                    tracing::warn!(error = %error, "change listener threw on a version change");
+                }
             }
         }
+    }
+
+    /// docs/13 Server compatibility: records fetched facts on the installed account while `epoch`
+    /// is still current; returns whether the version changed, the only fact that fires
+    /// [`ChangeEvent::Refresh`] since it gates playback decisions.
+    fn apply_server_facts_locked(
+        state: &mut State,
+        epoch: u64,
+        version: Option<jellyfin_api::ServerVersion>,
+        name: Option<String>,
+    ) -> bool {
+        let Some(installed) = state.account.installed_mut(epoch) else {
+            return false;
+        };
+        if name.is_some() {
+            installed.server_name = name;
+        }
+        let changed = version.is_some_and(|v| installed.server_version != Some(v));
+        if changed {
+            installed.server_version = version;
+        }
+        changed
     }
 
     /// [`Self::apply_public_server_info`]'s on-disk persist step, shared with the
@@ -4389,7 +4546,7 @@ impl JellybeamCore {
     ///
     /// Re-reads the session list *inside* `session_lock` and writes only the record matching
     /// `(server_url, user_id)`, and only the fields that actually changed. If a concurrent
-    /// sign-out/switch/remove already removed that record, writes nothing.
+    /// switch/remove already removed that record, writes nothing.
     fn persist_server_identity_locked(
         session_lock: &Mutex<()>,
         data_dir: &Path,
@@ -4398,31 +4555,22 @@ impl JellybeamCore {
         version: Option<&str>,
         name: Option<&str>,
     ) {
-        let _guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut sessions = session::load_list(data_dir);
-        if let Some(record) = sessions
-            .sessions
-            .iter_mut()
-            .find(|s| s.server_url == server_url && s.user_id == user_id)
-        {
-            let mut changed = false;
-            if let Some(version) = version {
-                if record.server_version.as_deref() != Some(version) {
-                    record.server_version = Some(version.to_string());
-                    changed = true;
-                }
+        let persisted = session::mutate(data_dir, session_lock, |sessions| {
+            let record = sessions
+                .sessions
+                .iter_mut()
+                .find(|s| s.is_account(server_url, user_id))
+                .ok_or(())?;
+            if let Some(version) = version.filter(|v| record.server_version.as_deref() != Some(v)) {
+                record.server_version = Some(version.to_string());
             }
-            if let Some(name) = name {
-                if record.server_name.as_deref() != Some(name) {
-                    record.server_name = Some(name.to_string());
-                    changed = true;
-                }
+            if let Some(name) = name.filter(|n| record.server_name.as_deref() != Some(n)) {
+                record.server_name = Some(name.to_string());
             }
-            if changed {
-                if let Err(e) = session::save_list(data_dir, &sessions) {
-                    tracing::warn!(error = %e, "failed to persist refreshed server identity");
-                }
-            }
+            Ok::<(), ()>(())
+        });
+        if let Err(session::MutateError::Storage(e)) = persisted {
+            tracing::warn!(error = %e, "failed to persist refreshed server identity");
         }
     }
 
@@ -4442,11 +4590,8 @@ impl JellybeamCore {
         );
     }
 
-    /// Abort `task` (if any) and block until it has actually finished, not
-    /// just scheduled -- the task holds its own `Mirror` clone, so without
-    /// waiting here that clone (and the writer-channel `Sender` it keeps
-    /// alive) could still be live when `runtime` drops (same deadlock class
-    /// documented on the `state` field above).
+    /// Abort `task` (if any) and block until it has finished, so nothing it holds (a `Mirror`
+    /// clone) outlives the caller's teardown.
     fn stop_task(&self, task: Option<tokio::task::JoinHandle<()>>) {
         if let Some(handle) = task {
             handle.abort();
@@ -4457,19 +4602,15 @@ impl JellybeamCore {
 
 impl Drop for JellybeamCore {
     fn drop(&mut self) {
-        let (mirror, client, task, bundle, preload_task, reporting, parked) = {
+        let (installed, preload_task, reporting, parked) = {
             let mut state = self.lock_state();
             (
-                state.mirror.take(),
-                state.client.take(),
-                state.listener_task.take(),
-                state.event_bus.take(),
-                state.preload_task.take(),
+                state.account.installed.take(),
+                state.preload_task.take().map(|task| task.handle),
                 state.reporting.take(),
                 state.playback_owner.parked.take(),
             )
         };
-        // The parked account's mirror drops with the current one, before the runtime.
         drop(parked);
         // A dropped `JellybeamCore` (app process teardown) is not the place to
         // block on a final network round trip -- `abandon` (sync, no I/O)
@@ -4478,16 +4619,17 @@ impl Drop for JellybeamCore {
         if let Some(reporting) = reporting {
             reporting.abandon();
         }
-        // Must happen before `runtime` drops -- see the field-order comment
-        // on `state` and `stop_task`'s own doc comment. `stop_event_bus`
-        // holds no `Mirror`/writer-channel handle so isn't itself subject to
-        // that deadlock, but still `block_on`s the bus's `shutdown()`.
-        self.stop_task(preload_task);
-        self.stop_task(task);
-        self.stop_event_bus(bundle);
-        drop(mirror);
-        drop(client);
+        Self::abort_task(preload_task);
+        // Blocks on the runtime, which is still alive here (fields drop after this body).
+        self.stop_event_bus(installed.and_then(|i| i.bundle));
     }
+}
+
+/// The access token a sign-in response must carry.
+fn access_token_of(auth: &jellyfin_api::models::AuthenticationResult) -> Result<String, CoreError> {
+    auth.access_token.clone().ok_or_else(|| CoreError::Api {
+        detail: "sign-in response did not include an access token".to_string(),
+    })
 }
 
 /// The non-virtual episode ids of a bulk-mark scope read; an unreadable scope (`None`) fails
@@ -4527,6 +4669,11 @@ fn next_up_options_from(settings: &Settings) -> media_cache::NextUpOptions {
         cutoff_days: settings.next_up_cutoff_days,
         rewatching: settings.next_up_rewatching,
     }
+}
+
+/// docs/17 §1: a sync parked behind playback isn't shown, since it makes no progress until playback ends.
+fn shown_as_syncing(syncing: bool, playback_active: bool) -> bool {
+    syncing && !playback_active
 }
 
 fn changed_next_up_options(
@@ -4579,7 +4726,7 @@ fn refuse_if_virtual(
     Ok(())
 }
 
-/// The pure half of [`JellybeamCore::children`]'s virtual-episode filtering
+/// The pure half of [`JellybeamCore::children_read`]'s virtual-episode filtering
 /// (`Settings::show_virtual_episodes`): drops any `cards` row that is both
 /// `item_type == "Episode"` and `is_virtual` when the setting is `false`,
 /// leaves everything else untouched. Scoped to `Episode` rows only -- a
@@ -4595,7 +4742,7 @@ fn filter_virtual_episodes(cards: Vec<Card>, show_virtual_episodes: bool) -> Vec
         .collect()
 }
 
-/// The pure half of [`JellybeamCore::children`]'s Series -> Seasons follow-on
+/// The pure half of [`JellybeamCore::children_read`]'s Series -> Seasons follow-on
 /// to [`filter_virtual_episodes`]: hides a Season chip whose every episode
 /// is virtual, so a fully-unaired season never opens onto an empty grid.
 /// `counts` is [`media_cache::Mirror::season_episode_counts`]'s
@@ -4944,8 +5091,9 @@ fn cap_transcode_reason(max_bps: u32) -> String {
 mod tests {
     /// (highest admitted seq, current claim, account epoch).
     fn owner_view(core: &JellybeamCore) -> (u64, Option<PlaybackClaim>, u64) {
-        let owner = &core.lock_state().playback_owner;
-        (owner.highest_seq, owner.claim.clone(), owner.account_epoch)
+        let state = core.lock_state();
+        let owner = &state.playback_owner;
+        (owner.highest_seq, owner.claim.clone(), state.account.epoch)
     }
 
     /// Admits the next request directly, as a prepare would before negotiating.
@@ -4956,6 +5104,11 @@ mod tests {
     }
 
     impl JellybeamCore {
+        /// How many times this core has entered `open_mirror`.
+        fn mirror_open_count(&self) -> usize {
+            self.mirror_opens.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
         /// Kotlin's ownership check: the current epoch, or the parked one.
         fn owns_playback(&self, epoch: u64) -> bool {
             epoch == self.account_epoch() || self.parked_account_epoch() == Some(epoch)
@@ -4967,7 +5120,7 @@ mod tests {
             let state = self.lock_state();
             PlaybackRequest {
                 seq: state.playback_owner.highest_seq + 1,
-                account_epoch: state.playback_owner.account_epoch,
+                account_epoch: state.account.epoch,
             }
         }
 
@@ -5001,6 +5154,13 @@ mod tests {
     }
 
     use super::*;
+
+    /// Removes the active account, as the server manager does (the only way the UI leaves one).
+    fn remove_active_account(core: &JellybeamCore) {
+        let index = core.active_account_index().expect("an account is active");
+        core.remove_session(index)
+            .expect("the active account is removed");
+    }
 
     fn core_in_tempdir() -> (tempfile::TempDir, Arc<JellybeamCore>) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5042,15 +5202,32 @@ mod tests {
     }
 
     #[test]
+    fn a_sync_parked_behind_playback_is_not_shown() {
+        for (syncing, playback_active, shown) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, false),
+            (false, true, false),
+        ] {
+            assert_eq!(
+                shown_as_syncing(syncing, playback_active),
+                shown,
+                "syncing={syncing} playback_active={playback_active}"
+            );
+        }
+    }
+
+    #[test]
     fn snapshot_queries_are_safe_defaults_before_mirror_is_open() {
         let (_dir, core) = core_in_tempdir();
         assert!(core.views().is_empty());
         assert_eq!(core.item_count(), 0);
         assert!(!core.is_syncing());
         assert_eq!(core.sync_status(), SyncStatus::Idle);
-        assert!(core
-            .children("any-parent".to_string(), SortOrder::NameAsc, 0, 10)
-            .is_empty());
+        assert!(matches!(
+            core.children_read("any-parent".to_string(), SortOrder::NameAsc, 0, 10),
+            BrowseRead::NotReady
+        ));
         assert!(core.search("anything".to_string(), 10).is_empty());
         let HomeSnapshot::Classic { home } = core.home_snapshot(HomeLayout::Classic);
         assert_eq!(home, crate::home::ClassicHome::default());
@@ -5093,12 +5270,7 @@ mod tests {
     fn image_url_prefix_names_the_current_epoch_and_none_before_sign_in() {
         let (_dir, core) = core_in_tempdir();
         assert!(core.image_url_prefix().is_none());
-        let client = jellyfin_api::JellyfinClient::from_token(
-            "http://localhost:8096",
-            core.client_identity("http://localhost:8096"),
-            "tok",
-        );
-        core.lock_state().client = Some(client);
+        install_without_refresh(&core, "http://localhost:8096");
         let prefix = core.image_url_prefix().expect("signed in");
         assert_eq!(prefix.epoch, core.account_epoch());
         assert_eq!(prefix.base_url, "http://localhost:8096");
@@ -5109,6 +5281,159 @@ mod tests {
     fn restore_session_with_nothing_saved_returns_none() {
         let (_dir, core) = core_in_tempdir();
         assert!(core.restore_session().is_none());
+    }
+
+    /// A signed-in core with its mirror open (nothing synced: the server is unreachable).
+    fn core_with_open_mirror() -> (tempfile::TempDir, Arc<JellybeamCore>) {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-a.test", "u1");
+        assert!(core.restore_session().is_some());
+        core.open_mirror().expect("opens local SQLite only");
+        (dir, core)
+    }
+
+    /// Installs an account on `server_url` (token "tok") through the one transition, without the
+    /// server-version refresh an install spawns, so a mock's last request stays the test's own.
+    fn install_without_refresh(core: &JellybeamCore, server_url: &str) {
+        let saved = slot_saved(server_url, "u1", "10.11.10", "Synthetic Server");
+        let mut reset = JellybeamCore::reset_account_state_locked(
+            &mut core.lock_state(),
+            Some(slot_installed(&saved)),
+            AccountChange::Replace,
+        );
+        reset.refresh = None;
+        core.dispose_account_reset(reset);
+    }
+
+    fn installed_mirror_dir(core: &JellybeamCore) -> String {
+        let state = core.lock_state();
+        let installed = state.account.installed().expect("an account is installed");
+        installed.mirror_dir.clone()
+    }
+
+    /// Makes every mirror read fail the way a damaged database does: the items table is gone.
+    fn break_mirror_reads(dir: &std::path::Path, core: &JellybeamCore) {
+        let mirror_dir = installed_mirror_dir(core);
+        let conn = rusqlite::Connection::open(dir.join(mirror_dir).join("mirror.db"))
+            .expect("opens the mirror file");
+        conn.busy_timeout(Duration::from_secs(5)).expect("timeout");
+        conn.execute_batch("DROP TABLE items;")
+            .expect("drops the items table");
+    }
+
+    const BROWSE_PARENT: &str = "00000000-0000-0000-0000-0000000000a1";
+
+    fn browse_children(core: &JellybeamCore) -> BrowseRead {
+        core.children_read(BROWSE_PARENT.to_string(), SortOrder::NameAsc, 0, 50)
+    }
+
+    /// Models a Kotlin listener whose first `onChange` throws.
+    struct ThrowsOnceListener {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        delivered: std::sync::mpsc::Sender<ChangeEvent>,
+    }
+
+    impl ChangeListener for ThrowsOnceListener {
+        fn on_change(&self, event: ChangeEvent) -> Result<(), crate::error::CallbackError> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err(crate::error::CallbackError::Failed);
+            }
+            let _ = self.delivered.send(event);
+            Ok(())
+        }
+
+        fn on_unauthorized(
+            &self,
+            _account: AccountIdentity,
+        ) -> Result<(), crate::error::CallbackError> {
+            Ok(())
+        }
+    }
+
+    /// A listener that throws once keeps receiving later changes.
+    #[test]
+    fn a_change_listener_that_throws_once_still_gets_the_next_change() {
+        let (dir, core) = core_with_open_mirror();
+        let mirror_dir = installed_mirror_dir(&core);
+        rusqlite::Connection::open(dir.path().join(mirror_dir).join("mirror.db"))
+            .expect("opens the mirror file")
+            .execute_batch(
+                "INSERT INTO items (id, item_type, dto, updated_at) VALUES \
+                 ('item-a', 'Movie', '{\"Id\":\"item-a\"}', 0);",
+            )
+            .expect("seeds an item");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        core.set_change_listener(Arc::new(ThrowsOnceListener {
+            calls: calls.clone(),
+            delivered: tx,
+        }));
+        let mirror = core.require_mirror().expect("mirror open");
+        let write = |ticks: i64| {
+            core.runtime
+                .block_on(mirror.apply_local_user_data_and_wait("item-a", ticks, None));
+        };
+        // The listener task subscribes asynchronously: write until the throwing call lands.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut ticks = 1;
+        while calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(std::time::Instant::now() < deadline, "listener never called");
+            write(ticks);
+            ticks += 1;
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        write(ticks);
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the change after the throw is delivered");
+    }
+
+    /// docs/07 §5: a read before the mirror opens is "not ready", not an empty folder.
+    #[test]
+    fn children_before_the_mirror_opens_is_not_ready() {
+        let (_dir, core) = core_in_tempdir();
+        assert!(matches!(browse_children(&core), BrowseRead::NotReady));
+    }
+
+    #[test]
+    fn children_of_an_empty_parent_is_genuinely_empty() {
+        let (_dir, core) = core_with_open_mirror();
+        assert!(matches!(browse_children(&core), BrowseRead::Items { cards } if cards.is_empty()));
+    }
+
+    /// docs/07 §5: a failed query must not look like an empty folder, or a screen settles on it.
+    #[test]
+    fn children_when_the_query_fails_is_failed() {
+        let (dir, core) = core_with_open_mirror();
+        break_mirror_reads(dir.path(), &core);
+        assert!(matches!(browse_children(&core), BrowseRead::Failed));
+    }
+
+    #[test]
+    fn series_episodes_before_the_mirror_opens_is_not_ready() {
+        let (_dir, core) = core_in_tempdir();
+        assert!(matches!(
+            core.series_episodes_read(BROWSE_PARENT.to_string()),
+            BrowseRead::NotReady
+        ));
+    }
+
+    #[test]
+    fn series_episodes_of_a_series_without_episodes_is_genuinely_empty() {
+        let (_dir, core) = core_with_open_mirror();
+        assert!(matches!(
+            core.series_episodes_read(BROWSE_PARENT.to_string()),
+            BrowseRead::Items { cards } if cards.is_empty()
+        ));
+    }
+
+    #[test]
+    fn series_episodes_when_the_query_fails_is_failed() {
+        let (dir, core) = core_with_open_mirror();
+        break_mirror_reads(dir.path(), &core);
+        assert!(matches!(
+            core.series_episodes_read(BROWSE_PARENT.to_string()),
+            BrowseRead::Failed
+        ));
     }
 
     #[test]
@@ -5168,6 +5493,7 @@ mod tests {
             server_name: None,
         };
         session::add_or_update(dir.path(), saved).expect("seed a session file");
+        assert!(core.restore_session().is_some());
 
         assert_eq!(
             core.server_display_name(None),
@@ -5230,7 +5556,7 @@ mod tests {
     fn get_playback_osd_detail_before_sign_in_is_not_signed_in() {
         let (_dir, core) = core_in_tempdir();
         let err = core
-            .get_playback_osd_detail("item-1".to_string(), None)
+            .get_playback_osd_detail("item-1".to_string(), "ms-1".to_string(), None)
             .expect_err("no client yet");
         assert!(matches!(err, CoreError::NotSignedIn));
     }
@@ -5278,12 +5604,7 @@ mod tests {
         let server = core.runtime.block_on(RouteMockServer::start());
         server.route("GET", "/Items", 200, items_json);
 
-        let client = jellyfin_api::JellyfinClient::from_token(
-            &server.base_url,
-            core.client_identity("http://example.test"),
-            "tok",
-        );
-        core.lock_state().client = Some(client);
+        install_without_refresh(&core, &server.base_url);
 
         let cards = core
             .live_children("channel-1".to_string(), 0, 50, LiveSort::ServerOrder)
@@ -5334,12 +5655,7 @@ mod tests {
         let server = core.runtime.block_on(RouteMockServer::start());
         server.route("GET", "/Items", 200, items_json);
 
-        let client = jellyfin_api::JellyfinClient::from_token(
-            &server.base_url,
-            core.client_identity("http://example.test"),
-            "tok",
-        );
-        core.lock_state().client = Some(client);
+        install_without_refresh(&core, &server.base_url);
 
         core.live_children("channel-1".to_string(), 0, 50, LiveSort::NameAsc)
             .expect("mock server responds 200");
@@ -5368,12 +5684,7 @@ mod tests {
         let server = core.runtime.block_on(RouteMockServer::start());
         server.route("GET", "/Items", 200, items_json);
 
-        let client = jellyfin_api::JellyfinClient::from_token(
-            &server.base_url,
-            core.client_identity("http://example.test"),
-            "tok",
-        );
-        core.lock_state().client = Some(client);
+        install_without_refresh(&core, &server.base_url);
 
         core.live_children("folder-1".to_string(), 0, 50, LiveSort::NewestFirst)
             .expect("mock server responds 200");
@@ -6028,7 +6339,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_out_deletes_a_saved_session() {
+    fn removing_the_active_account_deletes_its_saved_session() {
         let (dir, core) = core_in_tempdir();
         let saved = session::SessionFile {
             server_url: "http://example.invalid".to_string(),
@@ -6043,7 +6354,7 @@ mod tests {
         session::add_or_update(dir.path(), saved).expect("seed a session file");
         assert!(core.restore_session().is_some());
 
-        core.sign_out();
+        remove_active_account(&core);
 
         assert!(session::load(dir.path()).is_none());
         // A fresh restore attempt now finds nothing (state cleared too).
@@ -6051,10 +6362,10 @@ mod tests {
     }
 
     /// Reproduces a version refresh's persist step running after a
-    /// sign-out already removed the account: the removed account must stay
+    /// removal already removed the account: the removed account must stay
     /// removed, since `persist_server_version` re-reads under `session_lock`.
     #[test]
-    fn persist_server_version_after_sign_out_writes_nothing() {
+    fn persist_server_version_after_removing_the_active_account_writes_nothing() {
         let (dir, core) = core_in_tempdir();
         let saved = session::SessionFile {
             server_url: "http://example.invalid".to_string(),
@@ -6069,18 +6380,18 @@ mod tests {
         session::add_or_update(dir.path(), saved).expect("seed a session file");
         assert!(core.restore_session().is_some());
 
-        // Sign-out (which removes the account) completes first; only
+        // The removal completes first; only
         // afterward does the stale refresh's persist step run.
-        core.sign_out();
+        remove_active_account(&core);
         core.persist_server_version("http://example.invalid", "u1", "12.0.0");
 
         assert!(
             session::load(dir.path()).is_none(),
-            "persist_server_version must not resurrect an account removed by sign_out"
+            "persist_server_version must not resurrect a removed account"
         );
     }
 
-    /// Same interleaving as the sign-out test, against `remove_session` of
+    /// Same interleaving as the active-account removal test, against `remove_session` of
     /// a non-active account instead.
     #[test]
     fn persist_server_version_after_remove_session_writes_nothing_for_the_removed_account() {
@@ -6101,10 +6412,38 @@ mod tests {
         );
     }
 
-    /// `sign_out` clears `state.server_version` alongside `state.client`;
-    /// both getters fail closed once the client is gone.
+    /// docs/18 §2.1: a trailing slash on the saved address never splits an account from the
+    /// trimmed address its client and its rejected tokens carry.
     #[test]
-    fn sign_out_clears_the_cached_server_version() {
+    fn a_saved_trailing_slash_still_names_its_account() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-a.test/jf/", "u1");
+        let trimmed = AccountIdentity {
+            server_url: "http://server-a.test/jf".to_string(),
+            user_id: "u1".to_string(),
+        };
+
+        let account = core.reauthorization_account(trimmed, true);
+        assert_eq!(
+            account.map(|account| account.user_id),
+            Some("u1".to_string()),
+            "a 401 naming the trimmed owner resolves to the saved row"
+        );
+
+        core.persist_server_version("http://server-a.test/jf", "u1", "12.0.0");
+        assert_eq!(
+            session::load_list(dir.path()).sessions[0]
+                .server_version
+                .as_deref(),
+            Some("12.0.0"),
+            "the version lands on the saved row"
+        );
+    }
+
+    /// Removing the active account drops its server version with it; both getters fail closed
+    /// once no account is installed.
+    #[test]
+    fn removing_the_active_account_clears_the_cached_server_version() {
         let (dir, core) = core_in_tempdir();
         let saved = session::SessionFile {
             server_url: "http://server-a.test".to_string(),
@@ -6121,7 +6460,7 @@ mod tests {
         assert!(core.server_at_least(12, 0));
         assert_eq!(core.server_version(), Some("12.0.0".to_string()));
 
-        core.sign_out();
+        remove_active_account(&core);
 
         assert_eq!(core.server_version(), None);
         assert!(!core.server_at_least(12, 0));
@@ -6233,12 +6572,10 @@ mod tests {
     // --- websocket EventBus wiring. Mocks have
     // no websocket support, so `connect_ws()` always fails/backs off
     // harmlessly; assertions below are about `BusBundle` bookkeeping, never
-    // a real connection. Since the account-isolation fix, `open_mirror` adds
-    // no subscriber to `core.bus_tx` -- tests assert the bundle's own
-    // `tx.receiver_count()` instead. ---
+    // a real connection; tests assert the bundle's own `tx.receiver_count()`. ---
 
     #[test]
-    fn open_mirror_spawns_a_bus_and_sign_out_stops_it() {
+    fn open_mirror_spawns_a_bus_and_removing_the_account_stops_it() {
         let (dir, core) = core_in_tempdir();
         seed_session(dir.path(), "http://server-a.test", "u1");
         assert!(core.restore_session().is_some());
@@ -6248,8 +6585,8 @@ mod tests {
 
         assert_eq!(
             core.lock_state()
-                .event_bus
-                .as_ref()
+                .account
+                .bundle()
                 .expect("open_mirror should have spawned a real EventBus handle")
                 .tx
                 .receiver_count(),
@@ -6258,20 +6595,20 @@ mod tests {
         );
         let forwarder_handle = core
             .lock_state()
-            .event_bus
-            .as_ref()
+            .account
+            .bundle()
             .expect("open_mirror should have spawned a real EventBus handle")
             .forwarder
             .as_ref()
             .expect("open_mirror should have spawned a bus forwarder")
             .abort_handle();
 
-        core.sign_out();
+        remove_active_account(&core);
 
-        assert!(core.lock_state().event_bus.is_none());
+        assert!(core.lock_state().account.bundle().is_none());
         assert!(
             forwarder_handle.is_finished(),
-            "sign_out must actually stop the bus forwarder task, not just clear the handle \
+            "removal must actually stop the bus forwarder task, not just clear the handle \
              -- otherwise its unbounded reconnect loop keeps running in the background"
         );
         // Not asserting the bundle's `tx.receiver_count()` back to 0: the
@@ -6289,8 +6626,8 @@ mod tests {
         core.open_mirror().expect("first open_mirror");
         let first_forwarder = core
             .lock_state()
-            .event_bus
-            .as_ref()
+            .account
+            .bundle()
             .expect("first open_mirror should have spawned a bundle")
             .forwarder
             .as_ref()
@@ -6307,8 +6644,8 @@ mod tests {
         );
         let state = core.lock_state();
         let fresh_bundle = state
-            .event_bus
-            .as_ref()
+            .account
+            .bundle()
             .expect("re-entry should install a fresh bus");
         assert!(
             fresh_bundle.forwarder.is_some(),
@@ -6322,6 +6659,84 @@ mod tests {
         );
     }
 
+    /// Whether `connection`'s bus has already ended, with no wait: its supervisor, the watch's
+    /// only sender, is gone (docs/18 §2.1: stopped before the call that took it returns).
+    fn bus_has_stopped(
+        connection: &tokio::sync::watch::Receiver<jellyfin_core::BusConnection>,
+    ) -> bool {
+        connection.has_changed().is_err()
+    }
+
+    /// docs/18 §2.1 (R1): an open that spans a switch installs nothing for the new account and
+    /// stops its own bus; the new account's open then opens its own directory.
+    #[test]
+    fn an_open_mirror_that_spans_a_switch_installs_nothing_for_the_new_account() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-a.test", "u1");
+        let b = seed_session(dir.path(), "http://server-b.test", "u2");
+        core.switch_session(0).expect("A is installed");
+        let (epoch, client, mirror_dir) = core.open_begin().expect("A's open begins");
+        let built = core
+            .build_bundle(&client, mirror_dir)
+            .expect("A's mirror builds");
+        let spanned = built.0.connection.clone();
+        core.switch_session(1).expect("B is installed meanwhile");
+
+        let result = core.open_finish(epoch, &client, built);
+
+        assert!(
+            matches!(result, Err(CoreError::AccountChanged)),
+            "{result:?}"
+        );
+        assert!(core.views().is_empty(), "B shows no views");
+        assert!(core.require_mirror().is_err(), "B has no mirror");
+        assert!(core.server_info_snapshot().mirror.is_none());
+        assert!(
+            bus_has_stopped(&spanned),
+            "the spanning open's bus is stopped"
+        );
+        core.open_mirror().expect("B opens");
+        assert_eq!(installed_mirror_dir(&core), b.mirror_dir);
+        assert!(dir.path().join(&b.mirror_dir).join("mirror.db").exists());
+    }
+
+    /// docs/18 §2.1 (R2): of two interleaved opens of one account the first commit stays
+    /// installed, and the second succeeds with its bus stopped.
+    #[test]
+    fn two_open_mirrors_for_one_account_leave_exactly_one_bus() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-a.test", "u1");
+        assert!(core.restore_session().is_some());
+        let (first_epoch, first_client, first_dir) = core.open_begin().expect("first begins");
+        let first = core
+            .build_bundle(&first_client, first_dir)
+            .expect("first builds");
+        let (second_epoch, second_client, second_dir) = core.open_begin().expect("second begins");
+        let second = core
+            .build_bundle(&second_client, second_dir)
+            .expect("second builds");
+        let first_connection = first.0.connection.clone();
+        let second_connection = second.0.connection.clone();
+
+        core.open_finish(first_epoch, &first_client, first)
+            .expect("the first commits");
+        core.open_finish(second_epoch, &second_client, second)
+            .expect("the open that lost still succeeds");
+
+        assert!(
+            installed_bus_connection(&core).same_channel(&first_connection),
+            "the first commit stays installed"
+        );
+        assert!(
+            bus_has_stopped(&second_connection),
+            "the losing open's bus is stopped"
+        );
+        assert!(
+            !bus_has_stopped(&first_connection),
+            "the installed bus still runs"
+        );
+    }
+
     #[test]
     fn switch_session_stops_the_outgoing_accounts_bus() {
         let (dir, core) = core_in_tempdir();
@@ -6331,11 +6746,11 @@ mod tests {
 
         core.switch_session(0).expect("index 0 exists");
         core.open_mirror().expect("open account 0's mirror");
-        assert!(core.lock_state().event_bus.is_some());
+        assert!(core.lock_state().account.bundle().is_some());
         let forwarder = core
             .lock_state()
-            .event_bus
-            .as_ref()
+            .account
+            .bundle()
             .expect("open_mirror should have spawned a bundle")
             .forwarder
             .as_ref()
@@ -6349,7 +6764,7 @@ mod tests {
             "switch_session must stop the outgoing account's bus forwarder"
         );
         assert!(
-            core.lock_state().event_bus.is_none(),
+            core.lock_state().account.bundle().is_none(),
             "switch_session doesn't itself open a new mirror/bus -- the caller re-runs \
              open_mirror, same as it does for the mirror/listener task"
         );
@@ -6365,11 +6780,11 @@ mod tests {
         assert!(core.restore_session().is_some());
         core.open_mirror()
             .expect("open the active account's mirror");
-        assert!(core.lock_state().event_bus.is_some());
+        assert!(core.lock_state().account.bundle().is_some());
         let forwarder = core
             .lock_state()
-            .event_bus
-            .as_ref()
+            .account
+            .bundle()
             .expect("open_mirror should have spawned a bundle")
             .forwarder
             .as_ref()
@@ -6383,187 +6798,67 @@ mod tests {
             forwarder.is_finished(),
             "remove_session of the active account must stop its bus forwarder"
         );
-        assert!(core.lock_state().event_bus.is_none());
+        assert!(core.lock_state().account.bundle().is_none());
     }
 
-    /// `spawn_bus_forwarder` must relay every event onto the per-mirror
-    /// bundle, but only status events onto the process-wide `bus_tx` --
-    /// never a `Server(_)` payload.
+    /// docs/13 Server compatibility: the forwarder relays every bus event, `Server` payloads
+    /// included, onto its own bundle in order, and keeps relaying after the supervisor's watch ends.
     #[test]
-    fn bus_forwarder_relays_everything_to_the_bundle_and_only_status_to_bus_tx() {
+    fn bus_forwarder_relays_every_event_to_its_bundle_until_the_bus_closes() {
+        use jellyfin_core::BusEvent;
         let (_dir, core) = core_in_tempdir();
         let (real_tx, real_rx) = tokio::sync::broadcast::channel(16);
         let (bundle_tx, mut bundle_rx) = tokio::sync::broadcast::channel(16);
-        let mut status_rx = core.bus_tx.subscribe();
+        let (connection_tx, connection) =
+            tokio::sync::watch::channel(jellyfin_core::BusConnection::Disconnected);
+        let client = jellyfin_api::JellyfinClient::from_token(
+            "http://server-a.test",
+            JellybeamCore::identity_with("dev".to_string()),
+            "tok",
+        );
+        let epoch = core.account_epoch();
+        let forwarder = core.spawn_bus_forwarder(real_rx, bundle_tx, connection, client, epoch);
 
-        let forwarder = core.spawn_bus_forwarder(real_rx, bundle_tx.clone(), core.bus_tx.clone());
-
-        let user_data_event =
-            jellyfin_core::BusEvent::Server(jellyfin_api::ServerEvent::UserDataChanged {
-                item_userdata: vec![],
-            });
-        let library_event =
-            jellyfin_core::BusEvent::Server(jellyfin_api::ServerEvent::LibraryChanged {
-                added: vec![],
-                updated: vec![],
-                removed: vec![],
-            });
-        real_tx
-            .send(user_data_event)
-            .expect("send to a fresh channel");
-        real_tx
-            .send(jellyfin_core::BusEvent::Connected)
-            .expect("send to a fresh channel");
-        real_tx
-            .send(library_event)
-            .expect("send to a fresh channel");
-        real_tx
-            .send(jellyfin_core::BusEvent::NeedsReconcile)
-            .expect("send to a fresh channel");
-
-        core.runtime.block_on(async {
-            assert!(matches!(
-                bundle_rx.recv().await.expect("event 1 on bundle"),
-                jellyfin_core::BusEvent::Server(jellyfin_api::ServerEvent::UserDataChanged { .. })
-            ));
-            assert!(matches!(
-                bundle_rx.recv().await.expect("event 2 on bundle"),
-                jellyfin_core::BusEvent::Connected
-            ));
-            assert!(matches!(
-                bundle_rx.recv().await.expect("event 3 on bundle"),
-                jellyfin_core::BusEvent::Server(jellyfin_api::ServerEvent::LibraryChanged { .. })
-            ));
-            assert!(matches!(
-                bundle_rx.recv().await.expect("event 4 on bundle"),
-                jellyfin_core::BusEvent::NeedsReconcile
-            ));
-
-            assert!(matches!(
-                status_rx.recv().await.expect("first status event"),
-                jellyfin_core::BusEvent::Connected
-            ));
-            assert!(matches!(
-                status_rx.recv().await.expect("second status event"),
-                jellyfin_core::BusEvent::NeedsReconcile
-            ));
-            let timed_out = tokio::time::timeout(Duration::from_millis(200), status_rx.recv())
-                .await
-                .is_err();
-            assert!(
-                timed_out,
-                "no Server(_) event should ever reach the process-wide status bus_tx"
-            );
+        let user_data_event = BusEvent::Server(jellyfin_api::ServerEvent::UserDataChanged {
+            item_userdata: vec![],
         });
+        let library_event = BusEvent::Server(jellyfin_api::ServerEvent::LibraryChanged {
+            added: vec![],
+            updated: vec![],
+            removed: vec![],
+        });
+        for event in [user_data_event, library_event, BusEvent::NeedsReconcile] {
+            real_tx.send(event).expect("send to a fresh channel");
+        }
+        let mut next = || {
+            core.runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), bundle_rx.recv())
+                    .await
+                    .expect("the forwarder relays the event")
+                    .expect("bundle open")
+            })
+        };
+        assert!(matches!(
+            next(),
+            BusEvent::Server(jellyfin_api::ServerEvent::UserDataChanged { .. })
+        ));
+        assert!(matches!(
+            next(),
+            BusEvent::Server(jellyfin_api::ServerEvent::LibraryChanged { .. })
+        ));
+        assert!(matches!(next(), BusEvent::NeedsReconcile));
+
+        drop(connection_tx);
+        real_tx.send(BusEvent::NeedsReconcile).expect("send");
+        assert!(
+            matches!(next(), BusEvent::NeedsReconcile),
+            "a closed connection watch leaves the relay running"
+        );
 
         drop(real_tx);
-        core.stop_task(Some(forwarder));
-    }
-
-    /// Two mirrors' bundles alive at once must never let one account's
-    /// `UserDataChanged` reach the other's mirror.
-    #[test]
-    fn two_live_bundles_never_share_user_data_events() {
-        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000099";
-
-        let (dir, core) = core_in_tempdir();
-        let mock = core.runtime.block_on(RouteMockServer::start());
-        mock.route(
-            "GET",
-            "/UserViews",
-            200,
-            user_views_json("00000000-0000-0000-0000-000000000098", "movies"),
-        );
-        mock.route(
-            "GET",
-            "/Items",
-            200,
-            serde_json::json!({
-                "Items": [{
-                    "Id": MOVIE_ID,
-                    "Name": "Sample Movie",
-                    "Type": "Movie",
-                    "UserData": {"Key": "k", "Played": false, "IsFavorite": false}
-                }],
-                "TotalRecordCount": 1
-            }),
-        );
-
-        let identity = core.client_identity("http://example.test");
-        let client_a =
-            jellyfin_api::JellyfinClient::from_token(&mock.base_url, identity.clone(), "tok-a")
-                .with_user_id("user-a");
-        let client_b = jellyfin_api::JellyfinClient::from_token(&mock.base_url, identity, "tok-b")
-            .with_user_id("user-b");
-
-        let (mirror_a, bundle_a) = core
-            .open_mirror_with_bus(client_a, dir.path().join("mirror-a"))
-            .expect("bundle A opens");
-        let (mirror_b, bundle_b) = core
-            .open_mirror_with_bus(client_b, dir.path().join("mirror-b"))
-            .expect("bundle B opens");
-
-        // Both bundles alive at once, neither installed into `state`.
-        wait_until(
-            || mirror_a.card_by_id(MOVIE_ID).is_some_and(|c| !c.played),
-            "mirror A's initial sync to seed the unplayed movie row",
-        );
-        wait_until(
-            || mirror_b.card_by_id(MOVIE_ID).is_some_and(|c| !c.played),
-            "mirror B's initial sync to seed the unplayed movie row",
-        );
-
-        bundle_a
-            .tx
-            .send(jellyfin_core::BusEvent::Server(
-                jellyfin_api::ServerEvent::UserDataChanged {
-                    item_userdata: vec![(
-                        MOVIE_ID.to_string(),
-                        jellyfin_api::models::UserItemDataDto {
-                            is_favorite: None,
-                            item_id: None,
-                            key: Some("k".to_string()),
-                            last_played_date: None,
-                            likes: None,
-                            play_count: None,
-                            playback_position_ticks: None,
-                            played: Some(true),
-                            played_percentage: None,
-                            rating: None,
-                            unplayed_item_count: None,
-                        },
-                    )],
-                },
-            ))
-            .expect("bundle A has at least its own mirror subscribed");
-
-        wait_until(
-            || mirror_a.card_by_id(MOVIE_ID).is_some_and(|c| c.played),
-            "mirror A to apply the UserDataChanged event sent on its own bundle",
-        );
-        // Bundle B, a different session's bus, must never see bundle A's event.
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(
-            mirror_b.card_by_id(MOVIE_ID).is_some_and(|c| !c.played),
-            "bundle B must not have received bundle A's UserDataChanged event"
-        );
-
-        core.stop_event_bus(Some(bundle_a));
-        drop(mirror_a);
-
-        // B keeps working independently once A is gone.
-        assert_eq!(
-            bundle_b.tx.receiver_count(),
-            1,
-            "bundle B's tx should still have exactly its own mirror subscribed"
-        );
-        bundle_b
-            .tx
-            .send(jellyfin_core::BusEvent::Connected)
-            .expect("bundle B's mirror is still subscribed");
-
-        core.stop_event_bus(Some(bundle_b));
-        drop(mirror_b);
+        core.runtime
+            .block_on(forwarder)
+            .expect("the forwarder exits once its real bus closes");
     }
 
     fn authentication_result(
@@ -6673,7 +6968,7 @@ mod tests {
                 .user_id,
             "u1"
         );
-        assert!(matches!(core.open_mirror(), Err(CoreError::NotSignedIn)));
+        assert_eq!(installed_user(&core).as_deref(), Some("u1"), "the fallback is installed");
     }
 
     #[test]
@@ -6688,8 +6983,10 @@ mod tests {
         assert_eq!(core.active_account_index(), Some(0));
     }
 
+    /// docs/18 §2.1: removing the active account installs the next saved one in the same change, so
+    /// the app's relaunch restore finds it installed and the epoch moves once, not twice.
     #[test]
-    fn sign_out_removes_only_the_active_account_and_does_not_auto_install_the_next_one() {
+    fn removing_the_active_account_installs_the_next_one_in_the_same_change() {
         let (dir, core) = core_in_tempdir();
         seed_session(dir.path(), "http://server-a.test", "u1");
         seed_session(dir.path(), "http://server-b.test", "u2");
@@ -6698,7 +6995,7 @@ mod tests {
             "u2 (active) restores fine"
         );
 
-        core.sign_out();
+        remove_active_account(&core);
 
         // u2 (previously active) is gone; u1 remains and is now active.
         let accounts = core.list_accounts();
@@ -6710,17 +7007,17 @@ mod tests {
         let current = core.current_account().expect("u1 is still on disk");
         assert_eq!(current.user_id, "u1");
 
-        // ...but no client was installed for it: sign_out leaves that
-        // decision to Kotlin.
-        let err = core.open_mirror().expect_err("no client installed yet");
-        assert!(matches!(err, CoreError::NotSignedIn));
+        // ...and it is already installed: the relaunch restore is not a second account change.
+        let epoch = core.account_epoch();
+        assert_eq!(core.restore_session().expect("u1").user_id, "u1");
+        assert_eq!(core.account_epoch(), epoch);
     }
 
     #[test]
-    fn sign_out_of_the_only_account_empties_the_list() {
+    fn removing_the_only_account_empties_the_list() {
         let (dir, core) = core_in_tempdir();
         seed_session(dir.path(), "http://server-a.test", "u1");
-        core.sign_out();
+        remove_active_account(&core);
         assert!(core.list_accounts().is_empty());
         assert!(core.active_account_index().is_none());
         assert!(!session::load_list(dir.path())
@@ -6787,6 +7084,85 @@ mod tests {
         };
         core.set_settings(new_settings.clone());
         assert_eq!(core.get_settings(), new_settings);
+    }
+
+    /// docs/09: concurrent `set_settings` calls must leave the file equal to memory, whichever lands last.
+    #[test]
+    fn concurrent_set_settings_leave_disk_equal_to_memory() {
+        const ROUNDS: u32 = 400;
+        let (dir, core) = core_in_tempdir();
+        for round in 0..ROUNDS {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let writers: Vec<_> = (0..2u32)
+                .map(|writer| {
+                    let core = core.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        let record = Settings {
+                            skip_back_secs: 1_000 + round * 2 + writer,
+                            ..Settings::default()
+                        };
+                        barrier.wait();
+                        core.set_settings(record);
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().expect("set_settings thread");
+            }
+            assert_eq!(
+                settings::load(dir.path()),
+                core.get_settings(),
+                "round {round}: the saved file and the in-memory record diverged"
+            );
+        }
+    }
+
+    /// docs/09: a Next Up option change returns to the caller without waiting on the Next Up
+    /// re-query, and the re-query still lands once the server answers.
+    #[test]
+    fn set_settings_with_changed_next_up_options_does_not_wait_on_the_next_up_reply() {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        mock.route(
+            "GET",
+            "/UserViews",
+            200,
+            user_views_json(VIEW_ID, "tvshows"),
+        );
+        core.open_mirror().expect("open_mirror");
+        wait_until(
+            || mock.hit_count("GET", "/Shows/NextUp") >= 1,
+            "the open's own Next Up fetch",
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        let before = mock.hit_count("GET", "/Shows/NextUp");
+        let held = mock.gate("GET", "/Shows/NextUp", before);
+
+        let changing = {
+            let core = core.clone();
+            std::thread::spawn(move || {
+                core.set_settings(Settings {
+                    next_up_cutoff_days: Some(14),
+                    ..Settings::default()
+                });
+            })
+        };
+        wait_until(
+            || mock.hit_count("GET", "/Shows/NextUp") > before,
+            "the Next Up re-query to arrive and be held",
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        let returned_while_held = changing.is_finished();
+
+        held.open();
+        changing.join().expect("set_settings thread");
+        assert!(
+            returned_while_held,
+            "set_settings must return while the Next Up reply is still held"
+        );
+        assert_eq!(core.get_settings().next_up_cutoff_days, Some(14));
     }
 
     #[test]
@@ -7034,7 +7410,7 @@ mod tests {
     }
 
     #[test]
-    fn remember_track_choice_makes_a_per_series_preference_win_over_the_global_one() {
+    fn remember_track_memory_makes_a_per_series_preference_win_over_the_global_one() {
         let (_dir, core) = core_in_tempdir();
         // Global prefers "jpn"; the remembered per-series choice must
         // override it outright.
@@ -7047,10 +7423,12 @@ mod tests {
         };
         core.set_settings(settings);
 
-        core.remember_track_choice(
+        core.remember_track_memory(
             "series-1".to_string(),
             TrackKindFfi::Audio,
-            Some("eng".to_string()),
+            TrackMemoryFfi::Key {
+                key: "eng".to_string(),
+            },
         );
 
         let tracks = vec![
@@ -7062,12 +7440,14 @@ mod tests {
     }
 
     #[test]
-    fn remember_track_choice_only_applies_to_the_series_it_was_saved_under() {
+    fn remember_track_memory_only_applies_to_the_series_it_was_saved_under() {
         let (_dir, core) = core_in_tempdir();
-        core.remember_track_choice(
+        core.remember_track_memory(
             "series-1".to_string(),
             TrackKindFfi::Audio,
-            Some("eng".to_string()),
+            TrackMemoryFfi::Key {
+                key: "eng".to_string(),
+            },
         );
 
         let tracks = vec![
@@ -7082,13 +7462,15 @@ mod tests {
     }
 
     #[test]
-    fn remember_track_choice_persists_across_a_fresh_core_against_the_same_data_dir() {
+    fn remember_track_memory_persists_across_a_fresh_core_against_the_same_data_dir() {
         let dir = tempfile::tempdir().expect("tempdir");
         let core = JellybeamCore::new(dir.path().to_string_lossy().to_string());
-        core.remember_track_choice(
+        core.remember_track_memory(
             "series-1".to_string(),
             TrackKindFfi::Subtitle,
-            Some("spa".to_string()),
+            TrackMemoryFfi::Key {
+                key: "spa".to_string(),
+            },
         );
 
         let reopened = JellybeamCore::new(dir.path().to_string_lossy().to_string());
@@ -7100,40 +7482,186 @@ mod tests {
         assert_eq!(decision.subtitle_track_id, Some(2));
     }
 
-    #[test]
-    fn remember_track_choice_with_none_clears_a_previously_remembered_key() {
-        let (_dir, core) = core_in_tempdir();
-        core.remember_track_choice(
-            "series-1".to_string(),
-            TrackKindFfi::Audio,
-            Some("eng".to_string()),
-        );
-        core.remember_track_choice("series-1".to_string(), TrackKindFfi::Audio, None);
+    fn remember(core: &JellybeamCore, series_id: &str, kind: TrackKindFfi, memory: TrackMemoryFfi) {
+        core.remember_track_memory(series_id.to_string(), kind, memory);
+    }
 
-        let tracks = vec![
-            track(1, TrackKindFfi::Audio, Some("eng")),
-            track(2, TrackKindFfi::Audio, Some("jpn")),
-        ];
+    fn core_with_global_subtitles_always() -> (tempfile::TempDir, Arc<JellybeamCore>) {
+        let (dir, core) = core_in_tempdir();
+        core.set_settings(Settings {
+            language: crate::settings::LanguageSettings {
+                subtitle_mode: crate::settings::SubtitleModeSetting::Always,
+                ..Default::default()
+            },
+            ..Settings::default()
+        });
+        (dir, core)
+    }
+
+    /// An audio track plus an English subtitle the stream flags default, the case where global
+    /// Always would turn subtitles back on.
+    fn episode_tracks_with_default_subtitle() -> Vec<TrackInfo> {
+        let mut subtitle = track(2, TrackKindFfi::Subtitle, Some("eng"));
+        subtitle.is_default = true;
+        vec![track(1, TrackKindFfi::Audio, Some("eng")), subtitle]
+    }
+
+    /// docs/18 §3.1: subtitle Off is a remembered per-series choice, so the next episode of that
+    /// series stays subtitle-free even under global Always.
+    #[test]
+    fn remembering_subtitles_off_keeps_them_off_for_the_next_episode_under_global_always() {
+        let (_dir, core) = core_with_global_subtitles_always();
+        remember(
+            &core,
+            "series-1",
+            TrackKindFfi::Subtitle,
+            TrackMemoryFfi::Off,
+        );
+
+        let decision = core.resolve_tracks(
+            Some("series-1".to_string()),
+            episode_tracks_with_default_subtitle(),
+        );
+        assert_eq!(
+            decision.subtitle_action,
+            crate::types::SubtitleActionFfi::Off,
+            "series-1 remembered Off but resolve_tracks returned {decision:?}"
+        );
+        assert_eq!(decision.subtitle_track_id, None);
+
+        // Another series has no memory and still follows the global mode.
+        let other = core.resolve_tracks(
+            Some("series-2".to_string()),
+            episode_tracks_with_default_subtitle(),
+        );
+        assert_eq!(other.subtitle_track_id, Some(2));
+    }
+
+    /// docs/18 §3.1: a remembered Off is written to track-prefs.json, so it survives a relaunch.
+    #[test]
+    fn a_remembered_subtitle_off_persists_across_a_fresh_core() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let core = JellybeamCore::new(dir.path().to_string_lossy().to_string());
+        remember(
+            &core,
+            "series-1",
+            TrackKindFfi::Subtitle,
+            TrackMemoryFfi::Off,
+        );
+
+        let reopened = JellybeamCore::new(dir.path().to_string_lossy().to_string());
+        reopened.set_settings(Settings {
+            language: crate::settings::LanguageSettings {
+                subtitle_mode: crate::settings::SubtitleModeSetting::Always,
+                ..Default::default()
+            },
+            ..Settings::default()
+        });
+        let decision = reopened.resolve_tracks(
+            Some("series-1".to_string()),
+            episode_tracks_with_default_subtitle(),
+        );
+        assert_eq!(
+            decision.subtitle_action,
+            crate::types::SubtitleActionFfi::Off,
+            "reopened core lost the remembered Off: {decision:?}"
+        );
+    }
+
+    /// docs/12 "Choices are remembered per series": Off is remembered, and only an explicit clear
+    /// (Unset) forgets it, returning the series to the global mode.
+    #[test]
+    fn remember_track_memory_off_is_remembered_and_an_explicit_clear_forgets() {
+        let (_dir, core) = core_with_global_subtitles_always();
+        remember(
+            &core,
+            "series-1",
+            TrackKindFfi::Audio,
+            TrackMemoryFfi::Key {
+                key: "jpn".to_string(),
+            },
+        );
+        remember(
+            &core,
+            "series-1",
+            TrackKindFfi::Subtitle,
+            TrackMemoryFfi::Off,
+        );
+
+        let mut tracks = episode_tracks_with_default_subtitle();
+        tracks.push(track(3, TrackKindFfi::Audio, Some("jpn")));
+        let decision = core.resolve_tracks(Some("series-1".to_string()), tracks.clone());
+        assert_eq!(decision.audio_track_id, Some(3));
+        assert_eq!(
+            decision.subtitle_action,
+            crate::types::SubtitleActionFfi::Off,
+            "Off was not remembered: {decision:?}"
+        );
+
+        remember(
+            &core,
+            "series-1",
+            TrackKindFfi::Audio,
+            TrackMemoryFfi::Unset,
+        );
+        remember(
+            &core,
+            "series-1",
+            TrackKindFfi::Subtitle,
+            TrackMemoryFfi::Unset,
+        );
         let decision = core.resolve_tracks(Some("series-1".to_string()), tracks);
         assert_eq!(
             decision.audio_track_id, None,
-            "cleared per-series preference must fall back to no audio decision (no global set either)"
+            "cleared audio memory must fall back to no audio decision (no global set either)"
+        );
+        assert_eq!(
+            decision.subtitle_track_id,
+            Some(2),
+            "cleared subtitle memory must fall back to the global Always mode"
         );
     }
 
     #[test]
-    fn remember_track_choice_with_video_kind_is_a_no_op() {
+    fn remember_track_memory_with_video_kind_is_a_no_op() {
         let (_dir, core) = core_in_tempdir();
         // Must not panic, and must not create a usable preference either.
-        core.remember_track_choice(
+        core.remember_track_memory(
             "series-1".to_string(),
             TrackKindFfi::Video,
-            Some("eng".to_string()),
+            TrackMemoryFfi::Key {
+                key: "eng".to_string(),
+            },
         );
 
         let tracks = vec![track(1, TrackKindFfi::Audio, Some("eng"))];
         let decision = core.resolve_tracks(Some("series-1".to_string()), tracks);
         assert_eq!(decision.audio_track_id, None);
+    }
+
+    /// Audio has no Off (docs/18 §3.1): an audio Off is refused like a Video choice, so it never
+    /// erases the remembered language.
+    #[test]
+    fn remember_track_memory_with_audio_off_is_a_no_op() {
+        let (_dir, core) = core_in_tempdir();
+        let tracks = vec![
+            track(1, TrackKindFfi::Audio, Some("eng")),
+            track(2, TrackKindFfi::Audio, Some("jpn")),
+        ];
+        core.remember_track_memory(
+            "series-1".to_string(),
+            TrackKindFfi::Audio,
+            TrackMemoryFfi::Key {
+                key: "jpn".to_string(),
+            },
+        );
+        core.remember_track_memory(
+            "series-1".to_string(),
+            TrackKindFfi::Audio,
+            TrackMemoryFfi::Off,
+        );
+        let decision = core.resolve_tracks(Some("series-1".to_string()), tracks);
+        assert_eq!(decision.audio_track_id, Some(2));
     }
 
     /// Thin [`RouteMockServer`] config scoped to exactly the two request
@@ -7479,6 +8007,105 @@ mod tests {
         assert!(state.preload_task.is_none());
     }
 
+    /// docs/18 §2: Play on the newest dwell target must not wait out an older target's reply.
+    #[test]
+    fn prepare_for_the_newest_dwell_target_does_not_wait_for_an_older_targets_negotiation() {
+        let (item_json, playback_json) = direct_play_fixture();
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_json);
+        let held_a = mock.routes.gate("POST", "/Items/item-a/PlaybackInfo", 0);
+        let hits_for = |item: &str| {
+            mock.routes
+                .hit_count_containing("POST", &format!("/Items/{item}/PlaybackInfo"))
+        };
+
+        core.preload_playback("item-a".to_string(), None);
+        wait_until(|| hits_for("item-a") >= 1, "A's PlaybackInfo to arrive");
+        core.preload_playback("item-b".to_string(), None);
+        let play_b = spawn_prepare(&core, "item-b");
+
+        let mut finished_while_a_held = false;
+        for _ in 0..200 {
+            if play_b.is_finished() {
+                finished_while_a_held = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Release A before asserting so a failing run cannot leave the thread blocked.
+        held_a.open();
+        let plan = join(play_b);
+        assert!(
+            finished_while_a_held,
+            "Play on B waited for A's held PlaybackInfo reply"
+        );
+        assert_eq!(plan.expect("Play on B").item_id, "item-b");
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            hits_for("item-b"),
+            1,
+            "B's PlaybackInfo must be requested exactly once, never joined and then renegotiated"
+        );
+        assert_eq!(hits_for("item-a"), 1);
+    }
+
+    /// Re-preloads item-1 after backdating its cache entry to `age_fraction` of the TTL
+    /// (the existing tests' `created_at` seam); returns the PlaybackInfo total.
+    fn playback_info_hits_after_repreload_at_age(age_fraction: f64) -> usize {
+        let (item_json, playback_json) = direct_play_fixture();
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_json);
+        core.preload_playback("item-1".to_string(), None);
+        wait_for_preload_idle(&core);
+        assert_eq!(mock.playback_info_hit_count(), 1);
+
+        {
+            let mut state = core.lock_state();
+            let cache = state.preload_cache.as_mut().expect("a cached DirectPlay");
+            cache.created_at = Instant::now() - PRELOAD_CACHE_TTL.mul_f64(age_fraction);
+        }
+        core.preload_playback("item-1".to_string(), None);
+        wait_for_preload_idle(&core);
+        mock.playback_info_hit_count()
+    }
+
+    /// docs/18 §2: a cache past half its TTL is renegotiated by the next dwell trigger, so a long
+    /// dwell re-armed every TTL never sits on a dead cache.
+    #[test]
+    fn a_repeated_preload_renegotiates_a_cache_at_half_its_ttl_or_older_and_not_a_younger_one() {
+        // (cache age as a fraction of the TTL, expected PlaybackInfo requests in total)
+        let mismatches: Vec<String> = [(0.0, 1), (0.5, 2), (0.99, 2), (1.01, 2)]
+            .into_iter()
+            .filter_map(|(age, expected)| {
+                let hits = playback_info_hits_after_repreload_at_age(age);
+                (hits != expected)
+                    .then(|| format!("age {age} x TTL: {hits} requests, expected {expected}"))
+            })
+            .collect();
+        assert!(mismatches.is_empty(), "{mismatches:?}");
+    }
+
+    /// docs/18 §2: refreshing early must not shorten how long a cache serves Play.
+    #[test]
+    fn prepare_still_consumes_a_cache_older_than_half_its_ttl() {
+        let (item_json, playback_json) = direct_play_fixture();
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_json);
+        core.preload_playback("item-1".to_string(), None);
+        wait_for_preload_idle(&core);
+        core.lock_state()
+            .preload_cache
+            .as_mut()
+            .expect("a cached DirectPlay")
+            .created_at = Instant::now() - PRELOAD_CACHE_TTL.mul_f64(0.75);
+
+        core.prepare_playback_now("item-1".to_string(), false)
+            .expect("a cache inside its TTL serves Play");
+        assert_eq!(
+            mock.playback_info_hit_count(),
+            1,
+            "Play inside the TTL must not renegotiate"
+        );
+    }
+
     #[test]
     fn real_prepare_for_the_same_item_joins_the_in_flight_preload_instead_of_renegotiating() {
         let (item_json, playback_json) = direct_play_fixture();
@@ -7562,6 +8189,404 @@ mod tests {
         let state = core.lock_state();
         assert!(state.preload_task.is_none());
         assert!(state.preload_cache.is_none());
+    }
+
+    /// A request for `item` that no network serves: the stand-in worker below never ends by itself.
+    fn quiet_preload_request(state: &State, item: &str, generation: u64) -> PreloadRequest {
+        PreloadRequest {
+            generation,
+            item_id: item.to_string(),
+            client: state
+                .account
+                .installed()
+                .map(|i| i.client.clone())
+                .expect("a signed-in core"),
+            mirror: state
+                .account
+                .bundle()
+                .map(|g| g.mirror.clone())
+                .expect("an open mirror"),
+            caps: state.caps.clone(),
+            tolerate_mislabeled_levels: state.settings.tolerate_mislabeled_levels,
+            quality: state.settings.playback_quality,
+        }
+    }
+
+    /// Starts the stand-in worker for `item`.
+    fn start_quiet_preload(core: &JellybeamCore, item: &str, generation: u64) {
+        let mut state = core.lock_state();
+        let request = quiet_preload_request(&state, item, generation);
+        state.preload_request(request, Instant::now(), |_| {
+            core.runtime.spawn(std::future::pending::<()>())
+        });
+    }
+
+    /// The worker for `generation` ending with a DirectPlay cache for `item`.
+    fn publish_quiet_preload(core: &JellybeamCore, item: &str, generation: u64) {
+        let cache = PreloadCache {
+            generation,
+            ..fake_preload_cache(item)
+        };
+        let _ = core
+            .lock_state()
+            .preload_publish(generation, Some(cache), Instant::now());
+    }
+
+    /// One thing that happens to the slot between a Play joining item-x's negotiation and its read.
+    #[derive(Clone, Copy, Debug)]
+    enum AfterJoin {
+        Publish(&'static str, u64),
+        AccountReset,
+        SetSettings,
+        SetDeviceCaps,
+        Request(&'static str, u64),
+    }
+
+    fn apply_after_join(core: &JellybeamCore, event: AfterJoin) {
+        match event {
+            AfterJoin::Publish(item, generation) => publish_quiet_preload(core, item, generation),
+            AfterJoin::AccountReset => change_account(core),
+            AfterJoin::SetSettings => {
+                let mut settings = core.get_settings();
+                settings.tolerate_mislabeled_levels = !settings.tolerate_mislabeled_levels;
+                core.set_settings(settings);
+            }
+            AfterJoin::SetDeviceCaps => core.set_device_caps(DeviceCaps::default()),
+            AfterJoin::Request(item, generation) => start_quiet_preload(core, item, generation),
+        }
+    }
+
+    /// docs/18 §2: a Play that joined item-x's negotiation (generation 1) reads that generation's
+    /// result alone -- never another generation's or account's, and not lost to another item's trigger.
+    #[test]
+    fn a_joined_play_reads_only_the_generation_it_joined() {
+        use AfterJoin::*;
+        // (events after the join, the generation the joined read must yield)
+        let table: Vec<(Vec<AfterJoin>, Option<u64>)> = vec![
+            (vec![Publish("item-x", 1)], Some(1)),
+            (vec![], None),
+            (vec![Publish("item-x", 1), AccountReset], None),
+            (vec![Publish("item-x", 1), SetSettings], None),
+            (vec![Publish("item-x", 1), SetDeviceCaps], None),
+            (vec![AccountReset, Publish("item-x", 1)], None),
+            (vec![Publish("item-x", 1), Request("item-y", 2)], Some(1)),
+            (
+                vec![
+                    Request("item-y", 2),
+                    Publish("item-x", 1),
+                    Publish("item-y", 2),
+                ],
+                Some(1),
+            ),
+            (
+                vec![
+                    Publish("item-x", 1),
+                    AccountReset,
+                    Request("item-x", 2),
+                    Publish("item-x", 2),
+                ],
+                None,
+            ),
+            (
+                vec![
+                    Publish("item-x", 1),
+                    SetSettings,
+                    Request("item-x", 2),
+                    Publish("item-x", 2),
+                ],
+                None,
+            ),
+            (
+                vec![
+                    Publish("item-x", 1),
+                    SetDeviceCaps,
+                    Request("item-x", 2),
+                    Publish("item-x", 2),
+                ],
+                None,
+            ),
+        ];
+        let mismatches: Vec<String> = table
+            .into_iter()
+            .filter_map(|(events, expected)| {
+                let (item_json, playback_json) = direct_play_fixture();
+                let (_dir, core, _mock) = core_signed_in_against_mock(item_json, playback_json);
+                start_quiet_preload(&core, "item-x", 1);
+                let join = core
+                    .lock_state()
+                    .preload_take_for_play("item-x", true, Instant::now())
+                    .join
+                    .expect("Play for the running item joins it");
+                for event in &events {
+                    apply_after_join(&core, *event);
+                }
+                let mut state = core.lock_state();
+                let read = state.preload_take_joined(&join, "item-x", Instant::now());
+                let read = read.map(|cache| cache.generation);
+                let slot_left = state.preload_cache.as_ref().map(|cache| cache.generation);
+                let consumed = read.is_none() || slot_left != read;
+                (read != expected || !consumed).then(|| {
+                    format!("{events:?}: read {read:?} (slot still {slot_left:?}), expected {expected:?}")
+                })
+            })
+            .collect();
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// docs/18 §2: a negotiation's single-use result goes to one Play; a second Play for the same
+    /// running item negotiates on its own and leaves the task the first is awaiting alone.
+    #[test]
+    fn only_the_first_play_joins_a_running_negotiation() {
+        let (item_json, playback_json) = direct_play_fixture();
+        let (_dir, core, _mock) = core_signed_in_against_mock(item_json, playback_json);
+        start_quiet_preload(&core, "item-x", 1);
+        let mut state = core.lock_state();
+        let first = state.preload_take_for_play("item-x", true, Instant::now());
+        let second = state.preload_take_for_play("item-x", true, Instant::now());
+        assert!(first.join.is_some(), "the first Play joins");
+        assert!(
+            second.join.is_none(),
+            "the second Play joined the same result"
+        );
+        assert!(
+            second.abort.is_none(),
+            "the second Play aborted the joined task"
+        );
+        assert!(state.preload_task.is_some());
+    }
+
+    /// One step of a dwell sequence against the preload slot.
+    #[derive(Clone, Copy, Debug)]
+    enum Dwell {
+        Request(&'static str),
+        /// The running negotiation ends with a `DirectPlay` cache for its own item.
+        Publish,
+        Play(&'static str),
+        /// The slot's cache was made this much earlier.
+        Age(Duration),
+    }
+
+    /// Runs `steps` against a fresh preload slot and returns the item its cache serves.
+    fn slot_after(steps: &[Dwell]) -> Option<String> {
+        let (item_json, playback_json) = direct_play_fixture();
+        let (_dir, core, _mock) = core_signed_in_against_mock(item_json, playback_json);
+        let mut generation = 0;
+        for step in steps {
+            match *step {
+                Dwell::Request(item) => {
+                    generation += 1;
+                    start_quiet_preload(&core, item, generation);
+                }
+                Dwell::Publish => {
+                    let (running, generation) = {
+                        let state = core.lock_state();
+                        let task = state.preload_task.as_ref().expect("a running task");
+                        (task.running_item.clone(), task.generation)
+                    };
+                    publish_quiet_preload(&core, &running, generation);
+                }
+                Dwell::Play(item) => {
+                    let _ = core
+                        .lock_state()
+                        .preload_take_for_play(item, true, Instant::now());
+                }
+                Dwell::Age(by) => {
+                    if let Some(cache) = core.lock_state().preload_cache.as_mut() {
+                        cache.created_at -= by;
+                    }
+                }
+            }
+        }
+        let slot = core
+            .lock_state()
+            .preload_cache
+            .as_ref()
+            .map(|cache| cache.item_id.clone());
+        slot
+    }
+
+    /// docs/18 §2: whichever negotiation publishes, the slot ends up serving the newest target
+    /// while its cache still serves, and anything else otherwise.
+    #[test]
+    fn a_publish_never_replaces_a_cache_that_still_serves_the_newest_target() {
+        use Dwell::{Age, Play, Publish, Request};
+        let past_refresh = PRELOAD_REFRESH_AFTER + Duration::from_secs(1);
+        let past_ttl = PRELOAD_CACHE_TTL + Duration::from_secs(1);
+        // (sequence, the slot's item after its last step)
+        let table: Vec<(Vec<Dwell>, Option<&str>)> = vec![
+            // X cached, then Y asked: Y drops X's cache, so back on X changes nothing for Y's publish.
+            (
+                vec![Request("x"), Publish, Request("y"), Request("x"), Publish],
+                Some("y"),
+            ),
+            (
+                vec![Request("x"), Request("y"), Publish, Request("x"), Publish],
+                Some("x"),
+            ),
+            (
+                vec![
+                    Request("x"),
+                    Request("y"),
+                    Publish,
+                    Request("x"),
+                    Request("y"),
+                    Publish,
+                ],
+                Some("y"),
+            ),
+            (
+                vec![
+                    Request("x"),
+                    Request("y"),
+                    Publish,
+                    Request("x"),
+                    Request("z"),
+                    Publish,
+                ],
+                Some("y"),
+            ),
+            (
+                vec![
+                    Request("x"),
+                    Request("y"),
+                    Publish,
+                    Request("x"),
+                    Play("y"),
+                    Publish,
+                ],
+                Some("y"),
+            ),
+            (
+                vec![
+                    Request("x"),
+                    Request("y"),
+                    Publish,
+                    Age(past_refresh),
+                    Request("x"),
+                    Publish,
+                ],
+                Some("x"),
+            ),
+            (
+                vec![
+                    Request("x"),
+                    Request("y"),
+                    Publish,
+                    Age(past_ttl),
+                    Request("x"),
+                    Publish,
+                ],
+                Some("y"),
+            ),
+        ];
+        let mismatches: Vec<String> = table
+            .into_iter()
+            .filter_map(|(steps, expected)| {
+                let slot = slot_after(&steps);
+                (slot.as_deref() != expected)
+                    .then(|| format!("{steps:?}: slot {slot:?}, expected {expected:?}"))
+            })
+            .collect();
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// docs/18 §2: back on a cached item, a different item's running negotiation must not
+    /// replace that item's cache when it ends.
+    #[test]
+    fn a_different_items_negotiation_cannot_overwrite_the_newest_items_young_cache() {
+        let (item_json, playback_json) = direct_play_fixture();
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_json);
+        let held_x = mock.routes.gate("POST", "/Items/item-x/PlaybackInfo", 0);
+        let held_y = mock.routes.gate("POST", "/Items/item-y/PlaybackInfo", 0);
+        let hits_for = |item: &str| {
+            mock.routes
+                .hit_count_containing("POST", &format!("/Items/{item}/PlaybackInfo"))
+        };
+
+        core.preload_playback("item-x".to_string(), None);
+        wait_until(|| hits_for("item-x") >= 1, "X's PlaybackInfo to arrive");
+        core.preload_playback("item-y".to_string(), None);
+        held_x.open();
+        wait_until(|| hits_for("item-y") >= 1, "Y's PlaybackInfo to arrive");
+        assert_eq!(
+            core.lock_state()
+                .preload_cache
+                .as_ref()
+                .map(|c| c.item_id.clone()),
+            Some("item-x".to_string()),
+            "X's cache is young while Y runs"
+        );
+
+        core.preload_playback("item-x".to_string(), None);
+        held_y.open();
+        wait_for_preload_idle(&core);
+
+        assert_eq!(
+            core.lock_state()
+                .preload_cache
+                .as_ref()
+                .map(|c| c.item_id.clone()),
+            Some("item-x".to_string()),
+            "Y finishing must not replace the item the viewer is back on"
+        );
+    }
+
+    /// docs/18 §3: playback start enriches with one `/Items?ids` GET, whose record carries both the
+    /// OSD detail and the playing source's trickplay manifest.
+    #[test]
+    fn playback_enrichment_is_one_items_fetch_carrying_the_osd_detail_and_the_trickplay_manifest() {
+        let manifest = jellyfin_api::models::TrickplayInfoDto {
+            width: Some(320),
+            height: Some(180),
+            tile_width: Some(10),
+            tile_height: Some(10),
+            interval: Some(10_000),
+            thumbnail_count: Some(100),
+            ..Default::default()
+        };
+        let item = jellyfin_api::models::BaseItemDto {
+            name: Some("Test Movie".to_string()),
+            trickplay: std::collections::HashMap::from([(
+                "ms-1".to_string(),
+                std::collections::HashMap::from([("320".to_string(), manifest)]),
+            )]),
+            ..Default::default()
+        };
+        let item_json = serde_json::to_value(jellyfin_api::models::BaseItemDtoQueryResult {
+            items: vec![item],
+            ..Default::default()
+        })
+        .expect("serialize items");
+        let (_, playback_json) = direct_play_fixture();
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_json);
+        let fetches = || mock.routes.hit_count_containing("GET", "ids=item-1");
+        let before = fetches();
+
+        let detail = core
+            .get_playback_osd_detail("item-1".to_string(), "ms-1".to_string(), None)
+            .expect("the enrichment fetch");
+
+        assert_eq!(fetches() - before, 1, "one fetch, not one per consumer");
+        let request = mock
+            .routes
+            .log_snapshot()
+            .into_iter()
+            .rfind(|entry| entry.contains("ids=item-1"))
+            .expect("the fetch is logged");
+        for field in ["MediaStreams", "Chapters", "MediaSources", "Trickplay"] {
+            assert!(request.contains(field), "{field} missing from {request}");
+        }
+        assert_eq!(
+            detail.trickplay,
+            Some(crate::types::TrickplayMetaFfi {
+                width: 320,
+                height: 180,
+                tile_width: 10,
+                tile_height: 10,
+                interval_ms: 10_000,
+                thumbnail_count: 100,
+            })
+        );
     }
 
     #[test]
@@ -8317,7 +9342,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_out_clears_the_preload_cache() {
+    fn removing_the_active_account_clears_the_preload_cache() {
         let (dir, core) = core_in_tempdir();
         let saved = session::SessionFile {
             server_url: "http://example.invalid".to_string(),
@@ -8333,7 +9358,7 @@ mod tests {
         assert!(core.restore_session().is_some());
         core.lock_state().preload_cache = Some(fake_preload_cache("item-1"));
 
-        core.sign_out();
+        remove_active_account(&core);
 
         assert!(core.lock_state().preload_cache.is_none());
     }
@@ -8443,6 +9468,8 @@ mod tests {
             authentication_result("new-token", "renamed-user"),
         )
         .expect("same user refreshes its credential");
+        core.open_mirror()
+            .expect("the account change opens the mirror");
     }
 
     /// Switches to a second saved account on another server; returns its list index.
@@ -8616,7 +9643,7 @@ mod tests {
                 Resolve::NewerRequest => {
                     join(spawn_prepare(&core, "item-2")).expect("C installs");
                 }
-                Resolve::AccountChanges => core.sign_out(),
+                Resolve::AccountChanges => remove_active_account(&core),
                 Resolve::Installs | Resolve::NegotiationFails => {}
             }
             if matches!(resolve, Resolve::NewerRequest | Resolve::AccountChanges) {
@@ -9004,7 +10031,6 @@ mod tests {
         let a = core
             .prepare_playback_now("item-1".to_string(), false)
             .expect("A plays");
-        let a_epoch = core.account_epoch();
         core.switch_session(index_of(&core, &other))
             .expect("browses B");
         core.open_mirror().expect("B's mirror, as Kotlin opens it");
@@ -9054,7 +10080,7 @@ mod tests {
         let other = switch_to_other_account(&core);
         core.switch_session(1 - other)
             .expect("back to A, mirror not reopened yet");
-        assert!(core.lock_state().mirror.is_none());
+        assert!(core.lock_state().account.bundle().is_none());
 
         core.stop_playback(a.play_session_id, 30_000_000);
         core.prepare_playback(
@@ -9068,8 +10094,8 @@ mod tests {
         .expect("next-up negotiates with the parked mirror");
     }
 
-    /// docs/18 §2.1: an account stays parked after its playback stops (next-up may follow), but
-    /// removing it then ends nothing -- a newer playback negotiating on the browsed account installs.
+    /// docs/18 §2.1: an account whose playback stopped isn't parked by the switch, so removing it
+    /// ends nothing -- a newer playback negotiating on the browsed account installs.
     #[test]
     fn removing_an_account_whose_playback_ended_leaves_the_newer_playback_alone() {
         let (_dir, core, mock) = auto_core(vec![
@@ -9084,10 +10110,7 @@ mod tests {
         seed_session(core.data_dir(), &first.server_url, "u-b");
         core.switch_session(1).expect("browses B");
         reopen_mirror(&core);
-        assert!(
-            core.parked_account_epoch().is_some(),
-            "A stays parked for next-up"
-        );
+        assert_eq!(core.parked_account_epoch(), None, "A's playback had stopped");
 
         let held = mock.hold_playback_info(1);
         let b = spawn_prepare(&core, "item-2");
@@ -9101,7 +10124,7 @@ mod tests {
     }
 
     /// docs/18 §2.1: a negotiation in flight across a switch parks its account; once it fails,
-    /// signing out of that account drops the parking instead of keeping it for a signed-out one.
+    /// removing that account drops the parking instead of keeping it for a signed-out one.
     #[test]
     fn signing_out_of_an_account_parked_by_a_failed_negotiation_drops_it() {
         let (item_json, playback_info_json) = transcode_fixture();
@@ -9118,7 +10141,7 @@ mod tests {
         join(a).expect_err("Direct Play mode refuses a Transcode decision outright");
 
         core.switch_session(1 - other).expect("back to A");
-        core.sign_out();
+        remove_active_account(&core);
 
         assert_eq!(core.parked_account_epoch(), None);
     }
@@ -9127,7 +10150,7 @@ mod tests {
     fn reopen_mirror(core: &JellybeamCore) -> media_cache::Mirror {
         core.open_mirror()
             .expect("opens, as Kotlin does after a switch");
-        core.lock_state().mirror.clone().expect("just opened")
+        installed_mirror(core)
     }
 
     /// docs/18 §2.1: every mirror -- the playing account's, the browsed one, any opened since --
@@ -9136,7 +10159,7 @@ mod tests {
     #[test]
     fn sync_yields_exactly_while_a_stream_plays() {
         type Path = fn(&JellybeamCore, String) -> Vec<media_cache::Mirror>;
-        let rows: [(&str, Path, bool); 14] = [
+        let rows: [(&str, Path, bool); 13] = [
             ("plays on A", |_, _| Vec::new(), true),
             (
                 "stop",
@@ -9155,9 +10178,9 @@ mod tests {
                 false,
             ),
             (
-                "sign out of A",
+                "remove A while browsing it",
                 |core, _| {
-                    core.sign_out();
+                    remove_active_account(core);
                     Vec::new()
                 },
                 false,
@@ -9211,16 +10234,6 @@ mod tests {
                 true,
             ),
             (
-                "browse B, sign out of B",
-                |core, _| {
-                    switch_to_other_account(core);
-                    let browsed = reopen_mirror(core);
-                    core.sign_out();
-                    vec![browsed]
-                },
-                true,
-            ),
-            (
                 "browse B, then C",
                 |core, _| {
                     switch_to_other_account(core);
@@ -9254,13 +10267,13 @@ mod tests {
                 false,
             ),
             (
-                "browse B, back to A, sign out of A",
+                "browse B, back to A, remove A",
                 |core, _| {
                     let other = switch_to_other_account(core);
                     let browsed = reopen_mirror(core);
                     core.switch_session(1 - other).expect("back to A");
                     let reopened = reopen_mirror(core);
-                    core.sign_out();
+                    remove_active_account(core);
                     vec![browsed, reopened]
                 },
                 false,
@@ -9273,7 +10286,7 @@ mod tests {
                 let plan = core
                     .prepare_playback_now("item-1".to_string(), false)
                     .expect("A plays");
-                let playing = core.lock_state().mirror.clone().expect("A's mirror");
+                let playing = installed_mirror(&core);
                 let mut held = path(&core, plan.play_session_id);
                 held.push(playing);
                 held.iter().any(|mirror| mirror.playback_active() != *plays)
@@ -9294,7 +10307,7 @@ mod tests {
         let (_dir, core, _mock) = core_signed_in_against_mock(item_json, playback_info_json);
         core.prepare_playback_now("item-1".to_string(), false)
             .expect_err("Direct Play mode refuses a Transcode decision outright");
-        let opened = core.lock_state().mirror.clone().expect("A's mirror");
+        let opened = installed_mirror(&core);
         assert!(core.lock_state().playback_owner.claim.is_none());
 
         switch_to_other_account(&core);
@@ -9303,6 +10316,24 @@ mod tests {
         assert_eq!(core.parked_account_epoch(), None);
         assert!(!opened.playback_active());
         assert!(!browsed.playback_active());
+    }
+
+    /// docs/18 §2.1: a playback stopped before the switch plays nothing, so its account isn't
+    /// parked: no second mirror or client stays loaded, and its epoch no longer owns playback.
+    #[test]
+    fn a_stopped_playback_does_not_park_its_account_on_the_next_switch() {
+        let (item_json, playback_info_json) = direct_play_fixture();
+        let (_dir, core, _mock) = core_signed_in_against_mock(item_json, playback_info_json);
+        let played_epoch = core.account_epoch();
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("plays");
+        core.stop_playback(plan.play_session_id, 30_000_000);
+
+        switch_to_other_account(&core);
+
+        assert_eq!(core.parked_account_epoch(), None);
+        assert!(!core.owns_playback(played_epoch));
     }
 
     /// docs/18 §2.1: a negotiation that fails on the browsed account leaves the playback still
@@ -9326,9 +10357,8 @@ mod tests {
         assert!(core.owns_playback(a_epoch));
         core.stop_playback(plan.play_session_id, 30_000_000);
         assert_eq!(
-            core.lock_state()
-                .client
-                .as_ref()
+            core.require_client()
+                .ok()
                 .map(|client| client.base_url().to_string()),
             Some("http://third-server.invalid".to_string()),
             "C stays browsed"
@@ -9521,7 +10551,7 @@ mod tests {
                 "signed out of B while A plays on",
                 |core, _, b| {
                     a_plays_then_browses_b(core, b);
-                    core.sign_out();
+                    remove_active_account(core);
                 },
                 true,
                 false,
@@ -9603,7 +10633,7 @@ mod tests {
             .expect("A plays");
         core.report_position(a.play_session_id, 42_000_000);
 
-        core.sign_out();
+        remove_active_account(&core);
 
         assert_eq!(active_play_session_id(&core), None);
         assert!(core.lock_state().sidecars.is_none());
@@ -9630,7 +10660,7 @@ mod tests {
         core.report_position(a.play_session_id.clone(), 10_000_000);
         core.report_position("an-earlier-session".to_string(), 99_000_000);
 
-        core.sign_out();
+        remove_active_account(&core);
 
         wait_until(
             || !stopped_positions(&mock, &a.play_session_id).is_empty(),
@@ -9649,7 +10679,7 @@ mod tests {
             .expect("A plays");
         assert_start_reports(&mock, 1);
 
-        core.sign_out();
+        remove_active_account(&core);
 
         assert_eq!(active_play_session_id(&core), None);
         std::thread::sleep(Duration::from_millis(150));
@@ -9677,8 +10707,8 @@ mod tests {
         assert_eq!(active_play_session_id(&core), Some(a.play_session_id));
     }
 
-    /// Every account path advances the epoch; only leaving the account that plays (signing out of
-    /// it, removing it, active or parked) ends the playback with its claim and sidecars. Removing
+    /// Every account path advances the epoch; only leaving the account that plays (removing it,
+    /// active or parked) ends the playback with its claim and sidecars. Removing
     /// an account that isn't active is not an account change.
     #[test]
     fn only_leaving_the_playing_account_ends_playback() {
@@ -9689,8 +10719,7 @@ mod tests {
             Untouched,
         }
         type AccountPath = fn(&JellybeamCore, session::SessionFile);
-        let paths: [(&str, AccountPath, Expect); 6] = [
-            ("sign_out", |core, _| core.sign_out(), Expect::Ends),
+        let paths: [(&str, AccountPath, Expect); 5] = [
             (
                 "switch",
                 |core, _| {
@@ -9798,8 +10827,9 @@ mod tests {
     /// (method, required path substring, responses, delays): see
     /// [`RouteMockServer::route_script`].
     type ScriptedRoute = (String, String, Vec<serde_json::Value>, Vec<Duration>);
-    /// (method, path substring, hit index, gate): see [`RouteMockServer::gate`].
-    type GatedReply = (String, String, usize, Arc<tokio::sync::Semaphore>);
+    /// (method, path substring, query substring, hit index, gate): see
+    /// [`RouteMockServer::gate_with_query`]; an empty query substring matches every query.
+    type GatedReply = (String, String, String, usize, Arc<tokio::sync::Semaphore>);
 
     /// The state a [`RouteMockServer`]'s connection handler shares with the
     /// struct's own accessors, held as one `Arc` so `serve` only ever clones
@@ -9831,6 +10861,9 @@ mod tests {
         /// "METHOD full-target" (query string included) in arrival order,
         /// so a test can tell apart requests that collapse to the same key.
         log: Mutex<Vec<String>>,
+        /// ("METHOD path", `Authorization` header value) in arrival order, see
+        /// [`RouteMockServer::authorizations`].
+        auth_log: Mutex<Vec<(String, String)>>,
     }
 
     /// A held mock reply; see [`RouteMockServer::gate`].
@@ -9931,10 +10964,24 @@ mod tests {
         /// Holds the `hit_index`-th (zero-based) scripted `method` arrival whose path contains
         /// `path_substring` until the returned gate is opened.
         fn gate(&self, method: &str, path_substring: &str, hit_index: usize) -> Gate {
+            self.gate_with_query(method, path_substring, "", hit_index)
+        }
+
+        /// [`Self::gate`] restricted to arrivals whose query string contains `query_substring`;
+        /// only those arrivals count toward `hit_index`, so a same-path request with another
+        /// query neither trips nor shifts the hold.
+        fn gate_with_query(
+            &self,
+            method: &str,
+            path_substring: &str,
+            query_substring: &str,
+            hit_index: usize,
+        ) -> Gate {
             let gate = Arc::new(tokio::sync::Semaphore::new(0));
             unlock(&self.shared.gates).push((
                 method.to_string(),
                 path_substring.to_string(),
+                query_substring.to_string(),
                 hit_index,
                 gate.clone(),
             ));
@@ -9972,6 +11019,16 @@ mod tests {
                 .expect("no request captured")
         }
 
+        /// The `Authorization` header of every "METHOD path" arrival, in arrival order.
+        fn authorizations(&self, method: &str, path: &str) -> Vec<String> {
+            let key = format!("{method} {path}");
+            unlock(&self.shared.auth_log)
+                .iter()
+                .filter(|(entry, _)| *entry == key)
+                .map(|(_, header)| header.clone())
+                .collect()
+        }
+
         fn hit_count(&self, method: &str, path: &str) -> usize {
             *unlock(&self.shared.hits)
                 .get(&format!("{method} {path}"))
@@ -9999,6 +11056,13 @@ mod tests {
                 .map(|(_, body)| body.clone())
                 .collect()
         }
+    }
+
+    /// Whether a logged "METHOD target" entry's query string contains `needle`.
+    fn entry_query_contains(entry: &str, needle: &str) -> bool {
+        entry
+            .split_once('?')
+            .map_or(needle.is_empty(), |(_, query)| query.contains(needle))
     }
 
     /// One accepted connection's worth of [`RouteMockServer`] logic: parses
@@ -10042,14 +11106,16 @@ mod tests {
         // method + substring) this arrival is.
         let gate = unlock(&shared.gates)
             .iter()
-            .find(|(m, needle, index, _)| {
+            .find(|(m, needle, query_needle, index, _)| {
                 *m == method
                     && path.contains(needle.as_str())
+                    && query.contains(query_needle.as_str())
                     && unlock(&shared.log)
                         .iter()
                         .filter(|entry| {
                             entry.starts_with(&format!("{method} "))
                                 && entry.contains(needle.as_str())
+                                && entry_query_contains(entry, query_needle)
                         })
                         .count()
                         == *index
@@ -10058,6 +11124,12 @@ mod tests {
 
         *unlock(&shared.hits).entry(key.clone()).or_insert(0) += 1;
         unlock(&shared.log).push(format!("{method} {target}"));
+        let authorization = request
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+            .map(|line| line["authorization:".len()..].trim().to_string())
+            .unwrap_or_default();
+        unlock(&shared.auth_log).push((key.clone(), authorization));
         if let Some(raw_body) = request.split("\r\n\r\n").nth(1) {
             if let Ok(parsed) = serde_json::from_str(raw_body) {
                 unlock(&shared.bodies).push((key.clone(), parsed));
@@ -10370,6 +11442,117 @@ mod tests {
         );
     }
 
+    /// Websocket connect attempts the mock has seen; it serves no upgrade, so each arrives as a
+    /// plain `GET /socket`.
+    fn ws_connect_count(mock: &RouteMockServer) -> usize {
+        mock.hit_count_containing("GET", "/socket")
+    }
+
+    /// Harness self-test: every `open_mirror` enters the single open funnel exactly once.
+    #[test]
+    fn mirror_open_count_rises_by_one_per_open_mirror() {
+        let (_dir, core, _mock) = core_signed_in_against_routes();
+        let baseline = core.mirror_open_count();
+        assert_eq!(baseline, 0);
+
+        core.open_mirror().expect("first open_mirror");
+        assert_eq!(core.mirror_open_count(), baseline + 1);
+
+        core.open_mirror().expect("second open_mirror");
+        assert_eq!(core.mirror_open_count(), baseline + 2);
+    }
+
+    /// Harness self-test: one open starts one websocket attempt, and the next arrives only after
+    /// the reconnect backoff (base 1 s, at least 0.75 s with jitter), so a short window is stable.
+    #[test]
+    fn ws_connect_count_sees_one_attempt_per_open_within_the_backoff() {
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        assert_eq!(ws_connect_count(&mock), 0);
+
+        core.open_mirror().expect("open_mirror");
+        wait_until_for(
+            Duration::from_secs(3),
+            || ws_connect_count(&mock) >= 1,
+            "the websocket connect attempt to reach the mock",
+        );
+        let first = ws_connect_count(&mock);
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            ws_connect_count(&mock),
+            first,
+            "no second attempt inside the reconnect backoff"
+        );
+    }
+
+    /// Harness self-test: a query-scoped gate holds only the BoxSet `GET /Items`, not the
+    /// mirror's own `GET /Items` pages.
+    #[test]
+    fn gate_with_query_holds_list_collections_but_not_sync_pages() {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000034";
+        const COLLECTION_ID: &str = "00000000-0000-0000-0000-000000000035";
+
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        mock.route("GET", "/UserViews", 200, user_views_json(VIEW_ID, "movies"));
+        mock.route(
+            "GET",
+            "/Items",
+            200,
+            serde_json::json!({
+                "Items": [{
+                    "Id": MOVIE_ID,
+                    "Name": "Sample Movie",
+                    "Type": "Movie",
+                    "UserData": {"Key": "k", "Played": false, "IsFavorite": false}
+                }],
+                "TotalRecordCount": 1
+            }),
+        );
+        mock.route_with_query(
+            "GET",
+            "/Items",
+            "includeItemTypes=BoxSet",
+            200,
+            &serde_json::json!({
+                "Items": [{"Id": COLLECTION_ID, "Name": "Sample Collection"}],
+                "TotalRecordCount": 1
+            }),
+        );
+        let held = mock.gate_with_query("GET", "/Items", "includeItemTypes=BoxSet", 0);
+
+        core.open_mirror().expect("open_mirror");
+        wait_until(
+            || {
+                core.card_by_id(MOVIE_ID.to_string())
+                    .ok()
+                    .flatten()
+                    .is_some()
+            },
+            "the sync page to land in the mirror before the BoxSet request exists",
+        );
+
+        let listing = std::thread::spawn(move || core.list_collections());
+        wait_until(
+            || mock.hit_count_containing("GET", "includeItemTypes=BoxSet") == 1,
+            "the BoxSet request to arrive",
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !listing.is_finished(),
+            "list_collections waits for its held reply"
+        );
+
+        held.open();
+        let collections = listing
+            .join()
+            .expect("list_collections thread")
+            .expect("list_collections once released");
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].id, COLLECTION_ID);
+        assert_eq!(collections[0].name, "Sample Collection");
+    }
+
     /// docs/19 §2.2/§2.3: `add_to_collection` posts the add, then spawns a
     /// background membership refresh so `collection_ids_containing` sees it
     /// without waiting on `LibraryChanged`.
@@ -10508,6 +11691,253 @@ mod tests {
             mock.hit_count("GET", "/Users/Me"),
             1,
             "a cached admin bit must not make a second request"
+        );
+    }
+
+    const SWAP_USER_A: &str = "00000000-0000-0000-0000-000000000001";
+    const SWAP_USER_B: &str = "00000000-0000-0000-0000-000000000002";
+
+    /// How the active account stops being account A while A's fetch is in flight.
+    #[derive(Clone, Copy, Debug)]
+    enum AccountSwap {
+        Switch,
+        SignIn,
+        RemoveActive,
+    }
+
+    /// Account A (active, on `mock_a`) and account B (on `mock_b`) with distinct answers for the
+    /// two per-account caches; B is saved at index 0 and A at index 1, except that `SignIn`
+    /// leaves B unsaved for the swap itself to install.
+    struct TwoAccounts {
+        _dir: tempfile::TempDir,
+        core: Arc<JellybeamCore>,
+        mock_a: RouteMockServer,
+        mock_b: RouteMockServer,
+    }
+
+    fn core_with_two_accounts(swap: AccountSwap) -> TwoAccounts {
+        let (dir, core) = core_in_tempdir();
+        let mock_a = core.runtime.block_on(RouteMockServer::start());
+        let mock_b = core.runtime.block_on(RouteMockServer::start());
+        let collection = |name: &str| {
+            serde_json::json!({
+                "Items": [{"Id": "00000000-0000-0000-0000-000000000030", "Name": name}],
+                "TotalRecordCount": 1
+            })
+        };
+        let user = |id: &str, admin: bool| {
+            serde_json::json!({
+                "Id": id,
+                "Name": "Sample User",
+                "Policy": {
+                    "IsAdministrator": admin,
+                    "AuthenticationProviderId": "synthetic-provider",
+                    "PasswordResetProviderId": "synthetic-provider"
+                }
+            })
+        };
+        mock_a.route_with_query(
+            "GET",
+            "/Items",
+            "includeItemTypes=BoxSet",
+            200,
+            &collection("Sample Collection A"),
+        );
+        mock_b.route_with_query(
+            "GET",
+            "/Items",
+            "includeItemTypes=BoxSet",
+            200,
+            &collection("Sample Collection B"),
+        );
+        mock_a.route("GET", "/Users/Me", 200, user(SWAP_USER_A, true));
+        mock_b.route("GET", "/Users/Me", 200, user(SWAP_USER_B, false));
+        mock_b.route(
+            "POST",
+            "/Users/AuthenticateByName",
+            200,
+            serde_json::json!({
+                "User": {"Id": SWAP_USER_B, "Name": "Sample User"},
+                "AccessToken": "tok-b",
+            }),
+        );
+
+        if !matches!(swap, AccountSwap::SignIn) {
+            seed_session(dir.path(), &mock_b.base_url, SWAP_USER_B);
+        }
+        seed_session(dir.path(), &mock_a.base_url, SWAP_USER_A);
+        assert_eq!(
+            core.restore_session().expect("account A restores").user_id,
+            SWAP_USER_A
+        );
+        TwoAccounts {
+            _dir: dir,
+            core,
+            mock_a,
+            mock_b,
+        }
+    }
+
+    fn apply_account_swap(accounts: &TwoAccounts, swap: AccountSwap) {
+        let core = &accounts.core;
+        match swap {
+            AccountSwap::Switch => {
+                core.switch_session(0).expect("switch to account B");
+            }
+            AccountSwap::SignIn => {
+                core.sign_in(
+                    accounts.mock_b.base_url.clone(),
+                    "user".to_string(),
+                    "pass".to_string(),
+                )
+                .expect("sign in as account B");
+            }
+            AccountSwap::RemoveActive => {
+                assert!(core.remove_session(1).expect("remove account A"));
+            }
+        }
+    }
+
+    /// docs/19 §2.3: a per-account cache fetch that spans an account change may hand its caller
+    /// the old account's answer, but must not store it for the new account.
+    fn assert_fetch_spanning_a_swap_is_not_cached<T>(
+        swap: AccountSwap,
+        fetch: fn(&JellybeamCore) -> Result<T, CoreError>,
+        cache_is_empty: fn(&JellybeamCore) -> bool,
+        (gate_path, gate_query, request_needle): (&str, &str, &str),
+        expected_b: T,
+    ) where
+        T: Send + PartialEq + std::fmt::Debug + 'static,
+    {
+        let accounts = core_with_two_accounts(swap);
+        let held = accounts
+            .mock_a
+            .gate_with_query("GET", gate_path, gate_query, 0);
+        let in_flight = {
+            let core = accounts.core.clone();
+            std::thread::spawn(move || fetch(&core))
+        };
+        wait_until(
+            || accounts.mock_a.hit_count_containing("GET", request_needle) >= 1,
+            "account A's request to reach its server",
+        );
+        apply_account_swap(&accounts, swap);
+        held.open();
+        let _ = in_flight.join().expect("fetch thread");
+
+        assert!(
+            cache_is_empty(&accounts.core),
+            "account A's answer must not be cached after {swap:?}"
+        );
+        let before = accounts.mock_b.hit_count_containing("GET", request_needle);
+        assert_eq!(
+            fetch(&accounts.core).expect("account B's fetch"),
+            expected_b
+        );
+        assert_eq!(
+            accounts.mock_b.hit_count_containing("GET", request_needle),
+            before + 1,
+            "account B reads its own server, not a cache"
+        );
+    }
+
+    fn assert_collections_fetch_spanning_a_swap_is_not_cached(swap: AccountSwap) {
+        assert_fetch_spanning_a_swap_is_not_cached(
+            swap,
+            JellybeamCore::list_collections,
+            |core| {
+                let state = core.lock_state();
+                state
+                    .account
+                    .installed()
+                    .is_none_or(|i| i.caches.collections.is_none())
+            },
+            (
+                "/Items",
+                "includeItemTypes=BoxSet",
+                "includeItemTypes=BoxSet",
+            ),
+            vec![CollectionInfo {
+                id: "00000000-0000-0000-0000-000000000030".to_string(),
+                name: "Sample Collection B".to_string(),
+            }],
+        );
+    }
+
+    fn assert_admin_fetch_spanning_a_swap_is_not_cached(swap: AccountSwap) {
+        assert_fetch_spanning_a_swap_is_not_cached(
+            swap,
+            JellybeamCore::is_administrator,
+            |core| {
+                let state = core.lock_state();
+                state
+                    .account
+                    .installed()
+                    .is_none_or(|i| i.caches.is_admin.is_none())
+            },
+            ("/Users/Me", "", "/Users/Me"),
+            false,
+        );
+    }
+
+    #[test]
+    fn list_collections_fetch_spanning_a_switch_is_not_cached() {
+        assert_collections_fetch_spanning_a_swap_is_not_cached(AccountSwap::Switch);
+    }
+
+    #[test]
+    fn list_collections_fetch_spanning_a_sign_in_is_not_cached() {
+        assert_collections_fetch_spanning_a_swap_is_not_cached(AccountSwap::SignIn);
+    }
+
+    #[test]
+    fn list_collections_fetch_spanning_a_remove_of_the_active_account_is_not_cached() {
+        assert_collections_fetch_spanning_a_swap_is_not_cached(AccountSwap::RemoveActive);
+    }
+
+    #[test]
+    fn is_administrator_fetch_spanning_a_switch_is_not_cached() {
+        assert_admin_fetch_spanning_a_swap_is_not_cached(AccountSwap::Switch);
+    }
+
+    #[test]
+    fn is_administrator_fetch_spanning_a_sign_in_is_not_cached() {
+        assert_admin_fetch_spanning_a_swap_is_not_cached(AccountSwap::SignIn);
+    }
+
+    #[test]
+    fn is_administrator_fetch_spanning_a_remove_of_the_active_account_is_not_cached() {
+        assert_admin_fetch_spanning_a_swap_is_not_cached(AccountSwap::RemoveActive);
+    }
+
+    /// docs/19 §2.3: a `/Users/Me` reply without a `Policy` proves nothing about the role, so
+    /// the guess is not stored and the next call asks the server again.
+    #[test]
+    fn is_administrator_does_not_cache_a_reply_without_a_policy() {
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        mock.route(
+            "GET",
+            "/Users/Me",
+            200,
+            serde_json::json!({
+                "Id": "00000000-0000-0000-0000-000000000040",
+                "Name": "Sample User"
+            }),
+        );
+
+        assert!(!core.is_administrator().expect("first call"));
+        assert!(
+            core.lock_state()
+                .account
+                .installed()
+                .is_some_and(|i| i.caches.is_admin.is_none()),
+            "an unknown role must not be cached as false"
+        );
+        let _ = core.is_administrator();
+        assert_eq!(
+            mock.hit_count("GET", "/Users/Me"),
+            2,
+            "the second call asks the server again"
         );
     }
 
@@ -11174,7 +12604,7 @@ mod tests {
         // The mark is in flight: the Stopped is held, not sent, and not released, even across its
         // backoff.
         let sent = mock.hit_count_containing("POST", "/Sessions/Playing");
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_secs(3));
         assert_eq!(
             mock.hit_count_containing("POST", "/Sessions/Playing"),
             sent,
@@ -11528,10 +12958,10 @@ mod tests {
         );
     }
 
-    /// A first sign-in that never separately calls `open_mirror` still gets
-    /// a bus/forwarder installed immediately, and `sign_out` still stops them.
+    /// A sign-in plus the account change's `open_mirror` opens one mirror and one bus, and
+    /// removing the account stops them.
     #[test]
-    fn sign_in_alone_spawns_a_bus_and_sign_out_stops_it() {
+    fn sign_in_then_open_mirror_opens_once_and_removal_stops_the_bus() {
         let (_dir, core) = core_in_tempdir();
         let mock = core.runtime.block_on(RouteMockServer::start());
         mock.route(
@@ -11550,31 +12980,27 @@ mod tests {
             "pass".to_string(),
         )
         .expect("sign_in against mock server");
+        core.open_mirror()
+            .expect("the account change opens the mirror");
 
-        assert!(
-            core.lock_state().event_bus.is_some(),
-            "sign_in alone (no open_mirror call) should already have spawned a real EventBus"
-        );
+        assert_eq!(core.mirror_open_count(), 1, "one sign-in, one mirror open");
         let forwarder_handle = core
             .lock_state()
-            .event_bus
-            .as_ref()
-            .expect("sign_in alone should already have spawned a bundle")
+            .account
+            .bundle()
+            .expect("open_mirror spawned a bundle")
             .forwarder
             .as_ref()
-            .expect("sign_in alone should already have spawned a bus forwarder")
+            .expect("open_mirror spawned a bus forwarder")
             .abort_handle();
-        assert!(
-            !forwarder_handle.is_finished(),
-            "the forwarder spawned by sign_in should still be running"
-        );
+        assert!(!forwarder_handle.is_finished());
 
-        core.sign_out();
+        remove_active_account(&core);
 
-        assert!(core.lock_state().event_bus.is_none());
+        assert!(core.lock_state().account.bundle().is_none());
         assert!(
             forwarder_handle.is_finished(),
-            "sign_out must actually stop the bus forwarder sign_in spawned"
+            "removal must actually stop the bus forwarder sign_in spawned"
         );
     }
 
@@ -11681,6 +13107,577 @@ mod tests {
         }
     }
 
+    // --- docs/18 §2.1 account boundary: server info, logout, reauthorization -------------------
+
+    const ACCOUNT_A_ID: &str = "00000000-0000-0000-0000-0000000000a1";
+    const ACCOUNT_B_ID: &str = "00000000-0000-0000-0000-0000000000b2";
+
+    /// Saves an account whose server is `mock`, with `token` and a UUID user id; later saves are active.
+    fn seed_account_on(
+        dir: &std::path::Path,
+        mock: &RouteMockServer,
+        user_id: &str,
+        token: &str,
+    ) -> session::SessionFile {
+        session::add_or_update(
+            dir,
+            session::SessionFile {
+                server_url: mock.base_url.clone(),
+                user_id: user_id.to_string(),
+                user_name: format!("{user_id}-name"),
+                token: token.to_string(),
+                device_id: "dev".to_string(),
+                mirror_dir: session::mirror_dir_name(&mock.base_url, user_id),
+                server_version: None,
+                server_name: None,
+            },
+        )
+        .expect("seed a session file")
+    }
+
+    /// Account B (index 0, token `tok-b`) then account A (index 1, token `tok-a`, active and
+    /// restored), each on its own mock server.
+    fn two_accounts_on_mocks() -> (
+        tempfile::TempDir,
+        Arc<JellybeamCore>,
+        RouteMockServer,
+        RouteMockServer,
+    ) {
+        let (dir, core) = core_in_tempdir();
+        let mock_a = core.runtime.block_on(RouteMockServer::start());
+        let mock_b = core.runtime.block_on(RouteMockServer::start());
+        seed_account_on(dir.path(), &mock_b, ACCOUNT_B_ID, "tok-b");
+        seed_account_on(dir.path(), &mock_a, ACCOUNT_A_ID, "tok-a");
+        assert_eq!(
+            core.restore_session().expect("account A restores").user_id,
+            ACCOUNT_A_ID
+        );
+        (dir, core, mock_a, mock_b)
+    }
+
+    fn logouts(mock: &RouteMockServer) -> usize {
+        mock.hit_count("POST", "/Sessions/Logout")
+    }
+
+    /// Lets a fire-and-forget request that must NOT exist show up if it is going to.
+    fn settle() {
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    #[test]
+    fn server_details_split_admin_non_admin_and_revoked_token_rows() {
+        enum Expect {
+            Details { available: bool },
+            Reauthorize,
+        }
+        // (name, cached admin flag, /System/Info status, expected /System/Info requests, expectation)
+        let rows = [
+            (
+                "admin",
+                Some(true),
+                200,
+                Some(1),
+                Expect::Details { available: true },
+            ),
+            (
+                "cached non-admin skips the admin endpoint",
+                Some(false),
+                403,
+                Some(0),
+                Expect::Details { available: false },
+            ),
+            (
+                "role not yet known falls back on 403",
+                None,
+                403,
+                None,
+                Expect::Details { available: false },
+            ),
+            (
+                "revoked token of a cached admin",
+                Some(true),
+                401,
+                Some(1),
+                Expect::Reauthorize,
+            ),
+            (
+                "revoked token of an unknown role",
+                None,
+                401,
+                None,
+                Expect::Reauthorize,
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, cached_admin, info_status, info_requests, expect) in rows {
+            let (_dir, core, mock) = core_signed_in_against_routes();
+            mock.route(
+                "GET",
+                "/System/Info",
+                info_status,
+                serde_json::json!({
+                    "ServerName": "Synthetic Admin Name",
+                    "Version": "12.0.0",
+                    "ProductName": "Synthetic Server"
+                }),
+            );
+            mock.route(
+                "GET",
+                "/System/Info/Public",
+                200,
+                serde_json::json!({"ServerName": "Synthetic Public Name", "Version": "12.0.0"}),
+            );
+            let epoch = core.account_epoch();
+            assert!(core.store_if_epoch(epoch, |caches| caches.is_admin = cached_admin));
+
+            let result = core.fetch_server_details();
+
+            let requests = mock.hit_count("GET", "/System/Info");
+            if info_requests.is_some_and(|expected| expected != requests) {
+                failures.push(format!(
+                    "{name}: {requests} admin-endpoint requests, expected {info_requests:?}"
+                ));
+            }
+            let fine = match (&expect, &result) {
+                (Expect::Details { available }, Ok(details)) => {
+                    details.system_info_available == *available
+                        && (*available
+                            || details.server_name.as_deref() == Some("Synthetic Public Name"))
+                }
+                (Expect::Reauthorize, Err(CoreError::Unauthorized { account: Some(_) })) => true,
+                _ => false,
+            };
+            if !fine {
+                failures.push(format!("{name}: unexpected result {result:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// docs/18 §2.1: removing the active account asks its server to end that account's session.
+    #[test]
+    fn remove_session_of_the_active_account_logs_it_out_with_its_own_token() {
+        let (_dir, core, mock_a, mock_b) = two_accounts_on_mocks();
+
+        assert!(core.remove_session(1).expect("active index exists"));
+
+        wait_until(
+            || logouts(&mock_a) >= 1,
+            "a Logout at the removed account's server",
+        );
+        settle();
+        assert_eq!(logouts(&mock_a), 1);
+        let auth = mock_a.authorizations("POST", "/Sessions/Logout");
+        assert!(auth[0].contains(r#"Token="tok-a""#), "{auth:?}");
+        assert_eq!(logouts(&mock_b), 0, "the other account stays signed in");
+    }
+
+    #[test]
+    fn remove_session_of_a_parked_account_logs_it_out_with_its_own_token() {
+        let (_dir, core, mock_a, mock_b) = two_accounts_on_mocks();
+
+        assert!(!core.remove_session(0).expect("parked index exists"));
+
+        wait_until(
+            || logouts(&mock_b) >= 1,
+            "a Logout at the removed account's server",
+        );
+        settle();
+        assert_eq!(logouts(&mock_b), 1);
+        let auth = mock_b.authorizations("POST", "/Sessions/Logout");
+        assert!(auth[0].contains(r#"Token="tok-b""#), "{auth:?}");
+        assert_eq!(logouts(&mock_a), 0, "the active account stays signed in");
+    }
+
+    /// docs/18 §2.1: ending an account never revokes the token its final Stopped report still needs.
+    #[test]
+    fn logout_waits_for_the_final_stopped_of_the_account_it_ends() {
+        {
+            let (_dir, core, mock_a, _mock_b) = two_accounts_on_mocks();
+            let (item_json, playback_info_json) = playback_fixture(
+                "Test Movie",
+                "ms-1",
+                Some("mkv"),
+                true,
+                None,
+                None,
+                "play-session-logout-order",
+            );
+            mock_a.route("GET", "/Items", 200, item_json);
+            mock_a.route_script("POST", "/PlaybackInfo", vec![playback_info_json], vec![]);
+            let stopped = mock_a.gate("POST", "/Sessions/Playing/Stopped", 0);
+            core.open_mirror().expect("account A's mirror opens");
+            let plan = core
+                .prepare_playback_now("item-1".to_string(), false)
+                .expect("A plays");
+            core.report_position(plan.play_session_id, 30_000_000);
+
+            core.remove_session(1).expect("removes A");
+            wait_until(
+                || mock_a.hit_count("POST", "/Sessions/Playing/Stopped") >= 1,
+                "the Stopped report to reach its server",
+            );
+            settle();
+            assert_eq!(logouts(&mock_a), 0, "no Logout while the Stopped is held");
+
+            stopped.open();
+            wait_until(|| logouts(&mock_a) >= 1, "the Logout after the Stopped");
+            let stopped_at = mock_a.first_request_containing("POST /Sessions/Playing/Stopped");
+            let logout_at = mock_a.first_request_containing("POST /Sessions/Logout");
+            assert!(
+                stopped_at < logout_at,
+                "Stopped at {stopped_at:?}, Logout at {logout_at:?}"
+            );
+        }
+    }
+
+    /// docs/18 §2.1: a Stopped still pending after the settle budget no longer holds the Logout.
+    #[test]
+    fn logout_goes_out_once_the_settle_budget_expires_with_the_stopped_still_held() {
+        let (_dir, core, mock_a, _mock_b) = two_accounts_on_mocks();
+        let (item_json, playback_info_json) = playback_fixture(
+            "Test Movie",
+            "ms-1",
+            Some("mkv"),
+            true,
+            None,
+            None,
+            "play-session-logout-budget",
+        );
+        mock_a.route("GET", "/Items", 200, item_json);
+        mock_a.route_script("POST", "/PlaybackInfo", vec![playback_info_json], vec![]);
+        let stopped = mock_a.gate("POST", "/Sessions/Playing/Stopped", 0);
+        core.open_mirror().expect("account A's mirror opens");
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        core.report_position(plan.play_session_id, 30_000_000);
+
+        let started = Instant::now();
+        remove_active_account(&core);
+        wait_until_for(
+            FINAL_REPORT_SETTLE_BUDGET + Duration::from_secs(3),
+            || logouts(&mock_a) >= 1,
+            "the Logout after the settle budget",
+        );
+        assert!(
+            started.elapsed() >= FINAL_REPORT_SETTLE_BUDGET,
+            "Logout went out after {:?}, before the budget",
+            started.elapsed()
+        );
+        settle();
+        assert_eq!(logouts(&mock_a), 1);
+        stopped.open();
+    }
+
+    /// docs/18 §2.1: a Stopped that lands inside the budget releases the Logout right away.
+    #[test]
+    fn logout_follows_a_stopped_that_lands_inside_the_settle_budget() {
+        let (_dir, core, mock_a, _mock_b) = two_accounts_on_mocks();
+        let (item_json, playback_info_json) = playback_fixture(
+            "Test Movie",
+            "ms-1",
+            Some("mkv"),
+            true,
+            None,
+            None,
+            "play-session-logout-early",
+        );
+        mock_a.route("GET", "/Items", 200, item_json);
+        mock_a.route_script("POST", "/PlaybackInfo", vec![playback_info_json], vec![]);
+        let stopped = mock_a.gate("POST", "/Sessions/Playing/Stopped", 0);
+        core.open_mirror().expect("account A's mirror opens");
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        core.report_position(plan.play_session_id, 30_000_000);
+
+        let started = Instant::now();
+        remove_active_account(&core);
+        wait_until(
+            || mock_a.hit_count("POST", "/Sessions/Playing/Stopped") >= 1,
+            "the Stopped report to reach its server",
+        );
+        stopped.open();
+        wait_until(|| logouts(&mock_a) >= 1, "the Logout after the Stopped");
+        assert!(
+            started.elapsed() < FINAL_REPORT_SETTLE_BUDGET,
+            "Logout waited the full budget: {:?}",
+            started.elapsed()
+        );
+        settle();
+        assert_eq!(logouts(&mock_a), 1);
+    }
+
+    /// docs/18 §2.1: the server's Logout is best effort; a slow or failing one never holds up or fails the removal.
+    #[test]
+    fn a_held_logout_never_delays_removal() {
+        {
+            let (_dir, core, mock_a, _mock_b) = two_accounts_on_mocks();
+            let _held = mock_a.gate("POST", "/Sessions/Logout", 0);
+
+            let started = Instant::now();
+            core.remove_session(1).expect("removal succeeds");
+            let elapsed = started.elapsed();
+
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "returned after {elapsed:?} with the Logout held"
+            );
+            assert!(
+                core.list_accounts()
+                    .iter()
+                    .all(|a| a.user_id != ACCOUNT_A_ID),
+                "the account is gone"
+            );
+            wait_until(
+                || logouts(&mock_a) >= 1,
+                "the held Logout to have been attempted",
+            );
+        }
+    }
+
+    #[test]
+    fn a_failing_logout_does_not_fail_the_removal() {
+        let (_dir, core, mock_a, mock_b) = two_accounts_on_mocks();
+        mock_a.route("POST", "/Sessions/Logout", 500, serde_json::json!({}));
+        mock_b.route("POST", "/Sessions/Logout", 500, serde_json::json!({}));
+
+        assert!(!core
+            .remove_session(0)
+            .expect("a 500 Logout still removes the parked account"));
+        wait_until(
+            || logouts(&mock_b) >= 1,
+            "the parked account's failing Logout",
+        );
+        assert!(core
+            .remove_session(0)
+            .expect("a 500 Logout still removes the active account"));
+
+        wait_until(
+            || logouts(&mock_a) >= 1,
+            "the active account's failing Logout",
+        );
+        assert!(core.list_accounts().is_empty());
+    }
+
+    #[test]
+    fn switch_session_sends_no_logout() {
+        let (_dir, core, mock_a, mock_b) = two_accounts_on_mocks();
+
+        core.switch_session(0).expect("account B exists");
+        core.switch_session(1).expect("account A exists");
+
+        settle();
+        assert_eq!(logouts(&mock_a), 0);
+        assert_eq!(logouts(&mock_b), 0);
+    }
+
+    fn route_authentication(mock: &RouteMockServer, user_id: &str, new_token: &str) {
+        mock.route(
+            "POST",
+            "/Users/AuthenticateByName",
+            200,
+            serde_json::json!({
+                "User": {"Id": user_id, "Name": "jellybeam-user"},
+                "AccessToken": new_token,
+            }),
+        );
+    }
+
+    /// docs/18 §2.1: reauthorizing a parked account refreshes its token in place; the account being browsed stays.
+    #[test]
+    fn reauthorizing_a_parked_account_keeps_the_browsed_account_active() {
+        let (_dir, core, mock_a, mock_b) = two_accounts_on_mocks();
+        route_authentication(&mock_b, ACCOUNT_B_ID, "new-b");
+        let epoch_before = core.account_epoch();
+
+        let reauthorized = core
+            .reauthorize_session(0, "user".to_string(), "pass".to_string())
+            .expect("the parked account reauthorizes");
+
+        assert_eq!(reauthorized.user_id, ACCOUNT_B_ID);
+        assert_eq!(
+            core.active_account_index(),
+            Some(1),
+            "the browsed account stays active"
+        );
+        assert_eq!(core.account_epoch(), epoch_before, "no account change");
+        let saved = session::load_list(core.data_dir());
+        assert_eq!(saved.sessions[0].token, "new-b", "B's token is replaced");
+        assert_eq!(saved.sessions[1].token, "tok-a", "A's token is untouched");
+        let live_user = core
+            .require_client()
+            .ok()
+            .and_then(|c| c.user_id().map(str::to_string));
+        assert_eq!(
+            live_user.as_deref(),
+            Some(ACCOUNT_A_ID),
+            "A's client stays installed"
+        );
+        assert_eq!(mock_a.hit_count("POST", "/Users/AuthenticateByName"), 0);
+    }
+
+    #[test]
+    fn reauthorizing_the_active_account_keeps_it_active_with_the_new_token() {
+        let (_dir, core, mock_a, _mock_b) = two_accounts_on_mocks();
+        route_authentication(&mock_a, ACCOUNT_A_ID, "new-a");
+
+        core.reauthorize_session(1, "user".to_string(), "pass".to_string())
+            .expect("the active account reauthorizes");
+
+        assert_eq!(core.active_account_index(), Some(1));
+        let saved = session::load_list(core.data_dir());
+        assert_eq!(saved.sessions[1].token, "new-a");
+        assert_eq!(saved.sessions[0].token, "tok-b");
+    }
+
+    const QUICK_CONNECT_USER_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+    /// Registers the three Quick Connect routes under `prefix` (a reverse-proxy path prefix, or "").
+    fn route_quick_connect(mock: &RouteMockServer, prefix: &str) {
+        mock.route(
+            "POST",
+            &format!("{prefix}/QuickConnect/Initiate"),
+            200,
+            serde_json::json!({"Code": "123456", "Secret": "s3cr3t", "Authenticated": false}),
+        );
+        mock.route(
+            "GET",
+            &format!("{prefix}/QuickConnect/Connect"),
+            200,
+            serde_json::json!({"Code": "123456", "Secret": "s3cr3t", "Authenticated": true}),
+        );
+        mock.route(
+            "POST",
+            &format!("{prefix}/Users/AuthenticateWithQuickConnect"),
+            200,
+            serde_json::json!({
+                "User": {"Id": QUICK_CONNECT_USER_ID, "Name": "Sample User"},
+                "AccessToken": "tok",
+            }),
+        );
+    }
+
+    /// docs/13 "sign-in" (Quick Connect): every step sends the typed address to the same normalized
+    /// base, so a scheme-less, slashed, upper-case or proxied address works for the whole handshake.
+    fn assert_quick_connect_reaches_normalized_base(
+        address: impl Fn(&RouteMockServer) -> String,
+        prefix: &str,
+    ) {
+        let (_dir, core) = core_in_tempdir();
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        route_quick_connect(&mock, prefix);
+        let address = address(&mock);
+
+        let session = core.initiate_quick_connect(address.clone());
+        let polled = core.poll_quick_connect(address.clone(), "s3cr3t".to_string());
+        let completed = core.complete_quick_connect(address.clone(), "s3cr3t".to_string());
+
+        let log = mock.log_snapshot();
+        let reached = |entry: String| log.contains(&entry);
+        assert!(
+            reached(format!("POST {prefix}/QuickConnect/Initiate")),
+            "initiate must reach {prefix}/QuickConnect/Initiate for {address:?}; got {log:?}"
+        );
+        assert!(
+            reached(format!("GET {prefix}/QuickConnect/Connect?secret=s3cr3t")),
+            "poll must reach {prefix}/QuickConnect/Connect for {address:?}; got {log:?}"
+        );
+        assert!(
+            reached(format!("POST {prefix}/Users/AuthenticateWithQuickConnect")),
+            "complete must reach {prefix}/Users/AuthenticateWithQuickConnect for {address:?}; got {log:?}"
+        );
+        assert_eq!(session.expect("initiate").secret, "s3cr3t");
+        assert!(
+            polled.expect("poll must succeed for the same address"),
+            "the secret is authenticated"
+        );
+        assert_eq!(completed.expect("complete").user_id, QUICK_CONNECT_USER_ID);
+    }
+
+    #[test]
+    fn quick_connect_reaches_the_server_for_a_bare_host_and_port() {
+        assert_quick_connect_reaches_normalized_base(
+            |mock| mock.base_url.trim_start_matches("http://").to_string(),
+            "",
+        );
+    }
+
+    #[test]
+    fn quick_connect_reaches_the_server_for_an_address_with_a_trailing_slash() {
+        assert_quick_connect_reaches_normalized_base(|mock| format!("{}/", mock.base_url), "");
+    }
+
+    #[test]
+    fn quick_connect_reaches_the_server_for_an_uppercase_scheme() {
+        assert_quick_connect_reaches_normalized_base(
+            |mock| format!("HTTP://{}", mock.base_url.trim_start_matches("http://")),
+            "",
+        );
+    }
+
+    #[test]
+    fn quick_connect_reaches_the_server_for_an_address_with_a_path_prefix() {
+        assert_quick_connect_reaches_normalized_base(|mock| format!("{}/jf", mock.base_url), "/jf");
+    }
+
+    /// docs/13 "sign-in" (Quick Connect): Initiate answered 401 means the server has the feature off.
+    #[test]
+    fn initiating_quick_connect_on_a_server_that_disabled_it_reports_disabled() {
+        let (_dir, core) = core_in_tempdir();
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        mock.route(
+            "POST",
+            "/QuickConnect/Initiate",
+            401,
+            serde_json::json!("Quick connect is not active on this server."),
+        );
+
+        let err = core
+            .initiate_quick_connect(mock.base_url.clone())
+            .expect_err("a 401 from Initiate is not a session");
+
+        assert!(
+            matches!(err, CoreError::QuickConnectDisabled { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// docs/13 "sign-in" (Quick Connect): reauthorizing a saved account whose stored address has a
+    /// trailing slash still lands on the normalized base.
+    #[test]
+    fn quick_connect_reauthorization_reaches_the_saved_accounts_normalized_base() {
+        let (dir, core) = core_in_tempdir();
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        route_quick_connect(&mock, "/jf");
+        session::add_or_update(
+            dir.path(),
+            session::SessionFile {
+                server_url: format!("{}/jf/", mock.base_url),
+                user_id: QUICK_CONNECT_USER_ID.to_string(),
+                user_name: "Sample User".to_string(),
+                token: "stale".to_string(),
+                device_id: "dev".to_string(),
+                mirror_dir: "mirror".to_string(),
+                server_version: None,
+                server_name: None,
+            },
+        )
+        .expect("seed a saved account");
+
+        let account = core
+            .complete_quick_connect_reauthorization(0, "s3cr3t".to_string())
+            .expect("reauthorization against the saved address");
+
+        assert_eq!(account.user_id, QUICK_CONNECT_USER_ID);
+        let log = mock.log_snapshot();
+        assert!(
+            log.contains(&"POST /jf/Users/AuthenticateWithQuickConnect".to_string()),
+            "reauthorization must reach /jf/Users/AuthenticateWithQuickConnect; got {log:?}"
+        );
+    }
+
     /// The mock has no websocket support, so the periodic
     /// `SERVER_VERSION_REFRESH_INTERVAL` tick (200ms under cfg(test)) is what
     /// notices a server-version change after sign-in already settled on the
@@ -11717,7 +13714,7 @@ mod tests {
         );
 
         // No sign-in/restore/switch happens after this -- only the
-        // reconnect watch's own tick can notice the route change.
+        // poll's own tick can notice the route change.
         mock.route(
             "GET",
             "/System/Info/Public",
@@ -11915,25 +13912,1907 @@ mod tests {
         assert_eq!(details.has_update_available, None);
     }
 
+    /// Installs a hand-built bus whose connection the returned sender drives, since the mock has
+    /// no websocket: an account (on an unreachable server unless one is installed) opens its
+    /// mirror, and the bundle keeps that mirror while the bus it opened with is torn down.
+    fn install_test_bus(
+        core: &JellybeamCore,
+        bundle_tx: tokio::sync::broadcast::Sender<jellyfin_core::BusEvent>,
+        forwarder: Option<tokio::task::JoinHandle<()>>,
+    ) -> tokio::sync::watch::Sender<jellyfin_core::BusConnection> {
+        if core.installed_identity().is_none() {
+            install_without_refresh(core, "http://server-a.test");
+        }
+        if core.require_mirror().is_err() {
+            core.open_mirror().expect("opens local SQLite only");
+        }
+        let (connection_tx, connection) =
+            tokio::sync::watch::channel(jellyfin_core::BusConnection::Disconnected);
+        let opened = take_bundle(core).expect("the mirror just opened");
+        let old_bus = BusBundle {
+            mirror: opened.mirror.clone(),
+            listener_task: None,
+            tx: opened.tx,
+            connection: opened.connection,
+            handle: opened.handle,
+            forwarder: opened.forwarder,
+        };
+        core.stop_event_bus(Some(old_bus));
+        let bundle = BusBundle {
+            mirror: opened.mirror,
+            listener_task: opened.listener_task,
+            tx: bundle_tx,
+            connection,
+            handle: None,
+            forwarder,
+        };
+        let epoch = core.account_epoch();
+        assert!(JellybeamCore::commit_bundle_locked(&mut core.lock_state(), epoch, bundle).is_ok());
+        connection_tx
+    }
+
+    /// Takes the installed account's bundle, as a teardown would, for the caller to stop.
+    fn take_bundle(core: &JellybeamCore) -> Option<BusBundle> {
+        let mut state = core.lock_state();
+        state.account.installed.as_mut()?.bundle.take()
+    }
+
+    /// The installed account's open mirror.
+    fn installed_mirror(core: &JellybeamCore) -> media_cache::Mirror {
+        let state = core.lock_state();
+        let bundle = state.account.bundle().expect("a mirror is open");
+        bundle.mirror.clone()
+    }
+
+    /// A clone of the installed bundle's connection receiver: it keeps the bundle's seen version,
+    /// so a value sent before the clone still reads as changed.
+    fn installed_bus_connection(
+        core: &JellybeamCore,
+    ) -> tokio::sync::watch::Receiver<jellyfin_core::BusConnection> {
+        core.lock_state()
+            .account
+            .bundle()
+            .expect("a test bus is installed")
+            .connection
+            .clone()
+    }
+
+    /// One mirror on an unreachable server, cloned into every hand-built bundle of a pure test.
+    fn test_mirror(
+        runtime: &tokio::runtime::Runtime,
+        dir: &std::path::Path,
+    ) -> media_cache::Mirror {
+        let (_tx, bus) = tokio::sync::broadcast::channel(1);
+        runtime
+            .block_on(media_cache::Mirror::open(
+                dir.join("mirror"),
+                test_bus_client(),
+                bus,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(jellyfin_core::pending_local_item_ids),
+            ))
+            .expect("opens local SQLite only")
+    }
+
+    /// A client whose token the test buses reject, owned by [`BUS_USER`].
+    fn test_bus_client() -> jellyfin_api::JellyfinClient {
+        jellyfin_api::JellyfinClient::from_token(
+            "http://server-a.test",
+            JellybeamCore::identity_with("dev".to_string()),
+            "tok",
+        )
+        .with_user_id(BUS_USER)
+    }
+
+    /// A forwarder over an installed hand-driven bus: `connection` drives its watch.
+    struct TestBus {
+        connection: tokio::sync::watch::Sender<jellyfin_core::BusConnection>,
+        real_tx: tokio::sync::broadcast::Sender<jellyfin_core::BusEvent>,
+        bundle_rx: tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>,
+        /// The forwarder, unless handed to the bundle (then taking the bundle stops it).
+        forwarder: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    fn spawn_test_bus(core: &JellybeamCore, client: jellyfin_api::JellyfinClient) -> TestBus {
+        let (real_tx, real_rx) = tokio::sync::broadcast::channel(16);
+        let (bundle_tx, bundle_rx) = tokio::sync::broadcast::channel(16);
+        let connection = install_test_bus(core, bundle_tx.clone(), None);
+        let epoch = core.account_epoch();
+        let forwarder = core.spawn_bus_forwarder(
+            real_rx,
+            bundle_tx,
+            installed_bus_connection(core),
+            client,
+            epoch,
+        );
+        TestBus {
+            connection,
+            real_tx,
+            bundle_rx,
+            forwarder: Some(forwarder),
+        }
+    }
+
+    impl TestBus {
+        /// Two relayed markers: the forwarder's poll after the first sees every earlier
+        /// connection change first (biased select), so both arriving means it handled them.
+        fn caught_up(&mut self, core: &JellybeamCore) {
+            for _ in 0..2 {
+                self.real_tx
+                    .send(jellyfin_core::BusEvent::NeedsReconcile)
+                    .expect("send");
+                core.runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(2), self.bundle_rx.recv())
+                        .await
+                        .expect("the forwarder relays the marker")
+                        .expect("bundle open")
+                });
+            }
+        }
+
+        fn hand_forwarder_to_bundle(&mut self, core: &JellybeamCore) {
+            let mut state = core.lock_state();
+            let installed = state.account.installed.as_mut();
+            installed
+                .and_then(|i| i.bundle.as_mut())
+                .expect("a test bus is installed")
+                .forwarder = self.forwarder.take();
+        }
+
+        /// Closes the real bus and joins a forwarder still held here.
+        fn finish(self, core: &JellybeamCore) {
+            drop(self.real_tx);
+            if let Some(forwarder) = self.forwarder {
+                core.runtime
+                    .block_on(forwarder)
+                    .expect("the forwarder exits once its real bus closes");
+            }
+        }
+    }
+
+    /// Records every reauthorization ask, in order.
+    #[derive(Default)]
+    struct AskRecorder {
+        asks: Mutex<Vec<AccountIdentity>>,
+    }
+
+    impl AskRecorder {
+        fn asks(&self) -> Vec<AccountIdentity> {
+            self.asks.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    impl ChangeListener for AskRecorder {
+        fn on_change(&self, _event: ChangeEvent) -> Result<(), crate::error::CallbackError> {
+            Ok(())
+        }
+
+        fn on_unauthorized(
+            &self,
+            account: AccountIdentity,
+        ) -> Result<(), crate::error::CallbackError> {
+            self.asks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(account);
+            Ok(())
+        }
+    }
+
+    /// An ask that signals `entered`, then holds until released and takes `done_at`'s next value.
+    struct HeldAskListener {
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        done_at: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ChangeListener for HeldAskListener {
+        fn on_change(&self, _event: ChangeEvent) -> Result<(), crate::error::CallbackError> {
+            Ok(())
+        }
+
+        fn on_unauthorized(
+            &self,
+            _account: AccountIdentity,
+        ) -> Result<(), crate::error::CallbackError> {
+            let _ = self.entered.send(());
+            let _ = self
+                .release
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .recv_timeout(Duration::from_secs(5));
+            self.done_at
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// docs/13 Server compatibility: each Connected of the installed bus refreshes the server
+    /// version once with that bus's own client; a down, rejected or taken bus refreshes nothing.
     #[test]
-    fn bus_connected_and_disconnected_events_flip_live_events_connected() {
+    fn a_connected_bus_refreshes_the_server_version_once_with_its_own_client() {
+        use jellyfin_core::{BusConnection, BusEvent};
+        // The test bus's account has an unresolvable server: every mock hit is the forwarder's.
+        let (_dir, core) = core_in_tempdir();
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        mock.route(
+            "GET",
+            "/System/Info/Public",
+            200,
+            serde_json::json!({"Version": "12.0.0"}),
+        );
+        let bus_client = jellyfin_api::JellyfinClient::from_token(
+            &mock.base_url,
+            JellybeamCore::identity_with("dev".to_string()),
+            "tok",
+        )
+        .with_user_id("00000000-0000-4000-8000-000000000001");
+        let hits = || mock.hit_count("GET", "/System/Info/Public");
+
+        // A Connected behind a flood that laps the forwarder's ring still refreshes once.
+        let (flood_tx, flood_rx) = tokio::sync::broadcast::channel(256);
+        for _ in 0..300 {
+            flood_tx
+                .send(BusEvent::Server(
+                    jellyfin_api::ServerEvent::UserDataChanged {
+                        item_userdata: vec![],
+                    },
+                ))
+                .expect("send");
+        }
+        let (flood_bundle_tx, _flood_bundle_rx) = tokio::sync::broadcast::channel(16);
+        let flood_connection = install_test_bus(&core, flood_bundle_tx.clone(), None);
+        flood_connection.send_replace(BusConnection::Connected);
+        let flooded = core.spawn_bus_forwarder(
+            flood_rx,
+            flood_bundle_tx,
+            installed_bus_connection(&core),
+            bus_client.clone(),
+            core.account_epoch(),
+        );
+        drop(flood_tx);
+        core.runtime
+            .block_on(flooded)
+            .expect("the forwarder drains the flood and exits");
+        assert_eq!(hits(), 1, "flood then Connected: one refresh");
+
+        let mut bus = spawn_test_bus(&core, bus_client);
+        let rows = [
+            (BusConnection::Disconnected, 1, "socket down: no refresh"),
+            (BusConnection::Connected, 2, "socket up: one refresh"),
+            (BusConnection::Disconnected, 2, "socket closed: no refresh"),
+            (BusConnection::Connected, 3, "socket back up: one refresh"),
+        ];
+        for (state, expected, row) in rows {
+            bus.connection.send_replace(state);
+            bus.caught_up(&core);
+            assert_eq!(hits(), expected, "{row}");
+        }
+
+        // Still watching here (no rejection yet), so this row proves the installed check.
+        let taken = take_bundle(&core);
+        bus.connection.send_replace(BusConnection::Connected);
+        bus.caught_up(&core);
+        assert_eq!(hits(), 3, "a taken bus's Connected refreshes nothing");
+
+        core.stop_event_bus(taken);
+        bus.finish(&core);
+    }
+
+    /// The account a synthetic rejected token was issued to.
+    fn rejected_owner(user_id: &str) -> jellyfin_api::TokenOwner {
+        jellyfin_api::TokenOwner {
+            server_url: "http://server-a.test".to_string(),
+            user_id: user_id.to_string(),
+        }
+    }
+
+    fn rejected(user_id: &str) -> jellyfin_core::BusConnection {
+        jellyfin_core::BusConnection::Unauthorized {
+            owner: Some(rejected_owner(user_id)),
+        }
+    }
+
+    const BUS_USER: &str = "00000000-0000-4000-8000-000000000001";
+
+    /// docs/18 §2.1: a rejection of the installed bus asks the listener once, naming its account.
+    #[test]
+    fn a_rejected_live_events_socket_asks_to_reauthorize_its_account_once() {
+        let (_dir, core) = core_in_tempdir();
+        let recorder = Arc::new(AskRecorder::default());
+        core.set_change_listener(recorder.clone());
+        let mut bus = spawn_test_bus(&core, test_bus_client());
+
+        bus.connection.send_replace(rejected(BUS_USER));
+        bus.caught_up(&core);
+        assert_eq!(
+            recorder.asks(),
+            vec![AccountIdentity::from(rejected_owner(BUS_USER))]
+        );
+        bus.finish(&core);
+    }
+
+    /// docs/18 §2.1: a rejection is terminal for its bus, so a repeat asks nobody.
+    #[test]
+    fn a_second_unauthorized_on_one_bus_asks_nobody_again() {
+        let (_dir, core) = core_in_tempdir();
+        let recorder = Arc::new(AskRecorder::default());
+        core.set_change_listener(recorder.clone());
+        let mut bus = spawn_test_bus(&core, test_bus_client());
+
+        for _ in 0..2 {
+            bus.connection.send_replace(rejected(BUS_USER));
+            bus.caught_up(&core);
+        }
+        assert_eq!(recorder.asks().len(), 1, "one ask per bus");
+        bus.finish(&core);
+    }
+
+    /// docs/18 §2.1: a rejection that names no account has nobody to reauthorize.
+    #[test]
+    fn a_live_events_rejection_naming_no_account_asks_nobody() {
+        let (_dir, core) = core_in_tempdir();
+        let recorder = Arc::new(AskRecorder::default());
+        core.set_change_listener(recorder.clone());
+        let mut bus = spawn_test_bus(&core, test_bus_client());
+
+        bus.connection
+            .send_replace(jellyfin_core::BusConnection::Unauthorized { owner: None });
+        bus.caught_up(&core);
+        assert!(recorder.asks().is_empty());
+        bus.finish(&core);
+    }
+
+    /// docs/18 §2.1: a switch takes the old bus, so its late rejection asks nobody; the forwarder
+    /// is kept out of the bundle to model the window before the switch stops it.
+    #[test]
+    fn a_taken_bus_rejected_after_the_switch_asks_nobody() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-a.test", "u1");
+        seed_session(dir.path(), "http://server-b.test", "u2");
+        assert!(core.restore_session().is_some());
+        let recorder = Arc::new(AskRecorder::default());
+        core.set_change_listener(recorder.clone());
+        let mut bus = spawn_test_bus(&core, test_bus_client());
+
+        let other = 1 - core.active_account_index().expect("an account is active");
+        core.switch_session(other)
+            .expect("switch to the other account");
+        bus.connection.send_replace(rejected(BUS_USER));
+        bus.caught_up(&core);
+        assert!(
+            recorder.asks().is_empty(),
+            "the taken bus asked {:?}",
+            recorder.asks()
+        );
+        bus.finish(&core);
+    }
+
+    /// docs/18 §2.1: an ask already running when a reauthorization takes its bus finishes before
+    /// that reauthorization returns, so no ask ever follows it.
+    #[test]
+    fn a_rejection_racing_a_reauthorization_lands_before_it_returns() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (dir, core) = core_in_tempdir();
+        let target = seed_session(dir.path(), "http://server-a.test", "u1");
+        assert!(core.restore_session().is_some());
+        let order = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        core.set_change_listener(Arc::new(HeldAskListener {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+            done_at: order.clone(),
+        }));
+        let mut bus = spawn_test_bus(&core, test_bus_client());
+        bus.hand_forwarder_to_bundle(&core);
+
+        bus.connection.send_replace(rejected(BUS_USER));
+        entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the forwarder asks");
+        let reauthorizing = {
+            let core = core.clone();
+            let order = order.clone();
+            std::thread::spawn(move || {
+                let client = jellyfin_api::JellyfinClient::from_token(
+                    &target.server_url,
+                    core.client_identity("http://example.test"),
+                    "new-token",
+                )
+                .with_user_id("u1");
+                core.install_reauthenticated_session(
+                    0,
+                    target,
+                    client,
+                    authentication_result("new-token", "u1-name"),
+                )
+                .expect("reauthorizes the installed account");
+                order.fetch_add(1, Ordering::SeqCst)
+            })
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !reauthorizing.is_finished(),
+            "the reauthorization waits for the running ask"
+        );
+        release.send(()).expect("release the ask");
+        let returned_at = reauthorizing.join().expect("reauthorization thread");
+        assert_eq!(
+            order.load(Ordering::SeqCst),
+            2,
+            "one ask and one return recorded"
+        );
+        assert_eq!(
+            returned_at, 1,
+            "the ask finished before the reauthorization returned"
+        );
+        bus.finish(&core);
+    }
+
+    /// docs/18 §2.1: a socket rejected before `open_mirror` installs its bundle still asks once,
+    /// since the forwarder starts only once the bundle is installed.
+    #[test]
+    fn a_bus_rejected_while_its_mirror_opens_still_asks() {
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        mock.route("GET", "/socket", 401, serde_json::json!({}));
+        let recorder = Arc::new(AskRecorder::default());
+        core.set_change_listener(recorder.clone());
+
+        core.open_mirror()
+            .expect("open_mirror should succeed against a real loopback server");
+        wait_until(
+            || !recorder.asks().is_empty(),
+            "the rejected socket to ask for reauthorization",
+        );
+        assert_eq!(
+            recorder.asks(),
+            vec![AccountIdentity {
+                server_url: mock.base_url.clone(),
+                user_id: "u1".to_string(),
+            }]
+        );
+    }
+
+    /// docs/18 §2.1, R1-R4 over every sequence of up to four bus events: an ask names the asking
+    /// bus's account, comes only from the installed bus with a listener bound, and at most once
+    /// per bus; exactly the first named rejection of the installed bus asks.
+    #[test]
+    fn bus_sequences_up_to_four_keep_the_reauthorization_invariants() {
+        use jellyfin_core::BusConnection;
+        #[derive(Clone, Copy, Debug)]
+        enum Ev {
+            Open,
+            UpCur,
+            DownCur,
+            RejectedCur,
+            UpStale,
+            Stop,
+            RejectedStale,
+            RejectedUnnamedCur,
+        }
+        const ALPHABET: [Ev; 8] = [
+            Ev::Open,
+            Ev::UpCur,
+            Ev::DownCur,
+            Ev::RejectedCur,
+            Ev::UpStale,
+            Ev::Stop,
+            Ev::RejectedStale,
+            Ev::RejectedUnnamedCur,
+        ];
+        struct Bus {
+            id: String,
+            tx: tokio::sync::watch::Sender<BusConnection>,
+            rx: tokio::sync::watch::Receiver<BusConnection>,
+            watching: bool,
+        }
+        // The forwarder's watch arm: the latest value, and a rejection ends its watching.
+        fn observe(state: &State, bus: &mut Bus) -> Option<AccountIdentity> {
+            if !bus.watching || !bus.rx.has_changed().unwrap_or(false) {
+                return None;
+            }
+            let now = bus.rx.borrow_and_update().clone();
+            if !matches!(now, BusConnection::Unauthorized { .. }) {
+                return None;
+            }
+            bus.watching = false;
+            JellybeamCore::bus_reauthorization_locked(state, &bus.rx, &now)
+                .map(|(_, account)| account)
+        }
+        fn install(state: &mut State, mirror: &media_cache::Mirror, id: usize) -> Bus {
+            let (tx, rx) = tokio::sync::watch::channel(BusConnection::Disconnected);
+            let installed = state.account.installed.as_mut().expect("an account");
+            installed.bundle = Some(BusBundle {
+                mirror: mirror.clone(),
+                listener_task: None,
+                tx: tokio::sync::broadcast::channel(1).0,
+                connection: rx.clone(),
+                handle: None,
+                forwarder: None,
+            });
+            Bus {
+                id: format!("00000000-0000-4000-8000-{id:012}"),
+                tx,
+                rx,
+                watching: true,
+            }
+        }
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mirror = test_mirror(&runtime, dir.path());
+        let saved = slot_saved("http://server-a.test", "u1", "10.11.10", "Server A");
+        let mut failures = Vec::new();
+        let mut sequences = 0;
+        for listener_bound in [true, false] {
+            for len in 1..=4u32 {
+                for code in 0..8usize.pow(len) {
+                    sequences += 1;
+                    let seq: Vec<Ev> = (0..len)
+                        .map(|i| ALPHABET[code / 8usize.pow(i) % 8])
+                        .collect();
+                    let mut state = State::default();
+                    drop(JellybeamCore::reset_account_state_locked(
+                        &mut state,
+                        Some(slot_installed(&saved)),
+                        AccountChange::Replace,
+                    ));
+                    if listener_bound {
+                        state.listener = Some(Arc::new(AskRecorder::default()));
+                    }
+                    let mut opened = 0;
+                    let mut cur: Option<Bus> = None;
+                    let mut stale: Option<Bus> = None;
+                    let mut asked: Vec<String> = Vec::new();
+                    for (step, ev) in seq.iter().enumerate() {
+                        let expect_ask = matches!(ev, Ev::RejectedCur)
+                            && listener_bound
+                            && cur.as_ref().is_some_and(|bus| bus.watching);
+                        let send = |bus: &Option<Bus>, value: BusConnection| {
+                            if let Some(bus) = bus {
+                                bus.tx.send_replace(value);
+                            }
+                        };
+                        match ev {
+                            Ev::Open | Ev::Stop => {
+                                if let Some(taken) = cur.take() {
+                                    stale = Some(taken);
+                                }
+                                let installed = state.account.installed.as_mut();
+                                installed.expect("an account").bundle = None;
+                                if matches!(ev, Ev::Open) {
+                                    opened += 1;
+                                    cur = Some(install(&mut state, &mirror, opened));
+                                }
+                            }
+                            Ev::UpCur => send(&cur, BusConnection::Connected),
+                            Ev::DownCur => send(&cur, BusConnection::Disconnected),
+                            Ev::RejectedCur => {
+                                if let Some(bus) = &cur {
+                                    bus.tx.send_replace(rejected(&bus.id));
+                                }
+                            }
+                            Ev::RejectedUnnamedCur => {
+                                send(&cur, BusConnection::Unauthorized { owner: None })
+                            }
+                            Ev::UpStale => send(&stale, BusConnection::Connected),
+                            Ev::RejectedStale => {
+                                if let Some(bus) = &stale {
+                                    bus.tx.send_replace(rejected(&bus.id));
+                                }
+                            }
+                        }
+                        let mut asked_now = false;
+                        for (bus, installed) in [(&mut cur, true), (&mut stale, false)] {
+                            let Some(bus) = bus.as_mut() else { continue };
+                            let Some(account) = observe(&state, bus) else {
+                                continue;
+                            };
+                            asked_now = true;
+                            let at = format!("{seq:?} step {step} (listener {listener_bound})");
+                            if !installed {
+                                failures.push(format!("{at}: a taken bus asked"));
+                            }
+                            if asked.contains(&bus.id) {
+                                failures.push(format!("{at}: a bus asked twice"));
+                            }
+                            if account != AccountIdentity::from(rejected_owner(&bus.id)) {
+                                failures.push(format!("{at}: the ask named another account"));
+                            }
+                            asked.push(bus.id.clone());
+                        }
+                        if asked_now != expect_ask {
+                            failures.push(format!(
+                                "{seq:?} step {step} (listener {listener_bound}): asked {asked_now}, expected {expect_ask}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(sequences, 2 * (8 + 64 + 512 + 4096));
+        assert!(
+            failures.is_empty(),
+            "{} failures, first: {:?}",
+            failures.len(),
+            failures.first()
+        );
+    }
+
+    /// docs/13 About > server info: a Server flood that laps the forwarder must not lose Connected.
+    #[test]
+    fn a_server_flood_lagging_the_bus_forwarder_still_reports_connected() {
         let (_dir, core, _mock) = core_signed_in_against_routes();
-        assert!(!core.server_info_snapshot().live_events_connected);
+        let (real_tx, real_rx) = tokio::sync::broadcast::channel(256);
+        let (bundle_tx, _bundle_rx) = tokio::sync::broadcast::channel(16);
+        // Queued before the forwarder runs, as when it is starved: the flood laps it while the
+        // watch carries Connected.
+        real_tx
+            .send(jellyfin_core::BusEvent::NeedsReconcile)
+            .expect("send");
+        for _ in 0..300 {
+            real_tx
+                .send(jellyfin_core::BusEvent::Server(
+                    jellyfin_api::ServerEvent::UserDataChanged {
+                        item_userdata: vec![],
+                    },
+                ))
+                .expect("send");
+        }
+        let connection = install_test_bus(&core, bundle_tx.clone(), None);
+        assert!(
+            !core.server_info_snapshot().live_events_connected,
+            "a bus that has not connected yet reads disconnected"
+        );
+        connection.send_replace(jellyfin_core::BusConnection::Connected);
+        let forwarder = core.spawn_bus_forwarder(
+            real_rx,
+            bundle_tx,
+            installed_bus_connection(&core),
+            core.require_client().expect("signed in"),
+            core.account_epoch(),
+        );
+        // Closing the real bus ends the forwarder only after it relayed the whole lagged flood.
+        drop(real_tx);
+        core.runtime
+            .block_on(forwarder)
+            .expect("the forwarder drains the flood and exits");
+        assert!(
+            core.server_info_snapshot().live_events_connected,
+            "the socket is up, so live events read connected"
+        );
+    }
 
-        core.bus_tx.send(jellyfin_core::BusEvent::Connected).expect(
-            "send to a live receiver -- the reconnect watch subscribes at JellybeamCore::new",
+    /// docs/13 About > server info: the flag follows only the installed bus's connection watch.
+    #[test]
+    fn live_events_connected_follows_only_the_installed_bus_connection() {
+        use jellyfin_core::BusConnection;
+        let (_dir, core, _mock) = core_signed_in_against_routes();
+        core.open_mirror()
+            .expect("open_mirror should succeed against a real loopback server");
+        assert!(
+            !core.server_info_snapshot().live_events_connected,
+            "a freshly opened bus has not connected yet"
         );
-        wait_until(
-            || core.server_info_snapshot().live_events_connected,
-            "the reconnect watch to observe Connected",
+        let (bundle_tx, _bundle_rx) = tokio::sync::broadcast::channel(16);
+        let installed = install_test_bus(&core, bundle_tx, None);
+        let rows = [
+            (
+                BusConnection::Disconnected,
+                false,
+                "before the socket connects",
+            ),
+            (BusConnection::Connected, true, "socket up"),
+            (BusConnection::Disconnected, false, "socket closed"),
+            (BusConnection::Connected, true, "socket back up"),
+            (
+                BusConnection::Unauthorized { owner: None },
+                false,
+                "socket rejected",
+            ),
+        ];
+        for (connection, expected, row) in rows {
+            installed.send_replace(connection);
+            assert_eq!(
+                core.server_info_snapshot().live_events_connected,
+                expected,
+                "{row}"
+            );
+        }
+        installed.send_replace(BusConnection::Connected);
+        assert!(core.server_info_snapshot().live_events_connected);
+
+        core.open_mirror()
+            .expect("open_mirror should succeed against a real loopback server");
+        assert!(
+            !core.server_info_snapshot().live_events_connected,
+            "re-entry takes the old bus; the new one has not connected"
+        );
+        installed.send_replace(BusConnection::Connected);
+        assert!(
+            !core.server_info_snapshot().live_events_connected,
+            "a taken bus's Connected never reaches the snapshot"
         );
 
-        core.bus_tx
-            .send(jellyfin_core::BusEvent::Disconnected)
-            .expect("send to a live receiver");
-        wait_until(
-            || !core.server_info_snapshot().live_events_connected,
-            "the reconnect watch to observe Disconnected",
+        let stopped = take_bundle(&core);
+        core.stop_event_bus(stopped);
+        assert!(
+            !core.server_info_snapshot().live_events_connected,
+            "no installed bus reads disconnected while signed in"
         );
+    }
+
+    // --- docs/07 Next Up follows the latest settings; docs/18 §2.1 the account list. ---
+
+    /// A Next Up reply naming one episode, so a test can tell which request's answer the mirror holds.
+    fn next_up_reply(episode_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "Items": [{"Id": episode_id, "Name": "Sample Episode", "Type": "Episode"}],
+            "TotalRecordCount": 1
+        })
+    }
+
+    /// The query fragment a `/Shows/NextUp` request carries for a cutoff of `days` days.
+    fn next_up_cutoff_query(days: i64) -> String {
+        // The code under test reads the clock itself, so wait out a UTC date rollover that
+        // could fall between the two reads.
+        let into_day = chrono::Utc::now().timestamp().rem_euclid(86_400);
+        if into_day > 86_400 - 30 {
+            std::thread::sleep(Duration::from_secs(
+                u64::try_from(86_400 - into_day).expect("positive") + 1,
+            ));
+        }
+        let day = chrono::Utc::now() - chrono::Duration::days(days);
+        format!("nextUpDateCutoff={}", day.format("%Y-%m-%d"))
+    }
+
+    fn mirror_next_up_ids(core: &JellybeamCore) -> Vec<String> {
+        core.require_mirror()
+            .map(|mirror| mirror.next_up(10).into_iter().map(|row| row.id).collect())
+            .unwrap_or_default()
+    }
+
+    fn next_up_requests_containing(mock: &RouteMockServer, needle: &str) -> usize {
+        mock.log_snapshot()
+            .iter()
+            .filter(|entry| entry.starts_with("GET /Shows/NextUp") && entry.contains(needle))
+            .count()
+    }
+
+    /// Polls up to `within` for a `/Shows/NextUp` request whose query contains `needle`.
+    fn next_up_request_arrives(mock: &RouteMockServer, needle: &str, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if next_up_requests_containing(mock, needle) > 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// Polls until `count` has not changed for `quiet`.
+    fn wait_until_quiet(count: impl Fn() -> usize, quiet: Duration) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut last = count();
+        let mut since = Instant::now();
+        while since.elapsed() < quiet {
+            assert!(Instant::now() < deadline, "the request count never settled");
+            std::thread::sleep(Duration::from_millis(5));
+            let now = count();
+            if now != last {
+                last = now;
+                since = Instant::now();
+            }
+        }
+    }
+
+    /// A signed-in core with an open tvshows mirror whose own Next Up fetches have settled.
+    fn core_with_settled_next_up_mirror() -> (tempfile::TempDir, Arc<JellybeamCore>, RouteMockServer)
+    {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+        let (dir, core, mock) = core_signed_in_against_routes();
+        mock.route(
+            "GET",
+            "/UserViews",
+            200,
+            user_views_json(VIEW_ID, "tvshows"),
+        );
+        core.open_mirror().expect("open_mirror");
+        wait_until(
+            || mock.hit_count("GET", "/Shows/NextUp") >= 1,
+            "the open's own Next Up fetch",
+        );
+        wait_until_quiet(
+            || mock.hit_count("GET", "/Shows/NextUp"),
+            Duration::from_secs(2),
+        );
+        (dir, core, mock)
+    }
+
+    /// docs/07: Next Up shows the latest saved settings even when an earlier save's reply lands last.
+    #[test]
+    fn next_up_follows_the_latest_settings_when_the_older_reply_lands_last() {
+        const EPISODE_A: &str = "00000000-0000-0000-0000-0000000000a1";
+        const EPISODE_B: &str = "00000000-0000-0000-0000-0000000000b1";
+        let (_dir, core, mock) = core_with_settled_next_up_mirror();
+        let (query_a, query_b) = (next_up_cutoff_query(7), next_up_cutoff_query(30));
+        mock.route_with_query(
+            "GET",
+            "/Shows/NextUp",
+            &query_a,
+            200,
+            &next_up_reply(EPISODE_A),
+        );
+        mock.route_with_query(
+            "GET",
+            "/Shows/NextUp",
+            &query_b,
+            200,
+            &next_up_reply(EPISODE_B),
+        );
+        let held_a = mock.gate_with_query("GET", "/Shows/NextUp", &query_a, 0);
+
+        core.set_settings(Settings {
+            next_up_cutoff_days: Some(7),
+            ..Settings::default()
+        });
+        let _ = next_up_request_arrives(&mock, &query_a, Duration::from_secs(1));
+        core.set_settings(Settings {
+            next_up_cutoff_days: Some(30),
+            ..Settings::default()
+        });
+        // Whenever B's request is sent while A's reply is held, B's reply lands first.
+        if next_up_request_arrives(&mock, &query_b, Duration::from_secs(1)) {
+            wait_until_for(
+                Duration::from_secs(3),
+                || mirror_next_up_ids(&core) == [EPISODE_B],
+                "B's reply to land",
+            );
+        }
+        held_a.open();
+        wait_until_for(
+            Duration::from_secs(6),
+            || mirror_next_up_ids(&core) == [EPISODE_B],
+            "the mirror to hold B's Next Up",
+        );
+        std::thread::sleep(Duration::from_millis(500));
+
+        assert_eq!(
+            mirror_next_up_ids(&core),
+            [EPISODE_B],
+            "Next Up must follow the latest settings once both replies have landed"
+        );
+    }
+
+    /// Spinning threads, twice the CPU count, that burn only while asked to; joined on drop.
+    struct CpuBurners {
+        burn: Arc<std::sync::atomic::AtomicBool>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        threads: Vec<std::thread::JoinHandle<()>>,
+    }
+
+    impl CpuBurners {
+        fn start() -> Self {
+            use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+            let burn = Arc::new(AtomicBool::new(false));
+            let stop = Arc::new(AtomicBool::new(false));
+            let count = std::thread::available_parallelism().map_or(8, |n| n.get() * 2);
+            let threads = (0..count)
+                .map(|_| {
+                    let (burn, stop) = (burn.clone(), stop.clone());
+                    std::thread::spawn(move || {
+                        while !stop.load(Relaxed) {
+                            if burn.load(Relaxed) {
+                                std::hint::spin_loop();
+                            } else {
+                                std::thread::sleep(Duration::from_micros(20));
+                            }
+                        }
+                    })
+                })
+                .collect();
+            Self {
+                burn,
+                stop,
+                threads,
+            }
+        }
+
+        fn burn(&self, on: bool) {
+            self.burn.store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl Drop for CpuBurners {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            for thread in self.threads.drain(..) {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// docs/09: after overlapping saves the mirror's Next Up options are those of the settings that won.
+    #[test]
+    fn mirror_next_up_options_equal_the_settings_after_overlapping_saves() {
+        const ROUNDS: i64 = 200;
+        const WRITERS: i64 = 8;
+        let (_dir, core, _mock) = core_with_settled_next_up_mirror();
+        let mirror = core.require_mirror().expect("mirror is open");
+        // Busy threads, while the writers run, make one lose its slot between saving and pushing.
+        let burners = CpuBurners::start();
+        for round in 0..ROUNDS {
+            let barrier = Arc::new(std::sync::Barrier::new(WRITERS as usize));
+            burners.burn(true);
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|writer| {
+                    let core = core.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        let days = u32::try_from(1_000 + round * WRITERS + writer).expect("small");
+                        barrier.wait();
+                        core.set_settings(Settings {
+                            next_up_cutoff_days: Some(days),
+                            ..Settings::default()
+                        });
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().expect("set_settings thread");
+            }
+            burners.burn(false);
+
+            assert_eq!(
+                mirror.next_up_options(),
+                next_up_options_from(&core.get_settings()),
+                "round {round}: the mirror holds options other than the saved settings"
+            );
+        }
+    }
+
+    /// Core with B installed while the saved list still names A active, the state a lost
+    /// active-index save leaves; A is index 1, B index 0.
+    fn installed_b_while_the_list_names_a() -> TwoAccounts {
+        let accounts = core_with_two_accounts(AccountSwap::Switch);
+        accounts
+            .core
+            .switch_session(0)
+            .expect("switch to account B");
+        let mut list = session::load_list(accounts.core.data_dir());
+        list.active = 1;
+        session::save_list(accounts.core.data_dir(), &list).expect("name A active again");
+        assert_eq!(accounts.core.active_account_index(), Some(1));
+        assert_eq!(installed_user(&accounts.core).as_deref(), Some(SWAP_USER_B));
+        accounts
+    }
+
+    fn installed_user(core: &JellybeamCore) -> Option<String> {
+        core.installed_identity()
+            .map(|identity| identity.account.user_id)
+    }
+
+    fn saved_users(core: &JellybeamCore) -> Vec<String> {
+        core.list_accounts()
+            .into_iter()
+            .map(|account| account.user_id)
+            .collect()
+    }
+
+    /// docs/18 §2.1: removing a saved account other than the installed one leaves the installed one alone.
+    #[test]
+    fn removing_a_saved_account_keeps_the_installed_account_when_the_list_names_it() {
+        let accounts = installed_b_while_the_list_names_a();
+        let epoch = accounts.core.account_epoch();
+
+        let removed_installed = accounts.core.remove_session(1).expect("remove account A");
+
+        assert!(!removed_installed, "A was not the installed account");
+        assert_eq!(
+            installed_user(&accounts.core).as_deref(),
+            Some(SWAP_USER_B),
+            "removing A must keep B installed"
+        );
+        assert_eq!(accounts.core.account_epoch(), epoch);
+        assert_eq!(saved_users(&accounts.core), [SWAP_USER_B]);
+    }
+
+    /// docs/18 §2.1: removing the installed account tears it down, whatever the saved list names active.
+    #[test]
+    fn removing_the_installed_account_tears_it_down_when_the_list_names_another() {
+        let accounts = installed_b_while_the_list_names_a();
+
+        let removed_installed = accounts.core.remove_session(0).expect("remove account B");
+
+        assert!(removed_installed, "B was the installed account");
+        assert_eq!(
+            installed_user(&accounts.core).as_deref(),
+            Some(SWAP_USER_A),
+            "removing B tears B down and installs the account the list names"
+        );
+        assert_eq!(saved_users(&accounts.core), [SWAP_USER_A]);
+        wait_until(
+            || accounts.mock_b.hit_count("POST", "/Sessions/Logout") == 1,
+            "B's server to be logged out",
+        );
+    }
+
+    /// docs/18 §2.1: a switch whose active-index save fails is refused, so nothing is installed
+    /// that the saved list does not name.
+    #[cfg(unix)]
+    #[test]
+    fn switch_session_fails_and_installs_nothing_when_the_active_index_cannot_be_saved() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-b.invalid", "u2");
+        seed_session(dir.path(), "http://server-a.invalid", "u1");
+        assert_eq!(core.restore_session().expect("A restores").user_id, "u1");
+        let epoch = core.account_epoch();
+        let Some(read_only) = crate::persistence::ChmodGuard::read_only_dir(dir.path()) else {
+            return;
+        };
+
+        let result = core.switch_session(0);
+        drop(read_only);
+
+        assert!(
+            result.is_err(),
+            "switch_session reported success although the active index was not saved"
+        );
+        assert_eq!(core.account_epoch(), epoch, "nothing may be installed");
+        assert_eq!(installed_user(&core).as_deref(), Some("u1"));
+        assert_eq!(core.active_account_index(), Some(1));
+    }
+
+    /// Every file and directory name in `dir` with the bytes of each file.
+    fn directory_contents(
+        dir: &std::path::Path,
+    ) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .flatten()
+            .map(|entry| {
+                let bytes = entry
+                    .path()
+                    .is_file()
+                    .then(|| std::fs::read(entry.path()).unwrap_or_default());
+                (entry.file_name().to_string_lossy().into_owned(), bytes)
+            })
+            .collect()
+    }
+
+    type AccountReader = (&'static str, fn(&JellybeamCore));
+
+    /// Every call that reads the saved account list and must never write it.
+    fn account_list_readers() -> Vec<AccountReader> {
+        vec![
+            ("list_accounts", |core| {
+                core.list_accounts();
+            }),
+            ("active_account_index", |core| {
+                core.active_account_index();
+            }),
+            ("current_account", |core| {
+                core.current_account();
+            }),
+            ("server_display_name", |core| {
+                core.server_display_name(None);
+            }),
+            ("server_info_snapshot", |core| {
+                core.server_info_snapshot();
+            }),
+            ("reauthorization_account", |core| {
+                core.reauthorization_account(
+                    AccountIdentity {
+                        server_url: "http://reader.invalid".to_string(),
+                        user_id: "u1".to_string(),
+                    },
+                    true,
+                );
+            }),
+        ]
+    }
+
+    fn assert_readers_leave_the_directory_unchanged(dir: &std::path::Path, core: &JellybeamCore) {
+        let before = directory_contents(dir);
+        for (name, read) in account_list_readers() {
+            read(core);
+            let after = directory_contents(dir);
+            let changed: Vec<&String> = after
+                .keys()
+                .chain(before.keys())
+                .filter(|file| after.get(*file) != before.get(*file))
+                .collect();
+            assert!(
+                changed.is_empty(),
+                "{name} wrote to the data directory: {changed:?}"
+            );
+        }
+    }
+
+    const GARBAGE_LIST: &[u8] = b"{ not a session list";
+
+    fn write_legacy_session(dir: &std::path::Path) {
+        let legacy = session::SessionFile {
+            server_url: "http://reader.invalid".to_string(),
+            user_id: "u1".to_string(),
+            user_name: "u1-name".to_string(),
+            token: "tok".to_string(),
+            device_id: "dev".to_string(),
+            mirror_dir: "mirror".to_string(),
+            server_version: None,
+            server_name: None,
+        };
+        session::write_legacy(dir, &legacy);
+    }
+
+    /// docs/18 §2.1: reading the account list never quarantines or rewrites an unparseable one.
+    #[test]
+    fn readers_leave_an_unparseable_account_list_untouched() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://reader.invalid", "u1");
+        core.restore_session().expect("the seeded account restores");
+        std::fs::write(dir.path().join("sessions.json"), GARBAGE_LIST).expect("corrupt the list");
+
+        assert_readers_leave_the_directory_unchanged(dir.path(), &core);
+    }
+
+    /// docs/18 §2.1: reading never migrates a lone legacy `session.json` into `sessions.json`.
+    #[test]
+    fn readers_leave_a_legacy_only_session_untouched() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://reader.invalid", "u1");
+        core.restore_session().expect("the seeded account restores");
+        std::fs::remove_file(dir.path().join("sessions.json")).expect("remove the list");
+        write_legacy_session(dir.path());
+
+        assert_readers_leave_the_directory_unchanged(dir.path(), &core);
+        assert!(!dir.path().join("sessions.json").exists());
+    }
+
+    /// docs/18 §2.1: the first locked writer sets a corrupt list aside once, migrates the legacy
+    /// account and keeps it.
+    #[test]
+    fn the_first_writer_quarantines_and_migrates_once_and_keeps_every_account() {
+        let (dir, core) = core_in_tempdir();
+        std::fs::write(dir.path().join("sessions.json"), GARBAGE_LIST).expect("corrupt the list");
+        write_legacy_session(dir.path());
+        assert_readers_leave_the_directory_unchanged(dir.path(), &core);
+
+        core.switch_session(0)
+            .expect("the legacy account switches in");
+        core.switch_session(0).expect("and again");
+
+        let quarantined: Vec<_> = directory_contents(dir.path())
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("sessions.json.corrupt-"))
+            .collect();
+        assert_eq!(quarantined.len(), 1, "exactly one quarantine file");
+        assert_eq!(quarantined[0].1.as_deref(), Some(GARBAGE_LIST));
+        assert_eq!(saved_users(&core), ["u1"]);
+    }
+
+    /// docs/18 §2.1: an account list that cannot be read is a storage error, not an empty list.
+    #[cfg(unix)]
+    #[test]
+    fn remove_session_with_an_unreadable_list_is_a_storage_error() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-a.invalid", "u1");
+        let Some(_unreadable) =
+            crate::persistence::ChmodGuard::unreadable_file(&dir.path().join("sessions.json"))
+        else {
+            return;
+        };
+
+        let error = core.remove_session(0).expect_err("the list cannot be read");
+
+        assert!(matches!(error, CoreError::Cache { .. }), "{error:?}");
+    }
+
+    /// docs/18 §2.1: a sign-in that cannot read the account list creates no mirror to strand.
+    #[cfg(unix)]
+    #[test]
+    fn sign_in_with_an_unreadable_list_creates_no_mirror_directory() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-a.invalid", "u1");
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        mock.route(
+            "POST",
+            "/Users/AuthenticateByName",
+            200,
+            serde_json::json!({
+                "User": {"Id": SWAP_USER_B, "Name": "Sample User"},
+                "AccessToken": "tok-b",
+            }),
+        );
+        let Some(_unreadable) =
+            crate::persistence::ChmodGuard::unreadable_file(&dir.path().join("sessions.json"))
+        else {
+            return;
+        };
+
+        let result = core.sign_in(
+            mock.base_url.clone(),
+            "user".to_string(),
+            "pass".to_string(),
+        );
+
+        assert!(result.is_err(), "the list cannot be read");
+        let mirrors: Vec<String> = directory_contents(dir.path())
+            .into_keys()
+            .filter(|name| name.starts_with("mirror"))
+            .collect();
+        assert!(
+            mirrors.is_empty(),
+            "sign-in left mirror directories behind: {mirrors:?}"
+        );
+    }
+
+    /// docs/18 §2.1: leaving the sign-in surface while its authentication is in flight does not
+    /// stop it: the account is saved, installed and the epoch moves, so the app follows it.
+    #[test]
+    fn a_sign_in_still_in_flight_after_back_is_saved_and_active() {
+        let (_dir, core, _mock_a, _mock_b) = two_accounts_on_mocks();
+        let mock_new = core.runtime.block_on(RouteMockServer::start());
+        route_authentication(&mock_new, SWAP_USER_B, "tok-new");
+        let gate = mock_new.gate("POST", "/Users/AuthenticateByName", 0);
+        let epoch_before = core.account_epoch();
+
+        let worker = {
+            let core = Arc::clone(&core);
+            let url = mock_new.base_url.clone();
+            std::thread::spawn(move || core.sign_in(url, "user".to_string(), "pass".to_string()))
+        };
+        wait_until(
+            || mock_new.hit_count("POST", "/Users/AuthenticateByName") >= 1,
+            "the authentication request to arrive",
+        );
+        gate.open();
+
+        let account = worker
+            .join()
+            .expect("the sign-in thread must not panic")
+            .expect("the sign-in completes");
+        assert_eq!(account.user_id, SWAP_USER_B);
+        assert!(
+            saved_users(&core).contains(&SWAP_USER_B.to_string()),
+            "saved"
+        );
+        assert_eq!(
+            core.installed_identity().map(|id| id.account.user_id),
+            Some(SWAP_USER_B.to_string()),
+            "installed"
+        );
+        assert!(core.account_epoch() > epoch_before, "the epoch moved");
+    }
+
+    /// docs/18 §2.1: `account_epochs` reports exactly what the two single-value reads do.
+    #[test]
+    fn account_epochs_match_the_single_epoch_reads_across_a_switch() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-b.invalid", "u2");
+        seed_session(dir.path(), "http://server-a.invalid", "u1");
+        core.restore_session().expect("A restores");
+        let before = core.account_epochs();
+        assert_eq!(before.epoch, core.account_epoch());
+        assert_eq!(before.parked, core.parked_account_epoch());
+
+        core.switch_session(0).expect("switch to B");
+
+        let after = core.account_epochs();
+        assert!(after.epoch > before.epoch);
+        assert_eq!(after.epoch, core.account_epoch());
+        assert_eq!(after.parked, core.parked_account_epoch());
+    }
+
+    /// The account slot as the sequence test compares it.
+    #[derive(Clone, Debug, PartialEq)]
+    struct SlotView {
+        epoch: u64,
+        installed: Option<(AccountIdentity, String)>,
+        server: (Option<jellyfin_api::ServerVersion>, Option<String>),
+        is_admin: Option<bool>,
+        collections: bool,
+        /// A bundle is installed (Open).
+        open: bool,
+    }
+
+    impl SlotView {
+        fn of(state: &State) -> Self {
+            let installed = state.account.installed();
+            Self {
+                epoch: state.account.epoch,
+                installed: installed.map(|i| (i.identity(), i.mirror_dir.clone())),
+                server: installed
+                    .map_or((None, None), |i| (i.server_version, i.server_name.clone())),
+                is_admin: installed.and_then(|i| i.caches.is_admin),
+                collections: installed.is_some_and(|i| i.caches.collections.is_some()),
+                open: state.account.bundle().is_some(),
+            }
+        }
+
+        /// Right after an account change to `saved` (`None`: signed out) under `epoch`.
+        fn fresh(epoch: u64, saved: Option<&session::SessionFile>) -> Self {
+            Self {
+                epoch,
+                installed: saved.map(|s| (AccountIdentity::of(s), s.mirror_dir.clone())),
+                server: saved.map_or((None, None), |s| {
+                    (
+                        s.server_version.as_deref().and_then(|v| v.parse().ok()),
+                        s.server_name.clone(),
+                    )
+                }),
+                is_admin: None,
+                collections: false,
+                open: false,
+            }
+        }
+    }
+
+    /// Every bundle a slot sequence built, with the epoch and account it was opened for, and
+    /// every bundle the slot handed back for teardown.
+    #[derive(Default)]
+    struct BundleLedger {
+        built: Vec<(
+            u64,
+            Option<AccountIdentity>,
+            tokio::sync::watch::Receiver<jellyfin_core::BusConnection>,
+        )>,
+        handed: Vec<BusBundle>,
+    }
+
+    impl BundleLedger {
+        fn build(
+            &mut self,
+            mirror: &media_cache::Mirror,
+            tag: u64,
+            account: Option<AccountIdentity>,
+        ) -> BusBundle {
+            let (_tx, connection) =
+                tokio::sync::watch::channel(jellyfin_core::BusConnection::Disconnected);
+            self.built.push((tag, account, connection.clone()));
+            BusBundle {
+                mirror: mirror.clone(),
+                listener_task: None,
+                tx: tokio::sync::broadcast::channel(1).0,
+                connection,
+                handle: None,
+                forwarder: None,
+            }
+        }
+
+        fn hand(&mut self, reset: Option<AccountReset>) {
+            self.handed.extend(reset.and_then(|reset| reset.bundle));
+        }
+
+        /// R1 invariants 4 (each built bundle is installed or handed back, exactly once) and 7
+        /// (the installed bundle was opened under the slot's epoch for its account).
+        fn violations(&self, state: &State) -> Vec<String> {
+            let installed = state.account.bundle();
+            let account = state.account.installed().map(Installed::identity);
+            let mut found = Vec::new();
+            for (i, (tag, opened_for, rx)) in self.built.iter().enumerate() {
+                let here = usize::from(installed.is_some_and(|g| g.connection.same_channel(rx)));
+                let handed = self
+                    .handed
+                    .iter()
+                    .filter(|g| g.connection.same_channel(rx))
+                    .count();
+                if here + handed != 1 {
+                    found.push(format!(
+                        "bundle {i}: installed {here}, handed back {handed}"
+                    ));
+                }
+                if here == 1 && (*tag != state.account.epoch || *opened_for != account) {
+                    found.push(format!("bundle {i} opened under {tag} is installed"));
+                }
+            }
+            found
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SlotStep {
+        InstallA,
+        InstallB,
+        /// Restores the installed account (A when none is) under the current epoch.
+        RestoreInstalled,
+        /// Restores B under the previous epoch.
+        RestoreBStale,
+        /// Restores the account not installed (B when none is) under the current epoch.
+        RestoreOtherCurrent,
+        RemoveInstalled,
+        /// Removes the installed account with the other one (B when none is) next in the list.
+        RemoveInstalledToOther,
+        FactsCurrent,
+        FactsStale,
+        CacheStoreStale,
+        CacheStoreCurrent,
+        /// Commits a bundle built for the installed account under the current epoch.
+        OpenCommitCurrent,
+        /// Commits a bundle built under the previous epoch.
+        OpenCommitStale,
+    }
+
+    const SLOT_STEPS: [SlotStep; 13] = [
+        SlotStep::InstallA,
+        SlotStep::InstallB,
+        SlotStep::RestoreInstalled,
+        SlotStep::RestoreBStale,
+        SlotStep::RestoreOtherCurrent,
+        SlotStep::RemoveInstalled,
+        SlotStep::RemoveInstalledToOther,
+        SlotStep::FactsCurrent,
+        SlotStep::FactsStale,
+        SlotStep::CacheStoreStale,
+        SlotStep::CacheStoreCurrent,
+        SlotStep::OpenCommitCurrent,
+        SlotStep::OpenCommitStale,
+    ];
+
+    fn slot_saved(
+        server_url: &str,
+        user_id: &str,
+        version: &str,
+        name: &str,
+    ) -> session::SessionFile {
+        session::SessionFile {
+            server_url: server_url.to_string(),
+            user_id: user_id.to_string(),
+            user_name: format!("{user_id}-name"),
+            token: "tok".to_string(),
+            device_id: "dev".to_string(),
+            mirror_dir: session::mirror_dir_name(server_url, user_id),
+            server_version: Some(version.to_string()),
+            server_name: Some(name.to_string()),
+        }
+    }
+
+    fn slot_installed(saved: &session::SessionFile) -> Installed {
+        let client = jellyfin_api::JellyfinClient::from_token(
+            &saved.server_url,
+            JellybeamCore::saved_identity(saved),
+            &saved.token,
+        )
+        .with_user_id(&saved.user_id);
+        Installed::of(saved, client)
+    }
+
+    /// Runs `step` on `state` and returns the slot the R1 table says it must leave.
+    fn apply_slot_step(
+        state: &mut State,
+        step: SlotStep,
+        a: &session::SessionFile,
+        b: &session::SessionFile,
+        mirror: &media_cache::Mirror,
+        ledger: &mut BundleLedger,
+    ) -> SlotView {
+        let before = SlotView::of(state);
+        let current = before.epoch;
+        let previous = current.wrapping_sub(1);
+        let installed = before.installed.is_some();
+        let fresh_version: jellyfin_api::ServerVersion = "12.0.0".parse().expect("parses");
+        let store = |state: &mut State, epoch: u64| {
+            if let Some(installed) = state.account.installed_mut(epoch) {
+                installed.caches.is_admin = Some(true);
+            }
+        };
+        match step {
+            SlotStep::InstallA | SlotStep::InstallB => {
+                let saved = if matches!(step, SlotStep::InstallA) {
+                    a
+                } else {
+                    b
+                };
+                ledger.hand(Some(JellybeamCore::reset_account_state_locked(
+                    state,
+                    Some(slot_installed(saved)),
+                    AccountChange::Replace,
+                )));
+                SlotView::fresh(current + 1, Some(saved))
+            }
+            SlotStep::RestoreInstalled => {
+                let on_b = state
+                    .account
+                    .installed()
+                    .is_some_and(|i| i.identity() == AccountIdentity::of(b));
+                let saved = if on_b { b } else { a };
+                ledger.hand(JellybeamCore::restore_account_locked(
+                    state,
+                    current,
+                    slot_installed(saved),
+                ));
+                if installed {
+                    before
+                } else {
+                    SlotView::fresh(current + 1, Some(saved))
+                }
+            }
+            SlotStep::RestoreOtherCurrent => {
+                let on_b = state
+                    .account
+                    .installed()
+                    .is_some_and(|i| i.identity() == AccountIdentity::of(b));
+                let other = if on_b { a } else { b };
+                ledger.hand(JellybeamCore::restore_account_locked(
+                    state,
+                    current,
+                    slot_installed(other),
+                ));
+                SlotView::fresh(current + 1, Some(other))
+            }
+            SlotStep::RestoreBStale => {
+                ledger.hand(JellybeamCore::restore_account_locked(
+                    state,
+                    previous,
+                    slot_installed(b),
+                ));
+                before
+            }
+            SlotStep::RemoveInstalled => {
+                ledger.hand(Some(JellybeamCore::reset_account_state_locked(
+                    state,
+                    None,
+                    AccountChange::Leave,
+                )));
+                SlotView::fresh(current + 1, None)
+            }
+            SlotStep::RemoveInstalledToOther => {
+                let on_b = state
+                    .account
+                    .installed()
+                    .is_some_and(|i| i.identity() == AccountIdentity::of(b));
+                let other = if on_b { a } else { b };
+                ledger.hand(Some(JellybeamCore::reset_account_state_locked(
+                    state,
+                    Some(slot_installed(other)),
+                    AccountChange::Leave,
+                )));
+                SlotView::fresh(current + 1, Some(other))
+            }
+            SlotStep::FactsCurrent | SlotStep::FactsStale => {
+                let tag = if matches!(step, SlotStep::FactsCurrent) {
+                    current
+                } else {
+                    previous
+                };
+                JellybeamCore::apply_server_facts_locked(
+                    state,
+                    tag,
+                    Some(fresh_version),
+                    Some("Renamed Server".to_string()),
+                );
+                if installed && tag == current {
+                    SlotView {
+                        server: (Some(fresh_version), Some("Renamed Server".to_string())),
+                        ..before
+                    }
+                } else {
+                    before
+                }
+            }
+            SlotStep::CacheStoreCurrent | SlotStep::CacheStoreStale => {
+                let tag = if matches!(step, SlotStep::CacheStoreCurrent) {
+                    current
+                } else {
+                    previous
+                };
+                store(state, tag);
+                if installed && tag == current {
+                    SlotView {
+                        is_admin: Some(true),
+                        ..before
+                    }
+                } else {
+                    before
+                }
+            }
+            SlotStep::OpenCommitCurrent | SlotStep::OpenCommitStale => {
+                let tag = if matches!(step, SlotStep::OpenCommitCurrent) {
+                    current
+                } else {
+                    previous
+                };
+                let account = before
+                    .installed
+                    .as_ref()
+                    .map(|(identity, _)| identity.clone());
+                let bundle = ledger.build(mirror, tag, account);
+                if let Err((bundle, _)) = JellybeamCore::commit_bundle_locked(state, tag, bundle) {
+                    ledger.handed.push(bundle);
+                }
+                if installed && tag == current {
+                    SlotView {
+                        open: true,
+                        ..before
+                    }
+                } else {
+                    before
+                }
+            }
+        }
+    }
+
+    /// docs/18 §2.1, R1 invariants 2, 3, 4, 7, 8, 9: over every sequence of up to four steps, each
+    /// account change moves the epoch by exactly one and installs a fresh, Closed account, restoring
+    /// the installed account changes nothing, a result tagged with an older epoch leaves the slot
+    /// untouched, and every bundle is installed for its own epoch or handed back exactly once.
+    #[test]
+    fn every_account_slot_sequence_moves_the_epoch_once_per_change_and_drops_stale_results() {
+        let a = slot_saved("http://server-a.test", "u-a", "10.11.10", "Server A");
+        let b = slot_saved("http://server-b.test", "u-b", "10.10.7", "Server B");
+        let mut sequences: Vec<Vec<SlotStep>> = Vec::new();
+        let mut frontier = vec![Vec::new()];
+        for _ in 0..4 {
+            frontier = frontier
+                .iter()
+                .flat_map(|seq| {
+                    SLOT_STEPS
+                        .iter()
+                        .map(move |step| [seq.as_slice(), &[*step]].concat())
+                })
+                .collect();
+            sequences.extend(frontier.iter().cloned());
+        }
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mirror = test_mirror(&runtime, dir.path());
+        let mut failures = Vec::new();
+        for sequence in &sequences {
+            let mut state = State::default();
+            let mut ledger = BundleLedger::default();
+            for (i, step) in sequence.iter().enumerate() {
+                let before_epoch = state.account.epoch;
+                let expected = apply_slot_step(&mut state, *step, &a, &b, &mirror, &mut ledger);
+                let after = SlotView::of(&state);
+                let broken = ledger.violations(&state);
+                if after != expected || after.epoch < before_epoch || !broken.is_empty() {
+                    failures.push(format!(
+                        "{sequence:?} step {i} {step:?}: left {after:?}, expected {expected:?}, \
+                         bundles {broken:?}"
+                    ));
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            sequences.len(),
+            13 + 169 + 2197 + 28561,
+            "every sequence up to length 4"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} failing sequences, first: {:?}",
+            failures.len(),
+            failures.first()
+        );
+    }
+
+    /// Counts the `Refresh` changes a core sends its listener.
+    #[derive(Default)]
+    struct RefreshCounter(std::sync::atomic::AtomicUsize);
+
+    impl ChangeListener for RefreshCounter {
+        fn on_change(&self, event: ChangeEvent) -> Result<(), crate::error::CallbackError> {
+            if matches!(event, ChangeEvent::Refresh) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        fn on_unauthorized(
+            &self,
+            _account: AccountIdentity,
+        ) -> Result<(), crate::error::CallbackError> {
+            Ok(())
+        }
+    }
+
+    /// docs/18 §2.1 (R3): a version fetched for A's install that lands after a switch away and
+    /// back reaches only A's saved record, never the account installed since: its facts stay the
+    /// saved ones and no `Refresh` fires.
+    #[test]
+    fn a_version_refresh_spanning_a_switch_never_reaches_the_new_account() {
+        let (dir, core) = core_in_tempdir();
+        let mock_a = core.runtime.block_on(RouteMockServer::start());
+        let mock_b = core.runtime.block_on(RouteMockServer::start());
+        mock_a.route_script(
+            "GET",
+            "/System/Info/Public",
+            vec![
+                serde_json::json!({"Version": "12.0.0"}),
+                serde_json::json!({"Version": "10.11.10"}),
+            ],
+            vec![],
+        );
+        // A's first fetch replies late; its second never does, so only the late one lands.
+        let late = mock_a.gate("GET", "/System/Info/Public", 0);
+        let _never = mock_a.gate("GET", "/System/Info/Public", 1);
+        mock_b.route(
+            "GET",
+            "/System/Info/Public",
+            200,
+            serde_json::json!({"Version": "10.10.7"}),
+        );
+        let a = slot_saved(&mock_a.base_url, "u-a", "10.11.10", "Server A");
+        session::add_or_update(dir.path(), a.clone()).expect("seed A");
+        let b = slot_saved(&mock_b.base_url, "u-b", "10.10.7", "Server B");
+        session::add_or_update(dir.path(), b).expect("seed B");
+        let refreshes = Arc::new(RefreshCounter::default());
+        core.set_change_listener(refreshes.clone());
+
+        core.switch_session(0).expect("A is installed");
+        wait_until(
+            || mock_a.hit_count("GET", "/System/Info/Public") >= 1,
+            "A's version fetch to reach its server",
+        );
+        core.switch_session(1).expect("B is installed");
+        assert_eq!(core.server_version().as_deref(), Some("10.10.7"));
+        core.switch_session(0).expect("A is installed again");
+        wait_until(
+            || mock_a.hit_count("GET", "/System/Info/Public") >= 2,
+            "the new install's own fetch to reach A's server",
+        );
+        late.open();
+        wait_until(
+            || {
+                session::load_list(dir.path())
+                    .sessions
+                    .iter()
+                    .any(|s| s.user_id == "u-a" && s.server_version.as_deref() == Some("12.0.0"))
+            },
+            "the late reply to persist onto A's saved record",
+        );
+        settle();
+
+        assert_eq!(
+            core.server_version().as_deref(),
+            Some("10.11.10"),
+            "the new install keeps its saved facts"
+        );
+        assert_eq!(
+            refreshes.0.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a late reply fires no Refresh"
+        );
+    }
+
+    /// docs/13 Server compatibility: an install's own refresh is tagged with the incoming
+    /// account's epoch, so its reply lands even though no later fetch reports a version.
+    #[test]
+    fn an_install_refresh_lands_under_the_incoming_accounts_epoch() {
+        let (dir, core) = core_in_tempdir();
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        mock.route_script(
+            "GET",
+            "/System/Info/Public",
+            vec![
+                serde_json::json!({"Version": "12.0.0"}),
+                serde_json::json!({}),
+            ],
+            vec![],
+        );
+        let saved = slot_saved(&mock.base_url, "u-a", "10.11.10", "Server A");
+        session::add_or_update(dir.path(), saved).expect("seed A");
+
+        assert!(core.restore_session().is_some());
+
+        wait_until(
+            || core.server_version().as_deref() == Some("12.0.0"),
+            "the install's refresh to update the installed version",
+        );
+    }
+
+    /// docs/18 §2.1 (R4): a restore that read the epoch before a switch landed installs nothing
+    /// over the switched-to account and answers with it.
+    #[test]
+    fn a_restore_that_lost_to_a_switch_installs_nothing() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-b.test", "u2");
+        seed_session(dir.path(), "http://server-a.test", "u1");
+        let tag = core.account_epoch();
+        let saved = session::load(dir.path()).expect("A is saved active");
+        core.switch_session(0).expect("B is installed meanwhile");
+        let after_switch = core.account_epochs();
+
+        let restored = core.restore_finish(tag, saved);
+
+        assert_eq!(
+            core.account_epochs(),
+            after_switch,
+            "the restore changed nothing"
+        );
+        assert_eq!(
+            installed_user(&core).as_deref(),
+            Some("u2"),
+            "B stays installed"
+        );
+        assert_eq!(
+            restored.map(|account| account.user_id).as_deref(),
+            Some("u2"),
+            "the answer is the account installed now"
+        );
+    }
+
+    /// docs/18 §2.1 (R5): removing the installed account installs the next one in one account
+    /// change, so the app sees the epoch move once.
+    #[test]
+    fn removing_the_active_account_moves_the_epoch_once() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-b.test", "u2");
+        seed_session(dir.path(), "http://server-a.test", "u1");
+        assert!(core.restore_session().is_some());
+        let before = core.account_epochs().epoch;
+
+        assert!(core.remove_session(1).expect("A is removed"));
+
+        assert_eq!(
+            core.account_epochs().epoch,
+            before + 1,
+            "one account change"
+        );
+        assert_eq!(
+            installed_user(&core).as_deref(),
+            Some("u2"),
+            "B is installed"
+        );
+    }
+
+    /// docs/13 About > server info (R6): the snapshot names the installed account, even while the
+    /// saved list's active row names another.
+    #[test]
+    fn about_shows_the_installed_accounts_address_when_the_list_names_another() {
+        let accounts = installed_b_while_the_list_names_a();
+
+        let snapshot = accounts.core.server_info_snapshot();
+
+        assert_eq!(
+            snapshot.server_url.as_deref(),
+            Some(accounts.mock_b.base_url.as_str())
+        );
+        assert_eq!(snapshot.user_name, Some(format!("{SWAP_USER_B}-name")));
+    }
+
+    /// docs/18 §2.1 (R7): an add to a collection that spans a switch refreshes no other account's
+    /// mirror once its post lands.
+    #[test]
+    fn add_to_collection_spanning_a_switch_refreshes_no_other_accounts_mirror() {
+        const COLLECTION_ID: &str = "00000000-0000-0000-0000-000000000031";
+        let accounts = core_with_two_accounts(AccountSwap::Switch);
+        accounts.core.open_mirror().expect("A opens");
+        let held = accounts.mock_a.gate("POST", "/Collections/", 0);
+        let adding = {
+            let core = accounts.core.clone();
+            std::thread::spawn(move || {
+                core.add_to_collection(COLLECTION_ID.to_string(), "item-1".to_string())
+            })
+        };
+        wait_until(
+            || {
+                accounts
+                    .mock_a
+                    .hit_count_containing("POST", "/Collections/")
+                    >= 1
+            },
+            "A's add to reach its server",
+        );
+        apply_account_swap(&accounts, AccountSwap::Switch);
+        accounts.core.open_mirror().expect("B opens");
+
+        held.open();
+        adding
+            .join()
+            .expect("add thread")
+            .expect("the add itself succeeded on A");
+        settle();
+
+        let refreshes = accounts
+            .mock_b
+            .log_snapshot()
+            .iter()
+            .filter(|entry| entry.contains(&format!("parentId={COLLECTION_ID}")))
+            .count();
+        assert_eq!(refreshes, 0, "B's mirror must not refresh A's collection");
     }
 }

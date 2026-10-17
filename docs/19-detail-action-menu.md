@@ -255,7 +255,7 @@ tests cover method, path, query and body for each.
 
 `State` gains `collections: Option<(Instant, Vec<CollectionInfo>)>` and
 `is_admin: Option<bool>`, both cleared wherever `client` is replaced or
-taken (`sign_out`, `switch_session`, `sign_in`, `restore_session`).
+taken (`remove_session`, `switch_session`, `sign_in`, `restore_session`).
 
 | Method | Behaviour |
 |---|---|

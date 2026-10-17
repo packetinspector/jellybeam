@@ -50,7 +50,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -96,7 +95,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.memory.MemoryCache
 import kotlinx.coroutines.launch
@@ -108,6 +106,9 @@ import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.PlaybackActivity
+import tv.jellybeam.ui.common.ActiveWhileTop
+import tv.jellybeam.ui.discover.DISCOVER_PAGE_MARGIN
+import tv.jellybeam.ui.discover.DiscoverErrorMessage
 import tv.jellybeam.ui.cards.WIDE_ART_ASPECT
 import tv.jellybeam.ui.cards.SkeletonBlock
 import tv.jellybeam.ui.cards.ArtSource
@@ -121,15 +122,16 @@ import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberHeaderPageBringIntoViewSpec
 import tv.jellybeam.ui.cards.rememberSkeletonPulseAlpha
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
 import tv.jellybeam.ui.focus.FocusTarget
 import tv.jellybeam.ui.focus.RefreshRestoreOwner
+import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.placeByKeys
 import tv.jellybeam.ui.focus.refreshGuardEligible
-import tv.jellybeam.ui.focus.releaseCancelledFreezeInPlace
 import tv.jellybeam.ui.focus.restoreNow
 import tv.jellybeam.ui.focus.rememberFocusMemory
 import tv.jellybeam.ui.nav.LocalDrawerFocusCoordinator
@@ -211,6 +213,9 @@ internal val EPISODE_SHELF_GAP = 15.dp
  */
 internal const val OVERVIEW_MORE_KEY = "overview:more"
 
+/** The series lists' Retry chip (docs/15 §5); gone once a read lands, so a restore falls past it. */
+private const val LISTS_RETRY_KEY = "lists:retry"
+
 // One pill spec for every Detail screen's action row, enforced via `widthIn(min = ...)`, never
 // `fillMaxWidth()`/`weight()` (which would stretch every button uniformly).
 // [ACTION_BUTTON_MIN_WIDTH]
@@ -248,8 +253,8 @@ val EPISODE_VERTICAL_SCRIM_STOPS: List<Pair<Float, Float>> = listOf(
 /**
  * Dispatches to the purpose-built Episode/Series/Movie layout for [card]'s item type. Any other
  * type fails open onto the Movie layout, rendering what it can and omitting the rest.
- * [isTop]/[focusGate] are [tv.jellybeam.MainActivity]'s retained-layer wiring, defaulting to
- * "already top, gate open" for callers (tests, previews) that construct this directly.
+ * [isTop] is [tv.jellybeam.MainActivity]'s retained-layer wiring, defaulting to "already top" for
+ * callers (tests, previews) that construct this directly.
  */
 @Composable
 fun DetailScreen(
@@ -257,12 +262,14 @@ fun DetailScreen(
     onOpenDetail: (Card) -> Unit,
     onOpenPerson: (PersonInfo) -> Unit,
     isTop: Boolean = true,
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
+    /** Called once when the mirror drops this page's item while it is on screen (docs/07 §5). */
+    onRemoved: () -> Unit = {},
     viewModel: DetailViewModel = viewModel(
         key = "detail-${card.id}",
         factory = DetailViewModelFactory(AppGraph.gateway, card, AppGraph.strings),
     ),
 ) {
+    val focusGate = LocalFocusGate.current
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     // docs/19 §3.4: one [FocusMemory] shared by whichever per-type screen is active, hoisted here
@@ -287,10 +294,12 @@ fun DetailScreen(
         onDispose { detailLocalView.viewTreeObserver.removeOnPreDrawListener(listener) }
     }
 
-    // Retained layer (docs/19 §1.5): tells the change-refresh scheduler whether this page is on
-    // screen, same wiring as Home and Library.
-    LaunchedEffect(isTop) {
-        viewModel.setActive(isTop)
+    ActiveWhileTop(isTop, viewModel::setActive)
+
+    // docs/07 §5: a title the mirror dropped has nothing left to show; leave once, when this page
+    // is the one on screen (a retained page below leaves when it becomes top).
+    LaunchedEffect(state.itemRemoved, isTop) {
+        if (state.itemRemoved && isTop) onRemoved()
     }
 
     // §1.4: Play*/Go to series rows close the panel and hand back a one-shot target for this
@@ -381,10 +390,10 @@ fun DetailScreen(
         // it.
         val panelOpen = state.menu != null || composedMenu != null
         when (card.itemType) {
-            EPISODE_ITEM_TYPE -> EpisodeDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
-            SERIES_ITEM_TYPE -> SeriesDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
-            CollectionFormatting.BOXSET_ITEM_TYPE -> CollectionDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
-            else -> MovieDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, focusGate, memory, contentEndInset, contentWidth, panelOpen)
+            EPISODE_ITEM_TYPE -> EpisodeDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, memory, contentEndInset, contentWidth, panelOpen)
+            SERIES_ITEM_TYPE -> SeriesDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, memory, contentEndInset, contentWidth, panelOpen)
+            CollectionFormatting.BOXSET_ITEM_TYPE -> CollectionDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, memory, contentEndInset, contentWidth, panelOpen)
+            else -> MovieDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, memory, contentEndInset, contentWidth, panelOpen)
         }
 
         // The live model while open, the last-known one while the panel is still sliding out.
@@ -396,7 +405,6 @@ fun DetailScreen(
                 memberOfCollections = state.memberOfCollections,
                 confirm = state.confirm,
                 offsetX = panelOffsetX,
-                focusGate = focusGate,
                 isTop = isTop,
                 onRunAction = viewModel::runAction,
                 onEnterCollections = viewModel::enterCollections,
@@ -417,12 +425,6 @@ fun DetailScreen(
     }
 }
 
-// All three Detail screens' focus seeds share the bounded-retry shape
-// [tv.jellybeam.ui.library.LibraryScreen]'s
-// own seeds use: `focusGate` opens fresh before every attempt, closes the instant one lands, and
-// stays open on total failure -- an open gate at least lets the framework's default-focus search
-// find something, rather than a closed gate leaving nothing focused and D-pad input going nowhere.
-
 // EPISODE (spec §2)
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -434,12 +436,12 @@ private fun EpisodeDetailScreen(
     onOpenDetail: (Card) -> Unit,
     onOpenPerson: (PersonInfo) -> Unit,
     isTop: Boolean,
-    focusGate: MutableState<Boolean>,
     memory: FocusMemory,
     contentEndInset: Dp,
     contentWidth: Dp,
     panelOpen: Boolean,
 ) {
+    val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
     val context = LocalContext.current
@@ -503,7 +505,6 @@ private fun EpisodeDetailScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         fallback = episodeFallback,
         tag = "detail-episode",
     )
@@ -520,40 +521,16 @@ private fun EpisodeDetailScreen(
     var episodeHasFocus by remember(card.id) { mutableStateOf(false) }
     // docs/10-perf-logging.md `detail.focus`: one-shot per push, the moment initial focus lands.
     val episodeFocusMarked = remember(card.id) { booleanArrayOf(false) }
-    // [RefreshRestoreOwner] owns the refresh guard's `restoreNow` coroutine and its freeze;
+    // [RefreshRestoreOwner] owns the refresh guard's `restoreNow` coroutine;
     // [refreshGuardEligible] is the shared predicate. Cancelled wherever this body stops owning
     // focus: losing `isTop`, the action panel opening, losing RESUMED, or the drawer opening.
-    val refreshOwner = remember { RefreshRestoreOwner() }
+    val refreshOwner = rememberRefreshRestoreOwner(isTop)
     // The live top state every ownership hook below reads (`rememberUpdatedState`, never the
     // captured `isTop` param).
     val latestIsTop by rememberUpdatedState(isTop)
-    LaunchedEffect(isTop) {
-        if (!isTop) refreshOwner.ownershipLost()
-    }
     LaunchedEffect(panelOpen) {
-        // The panel's own open/close path never touches [memory.frozen]
-        // (see this file's own `panelOpen` doc comment), so the owner's
-        // claim is kept across the open (plain `ownershipLost`; the guard
-        // is blocked by `latestPanelOpen` meanwhile) and the close is an
-        // in-place regain: a freeze a cancelled refresh restore left
-        // behind is released here or it never lifts (docs/15-focus-and-
-        // selection.md §3, [RefreshRestoreOwner.releaseCancelledFreeze]).
-        if (panelOpen) {
-            refreshOwner.ownershipLost()
-        } else {
-            // `panelOpen` also drops to false when the panel is dropped FOR
-            // a navigation (`dropPanelForNavigation`: Go to series, the
-            // playback rows) -- [latestIsTop] keeps that from clearing the
-            // navigation freeze (docs/15-focus-and-selection.md §3).
-            refreshOwner.releaseCancelledFreezeInPlace(memory, ownsFocus = latestIsTop)
-        }
-    }
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) refreshOwner.ownershipLost()
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        // The panel holds focus outside the page; its close needs no release (docs/15 §5).
+        if (panelOpen) refreshOwner.ownershipLost()
     }
     // P2-b: opening the drawer leaves this body top+resumed with focus moved outside its root and
     // [memory] not frozen, so a live refresh could steal focus back behind it. [drawerOpen] closes
@@ -569,12 +546,8 @@ private fun EpisodeDetailScreen(
                 drawerOpen = true
                 refreshOwner.ownershipLost()
             }
-            drawerFocusCoordinator.onDrawerClosed = { navigatingAway ->
+            drawerFocusCoordinator.onDrawerClosed = { _ ->
                 drawerOpen = false
-                // In-place close only: a navigating-away close, or one after this screen already
-                // lost top, must keep the navigation freeze instead (see
-                // [releaseCancelledFreezeInPlace]).
-                refreshOwner.releaseCancelledFreezeInPlace(memory, ownsFocus = !navigatingAway && latestIsTop)
                 false
             }
         }
@@ -586,15 +559,14 @@ private fun EpisodeDetailScreen(
         refreshOwner.onContentChanged(
             scope = synopsisScope,
             frame = { withFrameNanos {} },
-            eligible = { ownsFreeze ->
+            eligible = { ownTokens ->
                 !latestPanelOpen && !drawerOpen &&
                     refreshGuardEligible(
                         isTop = latestIsTop,
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = episodeHasFocus,
-                        frozen = memory.frozen,
-                        ownsFreeze = ownsFreeze,
+                        frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },
             restore = {
@@ -778,7 +750,6 @@ private fun EpisodeDetailScreen(
                 synopsisScope.launch { memory.placeByKeys(listOf(OVERVIEW_MORE_KEY), focusGate) }
             },
             isTop = isTop,
-            focusGate = focusGate,
         )
     }
     }
@@ -932,12 +903,12 @@ private fun SeriesDetailScreen(
     onOpenDetail: (Card) -> Unit,
     onOpenPerson: (PersonInfo) -> Unit,
     isTop: Boolean,
-    focusGate: MutableState<Boolean>,
     memory: FocusMemory,
     contentEndInset: Dp,
     contentWidth: Dp,
     panelOpen: Boolean,
 ) {
+    val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
     val context = LocalContext.current
@@ -983,7 +954,6 @@ private fun SeriesDetailScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = seedDecision != null,
         selectedKey = {
             if (seedDecision == DetailFormatting.FocusSeedTarget.PRIMARY) null
@@ -1035,25 +1005,11 @@ private fun SeriesDetailScreen(
     val seriesFocusMarked = remember(card.id) { booleanArrayOf(false) }
     // Same [RefreshRestoreOwner] shape as [EpisodeDetailScreen]; [refreshGuardEligible] is the
     // shared predicate.
-    val refreshOwner = remember { RefreshRestoreOwner() }
+    val refreshOwner = rememberRefreshRestoreOwner(isTop)
     val latestIsTop by rememberUpdatedState(isTop)
-    LaunchedEffect(isTop) {
-        if (!isTop) refreshOwner.ownershipLost()
-    }
     LaunchedEffect(panelOpen) {
-        // Same shape as [EpisodeDetailScreen]'s identical hook.
-        if (panelOpen) {
-            refreshOwner.ownershipLost()
-        } else {
-            refreshOwner.releaseCancelledFreezeInPlace(memory, ownsFocus = latestIsTop)
-        }
-    }
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) refreshOwner.ownershipLost()
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        // The panel holds focus outside the page; its close needs no release (docs/15 §5).
+        if (panelOpen) refreshOwner.ownershipLost()
     }
     // P2-b: same shape as [EpisodeDetailScreen]'s identical fix.
     var drawerOpen by remember(card.id) { mutableStateOf(false) }
@@ -1064,27 +1020,27 @@ private fun SeriesDetailScreen(
                 drawerOpen = true
                 refreshOwner.ownershipLost()
             }
-            drawerFocusCoordinator.onDrawerClosed = { navigatingAway ->
+            drawerFocusCoordinator.onDrawerClosed = { _ ->
                 drawerOpen = false
-                refreshOwner.releaseCancelledFreezeInPlace(memory, ownsFocus = !navigatingAway && latestIsTop)
                 false
             }
         }
     }
     val latestPanelOpen by rememberUpdatedState(panelOpen)
-    LaunchedEffect(card, seasons, state.episodes, castMembers, state.similar) {
+    // [state.listError]: a good Retry removes the focused Retry chip; the guard then lands on the
+    // selected season chip (docs/15 §3).
+    LaunchedEffect(card, seasons, state.episodes, castMembers, state.similar, state.listError) {
         refreshOwner.onContentChanged(
             scope = synopsisScope,
             frame = { withFrameNanos {} },
-            eligible = { ownsFreeze ->
+            eligible = { ownTokens ->
                 !latestPanelOpen && !drawerOpen &&
                     refreshGuardEligible(
                         isTop = latestIsTop,
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = seriesHasFocus,
-                        frozen = memory.frozen,
-                        ownsFreeze = ownsFreeze,
+                        frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },
             restore = {
@@ -1218,6 +1174,15 @@ private fun SeriesDetailScreen(
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
+                // docs/07 §5: a failed season/episode read is not an empty series.
+                if (state.listError) {
+                    DiscoverErrorMessage(
+                        text = stringResource(R.string.detail_lists_error),
+                        onRetry = viewModel::retryLists,
+                        modifier = Modifier.padding(horizontal = PAGE_MARGIN - DISCOVER_PAGE_MARGIN),
+                        retryModifier = Modifier.focusKey(memory, LISTS_RETRY_KEY),
+                    )
+                }
                 // docs/11 §Loading state: the chip row and the shelf keep their final heights
                 // while seasons and the resume season's episodes load.
                 RegionReveal(
@@ -1314,7 +1279,6 @@ private fun SeriesDetailScreen(
                 synopsisScope.launch { memory.placeByKeys(listOf(OVERVIEW_MORE_KEY), focusGate) }
             },
             isTop = isTop,
-            focusGate = focusGate,
         )
     }
     }
@@ -1667,12 +1631,12 @@ private fun MovieDetailScreen(
     onOpenDetail: (Card) -> Unit,
     onOpenPerson: (PersonInfo) -> Unit,
     isTop: Boolean,
-    focusGate: MutableState<Boolean>,
     memory: FocusMemory,
     contentEndInset: Dp,
     contentWidth: Dp,
     panelOpen: Boolean,
 ) {
+    val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
     val context = LocalContext.current
@@ -1710,7 +1674,6 @@ private fun MovieDetailScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         fallback = movieFallback,
         tag = "detail-movie",
     )
@@ -1746,25 +1709,11 @@ private fun MovieDetailScreen(
     val movieFocusMarked = remember(card.id) { booleanArrayOf(false) }
     // Same [RefreshRestoreOwner] shape as [EpisodeDetailScreen]; [refreshGuardEligible] is the
     // shared predicate.
-    val refreshOwner = remember { RefreshRestoreOwner() }
+    val refreshOwner = rememberRefreshRestoreOwner(isTop)
     val latestIsTop by rememberUpdatedState(isTop)
-    LaunchedEffect(isTop) {
-        if (!isTop) refreshOwner.ownershipLost()
-    }
     LaunchedEffect(panelOpen) {
-        // Same shape as [EpisodeDetailScreen]'s identical hook.
-        if (panelOpen) {
-            refreshOwner.ownershipLost()
-        } else {
-            refreshOwner.releaseCancelledFreezeInPlace(memory, ownsFocus = latestIsTop)
-        }
-    }
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) refreshOwner.ownershipLost()
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        // The panel holds focus outside the page; its close needs no release (docs/15 §5).
+        if (panelOpen) refreshOwner.ownershipLost()
     }
     // P2-b: same shape as [EpisodeDetailScreen]'s identical fix.
     var drawerOpen by remember(card.id) { mutableStateOf(false) }
@@ -1775,9 +1724,8 @@ private fun MovieDetailScreen(
                 drawerOpen = true
                 refreshOwner.ownershipLost()
             }
-            drawerFocusCoordinator.onDrawerClosed = { navigatingAway ->
+            drawerFocusCoordinator.onDrawerClosed = { _ ->
                 drawerOpen = false
-                refreshOwner.releaseCancelledFreezeInPlace(memory, ownsFocus = !navigatingAway && latestIsTop)
                 false
             }
         }
@@ -1787,15 +1735,14 @@ private fun MovieDetailScreen(
         refreshOwner.onContentChanged(
             scope = synopsisScope,
             frame = { withFrameNanos {} },
-            eligible = { ownsFreeze ->
+            eligible = { ownTokens ->
                 !latestPanelOpen && !drawerOpen &&
                     refreshGuardEligible(
                         isTop = latestIsTop,
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = movieHasFocus,
-                        frozen = memory.frozen,
-                        ownsFreeze = ownsFreeze,
+                        frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },
             restore = {
@@ -1970,7 +1917,6 @@ private fun MovieDetailScreen(
                     synopsisScope.launch { memory.placeByKeys(listOf(OVERVIEW_MORE_KEY), focusGate) }
                 },
                 isTop = isTop,
-                focusGate = focusGate,
             )
         }
         }
@@ -2258,8 +2204,8 @@ internal fun SynopsisPanel(
     open: Boolean,
     onClose: () -> Unit,
     isTop: Boolean,
-    focusGate: MutableState<Boolean>,
 ) {
+    val focusGate = LocalFocusGate.current
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
     val requester = remember { FocusRequester() }

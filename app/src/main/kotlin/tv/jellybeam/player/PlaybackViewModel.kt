@@ -10,11 +10,12 @@ import androidx.media3.common.Tracks
 import kotlinx.coroutines.Dispatchers
 import tv.jellybeam.AppGraph
 import tv.jellybeam.R
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.data.SettingsStore
 import tv.jellybeam.data.displayMessage
 import tv.jellybeam.perf.PerfLog
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +24,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,8 +32,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -54,6 +56,7 @@ import uniffi.jellybeam_core.SubtitleActionFfi
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
+import uniffi.jellybeam_core.TrackMemoryFfi
 import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.TrickplayMetaFfi
@@ -101,9 +104,6 @@ internal fun burnableSubtitleId(index: Int): Long = BURNABLE_ID_BASE - index
 
 private fun burnableIndexOf(id: Long): Int? = id.takeIf { it <= BURNABLE_ID_BASE }?.let { (BURNABLE_ID_BASE - it).toInt() }
 
-/** docs/18 §3.1: a decision naming a [burnable] stream keeps player text off and returns that
- * stream for the renegotiation to burn in; any other decision passes through.
- */
 /** docs/18 §3.1: the policy takes the first match, so rows that need no renegotiation come first:
  * delivered tracks, the one burned in, sidecars, then streams only a new burn-in can show.
  */
@@ -112,6 +112,9 @@ internal fun policyTracks(embedded: List<TrackInfo>, sidecars: List<TrackInfo>, 
     return embedded + burned + sidecars + unburned
 }
 
+/** docs/18 §3.1: a decision naming a [burnable] stream keeps player text off and returns that
+ * stream for the renegotiation to burn in; any other decision passes through.
+ */
 internal fun routeBurnable(decision: TrackDecisionFfi, burnable: List<TrackInfo>): Pair<TrackDecisionFfi, TrackInfo?> {
     val pick = decision.subtitleTrackId?.let { id -> burnable.firstOrNull { it.id == id } } ?: return decision to null
     return decision.copy(subtitleAction = SubtitleActionFfi.OFF, subtitleTrackId = null) to pick
@@ -119,6 +122,9 @@ internal fun routeBurnable(decision: TrackDecisionFfi, burnable: List<TrackInfo>
 
 /** Embedded subtitles off, nothing else touched. */
 private val SUBTITLES_OFF = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.OFF, subtitleTrackId = null)
+
+/** A pick with no stable key forgets the series' choice rather than remembering a blank one. */
+private fun keyedMemory(key: String?): TrackMemoryFfi = key?.let { TrackMemoryFfi.Key(it) } ?: TrackMemoryFfi.Unset
 
 /**
  * docs/18 §1/§3: message shown once [PlaybackViewModel.maybeFallBackToTranscode]
@@ -135,6 +141,46 @@ internal fun fatalPlaybackMessage(strings: UiStrings, errorCodeName: String, pla
         strings.get(R.string.player_error_generic, errorCodeName)
     }
 }
+
+/** docs/12 §14: what the Undo toast needs to seek back and to label the skipped segment. */
+data class SkipUndoState(val preSkipPositionTicks: Long, val segmentType: MediaSegmentKind)
+
+/**
+ * docs/17 §2, docs/18 §2.1: what one playback session owns -- its [generation], item and account.
+ * Everything the session launches captures it, names [accountEpoch] in account-bound calls, and
+ * publishes only while [PlaybackViewModel] still holds this generation.
+ */
+internal data class SessionScope(val generation: Long, val itemId: String, val accountEpoch: ULong)
+
+/**
+ * docs/18 §2.1: whether the player holds a live reporting session. [Playing] owns one [scope];
+ * [Ended] ran its single stop or abandon, naming [sessionId] (`null`: none was ever installed), so
+ * that call, not a later one, ends it. [generation] only ever grows, so no two scopes compare equal.
+ */
+internal sealed interface SessionOwner {
+    val generation: Long
+
+    data class Playing(val scope: SessionScope) : SessionOwner {
+        override val generation: Long get() = scope.generation
+    }
+
+    data class Ended(override val generation: Long, val sessionId: String?) : SessionOwner
+}
+
+/**
+ * docs/12 §8: the episode-edge lookup. [Failed] is told apart from a series edge ([Known] with a
+ * `null` side) so entering the next-up trigger zone can retry it once ([Failed.retried]).
+ */
+internal sealed interface NeighborLookup {
+    data object Unknown : NeighborLookup
+
+    data class Known(val previous: Card?, val next: Card?) : NeighborLookup
+
+    data class Failed(val retried: Boolean) : NeighborLookup
+}
+
+/** docs/12 §14: the post-skip Undo toast's auto-hide window. */
+internal const val SKIP_UNDO_WINDOW_MS = 5_000L
 
 /**
  * Deliberately excludes position: [PlaybackViewModel.positionTicks] lives on its own `StateFlow`
@@ -173,6 +219,9 @@ data class PlaybackUiState(
      * [PlaybackViewModel.evaluateNextUp] only ever sets one, per
      * [uniffi.jellybeam_core.StillWatchingDecision]. */
     val stillWatching: StillWatchingState? = null,
+    /** docs/12 §14: the post-skip Undo toast; set by [PlaybackViewModel.skipSegment], cleared by undo,
+     * dismissal or its [SKIP_UNDO_WINDOW_MS] expiry. */
+    val skipUndo: SkipUndoState? = null,
     /** dpad-left seek magnitude, from `Settings.skipBackSecs`, read once per session in [start].
      * Defaults to [SeekMath.SKIP_MS] until that read resolves.
      */
@@ -181,31 +230,16 @@ data class PlaybackUiState(
     val skipForwardMs: Long = SeekMath.SKIP_MS,
     /** Read once per session in [start]; PlaybackScreen's `AndroidView` update block applies it. */
     val subtitleStyle: SubtitleStyle = SubtitleStyle(),
-    /** The in-player track picker (docs/09 slice 3b): `null` closed, else [TrackPickerState]'s
-     * rows. Independent of [PlaybackOsdController]'s `isVisible` -- see [TrackPickerState]'s own
-     * doc comment.
+    /** docs/12 §12: the one menu or sheet open over the OSD, if any -- opening one replaces the
+     * last, so no two are ever up together. The per-surface reads below ([speedMenuOpen],
+     * [trackPicker], ...) all derive from it.
      */
-    val trackPicker: TrackPickerState? = null,
-    /**
-     * The playback stats sheet (docs/12 §17): non-null exactly while open,
-     * holding the live [PlaybackLiveStats] snapshot its HEALTH row needs,
-     * refreshed at 1Hz by [PlaybackViewModel.refreshStatsSheetLive] only
-     * while open. The rest of the sheet is stateless per-item data built
-     * directly by [tv.jellybeam.player.PlaybackScreen] via [StatsSheetFormat.build].
-     */
-    val statsSheetLive: PlaybackLiveStats? = null,
+    val openSurface: OpenSurface = OpenSurface.None,
     /** Narrow, non-blocking OSD detail fetch and server label, kept in observable state so the
      * Direct Play chip and a newly opened stats sheet see the completed fetch immediately.
      */
     val playbackStatsDetail: PlaybackOsdDetail? = null,
     val statsServerName: String? = null,
-    /**
-     * Collector-oriented library metadata, loaded only when its OSD button
-     * is activated -- unlike [statsSheetLive] this stays outside the
-     * time-to-play path. [LibraryInfoOverlayState.Content] carries a
-     * [LibrarySheetContent] built via [LibraryInfoFormat.buildSheet] (docs/12 §17).
-     */
-    val libraryInfoOverlay: LibraryInfoOverlayState? = null,
     /** This session's chapter markers, from [uniffi.jellybeam_core.ItemDetail.chapters] -- empty
      * (never a throw) when unresolved, failed, or genuinely absent (see [Chapters]'s own doc
      * comment).
@@ -270,15 +304,6 @@ data class PlaybackUiState(
      * singleton never carries a previous session's rate forward.
      */
     val playbackRate: Float = 1f,
-    /** The speed menu (docs/12 §12). Opening it closes [chaptersMenuOpen], [trackPicker], and both
-     * info sheets -- the one-thing-at-a-time convention [PlaybackViewModel.openLibraryInfoOverlay]
-     * also follows.
-     */
-    val speedMenuOpen: Boolean = false,
-    /** The chapters menu (docs/12 §8/§12, shown only when the item has markers) -- same
-     * mutual-exclusion convention as [speedMenuOpen].
-     */
-    val chaptersMenuOpen: Boolean = false,
     /** Credits-aware previous/next-episode availability (docs/12 §8, episodic only) -- booleans
      * rather than exposing the fetched [Card]s, populated once per session in [start].
      */
@@ -315,6 +340,43 @@ data class PlaybackUiState(
     val transcodeReason: String? = null,
 ) {
     enum class Phase { LOADING, READY }
+
+    /** The speed menu (docs/12 §12). */
+    val speedMenuOpen: Boolean get() = openSurface is OpenSurface.Speed
+
+    /** The chapters menu (docs/12 §8/§12, shown only when the item has markers). */
+    val chaptersMenuOpen: Boolean get() = openSurface is OpenSurface.Chapters
+
+    /** The in-player track picker (docs/09 slice 3b): `null` closed, else [TrackPickerState]'s
+     * rows. Independent of [PlaybackOsdController]'s `isVisible` -- see [TrackPickerState]'s own
+     * doc comment.
+     */
+    val trackPicker: TrackPickerState? get() = (openSurface as? OpenSurface.Tracks)?.picker
+
+    /** The stats sheet's live snapshot (docs/12 §17): non-null exactly while open, refreshed at 1Hz by [PlaybackViewModel.refreshStatsSheetLive]. */
+    val statsSheetLive: PlaybackLiveStats? get() = (openSurface as? OpenSurface.Stats)?.live
+
+    /** Library metadata (docs/12 §17), loaded only when its OSD button is activated so it stays off the time-to-play path. */
+    val libraryInfoOverlay: LibraryInfoOverlayState? get() = (openSurface as? OpenSurface.LibraryInfo)?.overlay
+
+    /** Rewrites the open track picker in place; any other surface (or none) is left as it is. */
+    internal fun withTrackPicker(transform: (TrackPickerState) -> TrackPickerState): PlaybackUiState =
+        (openSurface as? OpenSurface.Tracks)?.let { copy(openSurface = OpenSurface.Tracks(transform(it.picker))) } ?: this
+}
+
+/** docs/12 §12: what [PlaybackUiState.openSurface] can hold -- the player's menus and sheets. */
+sealed interface OpenSurface {
+    data object None : OpenSurface
+
+    data object Speed : OpenSurface
+
+    data object Chapters : OpenSurface
+
+    data class Tracks(val picker: TrackPickerState) : OpenSurface
+
+    data class Stats(val live: PlaybackLiveStats) : OpenSurface
+
+    data class LibraryInfo(val overlay: LibraryInfoOverlayState) : OpenSurface
 }
 
 /** [PlaybackUiState.reconnecting]'s payload -- just the 1-based retry [attempt]: the
@@ -431,7 +493,7 @@ sealed interface PlaybackEvent {
  * reporting session is closed out **exactly once** ([stopPlaybackOnce], or [abandonPlaybackOnce]
  * when playback never became active) no matter which exit path fires first --
  * [tv.jellybeam.player.PlaybackActivity]'s `onStop`-while-finishing, its `onDestroy` fallback, and
- * this ViewModel's own [onCleared] all funnel through the same [sessionEnded]-guarded path.
+ * this ViewModel's own [onCleared] all funnel through the same [owner]-guarded path.
  * Autoplay ([playNext]) reuses this same instance for a second session rather than recreating the
  * Activity/screen: [start] resets every one-shot-per-session field so the guarantee holds per
  * session, not once per instance lifetime.
@@ -447,11 +509,6 @@ class PlaybackViewModel(
     itemId: String,
     private val strings: UiStrings,
     private val reportScope: CoroutineScope = AppGraph.processScope,
-    /** docs/17 §6: called after every landed final stop report
-     * ([stopPlaybackOnce]/[stopPlaybackAndAwait], never [abandonPlaybackOnce]'s) so Detail/Home can
-     * refresh promptly. Tests inject a counting lambda.
-     */
-    private val onStopReported: () -> Unit = PlaybackReports::onStopLanded,
     /** Sheet transport for the trickplay preview (docs/12 §11); `null` (tests) disables the
      * pipeline while [seek]/[glideSampleTile] still resolve tiles. */
     sheetFetcher: SheetFetcher? = null,
@@ -470,9 +527,12 @@ class PlaybackViewModel(
     private val parseSidecar: suspend (codec: String, text: String) -> SidecarCues? = { codec, text ->
         withContext(Dispatchers.Default) { ExternalSubtitles.parse(codec, text) }
     },
+    /** docs/09: the one settings reader (single writer); tests inject a store over their fake. */
+    private val settingsStore: SettingsStore = AppGraph.settingsStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(PlaybackUiState())
+    private var skipUndoExpiry: Job? = null
     val state: StateFlow<PlaybackUiState> = _state.asStateFlow()
 
     /**
@@ -497,19 +557,25 @@ class PlaybackViewModel(
     private val _events = MutableSharedFlow<PlaybackEvent>(replay = 1, extraBufferCapacity = 1)
     val events: SharedFlow<PlaybackEvent> = _events.asSharedFlow()
 
-    /** The item currently loaded/loading -- reassigned by [start] on every session, including
-     * [playNext]'s.
+    /** docs/18 §2.1: [SessionOwner.Ended] until a `preparePlayback` call actually succeeds -- see
+     * [stopPlaybackOnce]'s doc. Only the main thread reads or moves it, so a check-then-set is exactly once.
      */
-    private var currentItemId: String = itemId
+    private var owner: SessionOwner = SessionOwner.Ended(generation = 0L, sessionId = null)
 
-    /** `true` until a `preparePlayback` call actually succeeds -- see [stopPlaybackOnce]'s doc. */
-    private val sessionEnded = AtomicBoolean(true)
-    /** The session id this session's stop or abandon named; the core ends a fallback installed over
-     * it through that call (docs/18 §2.1), so the fallback's own disposal must not race it.
+    /** docs/17 §2: the scope [start] adopted, `null` once it ended; every launch it makes publishes
+     * only while its scope is still this one.
      */
-    private var endedSessionId: String? = null
-    /** Serializes the old session's stop/report with the next session's prepare/load. */
-    private val sessionTransitionInFlight = AtomicBoolean(false)
+    private val liveScope: SessionScope? get() = (owner as? SessionOwner.Playing)?.scope
+
+    private fun SessionScope.isCurrent(): Boolean = liveScope?.generation == generation
+
+    private inline fun <T> SessionScope.ifCurrent(block: () -> T): T? = if (isCurrent()) block() else null
+
+    /** docs/18 §2.1: the old session's final stop, open from the moment its snapshot is taken until
+     * the core has closed it; a newer request's prepare waits for it so it cannot replace a session
+     * mid-report.
+     */
+    private var stopLanding: CompletableDeferred<Unit>? = null
     private var lastReportedPaused: Boolean? = null
     private var reportTickerJob: Job? = null
     /** Sticky per-session proof that real playback began; fatal errors after this point must
@@ -587,14 +653,6 @@ class PlaybackViewModel(
      */
     private var sessionFailedTrack: FailedTrackFfi? = null
 
-    /**
-     * docs/18 §3: incremented once per session by [start] -- see [start]'s
-     * NonCancellable comment for the generation-guard rule this snapshot
-     * feeds. A plain counter, never reset, so no two sessions can compare
-     * equal.
-     */
-    private var sessionGeneration = 0
-
     /** docs/18 §2.1: the newest playback request this view model minted, the only one whose plan,
      * error or Finish may publish; `null` once stopped, abandoned or closed for an account change.
      */
@@ -670,16 +728,16 @@ class PlaybackViewModel(
      */
     private var lastAutoSkipSegmentKey: Pair<Long, Long>? = null
 
-    /** The current session's next episode, fetched via [CoreGateway.nextEpisodeAfter] when an
-     * Episode's plan loads -- `null` if unresolved, not an Episode, or already the series finale.
-     */
-    private var nextEpisode: Card? = null
+    /** docs/12 §8: this session's episode-edge lookup, reset to [NeighborLookup.Unknown] by [start]. */
+    private var neighbors: NeighborLookup = NeighborLookup.Unknown
 
-    /** The current session's previous episode, fetched via [CoreGateway.previousEpisodeBefore]
-     * alongside [nextEpisode] (docs/12 §8) -- `null` for the same three reasons. Private; only
+    /** The next episode, `null` while unknown or failed, or at the series finale. */
+    private val nextEpisode: Card? get() = (neighbors as? NeighborLookup.Known)?.next
+
+    /** The previous episode, `null` for the same three reasons as [nextEpisode]. Only
      * [PlaybackUiState.hasPreviousEpisode] is exposed.
      */
-    private var previousEpisode: Card? = null
+    private val previousEpisode: Card? get() = (neighbors as? NeighborLookup.Known)?.previous
 
     /** Back-dismiss: once dismissed, the next-up card stays hidden for the rest of this session,
      * reset by [start]. */
@@ -694,9 +752,8 @@ class PlaybackViewModel(
     private var currentSeriesId: String? = null
 
     /**
-     * The current session's trickplay manifest, fetched fire-and-forget by
-     * [fetchTrickplay] via [CoreGateway.getTrickplay] (not read off the
-     * plan directly, since `prepare_playback` must not await it). `null`
+     * The current session's trickplay manifest, carried by [fetchPlaybackOsdDetail]'s fetch (not
+     * read off the plan directly, since `prepare_playback` must not await it). `null`
      * until resolved, absent, or failed -- [seek] fails open on `null` the
      * same way a manifest-less item always has. Exposed publicly (unlike
      * [outroStartSecs]); [TrickplayPreviewer] turns its tiles into bitmaps.
@@ -729,7 +786,7 @@ class PlaybackViewModel(
         private set
 
     /** Completes on the first rendered frame or [ENRICHMENT_GATE_FALLBACK_MS] after [start],
-     * whichever comes first -- gates [fetchPlaybackOsdDetail], [fetchTrickplay], and
+     * whichever comes first -- gates [fetchPlaybackOsdDetail] and
      * [fetchServerDisplayName] so they don't compete with the media loads for time-to-first-frame
      * (docs/12 §11, docs/18). Replaced fresh by every [start]; [fetchMediaSegments] and
      * [fetchEpisodeNeighbors] stay immediate and never await it.
@@ -761,20 +818,20 @@ class PlaybackViewModel(
      */
     private var trackSelectionApplied = false
 
-    /**
-     * docs/18 §3.1: the job for [resolveTrackSelectionOnce]'s one `resolveTracks` round trip, so a
-     * session change or manual [chooseAudio]/[chooseSubtitle] pick can cancel it outright rather
-     * than relying only on the generation/manual-choice checks inside it (cancellation is
-     * cooperative, same caveat as [maybeFallBackToTranscode]'s generation guard). Cancelled in
-     * [start]'s reset, in [cancelSessionJobsAndCloseMenus], and before applying a manual pick.
+    /** docs/18 §3.1: [resolveTrackSelectionOnce]'s round trip; every session change and manual pick
+     * cancels it via [cancelTrackSelection], so a result landing past the await is still current.
      */
     private var trackSelectionJob: Job? = null
 
-    /** docs/18 §3.1: an automatic resolution has been asked for and not yet applied or dropped. */
+    /** docs/18 §3.1: an automatic resolution is in flight; cleared by its own completion or by [cancelTrackSelection]. */
     private var resolutionPending = false
 
-    /** Which launch owns [resolutionPending]: a cancelled one finishing late must not clear a newer one's. */
-    private var resolutionToken: Any? = null
+    /** Drops any in-flight automatic resolution, so a cancelled one finishing late can't clear a newer one's flag. */
+    private fun cancelTrackSelection() {
+        trackSelectionJob?.cancel()
+        trackSelectionJob = null
+        resolutionPending = false
+    }
 
     /** docs/18 §3.1: what a same-item reload still has to restore on its first usable tracks;
      * cleared once restored, by a manual pick, and by [start].
@@ -794,9 +851,8 @@ class PlaybackViewModel(
     private var recordedText: TextChoice = TextChoice.Leave
     private var recordedAudio: TrackIdentity? = null
 
-    /** `true` once [chooseAudio]/[chooseSubtitle] has applied a manual pick this session, checked
-     * by [resolveTrackSelectionOnce]'s pending coroutine so a slow automatic resolution can't
-     * overwrite it. Reset by every [start].
+    /** `true` once [chooseAudio]/[chooseSubtitle] has applied a manual pick this session, so a reload
+     * keeps it (a pick also cancels any pending automatic resolution). Reset by every [start].
      */
     private var manualTrackChoiceMade = false
 
@@ -848,7 +904,7 @@ class PlaybackViewModel(
                 _state.update { it.copy(nonDefaultTrackActive = computeNonDefaultTrackActive(allTrackInfos(tracks))) }
             }
             // An open picker follows the player's real tracks, never a stale snapshot.
-            if (_state.value.trackPicker != null) _state.update { it.copy(trackPicker = buildTrackPickerState(tracks)) }
+            _state.update { it.withTrackPicker { _ -> buildTrackPickerState(tracks) } }
             // docs/18 §1's second local-evidence signal (the other is onPlayerError
             // below): every track of a present type rejected by this device's
             // decoders. maybeFallBackToTranscode's own gate gets it right
@@ -989,22 +1045,22 @@ class PlaybackViewModel(
      * [fallbackPossible]; a `true` return tells the caller to skip its own fatal-error handling
      * since this takes over the session's fate. On success: loads the new plan with this session's
      * remembered tolerate/decoder preferences, resets playback rate, re-seeds position, and
-     * updates [PlaybackUiState.playMethod]/[PlaybackUiState.transcodeReason] -- [sessionEnded]
-     * stays `false` since Rust already swapped reporting sessions internally. A failed fallback is
+     * updates [PlaybackUiState.playMethod]/[PlaybackUiState.transcodeReason] -- [owner]
+     * stays [SessionOwner.Playing] since Rust already swapped reporting sessions internally. A failed fallback is
      * a plain fatal error, same handling as [start]'s own `CoreException` catch.
      *
      * **Generation guard** (canonical statement, cited elsewhere in this class): the negotiation
-     * is a real round trip, so a newer [start] call may move the session on before it resolves. A
-     * local `generation` snapshot of [sessionGeneration], re-checked when the call returns,
-     * discards the result on a mismatch -- no load, no state update, no ending a session that
-     * isn't this one's. [CoreException.StalePlaybackSession] is ignored the same way regardless.
+     * is a real round trip, so a newer [start] call may move the session on before it resolves. Its
+     * request is re-checked through [adoptPlan] when the call returns, which discards the result
+     * of a retired one -- no load, no state update, no ending a session that isn't this one's.
+     * [CoreException.StalePlaybackSession] is ignored the same way regardless.
      */
     private fun maybeFallBackToTranscode(reason: String, failed: FailedTrackFfi): Boolean {
         if (!fallbackPossible()) return false
         // docs/18 §2.1: only the live owner falls back; a retired one has nothing left to save.
-        val owner = currentRequest
-        if (owner == null || sessionEnded.get()) return true
-        if (!ownershipOpen(owner)) return false
+        val request = currentRequest
+        if (request == null || liveScope == null) return true
+        if (!ownershipOpen(request)) return false
         val plan = currentPlan!! // fallbackPossible() just confirmed this is non-null
         transcodeFallbackAttempted = true
         sessionFailedTrack = failed
@@ -1019,8 +1075,8 @@ class PlaybackViewModel(
      */
     private fun renegotiateIfBurnedIn() {
         val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return
-        val owner = currentRequest ?: return
-        if (sessionEnded.get() || !ownershipOpen(owner)) return
+        val request = currentRequest ?: return
+        if (liveScope == null || !ownershipOpen(request)) return
         // An undecided or default choice accepts whatever the server chose.
         val wanted = subtitleStreamIndexFor(choiceBeforeReload().text, plan.embeddedSubtitles) ?: return
         val burned = plan.burnedSubtitleIndex
@@ -1039,9 +1095,10 @@ class PlaybackViewModel(
      * subtitle stream the viewer's choice names. A choice changed while it negotiated is
      * renegotiated from the landed session before anything loads, so what loads never contradicts
      * the choice (burned-in pixels can't be turned off); it ends once the viewer stops changing it.
+     * Callers negotiate only for the live session.
      */
     private fun negotiateTranscode(reason: String, from: PlaybackPlan) {
-        val itemId = currentItemId
+        val itemId = from.itemId
         val ticks = _positionTicks.value
         val failed = sessionFailedTrack
         val sent = subtitleStreamIndexFor(choiceBeforeReload().text, from.embeddedSubtitles)
@@ -1113,25 +1170,34 @@ class PlaybackViewModel(
     /** The newest request minted before the launch restore landed; only those may be re-minted. */
     private var lastSeqBeforeRestore = 0uL
 
-    init {
-        playerHolder.addListener(playerListener)
-        // docs/18 §1's third local-evidence signal. Wired for this ViewModel's
-        // whole lifetime (not per-session) since the shared PlayerHolder may
-        // init a new decoder for any session, including playNext's; cleared in
-        // onCleared so a dead ViewModel's closure can't outlive it.
-        playerHolder.onVideoDecoderInitialized = { decoderName ->
-            // Cheap guard first (docs/18 §3): most decoder inits are a default
-            // Direct Play session fallbackPossible() rejects outright, so
-            // isSoftwareOnly's MediaCodecList enumeration is skipped for those.
-            if (fallbackPossible() && SoftwareDecoder.isSoftwareOnly(decoderName)) {
-                maybeFallBackToTranscode("Software video decoder $decoderName -- no hardware decoder on this TV", FailedTrackFfi.VIDEO)
-            }
+    /** Whether [playerListener] and [decoderHook] are on [playerHolder]; the first call builds its lazy ExoPlayer. */
+    private var playerWired = false
+
+    /** docs/18 §1's third local-evidence signal, kept so [onCleared] removes only its own hook from the shared holder. */
+    private val decoderHook: (String) -> Unit = { decoderName ->
+        // Cheap guard first (docs/18 §3): most decoder inits are a default Direct Play session
+        // fallbackPossible() rejects outright, so isSoftwareOnly's MediaCodecList enumeration is skipped.
+        if (fallbackPossible() && SoftwareDecoder.isSoftwareOnly(decoderName)) {
+            maybeFallBackToTranscode("Software video decoder $decoderName -- no hardware decoder on this TV", FailedTrackFfi.VIDEO)
         }
+    }
+
+    /** docs/10: called only by [start], once its plan is adopted (before the first [PlaybackPlayer.load]),
+     * so the main thread never builds the player ahead of Play's first request.
+     */
+    private fun wirePlayer() {
+        if (playerWired) return
+        playerWired = true
+        playerHolder.addListener(playerListener)
+        playerHolder.onVideoDecoderInitialized = decoderHook
+    }
+
+    init {
         // "Still watching?" (docs/12 §13): construction-only reset (not in
         // [start], which playNext/playPrevious/playNextEpisode reuse for later
         // sessions, and autoplay isn't interaction) -- unconditional, unlike
         // notePlayerInput's resetOnInput gating.
-        viewModelScope.launch { runCatching { gateway.resetStillWatching(clock.nowMs().toULong()) } }
+        viewModelScope.launch { runCatchingCancellable { gateway.resetStillWatching(clock.nowMs().toULong()) } }
         // Minted at once, so a replacement minted later outranks it; if the launch restore was still
         // running, it is re-minted under the restored epoch -- unless stopped or replaced meanwhile.
         val initialRequest = claimRequest(fresh = true)
@@ -1140,12 +1206,12 @@ class PlaybackViewModel(
             // docs/18 §2.1: from here, leaving the account this owner plays on ends its playback; the
             // core already stopped it. Not before: the launch restore itself moves the epoch.
             viewModelScope.launch {
-                combine(gateway.accountEpoch, gateway.parkedEpoch) { _, _ -> }.collect {
+                gateway.accountEpochs.collect {
                     if (currentRequest?.let { request -> !ownershipOpen(request) } == true) closeForAccountChange()
                 }
             }
             if (currentRequest != initialRequest) return@launch
-            start(currentItemId, remintIfRestored(initialRequest), startFromBeginning = startFromBeginning)
+            start(itemId, remintIfRestored(initialRequest), startFromBeginning = startFromBeginning)
         }
     }
 
@@ -1175,13 +1241,13 @@ class PlaybackViewModel(
     /** docs/18 §2.1: whether [request]'s [plan] may load; otherwise it is abandoned by its own id, and
      * the player closes if the account changed under it. */
     private suspend fun adoptPlan(request: PlaybackRequest, plan: PlaybackPlan, retires: String? = null): Boolean {
-        withContext(NonCancellable) { gateway.awaitAccountCalls() }
-        val outcome = planOutcome(latest = request == currentRequest, open = ownershipOpen(request))
+        val open = withContext(NonCancellable) { gateway.playbackOwnershipOpenNow(request.accountEpoch) }
+        val outcome = planOutcome(latest = request == currentRequest, open = open)
         if (outcome == PlanOutcome.APPLY) return true
         // A stop naming the session this fallback replaced ends it where the viewer left; an abandon
         // racing that stop could get there first and drop the position.
-        if (retires == null || retires != endedSessionId) {
-            reportScope.launch { runCatching { gateway.abandonPlayback(plan.playSessionId) } }
+        if (retires == null || retires != (owner as? SessionOwner.Ended)?.sessionId) {
+            reportScope.launch { runCatchingCancellable { gateway.abandonPlayback(plan.playSessionId) } }
         }
         if (outcome == PlanOutcome.CLOSE) closeForAccountChange()
         return false
@@ -1191,11 +1257,11 @@ class PlaybackViewModel(
      * A live session (a failed fallback) ends first; a failed prepare has none.
      */
     private suspend fun publishFailure(request: PlaybackRequest, error: CoreException) {
-        withContext(NonCancellable) { gateway.awaitAccountCalls() }
+        val open = withContext(NonCancellable) { gateway.playbackOwnershipOpenNow(request.accountEpoch) }
         val outcome = failureOutcome(
             latest = request == currentRequest,
-            open = ownershipOpen(request),
-            liveSession = !sessionEnded.get() && !errorDuringNegotiation,
+            open = open,
+            liveSession = owner is SessionOwner.Playing && !errorDuringNegotiation,
             error = error,
         )
         val event = when (outcome) {
@@ -1205,7 +1271,7 @@ class PlaybackViewModel(
             FailureOutcome.REAUTHORIZE -> PlaybackEvent.ReauthorizationRequired((error as? CoreException.Unauthorized)?.account)
             FailureOutcome.FINISH_WITH_MESSAGE -> PlaybackEvent.FinishWithMessage(error.displayMessage(strings))
         }
-        if (!sessionEnded.get()) finishAfterFatalPlaybackError(error::class.simpleName ?: "CoreException")
+        if (owner is SessionOwner.Playing) finishAfterFatalPlaybackError(error::class.simpleName ?: "CoreException")
         _events.tryEmit(event)
     }
 
@@ -1238,7 +1304,7 @@ class PlaybackViewModel(
                 // propagation for this child.
                 val settingsDeferred = async {
                     try {
-                        gateway.getSettings()
+                        settingsStore.load()
                     } catch (e: CancellationException) {
                         throw e
                     } catch (_: Exception) {
@@ -1265,12 +1331,13 @@ class PlaybackViewModel(
         }
         val (plan, settings) = startup
         if (!adoptPlan(request, plan)) return
+        wirePlayer()
 
         // Per-session reset (see the class doc's autoplay paragraph): every
         // field below is one-shot-per-session, put back to its fresh value on
         // every `start` call exactly as the constructor's own first call does.
-        currentItemId = itemId
-        sessionGeneration++ // docs/18 §3: fresh generation guard value for this session
+        val scope = SessionScope(owner.generation + 1, itemId, request.accountEpoch)
+        dismissSkipUndo() // docs/12 §14: the toast belongs to the session that skipped
         currentPlan = plan
         lastKnownItemType = plan.itemType
         logPlan(itemId, plan)
@@ -1278,21 +1345,17 @@ class PlaybackViewModel(
         sessionFailedTrack = null
         negotiation = null // a previous item's, whose stop already revoked it
         errorDuringNegotiation = false
-        endedSessionId = null
-        sessionEnded.set(false)
+        owner = SessionOwner.Playing(scope)
         lastReportedPaused = null
         playbackWasActive = false
         outroStartSecs = null // populated by fetchMediaSegments below, not read off the plan
-        nextEpisode = null
-        previousEpisode = null
+        neighbors = NeighborLookup.Unknown
         nextUpDismissed = false
         preloadedNextUpItemId = null
         lastAutoSkipSegmentKey = null
         currentSeriesId = plan.seriesId
-        trackSelectionJob?.cancel() // docs/18-playback-quality.md §3.1: leftover-job hygiene, see trackSelectionJob's own doc comment
-        trackSelectionJob = null
+        cancelTrackSelection() // docs/18 §3.1: leftover-job hygiene
         trackSelectionApplied = false
-        resolutionPending = false
         manualTrackChoiceMade = false
         pendingReapply = null
         recordedText = TextChoice.Leave
@@ -1305,8 +1368,7 @@ class PlaybackViewModel(
         endClampHold = false
         endHoldReportTicks = null
         loadStartedAtMs = android.os.SystemClock.elapsedRealtime()
-        libraryInfoJob?.cancel()
-        libraryInfoJob = null
+        closeSurface()
         bufferingTickerJob?.cancel() // leftover-job hygiene, see that field's own doc comment
         bufferingTickerJob = null
         clearSeekBufferingGrace()
@@ -1315,8 +1377,7 @@ class PlaybackViewModel(
         reconnectAttempt = 0
         reconnectElapsedMs = 0L
         reconnectPositionTicks = null
-        stillWatchingTimeoutJob?.cancel() // leftover-job hygiene, same reasoning as the tickers above
-        stillWatchingTimeoutJob = null
+        clearStillWatching()
         stillWatchingEvaluationPending = false
         endedWhileDeciding = false
 
@@ -1368,7 +1429,6 @@ class PlaybackViewModel(
                 indexNumber = plan.indexNumber,
                 durationTicks = plan.runtimeTicks,
                 nextUp = null,
-                stillWatching = null,
                 seekability = Seekability.UNKNOWN,
                 sidecarCues = null,
                 skipBackMs = skipBackMs,
@@ -1377,10 +1437,8 @@ class PlaybackViewModel(
                 skipSegmentActions = skipSegmentActions,
                 playMethod = plan.playMethod, // docs/18 §1/§3: reset per session from the fresh plan, never carried over
                 transcodeReason = plan.transcodeReason,
-                statsSheetLive = null,
                 playbackStatsDetail = null,
                 statsServerName = null,
-                libraryInfoOverlay = null,
                 chapters = emptyList(),
                 mediaSegments = emptyList(),
                 isBuffering = false,
@@ -1391,8 +1449,6 @@ class PlaybackViewModel(
                 seekPreviewSize = settings?.seekPreviewSize ?: SeekPreviewSize.MEDIUM,
                 miniPlayerEnabled = settings?.miniPlayerEnabled ?: false,
                 playbackRate = 1f,
-                speedMenuOpen = false,
-                chaptersMenuOpen = false,
                 hasPreviousEpisode = false,
                 hasNextEpisode = false,
                 nonDefaultTrackActive = false,
@@ -1401,13 +1457,13 @@ class PlaybackViewModel(
 
         // Session heartbeat starts before every optional enrichment; episode-neighbor
         // recovery may need one live request and must never block time-to-first-frame.
-        startProgressTicker()
+        startProgressTicker(scope)
         val episodeSeriesId = plan.seriesId
         if (plan.itemType == ITEM_TYPE_EPISODE && episodeSeriesId != null) {
-            fetchEpisodeNeighbors(itemId, episodeSeriesId)
+            fetchEpisodeNeighbors(scope, episodeSeriesId)
         }
         // Segments feed auto-skip, which can fire at 0s, so this one stays immediate.
-        fetchMediaSegments(itemId)
+        fetchMediaSegments(scope)
         // The rest are gated on enrichmentGate (first frame, or the fallback below) so they
         // don't compete with the media loads for time-to-first-frame (docs/12 §11, docs/18).
         val gate = enrichmentGate
@@ -1415,29 +1471,29 @@ class PlaybackViewModel(
             delay(ENRICHMENT_GATE_FALLBACK_MS)
             gate.complete(Unit)
         }
-        fetchPlaybackOsdDetail(itemId)
-        fetchTrickplay(itemId, plan.mediaSourceId)
-        fetchServerDisplayName(itemId)
+        fetchPlaybackOsdDetail(scope, plan.mediaSourceId)
+        fetchServerDisplayName(scope)
     }
 
     /**
      * Populates both episode-edge controls from one coherent lookup after
      * player load. The FFI prefers the mirror and performs at most one live
-     * series request if the current item cannot be placed there. The item-id
-     * guard prevents a late answer from an old autoplay session from adding
-     * controls that target the wrong episode.
+     * series request if the current item cannot be placed there. The scope
+     * guard keeps a late answer from an older session, even of the same item, from adding
+     * controls that target the wrong episode. An unanswered lookup is [NeighborLookup.Failed],
+     * which [retryFailedNeighbors] repeats once.
      */
-    private fun fetchEpisodeNeighbors(itemId: String, seriesId: String) {
+    private fun fetchEpisodeNeighbors(scope: SessionScope, seriesId: String, retried: Boolean = false) {
         viewModelScope.launch {
-            val neighbors = runCatching { gateway.episodeNeighbors(itemId, seriesId, accountEpoch) }.getOrNull()
-            if (currentItemId != itemId) return@launch
-            previousEpisode = neighbors?.previous
-            nextEpisode = neighbors?.next
-            _state.update {
-                it.copy(
-                    hasPreviousEpisode = previousEpisode != null,
-                    hasNextEpisode = nextEpisode != null,
-                )
+            val found = runCatchingCancellable { gateway.episodeNeighbors(scope.itemId, seriesId, scope.accountEpoch) }.getOrNull()
+            scope.ifCurrent {
+                neighbors = found?.let { NeighborLookup.Known(it.previous, it.next) } ?: NeighborLookup.Failed(retried)
+                _state.update {
+                    it.copy(
+                        hasPreviousEpisode = previousEpisode != null,
+                        hasNextEpisode = nextEpisode != null,
+                    )
+                }
             }
         }
     }
@@ -1446,26 +1502,28 @@ class PlaybackViewModel(
      * Chapters + the info overlay's content (docs/12), from one narrow live
      * [uniffi.jellybeam_core.PlaybackOsdDetail] fetch. Fire-and-forget, not awaited by [start]; fails
      * open since an older/unreachable server just means no tick marks/empty overlay, never a
-     * playback interruption. Gated on [enrichmentGate], along with [fetchTrickplay] and
-     * [fetchServerDisplayName].
+     * playback interruption. Gated on [enrichmentGate], along with [fetchServerDisplayName].
      *
      * **Stale-session guard, shared by every `fetch*` method in this class**
-     * ([fetchServerDisplayName]/[fetchMediaSegments]/[fetchTrickplay]): [viewModelScope] outlives
-     * one session, so a slow fetch from a *previous* item may still be in flight after
-     * [currentItemId] moved on. Each re-checks `currentItemId != itemId` after its suspend point
-     * and bails if a newer session started; each is independent, one failing never blocks another.
+     * ([fetchServerDisplayName]/[fetchMediaSegments]): [viewModelScope] outlives
+     * one session, so a slow fetch from an earlier one may still be in flight after a newer
+     * [start]. Each names its own [SessionScope.accountEpoch] and publishes only through
+     * [ifCurrent] (docs/18 §2.1); each is independent, one failing never blocks another.
      */
-    private fun fetchPlaybackOsdDetail(itemId: String) {
+    private fun fetchPlaybackOsdDetail(scope: SessionScope, mediaSourceId: String) {
         val gate = enrichmentGate
         viewModelScope.launch {
             gate.await() // docs/12 §11: first frame, or the fallback timer -- see enrichmentGate's doc comment
-            val detail = runCatching { gateway.getPlaybackOsdDetail(itemId, accountEpoch) }.getOrNull()
-            if (currentItemId != itemId) return@launch // a newer session started meanwhile -- see this method's own doc comment
-            _state.update {
-                it.copy(
-                    playbackStatsDetail = detail,
-                    chapters = detail?.chapters.orEmpty(),
-                )
+            if (!scope.isCurrent()) return@launch // a replaced session asks for nothing
+            val detail = runCatchingCancellable { gateway.getPlaybackOsdDetail(scope.itemId, mediaSourceId, scope.accountEpoch) }.getOrNull()
+            scope.ifCurrent {
+                _state.update {
+                    it.copy(
+                        playbackStatsDetail = detail,
+                        chapters = detail?.chapters.orEmpty(),
+                    )
+                }
+                startTrickplay(scope, detail?.trickplay)
             }
         }
     }
@@ -1474,13 +1532,13 @@ class PlaybackViewModel(
      * [fetchPlaybackOsdDetail]'s doc comment for the shared shape. `null` if unresolved or nobody's
      * signed in; the sheet omits the row.
      */
-    private fun fetchServerDisplayName(itemId: String) {
+    private fun fetchServerDisplayName(scope: SessionScope) {
         val gate = enrichmentGate
         viewModelScope.launch {
             gate.await() // docs/12 §11: first frame, or the fallback timer -- see enrichmentGate's doc comment
-            val name = runCatching { gateway.serverDisplayName(accountEpoch) }.getOrNull()
-            if (currentItemId != itemId) return@launch // a newer session started meanwhile -- see fetchPlaybackOsdDetail's own doc comment
-            _state.update { it.copy(statsServerName = name) }
+            if (!scope.isCurrent()) return@launch
+            val name = runCatchingCancellable { gateway.serverDisplayName(scope.accountEpoch) }.getOrNull()
+            scope.ifCurrent { _state.update { it.copy(statsServerName = name) } }
         }
     }
 
@@ -1488,40 +1546,34 @@ class PlaybackViewModel(
      * [outroStartSecs] via [CoreGateway.outroStartSecsFromSegments] from this same fetch -- no
      * second request.
      */
-    private fun fetchMediaSegments(itemId: String) {
+    private fun fetchMediaSegments(scope: SessionScope) {
         viewModelScope.launch {
-            val segments = runCatching { gateway.getMediaSegments(itemId, accountEpoch) }.getOrDefault(emptyList())
-            if (currentItemId != itemId) return@launch // a newer session started meanwhile -- see fetchPlaybackOsdDetail's own doc comment
-            outroStartSecs = gateway.outroStartSecsFromSegments(segments)
-            _state.update { it.copy(mediaSegments = segments) }
+            val segments = runCatchingCancellable { gateway.getMediaSegments(scope.itemId, scope.accountEpoch) }.getOrDefault(emptyList())
+            scope.ifCurrent {
+                outroStartSecs = gateway.outroStartSecsFromSegments(segments)
+                _state.update { it.copy(mediaSegments = segments) }
+            }
         }
     }
 
-    /** Trickplay scrub-preview manifest, via [CoreGateway.getTrickplay] -- see
-     * [fetchPlaybackOsdDetail]'s doc comment for the shared shape. [seek] already fails open on a
-     * `null` [trickplayMeta], so a race needs no special handling.
+    /** Starts the scrub-preview pipeline from the manifest the one enrichment fetch carried (docs/10).
+     * [seek] already fails open on a `null` [trickplayMeta], so a race needs no special handling.
      */
-    private fun fetchTrickplay(itemId: String, mediaSourceId: String) {
-        val gate = enrichmentGate
-        viewModelScope.launch {
-            gate.await() // docs/12 §11: first frame, or the fallback timer -- see enrichmentGate's doc comment
-            val meta = runCatching { gateway.getTrickplay(itemId, mediaSourceId, accountEpoch) }.getOrNull()
-            if (currentItemId != itemId) return@launch // a newer session started meanwhile -- see fetchPlaybackOsdDetail's own doc comment
-            trickplayMeta = meta
-            val previewer = previewer
-            if (meta != null && previewer != null) {
-                previewer.startSession(
-                    meta,
-                    urlFor = { index -> gateway.trickplayTileUrl(itemId, meta.width, index, accountEpoch) },
-                    abandonRule = { sheet, targetMs, direction ->
-                        gateway.trickplayShouldAbandonSheet(meta, sheet.toUInt(), targetMs.toULong(), direction)
-                    },
-                )
-                // docs/12 §11: the sheet under the play position is warmed now so the session's
-                // first glide never starts with a cold fetch.
-                val positionMs = PlaybackTicks.ticksToMs(positionTicks.value).coerceAtLeast(0L)
-                gateway.trickplayLocate(meta, positionMs.toULong())?.let { previewer.warm(it.imageIndex.toInt()) }
-            }
+    private fun startTrickplay(scope: SessionScope, meta: TrickplayMetaFfi?) {
+        trickplayMeta = meta
+        val previewer = previewer
+        if (meta != null && previewer != null) {
+            previewer.startSession(
+                meta,
+                urlFor = { index -> gateway.trickplayTileUrl(scope.itemId, meta.width, index, scope.accountEpoch) },
+                abandonRule = { sheet, targetMs, direction ->
+                    gateway.trickplayShouldAbandonSheet(meta, sheet.toUInt(), targetMs.toULong(), direction)
+                },
+            )
+            // docs/12 §11: the sheet under the play position is warmed now so the session's
+            // first glide never starts with a cold fetch.
+            val positionMs = PlaybackTicks.ticksToMs(positionTicks.value).coerceAtLeast(0L)
+            gateway.trickplayLocate(meta, positionMs.toULong())?.let { previewer.warm(it.imageIndex.toInt()) }
         }
     }
 
@@ -1539,7 +1591,7 @@ class PlaybackViewModel(
      * [evaluateNextUp] are independent concerns sharing one tick, none skippable just because
      * nobody's collecting.
      */
-    private fun startProgressTicker() {
+    private fun startProgressTicker(scope: SessionScope) {
         reportTickerJob?.cancel()
         reportTickerJob = viewModelScope.launch {
             while (isActive) {
@@ -1563,13 +1615,14 @@ class PlaybackViewModel(
                 // Named on main: a report queued behind a stop never lands on the next session.
                 val reportTo = sessionOnScreen()
                 if (reportTo != null && ProgressReportGate.shouldReportPosition(playerHolder.isPlaying)) {
-                    runCatching { gateway.reportPosition(reportTo, ticks) }
+                    runCatchingCancellable { gateway.reportPosition(reportTo, ticks) }
                 }
+                if (!scope.isCurrent()) return@launch // docs/18 §2.1: a report held across a newer start evaluates nothing
                 // docs/12 §9: an end-clamped glide commit pauses without
                 // triggering autoplay/up-next/watched-state -- position
                 // reporting and stats above are unaffected.
                 if (!endClampHold) {
-                    evaluateNextUp(ticks)
+                    evaluateNextUp(scope, ticks)
                     evaluateAutoSkip(ticks)
                 }
             }
@@ -1606,10 +1659,14 @@ class PlaybackViewModel(
      * [PlaybackUiState.stillWatching] instead (mutually exclusive by construction). With a card
      * already shown, advances its countdown and calls [playNext] on completion only if
      * [NextUpState.autoAdvance] is true; a shown still-watching card is left to its own timeout
-     * job. A no-op with no next episode, no known duration, or after [nextUpDismissed].
+     * job. A no-op with no next episode, no known duration, or after [nextUpDismissed]; a failed
+     * lookup is retried once on entering the trigger zone.
      */
-    private fun evaluateNextUp(positionTicks: Long) {
-        val next = nextEpisode ?: return
+    private fun evaluateNextUp(scope: SessionScope, positionTicks: Long) {
+        val lookup = neighbors
+        // Only a known next episode, or a failure not yet retried, has anything to evaluate.
+        if (lookup is NeighborLookup.Unknown || lookup is NeighborLookup.Failed && lookup.retried) return
+        if (lookup is NeighborLookup.Known && lookup.next == null) return
         if (nextUpDismissed) return
         if (_state.value.stillWatching != null) return
         if (stillWatchingEvaluationPending) return
@@ -1625,21 +1682,26 @@ class PlaybackViewModel(
                 SkipSegment.decision(MediaSegmentKind.OUTRO, _state.value.skipSegmentActions) == SegmentDecision.AUTO_SKIP
             val triggerSecs = gateway.nextEpisodeTriggerRemainingSecs(durationSecs, outroStart, outroAutoSkipActive, autoplayDelaySecs)
             if (remainingSecs <= triggerSecs) {
+                // Entering the zone is the moment a failed lookup matters (docs/12 §8): one more try.
+                val next = when (lookup) {
+                    is NeighborLookup.Known -> lookup.next ?: return
+                    is NeighborLookup.Failed -> return retryFailedNeighbors(scope, lookup)
+                    NeighborLookup.Unknown -> return
+                }
                 // The countdown runs against what will actually play: to the outro when the
                 // credits are auto-skipped, otherwise to the end of the file.
                 val playableSecs =
                     if (outroAutoSkipActive) (outroStart - positionSecs).coerceAtLeast(0.0) else remainingSecs
                 if (!autoplayEnabled) {
                     // Autoplay off: guard is inert, show the static card, no round trip.
-                    showCountdownCard(next, playableSecs, positionTicks)
+                    showCountdownCard(scope, next, playableSecs, positionTicks)
                     return
                 }
-                val requestedItemId = currentItemId
                 stillWatchingEvaluationPending = true
                 viewModelScope.launch {
-                    val decision = runCatching { gateway.noteEpisodeFinished(clock.nowMs().toULong()) }
+                    val decision = runCatchingCancellable { gateway.noteEpisodeFinished(clock.nowMs().toULong()) }
                         .getOrDefault(StillWatchingDecision.COUNTDOWN)
-                    if (currentItemId != requestedItemId) return@launch // a newer session started meanwhile
+                    if (!scope.isCurrent()) return@launch // a newer session started meanwhile
                     // docs/12 §9: a hold established during this await means the
                     // viewer already glided to the end clamp -- honour that over
                     // a decision computed before the hold existed.
@@ -1677,7 +1739,7 @@ class PlaybackViewModel(
                             endedWhileDeciding = false
                             when (outcome) {
                                 CountdownOutcome.ADVANCE_NOW -> transitionTo(next)
-                                CountdownOutcome.SHOW_CARD -> showCountdownCard(next, playableSecs, positionTicks)
+                                CountdownOutcome.SHOW_CARD -> showCountdownCard(scope, next, playableSecs, positionTicks)
                             }
                         }
                     }
@@ -1691,11 +1753,21 @@ class PlaybackViewModel(
         }
     }
 
+    /** docs/12 §8: a [NeighborLookup.Failed] lookup is repeated once, when the viewer reaches the
+     * next-up trigger zone; the retry is marked before it runs so no later tick repeats it.
+     */
+    private fun retryFailedNeighbors(scope: SessionScope, lookup: NeighborLookup.Failed) {
+        if (lookup.retried) return
+        val seriesId = currentSeriesId ?: return
+        neighbors = NeighborLookup.Failed(retried = true)
+        fetchEpisodeNeighbors(scope, seriesId, retried = true)
+    }
+
     /** Populates the ordinary autoplay countdown card -- factored out of [evaluateNextUp] since
      * it's reached from both the autoplay-off path and a [StillWatchingDecision.COUNTDOWN] answer.
      * [playableSecs] is what is left to play before the file ends or the credits are skipped.
      */
-    private fun showCountdownCard(next: Card, playableSecs: Double, positionTicks: Long) {
+    private fun showCountdownCard(scope: SessionScope, next: Card, playableSecs: Double, positionTicks: Long) {
         val countdownTotal = gateway.nextEpisodeCountdownTotal(playableSecs, autoplayDelaySecs)
         _state.update {
             it.copy(
@@ -1711,7 +1783,7 @@ class PlaybackViewModel(
         // fresh cache instead of negotiating cold.
         if (preloadedNextUpItemId != next.id) {
             preloadedNextUpItemId = next.id
-            viewModelScope.launch { runCatching { gateway.preloadPlayback(next.id, accountEpoch) } }
+            viewModelScope.launch { runCatchingCancellable { gateway.preloadPlayback(next.id, scope.accountEpoch) } }
         }
     }
 
@@ -1738,10 +1810,17 @@ class PlaybackViewModel(
      * restarts the shown card's timeout, resetting its fill/numeral.
      */
     fun noteUserInput() {
-        viewModelScope.launch { runCatching { gateway.notePlayerInput(clock.nowMs().toULong()) } }
+        viewModelScope.launch { runCatchingCancellable { gateway.notePlayerInput(clock.nowMs().toULong()) } }
         if (_state.value.stillWatching != null) {
             startStillWatchingTimeout()
         }
+    }
+
+    /** The one place the still-watching card goes away: its timeout dies with it, so a stale deadline can never stop a later session. */
+    private fun clearStillWatching() {
+        stillWatchingTimeoutJob?.cancel()
+        stillWatchingTimeoutJob = null
+        _state.update { it.copy(stillWatching = null) }
     }
 
     /** "Continue" on the still-watching card: resets the counters unconditionally via
@@ -1750,10 +1829,8 @@ class PlaybackViewModel(
      */
     fun stillWatchingContinue() {
         val card = _state.value.stillWatching?.card ?: return
-        stillWatchingTimeoutJob?.cancel()
-        stillWatchingTimeoutJob = null
-        _state.update { it.copy(stillWatching = null) }
-        viewModelScope.launch { runCatching { gateway.resetStillWatching(clock.nowMs().toULong()) } }
+        clearStillWatching()
+        viewModelScope.launch { runCatchingCancellable { gateway.resetStillWatching(clock.nowMs().toULong()) } }
         transitionTo(card)
     }
 
@@ -1764,12 +1841,10 @@ class PlaybackViewModel(
      */
     fun stillWatchingStop() {
         val card = _state.value.stillWatching?.card ?: return
-        stillWatchingTimeoutJob?.cancel()
-        stillWatchingTimeoutJob = null
-        _state.update { it.copy(stillWatching = null) }
+        clearStillWatching()
         stopPlaybackOnce(reason = "still_watching")
         // Detail resolves ids on the browsed account; a playback kept on another just closes (docs/18 §2.1).
-        val onBrowsedAccount = accountEpoch == null || accountEpoch == gateway.accountEpoch.value
+        val onBrowsedAccount = accountEpoch == null || accountEpoch == gateway.accountEpochs.value.epoch
         _events.tryEmit(if (onBrowsedAccount) PlaybackEvent.FinishToDetail(itemId = card.id) else PlaybackEvent.Finish)
     }
 
@@ -1789,7 +1864,7 @@ class PlaybackViewModel(
     private fun evaluateAutoSkip(positionTicks: Long) {
         // A transition this tick already started (the next-up countdown ran out at the
         // credits): nothing left to skip in a session being torn down.
-        if (sessionTransitionInFlight.get()) return
+        if (owner !is SessionOwner.Playing) return
         val segment = SkipSegment.activeSegment(_state.value.mediaSegments, positionTicks) ?: return
         val decision = guardedSegmentDecision(segment.segmentType)
         if (decision != SegmentDecision.AUTO_SKIP) return
@@ -1808,27 +1883,22 @@ class PlaybackViewModel(
         _events.tryEmit(PlaybackEvent.AutoSkipped(before, segment.segmentType))
     }
 
-    /** Shared end-then-start transition: ends the current session (serialized via
-     * [sessionTransitionInFlight]) then starts a fresh one for [card]'s item.
+    /** Shared end-then-start transition: ends the current session then starts a fresh one for
+     * [card]'s item. A no-op unless a session is [SessionOwner.Playing], so a double press or a
+     * simultaneous EOF and countdown moves on once.
      * [playNext]/[playPrevious]/[playNextEpisode]/[stillWatchingContinue] all funnel through this.
      */
     private fun transitionTo(card: Card) {
-        if (!sessionTransitionInFlight.compareAndSet(false, true)) return
+        if (owner !is SessionOwner.Playing) return
         val request = claimRequest()
         // Undispatched: the stop names the session at once, so no landing fallback sees the new
         // request before it (see adoptPlan).
-        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            try {
-                replaceWith(card.id, request)
-            } finally {
-                sessionTransitionInFlight.set(false)
-            }
-        }
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { replaceWith(card.id, request) }
     }
 
-    /** The end-then-start body [transitionTo] and [replaceItem] both guard with
-     * [sessionTransitionInFlight], keyed by a raw item id since JellybeamCore owns a single reporting
-     * session: the final stop must finish before `preparePlayback` replaces it.
+    /** The end-then-start body [transitionTo] and [replaceItem] share, keyed by a raw item id since
+     * JellybeamCore owns a single reporting session: the final stop must finish before
+     * `preparePlayback` replaces it, and only the newest [request] gets that far (docs/18 §2.1).
      */
     private suspend fun replaceWith(itemId: String, request: PlaybackRequest, startFromBeginning: Boolean = false) {
         stopPlaybackAndAwait(keep = request)
@@ -1845,19 +1915,13 @@ class PlaybackViewModel(
 
     /** `onNewIntent` path (docs/17 §2): a Play/Resume/deep-link intent to an already-alive
      * [tv.jellybeam.player.PlaybackActivity] swaps the item via [transitionTo]'s stop-then-start,
-     * keyed by raw item id. A no-op while another transition is in flight.
+     * keyed by raw item id. Always the newest request: one still negotiating, an autoplay's
+     * included, is obsolete and its plan abandoned (docs/18 §2.1).
      */
     fun replaceItem(itemId: String, startFromBeginning: Boolean = false) {
-        if (!sessionTransitionInFlight.compareAndSet(false, true)) return
         // Minted now, so an initial prepare still negotiating is already obsolete (docs/18 §2.1).
         val request = claimRequest(fresh = true)
-        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { // as transitionTo
-            try {
-                replaceWith(itemId, request, startFromBeginning)
-            } finally {
-                sessionTransitionInFlight.set(false)
-            }
-        }
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { replaceWith(itemId, request, startFromBeginning) } // as transitionTo
     }
 
     /** Autoplay/"Play now": advances to the next-up card's episode via [transitionTo]. A no-op if
@@ -1901,9 +1965,7 @@ class PlaybackViewModel(
      * [tracks], maps them via [TrackMapping.toTrackInfos], resolves a decision via
      * [CoreGateway.resolveTracks], and applies it (see [trackSelectionApplied]'s doc for the
      * once-per-session rule). A no-op when [tracks] carries nothing to decide on, without setting
-     * [trackSelectionApplied] so a later, more complete announcement still gets a chance. Same
-     * generation-guard shape as [maybeFallBackToTranscode] (re-checked alongside
-     * [manualTrackChoiceMade]) since a session change or manual pick can land mid-flight.
+     * [trackSelectionApplied] so a later, more complete announcement still gets a chance.
      */
     private fun resolveTrackSelectionOnce(tracks: Tracks) {
         if (trackSelectionApplied) return
@@ -1916,14 +1978,13 @@ class PlaybackViewModel(
         val burnable = burnableSubtitles(tracks)
         val embeddedTextSelected = (embedded + burnable).any { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }
         val seriesId = currentSeriesId
-        val generation = sessionGeneration
+        if (liveScope == null) return
         resolutionPending = true
-        val token = Any().also { resolutionToken = it }
         trackSelectionJob = viewModelScope.launch {
             try {
-                resolveAndApply(seriesId, trackInfos, policyTracks(embedded, sidecarInfos, burnable), embedded, burnable, embeddedTextSelected, tracks, generation)
+                resolveAndApply(seriesId, trackInfos, policyTracks(embedded, sidecarInfos, burnable), embedded, burnable, embeddedTextSelected, tracks)
             } finally {
-                if (resolutionToken === token) resolutionPending = false
+                if (isActive) resolutionPending = false // a cancelled job's canceller already cleared it
             }
         }
     }
@@ -1936,10 +1997,8 @@ class PlaybackViewModel(
         burnable: List<TrackInfo>,
         embeddedTextSelected: Boolean,
         tracks: Tracks,
-        generation: Int,
     ) {
-        val resolved = runCatching { gateway.resolveTracks(seriesId, policyInput) }.getOrNull() ?: return
-        if (generation != sessionGeneration || manualTrackChoiceMade) return // see resolveTrackSelectionOnce's doc comment
+        val resolved = runCatchingCancellable { gateway.resolveTracks(seriesId, policyInput) }.getOrNull() ?: return
         val (decision, burnPick) = routeBurnable(resolved, burnable)
         val audio = decision.audioTrackId?.let { id -> embedded.firstOrNull { it.id == id } }
             ?: embedded.firstOrNull { it.kind == TrackKindFfi.AUDIO && it.isSelected }
@@ -1979,8 +2038,7 @@ class PlaybackViewModel(
      * is matched (Off and sidecars need no track); Auto resolves again on the new tracks.
      */
     private fun armReapply(choice: ReloadChoice) {
-        trackSelectionJob?.cancel()
-        trackSelectionJob = null
+        cancelTrackSelection()
         if (choice.text == TextChoice.Auto) {
             trackSelectionApplied = false
             pendingReapply = null
@@ -2067,16 +2125,11 @@ class PlaybackViewModel(
      */
     fun openTrackPicker() {
         val tracks = playerHolder.currentTracks ?: return
-        _state.update {
-            it.copy(trackPicker = buildTrackPickerState(tracks), speedMenuOpen = false, chaptersMenuOpen = false)
-        }
+        open(OpenSurface.Tracks(buildTrackPickerState(tracks)))
     }
 
-    /** Closes the picker -- the Back priority chain calls this first, ahead of next-up dismissal
-     * and exit, whenever the picker is open.
-     */
-    fun closeTrackPicker() {
-        _state.update { it.copy(trackPicker = null) }
+    private fun closeTrackPicker() {
+        replaceSurface { if (it is OpenSurface.Tracks) OpenSurface.None else it }
     }
 
     private fun buildTrackPickerState(tracks: Tracks): TrackPickerState {
@@ -2281,16 +2334,15 @@ class PlaybackViewModel(
         val tracks = playerHolder.currentTracks ?: return
         _state.update { state ->
             state.copy(
-                trackPicker = state.trackPicker?.copy(subtitleTracks = subtitleChoices(tracks)),
                 nonDefaultTrackActive = computeNonDefaultTrackActive(allTrackInfos(tracks)),
-            )
+            ).withTrackPicker { it.copy(subtitleTracks = subtitleChoices(tracks)) }
         }
     }
 
     /**
      * Chooses [id] as the audio track (docs/09 slice 3b): applies it via
      * [PlaybackPlayer.applyTrackDecision] (subtitles untouched) and, only when this session has a
-     * series, remembers the choice via [CoreGateway.rememberTrackChoice]. A Movie applies the
+     * series, remembers the choice via [CoreGateway.rememberTrackMemory]. A Movie applies the
      * override but skips remembering (nothing to key on). A no-op if [id] doesn't resolve to a
      * currently-known audio track. Flips [TrackChoice.selected] optimistically in the held
      * [TrackPickerState] rather than waiting for a real `onTracksChanged`.
@@ -2302,27 +2354,23 @@ class PlaybackViewModel(
 
         // A manual pick always wins -- cancel any pending automatic resolution
         // outright rather than relying solely on its own after-the-fact recheck.
-        trackSelectionJob?.cancel()
-        trackSelectionJob = null
+        cancelTrackSelection()
         dropPendingReapply(TrackKindFfi.AUDIO)
         manualTrackChoiceMade = true
         val decision = TrackDecisionFfi(audioTrackId = id, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = null)
         playerHolder.applyTrackDecision(decision, tracks)
         recordDecision(decision, trackInfos)
-        rememberTrackChoiceIfSeries(TrackKindFfi.AUDIO, gateway.trackPrefKeyOf(info))
+        rememberTrackMemoryIfSeries(TrackKindFfi.AUDIO, keyedMemory(gateway.trackPrefKeyOf(info)))
         _state.update { state ->
             state.copy(
-                trackPicker = state.trackPicker?.copy(
-                    audioTracks = state.trackPicker.audioTracks.map { it.copy(selected = it.id == id) },
-                ),
                 nonDefaultTrackActive = computeNonDefaultTrackActive(applyDecisionToTrackInfos(trackInfos, decision)),
-            )
+            ).withTrackPicker { picker -> picker.copy(audioTracks = picker.audioTracks.map { it.copy(selected = it.id == id) }) }
         }
     }
 
     /** Chooses [id] as the subtitle track, or [TRACK_PICKER_SUBTITLE_OFF_ID] to disable subtitles
      * -- see [chooseAudio]'s doc comment for the shared design. "Off" is itself a real remembered
-     * choice (docs/09), so it still calls [CoreGateway.rememberTrackChoice] with `trackKey = null`.
+     * choice (docs/18 §3.1), so it remembers [TrackMemoryFfi.Off].
      */
     fun chooseSubtitle(id: Long) {
         val tracks = playerHolder.currentTracks ?: return
@@ -2332,24 +2380,23 @@ class PlaybackViewModel(
         if (id != TRACK_PICKER_SUBTITLE_OFF_ID && info == null) return
 
         // See chooseAudio's comment on why this cancels the pending resolution outright.
-        trackSelectionJob?.cancel()
-        trackSelectionJob = null
+        cancelTrackSelection()
         dropPendingReapply(TrackKindFfi.SUBTITLE)
         manualTrackChoiceMade = true
         val sidecar = ExternalSubtitles.indexOf(id)
-        val trackKey = info?.let(gateway::trackPrefKeyOf)
+        val memory = if (info == null) TrackMemoryFfi.Off else keyedMemory(gateway.trackPrefKeyOf(info))
         var decision: TrackDecisionFfi? = null
         if (sidecar != null) {
             // Embedded text is off under a sidecar, and stays off if the file fails.
             recordedText = TextChoice.Off
             // Remembered only once it loads, so a broken file never follows the series.
-            showSidecar(sidecar) { rememberTrackChoiceIfSeries(TrackKindFfi.SUBTITLE, trackKey) }
+            showSidecar(sidecar) { rememberTrackMemoryIfSeries(TrackKindFfi.SUBTITLE, memory) }
         } else {
             hideSidecar()
             decision = if (info == null) SUBTITLES_OFF else TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = id)
             playerHolder.applyTrackDecision(decision, tracks)
             recordDecision(decision, trackInfos)
-            rememberTrackChoiceIfSeries(TrackKindFfi.SUBTITLE, trackKey)
+            rememberTrackMemoryIfSeries(TrackKindFfi.SUBTITLE, memory)
         }
 
         renegotiateIfBurnedIn() // first, so the burn-in rows below read what it asked for
@@ -2358,11 +2405,8 @@ class PlaybackViewModel(
         val effective = decision?.let { applyDecisionToTrackInfos(trackInfos, it) } ?: allTrackInfos(tracks)
         _state.update { state ->
             state.copy(
-                trackPicker = state.trackPicker?.copy(
-                    subtitleTracks = if (sidecar != null) choices else choices.map { it.copy(selected = it.id == id) },
-                ),
                 nonDefaultTrackActive = computeNonDefaultTrackActive(effective),
-            )
+            ).withTrackPicker { it.copy(subtitleTracks = if (sidecar != null) choices else choices.map { choice -> choice.copy(selected = choice.id == id) }) }
         }
     }
 
@@ -2373,29 +2417,27 @@ class PlaybackViewModel(
         val info = burnableSubtitles(tracks).firstOrNull { it.id == id } ?: return
         // Already burned in and nothing negotiating; mid-negotiation the landing re-checks the choice.
         if (info.isSelected && negotiation == null) return
-        trackSelectionJob?.cancel()
-        trackSelectionJob = null
+        cancelTrackSelection()
         dropPendingReapply(TrackKindFfi.SUBTITLE)
         manualTrackChoiceMade = true
         hideSidecar()
         playerHolder.applyTrackDecision(SUBTITLES_OFF, tracks)
         recordedText = TextChoice.Embedded(info.identity())
-        rememberTrackChoiceIfSeries(TrackKindFfi.SUBTITLE, gateway.trackPrefKeyOf(info))
+        rememberTrackMemoryIfSeries(TrackKindFfi.SUBTITLE, keyedMemory(gateway.trackPrefKeyOf(info)))
         renegotiateIfBurnedIn()
         _state.update { state ->
             state.copy(
-                trackPicker = state.trackPicker?.copy(subtitleTracks = subtitleChoices(tracks).map { it.copy(selected = it.id == id) }),
                 nonDefaultTrackActive = computeNonDefaultTrackActive(applyDecisionToTrackInfos(allTrackInfos(tracks), SUBTITLES_OFF)),
-            )
+            ).withTrackPicker { picker -> picker.copy(subtitleTracks = subtitleChoices(tracks).map { it.copy(selected = it.id == id) }) }
         }
     }
 
     /** Shared by [chooseAudio]/[chooseSubtitle] -- see [chooseAudio]'s own doc comment for the
      * Movie skip-remember rule.
      */
-    private fun rememberTrackChoiceIfSeries(kind: TrackKindFfi, trackKey: String?) {
+    private fun rememberTrackMemoryIfSeries(kind: TrackKindFfi, memory: TrackMemoryFfi) {
         val seriesId = currentSeriesId ?: return
-        viewModelScope.launch { runCatching { gateway.rememberTrackChoice(seriesId, kind, trackKey) } }
+        viewModelScope.launch { runCatchingCancellable { gateway.rememberTrackMemory(seriesId, kind, memory) } }
     }
 
     /** A saved position this session asked to resume from; an unseekable file can't honor it. */
@@ -2475,7 +2517,7 @@ class PlaybackViewModel(
         if (ProgressReportGate.shouldReportPaused(lastReportedPaused, isPaused)) {
             lastReportedPaused = isPaused
             sessionOnScreen()?.let { reportTo ->
-                viewModelScope.launch { runCatching { gateway.reportPaused(reportTo, isPaused) } }
+                viewModelScope.launch { runCatchingCancellable { gateway.reportPaused(reportTo, isPaused) } }
             }
         }
 
@@ -2487,8 +2529,8 @@ class PlaybackViewModel(
      * Resolves Media3's terminal state -- the progress ticker normally starts autoplay before
      * EOF, but ENDED can beat its next tick. Preserves autoplay when its card is eligible;
      * otherwise closes the reporting session and tells the Activity to leave playback.
-     * [sessionTransitionInFlight] doubles as the play-next lock, making natural EOF and a
-     * simultaneous countdown/Enter mutually exclusive. A no-op while a "still watching?" card is
+     * A [transitionTo] ends the session synchronously, making natural EOF and a simultaneous
+     * countdown/Enter mutually exclusive. A no-op while a "still watching?" card is
      * shown: it must stay up until answered or timed out.
      */
     private fun handlePlaybackEnded() {
@@ -2504,11 +2546,8 @@ class PlaybackViewModel(
             playNext()
             return
         }
-        if (!sessionTransitionInFlight.compareAndSet(false, true)) return
-        if (sessionEnded.get()) return
-
-        stopPlaybackOnce(reason = "ended")
-        _events.tryEmit(PlaybackEvent.Finish)
+        if (owner !is SessionOwner.Playing) return
+        finishAfterStop(reason = "ended")
     }
 
     /**
@@ -2581,6 +2620,28 @@ class PlaybackViewModel(
     }
 
     fun togglePlayPause() = playerHolder.togglePlayPause()
+
+    /** The play/pause intent, which [MediaKeyRouter] reads so a repeated Play or Pause never toggles. */
+    val playWhenReady: Boolean get() = playerHolder.playWhenReady
+
+    /** docs/17 §2: a remote's Stop ends playback exactly like Back, whatever the session is doing --
+     * a transition still preparing its title is retired with it, so that title never plays.
+     */
+    fun stopFromRemote() = finishAfterStop(reason = "remote")
+
+    /** docs/17 §2: the one end the viewer asked for. [stopPlaybackOnce] is the exactly-once guard and
+     * retires any pending request; with the still-watching card up it is that card's Stop, as Back.
+     */
+    private fun finishAfterStop(reason: String) {
+        if (_state.value.stillWatching != null) return stillWatchingStop()
+        stopPlaybackOnce(reason = reason)
+        _events.tryEmit(PlaybackEvent.Finish)
+    }
+
+    /** docs/17 §2: an absolute seek asked for by the MediaSession (Assistant, system UI), through the same guarded path as the other seeks. */
+    fun seekToPositionMs(positionMs: Long) {
+        seekToAbsoluteTicks(PlaybackTicks.msToTicks(positionMs))
+    }
 
     /** Sets the live playback rate (docs/12 §12) on both the player and
      * [PlaybackUiState.playbackRate] so the pill's label never drifts. Doesn't close
@@ -2749,36 +2810,45 @@ class PlaybackViewModel(
      */
     fun jumpToChapterStart(startPositionTicks: Long) {
         seekToAbsoluteTicks(startPositionTicks)
-        _state.update { it.copy(chaptersMenuOpen = false) }
+        replaceSurface { if (it is OpenSurface.Chapters) OpenSurface.None else it }
     }
 
     // -- Speed menu / chapters menu (docs/12 §8, §12) --------------------
 
-    /** Opens the speed menu -- mutually exclusive with the chapters menu/track picker/both info
-     * sheets, same one-thing-at-a-time convention as [openLibraryInfoOverlay]. Cancels an in-flight
-     * library-info request too, since its result would populate a panel nobody can see.
+    /**
+     * docs/12 §12: the one writer of [PlaybackUiState.openSurface]; an in-flight library-info request dies with any
+     * result that is not the library-info panel. Kind-preserving content updates of an open picker stay in
+     * [PlaybackUiState.withTrackPicker].
      */
-    fun openSpeedMenu() {
-        libraryInfoJob?.cancel()
-        libraryInfoJob = null
-        _state.update {
-            it.copy(
-                speedMenuOpen = true,
-                chaptersMenuOpen = false,
-                trackPicker = null,
-                statsSheetLive = null,
-                libraryInfoOverlay = null,
-            )
+    private fun replaceSurface(transform: (OpenSurface) -> OpenSurface) {
+        val after = _state.updateAndGet { it.copy(openSurface = transform(it.openSurface)) }.openSurface
+        if (after !is OpenSurface.LibraryInfo) {
+            libraryInfoJob?.cancel()
+            libraryInfoJob = null
         }
     }
 
-    fun closeSpeedMenu() {
-        _state.update { it.copy(speedMenuOpen = false) }
+    /** docs/12 §12: opens [surface], replacing whichever was open. */
+    private fun open(surface: OpenSurface) {
+        // replaceSurface cancels for every other surface; reopening library info keeps the panel, so it cancels here.
+        if (surface is OpenSurface.LibraryInfo) {
+            libraryInfoJob?.cancel()
+            libraryInfoJob = null
+        }
+        replaceSurface { surface }
     }
 
-    /** See [openSpeedMenu]'s own doc comment -- identical mutual-exclusion shape, the other
-     * direction.
+    /** docs/12 §12: closes whichever surface is open (Back, Escape / Menu, a session end). */
+    fun closeSurface() = replaceSurface { OpenSurface.None }
+
+    /** Opens the speed menu, replacing any other [PlaybackUiState.openSurface]. Cancels an
+     * in-flight library-info request too, since its result would populate a panel nobody can see.
      */
+    fun openSpeedMenu() {
+        open(OpenSurface.Speed)
+    }
+
+    /** See [openSpeedMenu]'s own doc comment -- the same replace-the-open-surface shape. */
     fun openChaptersMenu() {
         // docs/12 §8: chapters only seek, so an unseekable file refuses the menu with the notice.
         refreshSeekable()
@@ -2786,21 +2856,7 @@ class PlaybackViewModel(
             notifySeekUnavailable()
             return
         }
-        libraryInfoJob?.cancel()
-        libraryInfoJob = null
-        _state.update {
-            it.copy(
-                chaptersMenuOpen = true,
-                speedMenuOpen = false,
-                trackPicker = null,
-                statsSheetLive = null,
-                libraryInfoOverlay = null,
-            )
-        }
-    }
-
-    fun closeChaptersMenu() {
-        _state.update { it.copy(chaptersMenuOpen = false) }
+        open(OpenSurface.Chapters)
     }
 
     /** Skip-intro/credits (docs/12 §14) -- seeks to [segment]'s end and returns the pre-skip
@@ -2809,14 +2865,44 @@ class PlaybackViewModel(
      */
     fun skipSegment(segment: MediaSegment): Long? {
         val before = _positionTicks.value
-        return if (seekToAbsoluteTicks(segment.endTicks)) before else null
+        if (!seekToAbsoluteTicks(segment.endTicks)) return null
+        offerSkipUndo(SkipUndoState(before, segment.segmentType))
+        return before
     }
 
     /** Undoes a [skipSegment] call -- seeks back to [preSkipPositionTicks] (docs/12 §14's Undo
-     * toast).
+     * toast) and drops the toast.
      */
     fun undoSkip(preSkipPositionTicks: Long) {
         seekToAbsoluteTicks(preSkipPositionTicks)
+        dismissSkipUndo()
+    }
+
+    /** Undoes the skip the toast is showing; a no-op once it has expired or been dismissed. */
+    fun undoSkip() {
+        val undo = _state.value.skipUndo ?: return
+        // docs/12 §14: `start` dismisses the toast, so a live scope is the one that offered it.
+        if (liveScope == null) return dismissSkipUndo()
+        undoSkip(undo.preSkipPositionTicks)
+    }
+
+    /** Drops the Undo toast and its expiry timer (an arrow key makes it stale, docs/12 §14). */
+    fun dismissSkipUndo() {
+        skipUndoExpiry?.cancel()
+        skipUndoExpiry = null
+        _state.update { it.copy(skipUndo = null) }
+    }
+
+    /** docs/12 §14: an equal token keeps the running timer, so only a changed toast restarts the window. */
+    private fun offerSkipUndo(undo: SkipUndoState) {
+        if (_state.value.skipUndo == undo) return
+        skipUndoExpiry?.cancel()
+        _state.update { it.copy(skipUndo = undo) }
+        skipUndoExpiry = viewModelScope.launch {
+            delay(SKIP_UNDO_WINDOW_MS)
+            _state.update { it.copy(skipUndo = null) }
+            skipUndoExpiry = null
+        }
     }
 
     /** Opens the playback stats sheet (docs/12 §17): a no-op if [playbackOsdDetail] hasn't resolved
@@ -2826,15 +2912,7 @@ class PlaybackViewModel(
      */
     fun openInfoOverlay() {
         if (playbackOsdDetail == null) return
-        _state.update {
-            it.copy(
-                statsSheetLive = playerHolder.livePlaybackStats(),
-                trackPicker = null,
-                libraryInfoOverlay = null,
-                speedMenuOpen = false,
-                chaptersMenuOpen = false,
-            )
-        }
+        open(OpenSurface.Stats(playerHolder.livePlaybackStats()))
     }
 
     /** docs/09: re-reads the subtitle style on resume, so a Settings change made from PiP or the
@@ -2842,7 +2920,7 @@ class PlaybackViewModel(
     fun refreshSubtitleStyle() {
         viewModelScope.launch {
             val settings = try {
-                gateway.getSettings()
+                settingsStore.load()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -2855,17 +2933,7 @@ class PlaybackViewModel(
     /** See [PlaybackUiState.statsSheetLive]'s own doc comment -- a no-op while the sheet is closed.
      */
     private fun refreshStatsSheetLive() {
-        _state.update { state ->
-            if (state.statsSheetLive == null) return@update state
-            state.copy(statsSheetLive = playerHolder.livePlaybackStats())
-        }
-    }
-
-    /** Closes the playback stats sheet -- [tv.jellybeam.player.PlaybackScreen]'s Back priority chain
-     * calls this first, same tier as [closeTrackPicker].
-     */
-    fun closeInfoOverlay() {
-        _state.update { it.copy(statsSheetLive = null) }
+        replaceSurface { if (it is OpenSurface.Stats) OpenSurface.Stats(playerHolder.livePlaybackStats()) else it }
     }
 
     /** The stats sheet's SUBTITLES row (docs/12 §17): selected subtitle's title (`null` for Off)
@@ -2886,36 +2954,21 @@ class PlaybackViewModel(
      */
     fun openLibraryInfoOverlay() {
         if (_state.value.libraryInfoOverlay != null) return
-        val requestedItemId = currentItemId
-        _state.update {
-            it.copy(
-                trackPicker = null,
-                statsSheetLive = null,
-                libraryInfoOverlay = LibraryInfoOverlayState.Loading,
-                speedMenuOpen = false,
-                chaptersMenuOpen = false,
-            )
-        }
-        libraryInfoJob?.cancel()
+        val scope = liveScope ?: return
+        open(OpenSurface.LibraryInfo(LibraryInfoOverlayState.Loading))
         libraryInfoJob = viewModelScope.launch {
             val result = try {
-                LibraryInfoOverlayState.Content(LibraryInfoFormat.buildSheet(strings, gateway.getItemDetail(requestedItemId, accountEpoch)))
+                LibraryInfoOverlayState.Content(LibraryInfoFormat.buildSheet(strings, gateway.getItemDetail(scope.itemId, scope.accountEpoch)))
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
                 LibraryInfoOverlayState.Unavailable
             }
-            if (currentItemId != requestedItemId || _state.value.libraryInfoOverlay == null) return@launch
-            _state.update { it.copy(libraryInfoOverlay = result) }
+            ensureActive()
+            if (!scope.isCurrent()) return@launch
+            replaceSurface { if (it is OpenSurface.LibraryInfo) OpenSurface.LibraryInfo(result) else it }
             libraryInfoJob = null
         }
-    }
-
-    /** Cancels an in-flight on-demand request as well as closing its panel. */
-    fun closeLibraryInfoOverlay() {
-        libraryInfoJob?.cancel()
-        libraryInfoJob = null
-        _state.update { it.copy(libraryInfoOverlay = null) }
     }
 
     /**
@@ -2928,22 +2981,34 @@ class PlaybackViewModel(
     fun stopPlaybackOnce(reason: String = "normal") {
         val snapshot = endSessionForStop() ?: return
         recordPlaybackStop(snapshot, reason)
-        reportScope.launch {
-            runCatching { gateway.stopPlayback(snapshot.playSessionId, snapshot.ticks) }
-            onStopReported()
-        }
+        launchFinalStop(snapshot)
     }
 
     /** Ends the current session and waits for its core reporting state to close; [keep] is the
      * transition's own request, which survives the teardown.
      */
     private suspend fun stopPlaybackAndAwait(keep: PlaybackRequest, reason: String = "transition") {
-        val snapshot = endSessionForStop(keep) ?: return
+        val snapshot = endSessionForStop(keep) ?: return run { stopLanding?.await() }
         recordPlaybackStop(snapshot, reason)
+        launchFinalStop(snapshot).await()
+    }
+
+    /** docs/18 §2.1: the one launch of a session's final stop, whichever path ended it. The returned
+     * landing is [stopLanding] until the core has closed the session, so a newer request's prepare
+     * ([replaceWith]) never replaces it mid-report and loses the final position.
+     */
+    private fun launchFinalStop(snapshot: StopSnapshot): CompletableDeferred<Unit> {
+        val landing = CompletableDeferred<Unit>().also { stopLanding = it }
         // Survives teardown: once captured, this stop is the only thing that ends the session it
         // names, a landed fallback included (see adoptPlan).
-        withContext(NonCancellable) { runCatching { gateway.stopPlayback(snapshot.playSessionId, snapshot.ticks) } }
-        onStopReported()
+        reportScope.launch {
+            try {
+                withContext(NonCancellable) { runCatchingCancellable { gateway.stopPlayback(snapshot.playSessionId, snapshot.ticks) } }
+            } finally {
+                landing.complete(Unit)
+            }
+        }
+        return landing
     }
 
     /** docs/21 §2.1's `playback.stop` event, shared by [stopPlaybackOnce]/[stopPlaybackAndAwait].
@@ -2964,11 +3029,12 @@ class PlaybackViewModel(
     private data class StopSnapshot(val playSessionId: String, val ticks: Long)
 
     /**
-     * Shared job-cancellation/menu-closing half of exit cleanup, run by both
-     * [endSessionForStop] and [abandonPlaybackOnce] right after their exactly-once guard. Cancels
+     * Shared job-cancellation/menu-closing half of exit cleanup, run by [endSessionOnce] right after
+     * its exactly-once guard. Cancels
      * [reportTickerJob], [bufferingTickerJob], the seek grace, [reconnectJob] (a Back press during
      * Reconnecting must cancel any pending retry, not race it), [libraryInfoJob], and
-     * [trackSelectionJob]. Also closes the speed/chapters menus, which must not survive it.
+     * [trackSelectionJob], and the still-watching card with its timeout (which must not fire a stop for
+     * a session that has ended). Also closes whichever surface is open, which must not survive it.
      */
     private fun cancelSessionJobsAndCloseMenus() {
         reportTickerJob?.cancel()
@@ -2976,51 +3042,41 @@ class PlaybackViewModel(
         clearSeekBufferingGrace()
         reconnectJob?.cancel()
         libraryInfoJob?.cancel()
-        trackSelectionJob?.cancel()
+        cancelTrackSelection()
         // A stopped player reads 0:00, so a still-fed sidecar would flash its first cue.
         hideSidecar()
-        _state.update { it.copy(speedMenuOpen = false, chaptersMenuOpen = false) }
+        clearStillWatching()
+        closeSurface()
+    }
+
+    /** docs/18 §2.1: ends the playing session exactly once (`null` if none was); [report] reads the
+     * on-screen id (`null` if start() never installed a plan) after its jobs stop, before the player clears.
+     */
+    private inline fun <T> endSessionOnce(keep: PlaybackRequest?, report: (playSessionId: String?) -> T?): T? {
+        // Before the exactly-once guard: a stop while the first prepare negotiates must retire it too.
+        retireRequests(keep)
+        val ending = owner as? SessionOwner.Playing ?: return null
+        // Read here synchronously -- see StopSnapshot's doc comment.
+        val playSessionId = sessionOnScreen()
+        owner = SessionOwner.Ended(ending.generation, playSessionId)
+        cancelSessionJobsAndCloseMenus()
+        return report(playSessionId).also { playerHolder.stopAndClear() }
     }
 
     /** Player-side, exactly-once half shared by normal exits and play-next transitions. */
-    private fun endSessionForStop(keep: PlaybackRequest? = null): StopSnapshot? {
-        // Before the exactly-once guard: a stop while the first prepare negotiates must retire it too.
-        retireRequests(keep)
-        if (!sessionEnded.compareAndSet(false, true)) return null
-        // Read here synchronously -- see StopSnapshot's doc comment. `null` means
-        // start() never installed a plan, so the native call is skipped entirely.
-        val playSessionId = sessionOnScreen()
-        endedSessionId = playSessionId
-        cancelSessionJobsAndCloseMenus()
-        // During a reconnect episode the player is idle after the error, so a live
-        // position read is untrustworthy -- report the remembered position instead.
-        val liveTicks = playerHolder.currentPositionTicks()
+    private fun endSessionForStop(keep: PlaybackRequest? = null): StopSnapshot? = endSessionOnce(keep) { playSessionId ->
+        // A reconnect episode leaves the player idle after the error, so it reports the remembered position.
         val lastKnownTicks = _positionTicks.value
         val currentTicks = reconnectPositionTicks
-            ?: liveTicks.takeIf { it > 0L || lastKnownTicks <= 0L }
+            ?: playerHolder.currentPositionTicks().takeIf { it > 0L || lastKnownTicks <= 0L }
             ?: lastKnownTicks
-        // docs/12 §9: exiting an active end-clamp hold must report where the viewer
-        // actually reached, never the clamp point itself.
-        val ticks = if (endClampHold) endHoldReportTicks ?: currentTicks else currentTicks
-        playerHolder.stopAndClear()
-        return playSessionId?.let { StopSnapshot(it, ticks) }
+        // docs/12 §9: exiting an active end-clamp hold reports where the viewer reached, never the clamp point.
+        playSessionId?.let { StopSnapshot(it, if (endClampHold) endHoldReportTicks ?: currentTicks else currentTicks) }
     }
 
-    /** Error path -- discards the session without a final report. Exactly once, same guard as
-     * [stopPlaybackOnce].
-     */
+    /** Error path: discards the session without a final report; a session prepare never opened has nothing to abandon. */
     private fun abandonPlaybackOnce() {
-        retireRequests()
-        if (!sessionEnded.compareAndSet(false, true)) return
-        // Captured synchronously before dispatching -- see StopSnapshot's doc comment.
-        val playSessionId = sessionOnScreen()
-        endedSessionId = playSessionId
-        cancelSessionJobsAndCloseMenus()
-        playerHolder.stopAndClear()
-        // No plan means prepare never completed -- nothing to abandon.
-        if (playSessionId != null) {
-            reportScope.launch { runCatching { gateway.abandonPlayback(playSessionId) } }
-        }
+        endSessionOnce(keep = null) { id -> id?.let { reportScope.launch { runCatchingCancellable { gateway.abandonPlayback(it) } } } }
     }
 
     /** A failure before playback ever became active has no trustworthy position, so it abandons;
@@ -3037,14 +3093,17 @@ class PlaybackViewModel(
     }
 
     /** Guaranteed backstop: fires when the owning Activity is finishing, independent of whether
-     * `onStop`/`onDestroy` already ran [stopPlaybackOnce]. Listener removal is unconditional so the
-     * shared [PlayerHolder] never keeps a dead reference.
+     * `onStop`/`onDestroy` already ran [stopPlaybackOnce]. A wired player's listener and its own
+     * decoder hook are removed so the shared [PlayerHolder] never keeps a dead reference, and a newer
+     * view model's hook is left alone.
      */
     override fun onCleared() {
         super.onCleared()
         previewer?.endSession()
-        playerHolder.removeListener(playerListener)
-        playerHolder.onVideoDecoderInitialized = null
+        if (playerWired) {
+            playerHolder.removeListener(playerListener)
+            if (playerHolder.onVideoDecoderInitialized === decoderHook) playerHolder.onVideoDecoderInitialized = null
+        }
         stopPlaybackOnce()
     }
 }

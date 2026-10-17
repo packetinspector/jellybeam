@@ -169,12 +169,11 @@ pub(crate) async fn connect(
     Ok(rx)
 }
 
-/// Map a failed WebSocket handshake to an [`ApiError`]. A `401` during the upgrade means the token
-/// was rejected -- surfaced as [`ApiError::Unauthorized`], matching how the REST client's
-/// `check_public_status` treats the same status.
+/// docs/18 §2.1: a rejected socket token (401, or Jellyfin 12's 403 -- no role-based 403 exists on
+/// the upgrade) is [`ApiError::Unauthorized`], so the bus stops instead of reconnecting.
 fn map_connect_error(e: tokio_tungstenite::tungstenite::Error) -> ApiError {
     if let tokio_tungstenite::tungstenite::Error::Http(response) = &e {
-        if response.status() == tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED {
+        if matches!(response.status().as_u16(), 401 | 403) {
             return ApiError::Unauthorized { owner: None };
         }
     }
@@ -253,6 +252,20 @@ mod tests {
     fn map_connect_error_translates_401_to_unauthorized() {
         let response = tokio_tungstenite::tungstenite::http::Response::builder()
             .status(401)
+            .body(None)
+            .expect("builds a response with no body");
+        let err = tokio_tungstenite::tungstenite::Error::Http(response);
+        assert!(matches!(
+            map_connect_error(err),
+            ApiError::Unauthorized { owner: None }
+        ));
+    }
+
+    /// Jellyfin 12 answers the upgrade with 403 for a revoked token.
+    #[test]
+    fn map_connect_error_translates_403_to_unauthorized() {
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(403)
             .body(None)
             .expect("builds a response with no body");
         let err = tokio_tungstenite::tungstenite::Error::Http(response);

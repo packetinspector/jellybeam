@@ -36,21 +36,7 @@ pub(crate) fn pick_next_episode(ordered: &[EpisodeSlot], current_id: &str) -> Op
         .map(|e| e.id.clone())
 }
 
-/// Mirror of [`pick_next_episode`] for the opposite direction: same
-/// ordering contract, returns the previous non-virtual Episode's id, `None`
-/// if `current_id` isn't found or is the first non-virtual episode.
-pub(crate) fn pick_previous_episode(ordered: &[EpisodeSlot], current_id: &str) -> Option<String> {
-    let idx = ordered
-        .iter()
-        .position(|e| e.id == current_id && e.item_type == "Episode")?;
-    ordered[..idx]
-        .iter()
-        .rev()
-        .find(|e| e.item_type == "Episode" && !e.is_virtual)
-        .map(|e| e.id.clone())
-}
-
-/// Shared traversal, factored out so [`crate::JellybeamCore::series_episodes`]
+/// Shared traversal, factored out so [`crate::JellybeamCore::series_episodes_read`]
 /// (docs/11 item 11) can reuse it: `series_id`'s seasons in `IndexNumber`
 /// order, each season's episodes concatenated back-to-back. Specials sort
 /// FIRST here (this owns raw mirror order, not the docs/11 button-label
@@ -94,34 +80,6 @@ pub(crate) fn next_episode_after(mirror: &Mirror, item_id: &str) -> Option<Card>
     episodes
         .into_iter()
         .find(|e| e.id == next_id)
-        .map(Card::from)
-}
-
-/// Mirror of [`next_episode_after`] walking backward via
-/// [`pick_previous_episode`]. `None` under the same conditions, substituting
-/// "first episode" for "last".
-pub(crate) fn previous_episode_before(mirror: &Mirror, item_id: &str) -> Option<Card> {
-    let dto = mirror.item(item_id)?;
-    if dto.type_ != Some(jellyfin_api::models::BaseItemKind::Episode) {
-        return None;
-    }
-    let series_id = dto.series_id?.to_string();
-
-    let episodes = all_episodes_of_series(mirror, &series_id)?;
-
-    let slots: Vec<EpisodeSlot> = episodes
-        .iter()
-        .map(|e| EpisodeSlot {
-            id: e.id.clone(),
-            item_type: e.item_type.clone(),
-            is_virtual: e.is_virtual,
-        })
-        .collect();
-
-    let previous_id = pick_previous_episode(&slots, item_id)?;
-    episodes
-        .into_iter()
-        .find(|e| e.id == previous_id)
         .map(Card::from)
 }
 
@@ -245,77 +203,5 @@ mod tests {
     fn unknown_current_id_has_no_next() {
         let ordered = vec![slot("s1e1"), slot("s1e2")];
         assert_eq!(pick_next_episode(&ordered, "does-not-exist"), None);
-    }
-
-    #[test]
-    fn normal_previous_within_the_same_season() {
-        let ordered = vec![slot("s1e1"), slot("s1e2"), slot("s1e3")];
-        assert_eq!(
-            pick_previous_episode(&ordered, "s1e2"),
-            Some("s1e1".to_string())
-        );
-    }
-
-    #[test]
-    fn skips_a_virtual_episode_to_find_the_previous_real_one() {
-        let ordered = vec![slot("s1e1"), virtual_slot("s1e2"), slot("s1e3")];
-        assert_eq!(
-            pick_previous_episode(&ordered, "s1e3"),
-            Some("s1e1".to_string())
-        );
-    }
-
-    #[test]
-    fn crosses_a_season_boundary_backward() {
-        let ordered = vec![slot("s1e1"), slot("s1e2"), slot("s2e1"), slot("s2e2")];
-        assert_eq!(
-            pick_previous_episode(&ordered, "s2e1"),
-            Some("s1e2".to_string())
-        );
-    }
-
-    #[test]
-    fn crosses_a_season_boundary_backward_and_skips_a_virtual_episode() {
-        let ordered = vec![
-            slot("s1e1"),
-            virtual_slot("s1e2"),
-            slot("s2e1"),
-            slot("s2e2"),
-        ];
-        assert_eq!(
-            pick_previous_episode(&ordered, "s2e1"),
-            Some("s1e1".to_string())
-        );
-    }
-
-    #[test]
-    fn first_episode_of_the_series_has_no_previous() {
-        let ordered = vec![slot("s1e1"), slot("s1e2")];
-        assert_eq!(pick_previous_episode(&ordered, "s1e1"), None);
-    }
-
-    #[test]
-    fn leading_virtual_episodes_before_the_first_real_one_are_not_a_previous() {
-        let ordered = vec![virtual_slot("s1e1"), slot("s1e2"), slot("s1e3")];
-        assert_eq!(pick_previous_episode(&ordered, "s1e2"), None);
-    }
-
-    #[test]
-    fn non_episode_input_has_no_previous() {
-        let ordered = vec![
-            slot("s1e1"),
-            EpisodeSlot {
-                id: "movie-1".to_string(),
-                item_type: "Movie".to_string(),
-                is_virtual: false,
-            },
-        ];
-        assert_eq!(pick_previous_episode(&ordered, "movie-1"), None);
-    }
-
-    #[test]
-    fn unknown_current_id_has_no_previous() {
-        let ordered = vec![slot("s1e1"), slot("s1e2")];
-        assert_eq!(pick_previous_episode(&ordered, "does-not-exist"), None);
     }
 }

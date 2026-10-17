@@ -18,7 +18,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -48,6 +47,7 @@ import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
 import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.cards.focusRing
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.requestFocusWithRetry
 import uniffi.jellybeam_core.Decade
 import uniffi.jellybeam_core.GridSortField
@@ -91,13 +91,13 @@ internal fun LibrarySortStrip(
     state: LibraryUiState,
     viewModel: LibraryViewModel,
     isTop: Boolean,
-    focusGate: MutableState<Boolean>,
     activeSortChipRequester: FocusRequester,
     panel: LibraryStripPanel?,
     onPanelChange: (LibraryStripPanel?) -> Unit,
     onCloseStrip: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val focusGate = LocalFocusGate.current
     val scope = rememberCoroutineScope()
 
     var focusRow by remember { mutableStateOf(StripRow.SORT) }

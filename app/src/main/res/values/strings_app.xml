@@ -16,9 +16,12 @@
     <string name="error_unreachable_timed_out">timed out</string>
     <string name="error_unreachable_network_unreachable">network unreachable</string>
     <string name="error_https_not_offered">%1$s isn\'t answering over HTTPS. Try the same address with http:// instead.</string>
+    <string name="error_certificate_rejected">%1$s\'s security certificate wasn\'t accepted (expired, self-signed or for another name). Fix the certificate on the server or use its trusted address.</string>
     <string name="error_not_jellyfin_server">%1$s answered, but it isn\'t a Jellyfin server (HTTP %2$d). Check the port; Jellyfin\'s default is 8096.</string>
     <string name="error_invalid_credentials">Wrong username or password.</string>
     <string name="error_seerr_wrong_email_or_password">Wrong email or password. A Seerr account signs in with its email address.</string>
+    <string name="error_seerr_session_expired">Seerr signed this TV out. Reconnect Seerr in Settings.</string>
+    <string name="error_seerr_change_unconfirmed">The change reached Seerr, but this TV couldn\'t read the title back. Try again.</string>
     <string name="error_seerr_api_key_rejected">The server rejected that API key.</string>
     <string name="error_seerr_media_server_sign_in">Seerr couldn\'t sign in to its own Jellyfin server, so it can\'t check this account. Jellyfin 12 needs Seerr 3.0 or newer; otherwise check Seerr\'s Jellyfin settings.</string>
     <string name="error_seerr_new_users_blocked">Seerr doesn\'t have this Jellyfin user yet and new sign-ins are turned off there. Sign in to Seerr in a browser once, or allow new Jellyfin sign-ins in Seerr.</string>
@@ -31,6 +34,7 @@
 
     <string name="signin_error_server_address_empty">Enter a server address first.</string>
     <string name="signin_error_quick_connect_disabled">Quick Connect is disabled on this server.</string>
+    <string name="signin_error_quick_connect_expired">This Quick Connect code expired. Try again for a new one.</string>
 
     <string name="settings_about_size_bytes">%1$d B</string>
     <string name="settings_about_size_kb">%1$.1f KB</string>

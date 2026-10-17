@@ -43,6 +43,7 @@ class PlaybackScreenControlsTest {
             chapters = emptyList(),
             sizeBytes = null,
             path = null,
+            trickplay = null,
         )
 
         assertEquals("1080p · HEVC", directPlayCodecSummary(strings, detail))

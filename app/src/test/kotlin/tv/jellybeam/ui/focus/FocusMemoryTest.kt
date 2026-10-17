@@ -9,6 +9,65 @@ import org.junit.Test
 
 class FocusMemoryTest {
 
+    // -- invoker capture (docs/15 §4) ------------------------------------
+
+    @Test
+    fun `invokerFor prefers the focused key over lastKey`() {
+        assertEquals("focused", invokerFor(focusedKey = "focused", lastKey = "last"))
+        assertEquals("last", invokerFor(focusedKey = null, lastKey = "last"))
+        assertNull(invokerFor(focusedKey = null, lastKey = null))
+    }
+
+    @Test
+    fun `a focus placed while frozen is the invoker a surface opened from it captures`() {
+        val memory = FocusMemory(null, null)
+        val token = memory.beginPlacement()
+        memory.noteFocusEvent("action:menu", hasFocus = true)
+        memory.endPlacement(token)
+
+        memory.captureInvoker()
+
+        assertEquals("action:menu", memory.invokerKey)
+        // The frozen rule for lastKey is unchanged.
+        assertNull(memory.lastKey)
+    }
+
+    @Test
+    fun `a stale lastKey loses to the element actually focused`() {
+        val memory = FocusMemory("person:gone", null)
+        val token = memory.beginPlacement()
+        memory.noteFocusEvent("action:primary", hasFocus = true)
+        memory.endPlacement(token)
+
+        memory.captureInvoker()
+
+        assertEquals("action:primary", memory.invokerKey)
+    }
+
+    @Test
+    fun `a lost focus falls back to lastKey`() {
+        val memory = FocusMemory(null, null)
+        memory.noteFocusEvent("a", hasFocus = true)
+        memory.noteFocusEvent("a", hasFocus = false)
+
+        memory.captureInvoker()
+
+        assertEquals("a", memory.invokerKey)
+    }
+
+    @Test
+    fun `an older key losing focus after the next gained it does not clear the newer one`() {
+        val memory = FocusMemory(null, null)
+        memory.noteFocusEvent("a", hasFocus = true)
+        memory.noteFocusEvent("b", hasFocus = true)
+        memory.noteFocusEvent("a", hasFocus = false)
+        memory.beginPlacement()
+
+        memory.captureInvoker()
+
+        assertEquals("b", memory.invokerKey)
+    }
+
     // -- resolveRestoreOrder --------------------------------------------
 
     @Test
@@ -86,7 +145,7 @@ class FocusMemoryTest {
     @Test
     fun `noteFocused is ignored while frozen`() {
         val memory = FocusMemory("original", null)
-        memory.frozen = true
+        memory.beginPlacement()
         memory.noteFocused("k")
         assertEquals("original", memory.lastKey)
     }

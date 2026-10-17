@@ -44,6 +44,8 @@ internal fun DiscoverErrorMessage(
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
     retryFocusRequester: FocusRequester? = null,
+    /** Applied to the Retry chip, e.g. a docs/15 §5 `focusKey`. */
+    retryModifier: Modifier = Modifier,
 ) {
     Column(
         modifier = modifier.padding(horizontal = DISCOVER_PAGE_MARGIN, vertical = 16.dp),
@@ -54,6 +56,7 @@ internal fun DiscoverErrorMessage(
             label = stringResource(R.string.discover_error_retry),
             selected = false,
             onSelect = onRetry,
+            modifier = retryModifier,
             focusRequester = retryFocusRequester,
         )
     }

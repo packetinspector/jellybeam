@@ -3,7 +3,9 @@ package tv.jellybeam.data
 import tv.jellybeam.AppGraph
 import tv.jellybeam.perf.PerfAccumulator
 import tv.jellybeam.perf.PerfLog
+import tv.jellybeam.player.AuthorizationRecoveryCoordinator
 import tv.jellybeam.player.authorizationRecoveryCoordinator
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -21,8 +23,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
+import uniffi.jellybeam_core.AccountEpochs
 import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.AssOverlay
@@ -64,6 +69,7 @@ import uniffi.jellybeam_core.SeerrMovieDetail
 import uniffi.jellybeam_core.SeerrMyRequest
 import uniffi.jellybeam_core.SeerrPage
 import uniffi.jellybeam_core.SeerrPersonCredits
+import uniffi.jellybeam_core.SeerrRequestDetail
 import uniffi.jellybeam_core.SeerrRequestInput
 import uniffi.jellybeam_core.SeerrRequestOptions
 import uniffi.jellybeam_core.SeerrStatus
@@ -78,6 +84,7 @@ import uniffi.jellybeam_core.TitleTmdbRef
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
+import uniffi.jellybeam_core.TrackMemoryFfi
 import uniffi.jellybeam_core.TrickplayMetaFfi
 import uniffi.jellybeam_core.TrickplayTileFfi
 import uniffi.jellybeam_core.ViewSnapshot
@@ -99,10 +106,6 @@ interface CoreGateway {
     /** Refreshes one saved account's token while preserving its isolated mirror. */
     @Throws(CoreException::class)
     suspend fun reauthorizeSession(index: UInt, username: String, password: String): AccountInfo
-
-    /** One bounded capability request; no polling or retained native work. */
-    @Throws(CoreException::class)
-    suspend fun quickConnectEnabled(serverUrl: String): Boolean
 
     /** Starts Quick Connect and returns the display code plus opaque in-memory secret. */
     @Throws(CoreException::class)
@@ -126,8 +129,6 @@ interface CoreGateway {
      * open to an empty list; the manual URL field stays primary.
      */
     suspend fun discoverServers(): List<DiscoveredServer>
-
-    suspend fun signOut()
 
     /** Every locally known signed-in account, core's stable order. [AccountInfo] carries no
      * token, so it's safe in Compose state; server URLs/usernames shown verbatim, never logged.
@@ -191,7 +192,11 @@ interface CoreGateway {
     @Throws(CoreException::class)
     suspend fun fetchServerDetails(): ServerDetails
 
-    /** A bounded slice of a parent's mirror-backed children; library grids page through this. */
+    /**
+     * A bounded slice of a parent's mirror-backed children; library grids page through this. An
+     * empty list is a genuinely empty parent; a mirror that is not open yet throws
+     * [BrowseNotReady] and a failed query [BrowseFailed] (docs/07 §5).
+     */
     suspend fun children(parentId: String, sort: SortOrder, offset: UInt, limit: UInt): List<Card>
 
     /** A bounded slice of [parentId]'s children fetched live, never mirror-backed -- used for
@@ -235,6 +240,13 @@ interface CoreGateway {
     /** The server-configured libraries, names shown verbatim (CLAUDE.md hard rule). */
     suspend fun views(): List<ViewSnapshot>
 
+    /**
+     * [views] as the app's one shared list (docs/07 §5): read when the mirror opens and again only
+     * on [ChangeEvent.ViewsChanged] or a merged [ChangeEvent.Refresh] (never on item changes). Empty
+     * until the mirror has opened, and again after an open that failed.
+     */
+    val viewsState: StateFlow<List<ViewSnapshot>>
+
     /** docs/07 §5: whether the drawer shows its Favorites entry. */
     suspend fun hasFavorites(): Boolean
 
@@ -269,9 +281,10 @@ interface CoreGateway {
     @Throws(CoreException::class)
     suspend fun cardsByIds(itemIds: List<String>): List<Card>
 
-    /** Narrow post-load stream/chapter enrichment; never collector metadata. */
+    /** Playback's one post-load enrichment fetch (docs/10): stream/chapter detail plus [mediaSourceId]'s
+     * trickplay manifest; never collector metadata. */
     @Throws(CoreException::class)
-    suspend fun getPlaybackOsdDetail(itemId: String, accountEpoch: ULong? = null): PlaybackOsdDetail
+    suspend fun getPlaybackOsdDetail(itemId: String, mediaSourceId: String, accountEpoch: ULong?): PlaybackOsdDetail
 
     /** The "Similar Titles" row (docs/11 tier 2 item 13): up to [limit] [Card]s from a live,
      * non-mirror-backed `GetSimilar` call, fetched alongside the Detail paint.
@@ -308,13 +321,11 @@ interface CoreGateway {
      */
     fun mintPlaybackRequest(accountEpoch: ULong? = null): PlaybackRequest
 
-    /** docs/18 §2.1: the core's account epoch, updated as each account call returns. */
-    val accountEpoch: StateFlow<ULong>
-
-    /** docs/18 §2.1: the epoch a playback kept on its own account across a change still owns,
-     * updated before [accountEpoch]; it can clear without the epoch moving (its account removed).
+    /** docs/18 §2.1: the core's account epoch and the epoch a playback kept on its own account
+     * across a change still owns (`parked`), read from the core as one pair and updated as each
+     * account call returns; `parked` can clear without the epoch moving (its account removed).
      */
-    val parkedEpoch: StateFlow<ULong?>
+    val accountEpochs: StateFlow<AccountEpochs>
 
     /** docs/18 §2.1: the saved account to re-authorize for a token [rejected] was issued to -- while
      * the app uses it (browsed, or a playback runs or negotiates on it), or, for the player's own
@@ -327,10 +338,10 @@ interface CoreGateway {
      */
     fun playbackOwnershipOpen(accountEpoch: ULong): Boolean
 
-    /** docs/18 §2.1: suspends while any account call is in flight, so a playback result is never
-     * judged between the core's account reset and the epoch update; returns at once otherwise.
+    /** docs/18 §2.1: [playbackOwnershipOpen] against the core's epochs now, not [accountEpochs], which
+     * lags an account call still in flight; for judging a playback result off the main thread.
      */
-    suspend fun awaitAccountCalls()
+    suspend fun playbackOwnershipOpenNow(accountEpoch: ULong): Boolean
 
     /** docs/18 §2.1: suspends until the first account call (the launch restore) has returned, so the
      * first playback request carries the epoch the core will hold.
@@ -388,16 +399,10 @@ interface CoreGateway {
      * All of [seriesId]'s episodes across every season, season-then-episode order (Specials
      * first), in one call (docs/11 item 11 Series Play/Resume) -- lets
      * [tv.jellybeam.ui.detail.DetailViewModel] resolve the primary-action button without fetching
-     * every season individually. Empty, never a throw, if the mirror isn't open or has none yet.
+     * every season individually. Empty means the series has none; a mirror that is not open yet
+     * throws [BrowseNotReady] and a failed query [BrowseFailed] (docs/07 §5).
      */
     suspend fun seriesEpisodes(seriesId: String): List<Card>
-
-    /**
-     * Mirror-local previous-episode lookup for the OSD's "Previous episode" button (docs/12 §6
-     * row 1), like [nextEpisodeAfter] but walking backward. `null` if [itemId] isn't a real
-     * `Episode`, has no known series, or is already first.
-     */
-    suspend fun previousEpisodeBefore(itemId: String): Card?
 
     /** Both episode-edge controls from one lookup; the Rust side prefers the mirror, falling
      * back to one live series request only when the episode can't be placed locally.
@@ -467,11 +472,10 @@ interface CoreGateway {
      */
     suspend fun resolveTracks(seriesId: String?, tracks: List<TrackInfo>): TrackDecisionFfi
 
-    /** Persists (or clears, when [trackKey] is `null`) [seriesId]'s remembered track choice,
-     * consumed by the next [resolveTracks] call. [trackKey] must already be [trackPrefKeyOf]'s
-     * result.
+    /** Persists [seriesId]'s remembered choice for [kind], consumed by the next [resolveTracks]; subtitle
+     * `Off` is a choice of its own and `Unset` forgets it (docs/18 §3.1). A `Key` must be [trackPrefKeyOf]'s result.
      */
-    suspend fun rememberTrackChoice(seriesId: String, kind: TrackKindFfi, trackKey: String?)
+    suspend fun rememberTrackMemory(seriesId: String, kind: TrackKindFfi, memory: TrackMemoryFfi)
 
     /** Pure delegate to `track_pref_key_of`: the persistence key a [TrackInfo] is remembered under
      * (language, else title). No I/O; not `suspend`.
@@ -482,11 +486,6 @@ interface CoreGateway {
      * signed-in client. `suspend` (unlike [imageUrl]): called once per debounced seek gesture.
      */
     suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt, accountEpoch: ULong? = null): String?
-
-    /** Trickplay scrub-preview manifest for [itemId]/[mediaSourceId], fetched fire-and-forget
-     * right after `load()`. A seek before it resolves fails open to no preview tile.
-     */
-    suspend fun getTrickplay(itemId: String, mediaSourceId: String, accountEpoch: ULong? = null): TrickplayMetaFfi?
 
     /** docs/18 §3.2: sidecar [index]'s text for session [playSessionId], fetched on pick; null on any failure. */
     suspend fun fetchExternalSubtitle(playSessionId: String, index: Int): String?
@@ -661,28 +660,31 @@ interface CoreGateway {
     @Throws(CoreException::class)
     suspend fun seerrRequestOptions(mediaType: SeerrMediaType, is4k: Boolean): SeerrRequestOptions
 
-    /** Creates or updates (POST-vs-PUT decided in Rust) a request. Kotlin is responsible for only
-     * sending seasons it marked requestable.
+    /** Creates or updates (POST-vs-PUT decided in Rust) a request and returns the title's post-mutation
+     * request state; Kotlin sends only seasons it marked requestable (docs/14 Request semantics).
      */
     @Throws(CoreException::class)
-    suspend fun seerrSubmitRequest(input: SeerrRequestInput)
+    suspend fun seerrSubmitRequestDetail(input: SeerrRequestInput): SeerrRequestDetail
 
-    /** Cancels (deletes) an existing request by its Seerr request id. */
+    /** Cancels (deletes) the request [requestId] of the title and returns its post-mutation request state (docs/14). */
     @Throws(CoreException::class)
-    suspend fun seerrCancelRequest(requestId: Long)
+    suspend fun seerrCancelRequestDetail(mediaType: SeerrMediaType, tmdbId: Long, requestId: Long): SeerrRequestDetail
 
     /** The signed-in Seerr account's own requests, each resolved to a full card -- a request this
      * app can't resolve a title for is omitted (fail open).
      */
     @Throws(CoreException::class)
     suspend fun seerrMyRequests(): List<SeerrMyRequest>
+
+    /** Bumps after every Seerr request, cancel, connect and disconnect that changed the server (a landed change with an unreadable detail included); the drawer's Discover entry follows it (docs/14). */
+    val seerrRevision: StateFlow<Long>
 }
 
 /**
  * [core] arrives as a not-yet-necessarily-ready [Deferred] (docs/10 `core.ready` phase):
  * construction happens off `Application.onCreate`, so every real call here waits for it.
  */
-class RealCoreGateway(
+internal class RealCoreGateway(
     private val core: Deferred<JellybeamCoreInterface>,
     /** Only used for the one-time [changeEvents] listener registration; must be a
      * process-scoped, never-cancelled scope ([tv.jellybeam.AppGraph.processScope]).
@@ -690,6 +692,8 @@ class RealCoreGateway(
     private val backgroundScope: CoroutineScope,
     /** Completed after the one-time decoder probe has either landed or failed open. */
     private val deviceCapsReady: Deferred<Unit>? = null,
+    /** Where a call's 401 goes and where a landed re-authorization is noted (docs/18 §2.1). */
+    private val authorizationRecovery: AuthorizationRecoveryCoordinator = authorizationRecoveryCoordinator,
 ) : CoreGateway {
     override suspend fun updater(facts: uniffi.jellybeam_core.InstalledUpdateFacts): uniffi.jellybeam_core.AppUpdater =
         ffi("updater") { updater(facts) }
@@ -724,7 +728,7 @@ class RealCoreGateway(
             tag("kind", error.diagLabel())
         }
         if (reauthorize && routesToReauthorization(section, error)) {
-            authorizationRecoveryCoordinator.request((error as? CoreException.Unauthorized)?.account)
+            authorizationRecovery.request((error as? CoreException.Unauthorized)?.account)
         }
     }
 
@@ -764,10 +768,11 @@ class RealCoreGateway(
         accountChange { authTimed("auth.signin", "ffi.signIn") { signIn(serverUrl, username, password) } }
 
     override suspend fun reauthorizeSession(index: UInt, username: String, password: String): AccountInfo =
-        accountChange { authTimed("auth.reauth", "ffi.reauthorizeSession") { reauthorizeSession(index, username, password) } }
-
-    override suspend fun quickConnectEnabled(serverUrl: String): Boolean =
-        ffi("ffi.quickConnectEnabled") { quickConnectEnabled(serverUrl) }
+        accountChange {
+            authTimed("auth.reauth", "ffi.reauthorizeSession") {
+                reauthorizeSession(index, username, password).also(::noteReauthorized)
+            }
+        }
 
     override suspend fun initiateQuickConnect(serverUrl: String): QuickConnectSession =
         ffi("ffi.initiateQuickConnect") { initiateQuickConnect(serverUrl) }
@@ -779,17 +784,18 @@ class RealCoreGateway(
         accountChange { ffi("ffi.completeQuickConnect") { completeQuickConnect(serverUrl, secret) } }
 
     override suspend fun completeQuickConnectReauthorization(index: UInt, secret: String): AccountInfo =
-        accountChange { ffi("ffi.completeQuickConnectReauthorization") { completeQuickConnectReauthorization(index, secret) } }
+        accountChange {
+            ffi("ffi.completeQuickConnectReauthorization") {
+                completeQuickConnectReauthorization(index, secret).also(::noteReauthorized)
+            }
+        }
+
+    /** docs/18 §2.1: runs inside the IO block as the FFI returns, so a caller cancelled meanwhile still opens the quiet window. */
+    private fun noteReauthorized(account: AccountInfo) =
+        authorizationRecovery.noteReauthorized(AccountIdentity(serverUrl = account.serverUrl, userId = account.userId))
 
     override suspend fun discoverServers(): List<DiscoveredServer> =
         ffi("ffi.discoverServers") { discoverServers() }
-
-    override suspend fun signOut() = accountChange {
-        withContext(Dispatchers.IO) {
-            PerfLog.timed("ffi.signOut") { core.await().signOut() }
-            AppGraph.diag.event("auth.signout")
-        }
-    }
 
     override suspend fun listAccounts(): List<AccountInfo> =
         ffi("ffi.listAccounts") { listAccounts() }
@@ -809,8 +815,34 @@ class RealCoreGateway(
     override suspend fun removeSession(index: UInt): Boolean =
         accountChange { ffi("ffi.removeSession") { removeSession(index) } }
 
-    override suspend fun openMirror() =
-        ffi("ffi.openMirror") { openMirror() }
+    override suspend fun openMirror() {
+        // docs/07 §5: the listener must be live before the mirror opens, or the first views events are lost.
+        changeListenerRegistration.join()
+        val epoch = epochs.value.epoch
+        try {
+            ffi("ffi.openMirror") { openMirror() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Fail open (docs/05), but never keep the previous account's libraries on screen; a newer account's stay (docs/18 §2.1).
+            if (epochs.value.epoch == epoch) _viewsState.value = emptyList()
+            throw e
+        }
+        refreshViews()
+    }
+
+    private val _viewsState = MutableStateFlow<List<ViewSnapshot>>(emptyList())
+    override val viewsState: StateFlow<List<ViewSnapshot>> = _viewsState.asStateFlow()
+
+    /** Serialises the read-then-publish, so a slower read never publishes an older list over a newer. */
+    private val viewsRefresh = Mutex()
+
+    /** One list read published to [viewsState]; dropped when the account moved while it was in flight. */
+    private suspend fun refreshViews() = viewsRefresh.withLock {
+        val epoch = epochs.value.epoch
+        val fresh = runCatchingCancellable { views() }.getOrNull() ?: return@withLock
+        if (epochs.value.epoch == epoch) _viewsState.value = fresh
+    }
 
     override suspend fun setDeviceCaps(caps: DeviceCaps) =
         ffi("ffi.setDeviceCaps") { setDeviceCaps(caps) }
@@ -831,7 +863,7 @@ class RealCoreGateway(
         ffi("ffi.fetchServerDetails") { fetchServerDetails() }
 
     override suspend fun children(parentId: String, sort: SortOrder, offset: UInt, limit: UInt): List<Card> =
-        ffi("ffi.children") { children(parentId, sort, offset, limit) }
+        ffi("ffi.children") { childrenRead(parentId, sort, offset, limit) }.rowsOrThrow()
 
     override suspend fun liveChildren(parentId: String, startIndex: UInt, limit: UInt, sort: LiveSort): List<Card> =
         ffi("ffi.liveChildren") { liveChildren(parentId, startIndex, limit, sort) }
@@ -878,8 +910,8 @@ class RealCoreGateway(
     override suspend fun cardsByIds(itemIds: List<String>): List<Card> =
         ffi("ffi.cardsByIds") { cardsByIds(itemIds) }
 
-    override suspend fun getPlaybackOsdDetail(itemId: String, accountEpoch: ULong?): PlaybackOsdDetail =
-        ffi("ffi.getPlaybackOsdDetail") { getPlaybackOsdDetail(itemId, accountEpoch) }
+    override suspend fun getPlaybackOsdDetail(itemId: String, mediaSourceId: String, accountEpoch: ULong?): PlaybackOsdDetail =
+        ffi("ffi.getPlaybackOsdDetail") { getPlaybackOsdDetail(itemId, mediaSourceId, accountEpoch) }
 
     override suspend fun getSimilar(itemId: String, limit: UInt): List<Card> =
         ffi("ffi.getSimilar") { getSimilar(itemId, limit) }
@@ -901,9 +933,10 @@ class RealCoreGateway(
      */
     private val imageUrlPerf = PerfAccumulator(label = "ffi.imageUrl", outlierMs = 5.0)
 
-    /** The current account's URL base, cached per account epoch. Never cached while an account call
-     * is in flight (the core's epoch may already have moved past [_accountEpoch]) and dropped when
-     * one ends; written under [urlBaseLock] so a fetch racing that drop can't keep a stale token.
+    /** The published account's URL base (docs/18 §2.1): a base whose epoch isn't the published one is
+     * never returned or cached, because the on-screen tree belongs to the published account until the
+     * next epoch publishes. Dropped when an account call ends; written under [urlBaseLock] so a fetch
+     * racing that drop can't keep a stale token.
      */
     @Volatile
     private var urlBase: ImageUrlBase? = null
@@ -911,11 +944,11 @@ class RealCoreGateway(
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private fun currentUrlBase(): ImageUrlBase? {
-        if (accountCallsInFlight.value > 0) return freshUrlBase()
-        urlBase?.let { if (it.epoch == _accountEpoch.value) return it }
+        val published = accountEpochs.value.epoch
+        urlBase?.let { if (it.epoch == published) return it }
         synchronized(urlBaseLock) {
-            urlBase?.let { if (it.epoch == _accountEpoch.value) return it }
-            return freshUrlBase()?.also { urlBase = it }
+            urlBase?.let { if (it.epoch == published) return it }
+            return freshUrlBase()?.takeIf { it.epoch == published }?.also { urlBase = it }
         }
     }
 
@@ -956,39 +989,35 @@ class RealCoreGateway(
 
     private val lastPlaybackSeq = AtomicLong(0)
 
-    private val _accountEpoch = MutableStateFlow(0uL)
-    override val accountEpoch: StateFlow<ULong> = _accountEpoch.asStateFlow()
-
-    private val accountCallsInFlight = MutableStateFlow(0)
-
     private val accountRestored = CompletableDeferred<Unit>()
 
-    private val _parkedEpoch = MutableStateFlow<ULong?>(null)
-    override val parkedEpoch: StateFlow<ULong?> = _parkedEpoch.asStateFlow()
+    /** Serialises the read-both-then-write-both in [accountChange], so a slower call tail never publishes an older pair over a newer one (docs/18 §2.1). */
+    private val epochLock = Any()
+
+    /** The pair as the core reported it, written only under [epochLock]: readers see one value, never a torn pair. */
+    private val epochs = MutableStateFlow(AccountEpochs(epoch = 0uL, parked = null))
+    override val accountEpochs: StateFlow<AccountEpochs> = epochs.asStateFlow()
 
     override fun mintPlaybackRequest(accountEpoch: ULong?): PlaybackRequest =
-        PlaybackRequest(seq = lastPlaybackSeq.incrementAndGet().toULong(), accountEpoch = accountEpoch ?: _accountEpoch.value)
+        PlaybackRequest(seq = lastPlaybackSeq.incrementAndGet().toULong(), accountEpoch = accountEpoch ?: epochs.value.epoch)
 
     override suspend fun reauthorizationAccount(rejected: AccountIdentity, failedPlayback: Boolean): AccountInfo? =
         ffi("ffi.reauthorizationAccount") { reauthorizationAccount(rejected, failedPlayback) }
 
     override fun playbackOwnershipOpen(accountEpoch: ULong): Boolean =
-        accountEpoch == _accountEpoch.value || accountEpoch == _parkedEpoch.value
+        epochs.value.let { accountEpoch == it.epoch || accountEpoch == it.parked }
 
-    override suspend fun awaitAccountCalls() {
-        accountCallsInFlight.first { it == 0 }
-    }
+    override suspend fun playbackOwnershipOpenNow(accountEpoch: ULong): Boolean =
+        ffi("ffi.accountEpochs") { accountEpochs() }.let { accountEpoch == it.epoch || accountEpoch == it.parked }
 
     override suspend fun awaitAccountRestored() = accountRestored.await()
 
     override fun accountRestoredNow(): Boolean = accountRestored.isCompleted
 
-    /** Closes playback ownership before the call, then re-reads the epoch even if it failed
-     * part-way (the core may already have reset the account) before reopening it.
+    /** Re-reads and publishes the core's epochs after the call, even if it failed part-way (the core
+     * may already have reset the account) or its caller was cancelled.
      */
     private suspend inline fun <T> accountChange(crossinline call: suspend () -> T): T {
-        accountCallsInFlight.update { it + 1 }
-        synchronized(urlBaseLock) { urlBase = null }
         try {
             return call()
         } finally {
@@ -996,15 +1025,15 @@ class RealCoreGateway(
             // dispatcher switch would throw before a statement placed after this block).
             withContext(NonCancellable + Dispatchers.IO) {
                 try {
-                    // Parked first: the epoch's collectors judge ownership with both.
                     runCatching {
                         val core = core.await()
-                        _parkedEpoch.value = core.parkedAccountEpoch()
-                        _accountEpoch.value = core.accountEpoch()
+                        synchronized(epochLock) {
+                            // One core read, one write: the pair is never torn by an account change in between.
+                            epochs.value = core.accountEpochs()
+                        }
                         synchronized(urlBaseLock) { urlBase = null }
                     }
                 } finally {
-                    accountCallsInFlight.update { it - 1 }
                     accountRestored.complete(Unit)
                 }
             }
@@ -1042,10 +1071,7 @@ class RealCoreGateway(
         ffi("ffi.nextEpisodeAfter") { nextEpisodeAfter(itemId) }
 
     override suspend fun seriesEpisodes(seriesId: String): List<Card> =
-        ffi("ffi.seriesEpisodes") { seriesEpisodes(seriesId) }
-
-    override suspend fun previousEpisodeBefore(itemId: String): Card? =
-        ffi("ffi.previousEpisodeBefore") { previousEpisodeBefore(itemId) }
+        ffi("ffi.seriesEpisodes") { seriesEpisodesRead(seriesId) }.rowsOrThrow()
 
     override suspend fun episodeNeighbors(itemId: String, seriesId: String, accountEpoch: ULong?): EpisodeNeighbors? =
         ffi("ffi.episodeNeighbors") { episodeNeighbors(itemId, seriesId, accountEpoch) }
@@ -1088,16 +1114,13 @@ class RealCoreGateway(
     override suspend fun resolveTracks(seriesId: String?, tracks: List<TrackInfo>): TrackDecisionFfi =
         ffi("ffi.resolveTracks") { resolveTracks(seriesId, tracks) }
 
-    override suspend fun rememberTrackChoice(seriesId: String, kind: TrackKindFfi, trackKey: String?) =
-        ffi("ffi.rememberTrackChoice") { rememberTrackChoice(seriesId, kind, trackKey) }
+    override suspend fun rememberTrackMemory(seriesId: String, kind: TrackKindFfi, memory: TrackMemoryFfi) =
+        ffi("ffi.rememberTrackMemory") { rememberTrackMemory(seriesId, kind, memory) }
 
     override fun trackPrefKeyOf(track: TrackInfo): String? = uniffi.jellybeam_core.trackPrefKeyOf(track)
 
     override suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt, accountEpoch: ULong?): String? =
         ffi("ffi.trickplayTileUrl") { trickplayTileUrl(itemId, width, imageIndex, accountEpoch) }
-
-    override suspend fun getTrickplay(itemId: String, mediaSourceId: String, accountEpoch: ULong?): TrickplayMetaFfi? =
-        ffi("ffi.getTrickplay") { getTrickplay(itemId, mediaSourceId, accountEpoch) }
 
     override suspend fun fetchExternalSubtitle(playSessionId: String, index: Int): String? =
         ffi("ffi.fetchExternalSubtitle") { fetchExternalSubtitle(playSessionId, index) }
@@ -1142,11 +1165,18 @@ class RealCoreGateway(
                 override fun onChange(event: ChangeEvent) {
                     // Called from a JellybeamCore-owned background thread; tryEmit is thread-safe.
                     _changeEvents.tryEmit(event)
+                    if (refreshesViews(event)) backgroundScope.launch { refreshViews() }
                     // docs/21 §2.1: one line per event, never the ids themselves.
                     AppGraph.diag.event("sync.change") {
                         tag("kind", changeEventKind(event))
                         num("n", changeEventCount(event).toLong())
                     }
+                }
+
+                // docs/18 §2.1: the socket's 401 asks to re-authorize; it must not call the core, whose teardown may be joining this thread.
+                override fun onUnauthorized(account: AccountIdentity) {
+                    AppGraph.diag.event("auth.socket_rejected")
+                    authorizationRecovery.request(account)
                 }
             })
         }
@@ -1194,10 +1224,10 @@ class RealCoreGateway(
         ffi("ffi.seerrStatus") { seerrStatus() }
 
     override suspend fun seerrConnect(url: String, method: SeerrAuthMethod, identity: String, secret: String): SeerrStatus =
-        ffi("ffi.seerrConnect") { seerrConnect(url, method, identity, secret) }
+        ffi("ffi.seerrConnect") { seerrConnect(url, method, identity, secret).also { bumpSeerrRevision() } }
 
     override suspend fun seerrDisconnect() =
-        ffi("ffi.seerrDisconnect") { seerrDisconnect() }
+        ffi("ffi.seerrDisconnect") { seerrDisconnect(); bumpSeerrRevision() }
 
     override suspend fun seerrHome(): SeerrHome =
         ffi("ffi.seerrHome") { seerrHome() }
@@ -1224,21 +1254,40 @@ class RealCoreGateway(
         ffi("ffi.getPersonPage") { getPersonPage(personId) }
 
     override suspend fun personDiscoverCredits(personId: String, tmdbPersonId: Long, inLibrary: List<TitleTmdbRef>?): List<SeerrCard> =
-        // Named as a Seerr call: its 401 is Seerr's login, never the Jellyfin session's.
         ffi("ffi.seerrPersonDiscoverCredits") { personDiscoverCredits(personId, tmdbPersonId, inLibrary) }
 
     override suspend fun seerrRequestOptions(mediaType: SeerrMediaType, is4k: Boolean): SeerrRequestOptions =
         ffi("ffi.seerrRequestOptions") { seerrRequestOptions(mediaType, is4k) }
 
-    override suspend fun seerrSubmitRequest(input: SeerrRequestInput) =
-        ffi("ffi.seerrSubmitRequest") { seerrSubmitRequest(input) }
+    // The bump runs inside the IO block, so a caller cancelled mid-call still announces the change (docs/14).
+    override suspend fun seerrSubmitRequestDetail(input: SeerrRequestInput): SeerrRequestDetail =
+        ffi("ffi.seerrSubmitRequestDetail") { announcingChange { seerrSubmitRequestDetail(input) } }
 
-    override suspend fun seerrCancelRequest(requestId: Long) =
-        ffi("ffi.seerrCancelRequest") { seerrCancelRequest(requestId) }
+    override suspend fun seerrCancelRequestDetail(mediaType: SeerrMediaType, tmdbId: Long, requestId: Long): SeerrRequestDetail =
+        ffi("ffi.seerrCancelRequestDetail") { announcingChange { seerrCancelRequestDetail(mediaType, tmdbId, requestId) } }
 
     override suspend fun seerrMyRequests(): List<SeerrMyRequest> =
         ffi("ffi.seerrMyRequests") { seerrMyRequests() }
+
+    private val _seerrRevision = MutableStateFlow(0L)
+    override val seerrRevision: StateFlow<Long> = _seerrRevision.asStateFlow()
+
+    /** The one bump site: every Seerr connect/disconnect/request/cancel that changed the server moves it (docs/14). */
+    private fun bumpSeerrRevision() = _seerrRevision.update { it + 1 }
+
+    /** Runs a submit/cancel and bumps when it succeeded or landed with its detail unreadable (docs/14 Errors). */
+    private inline fun <T> announcingChange(call: () -> T): T =
+        try {
+            call().also { bumpSeerrRevision() }
+        } catch (e: CoreException.SeerrChangeUnconfirmed) {
+            bumpSeerrRevision()
+            throw e
+        }
 }
+
+/** docs/07 §5: a merged [ChangeEvent.Refresh] may carry a views change, so it re-reads the list too. */
+internal fun refreshesViews(event: ChangeEvent): Boolean =
+    event is ChangeEvent.ViewsChanged || event is ChangeEvent.Refresh
 
 /** Extra buffer slots for [RealCoreGateway]'s shared change-event flow. */
 private const val CHANGE_EVENTS_EXTRA_BUFFER = 8

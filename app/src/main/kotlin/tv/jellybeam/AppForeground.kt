@@ -13,7 +13,7 @@ import androidx.compose.runtime.mutableStateOf
 object AppForeground {
     val resumeCount: MutableIntState = mutableIntStateOf(0)
 
-    /** `true` while [tv.jellybeam.MainActivity] is resumed; background work that only serves the
-     * browsing UI (the dwell preload's re-arm) waits on it. */
-    val browsing: MutableState<Boolean> = mutableStateOf(true)
+    /** `true` while [tv.jellybeam.MainActivity] is resumed: a retained screen is top only then (the
+     * stack doesn't change when the player covers it), and browsing-only work waits on it. */
+    val browsing: MutableState<Boolean> = mutableStateOf(false)
 }

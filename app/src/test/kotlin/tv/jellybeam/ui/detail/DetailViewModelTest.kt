@@ -2,6 +2,8 @@ package tv.jellybeam.ui.detail
 
 import androidx.lifecycle.ViewModelStore
 import tv.jellybeam.MainDispatcherRule
+import tv.jellybeam.data.BrowseFailed
+import tv.jellybeam.data.BrowseNotReady
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.FakeCoreGateway
 import tv.jellybeam.i18n.ResourceUiStrings
@@ -934,23 +936,123 @@ class DetailViewModelTest {
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
-    fun `a stop report epoch refreshes the header card`() = runTest {
-        val movie = testCard(id = "movie-1", itemType = "Movie", positionTicks = 1_000L)
-        val fake = FakeCoreGateway().apply {
-            cardsByItemId["movie-1"] = movie.copy(positionTicks = 9_000L, played = true)
+    fun `a stop's mirror write for another item leaves a retained movie page alone`() = runTest {
+        // docs/17 §6: every Detail in the back stack hears every stop as its item's Upserted; only that item's page re-reads.
+        for ((stoppedId, refreshes) in listOf("movie-2" to false, "movie-1" to true)) {
+            val movie = testCard(id = "movie-1", itemType = "Movie")
+            val fake = FakeCoreGateway().apply { cardsByItemId["movie-1"] = movie }
+
+            withDetailViewModel(DetailViewModel(fake, movie, ResourceUiStrings.default)) {
+                runCurrent()
+                val before = fake.cardByIdCalls.size
+
+                fake.emitChange(ChangeEvent.Upserted(ids = listOf(stoppedId), libraryId = null))
+                runCurrent()
+
+                assertEquals("stopped item $stoppedId", before + if (refreshes) 1 else 0, fake.cardByIdCalls.size)
+            }
         }
-        val stopEpoch = MutableStateFlow(0L)
+    }
 
-        withDetailViewModel(DetailViewModel(fake, movie, ResourceUiStrings.default, stopEpoch)) { viewModel ->
-            assertEquals(1_000L, viewModel.state.value.card.positionTicks)
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a stop landing while the page is hidden refreshes it once on return`() = runTest {
+        // docs/17 §6: a PiP dismissal stops playback with this page hidden under the player.
+        val movie = testCard(id = "movie-1", itemType = "Movie", positionTicks = 1_000L)
+        val fake = FakeCoreGateway().apply { cardsByItemId["movie-1"] = movie.copy(positionTicks = 9_000L) }
 
-            // docs/17-mini-player.md §6: a PiP dismissal gives this screen only the stop-epoch
-            // edge, no mirror-change event.
-            stopEpoch.value = 1L
+        withDetailViewModel(DetailViewModel(fake, movie, ResourceUiStrings.default)) { viewModel ->
+            viewModel.setActive(false)
             runCurrent()
+            val before = fake.cardByIdCalls.size
 
+            fake.emitChange(ChangeEvent.Upserted(ids = listOf("movie-1"), libraryId = null))
+            advanceTimeBy(5_000)
+            runCurrent()
+            assertEquals("hidden: no read", before, fake.cardByIdCalls.size)
+
+            viewModel.setActive(true)
+            advanceTimeBy(5_000)
+            runCurrent()
+            assertEquals("one read on return", before + 1, fake.cardByIdCalls.size)
             assertEquals(9_000L, viewModel.state.value.card.positionTicks)
-            assertTrue(viewModel.state.value.card.played)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a stop's mirror write for another item leaves a retained series page alone, one of its episodes does not`() = runTest {
+        for ((stoppedId, refreshes) in listOf("other-item" to false, "ep-1" to true)) {
+            val series = testCard(id = "series-1", itemType = "Series")
+            val fake = FakeCoreGateway(
+                childrenByParent = mapOf(
+                    "series-1" to listOf(testCard(id = "season-1", itemType = "Season", indexNumber = 1, name = "Season 1")),
+                    "season-1" to listOf(testCard(id = "ep-1", itemType = "Episode", indexNumber = 1)),
+                ),
+            )
+
+            withDetailViewModel(DetailViewModel(fake, series, ResourceUiStrings.default)) {
+                runCurrent()
+                val before = fake.childrenCalls.size
+
+                fake.emitChange(ChangeEvent.Upserted(ids = listOf(stoppedId), libraryId = null))
+                runCurrent()
+
+                assertEquals("stopped item $stoppedId refreshes=$refreshes", refreshes, fake.childrenCalls.size > before)
+            }
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a movie or episode page closes when the mirror drops its item`() = runTest {
+        // docs/07 §5: a removed item's page must not stay up on stale data.
+        for (itemType in listOf("Movie", "Episode")) {
+            val card = testCard(id = "item-1", itemType = itemType)
+            val fake = FakeCoreGateway().apply { cardsByItemId["item-1"] = card }
+            val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+            val gateway = object : CoreGateway by fake {
+                override fun changeEvents(): Flow<ChangeEvent> = changes
+            }
+
+            withDetailViewModel(DetailViewModel(gateway, card, ResourceUiStrings.default)) { viewModel ->
+                runCurrent()
+                assertFalse(viewModel.state.value.itemRemoved)
+
+                changes.tryEmit(ChangeEvent.Removed(ids = listOf("item-2"), libraryId = null))
+                runCurrent()
+                assertFalse("$itemType: another item's removal is not this page's", viewModel.state.value.itemRemoved)
+
+                changes.tryEmit(ChangeEvent.Removed(ids = listOf("item-1"), libraryId = null))
+                runCurrent()
+                assertTrue("$itemType: its own removal closes the page", viewModel.state.value.itemRemoved)
+            }
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a merged refresh closes the page only when the item is gone from the mirror`() = runTest {
+        // docs/07 §5: a Removed merged into a Refresh still removes the page; a failed probe never does.
+        val table = listOf("gone" to true, "present" to false, "failed" to false)
+        for ((probe, closes) in table) {
+            val card = testCard(id = "item-1", itemType = "Movie")
+            val fake = FakeCoreGateway().apply { if (probe == "present") cardsByItemId["item-1"] = card }
+            val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+            val gateway = object : CoreGateway by fake {
+                override fun changeEvents(): Flow<ChangeEvent> = changes
+                override suspend fun cardById(itemId: String): Card? =
+                    if (probe == "failed") throw IllegalStateException("mirror read failed") else fake.cardById(itemId)
+            }
+
+            withDetailViewModel(DetailViewModel(gateway, card, ResourceUiStrings.default)) { viewModel ->
+                runCurrent()
+
+                changes.tryEmit(ChangeEvent.Refresh)
+                runCurrent()
+
+                assertEquals("probe $probe", closes, viewModel.state.value.itemRemoved)
+            }
         }
     }
 
@@ -1620,22 +1722,20 @@ class DetailViewModelTest {
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
-    fun `a stop report and a change event never run overlapping series refreshes`() = runTest {
+    fun `two change events never run overlapping series refreshes`() = runTest {
         val v1 = listOf(seasonCard(1), seasonCard(2))
         val v2 = v1 + seasonCard(3)
         val gateway = mirrorGateway(v1, listOf(episodeCard(1), episodeCard(2)))
         val gates = mutableListOf<CompletableDeferred<Unit>>()
         var gating = false
         gateway.childrenGate = { id -> if (gating && id == "series-1") CompletableDeferred<Unit>().also { gates += it }.await() }
-        val stopEpoch = MutableStateFlow(0L)
-
-        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default, stopEpoch)) { viewModel ->
+        withDetailViewModel(DetailViewModel(gateway, testCard(id = "series-1", itemType = "Series"), ResourceUiStrings.default)) { viewModel ->
             runCurrent()
             gating = true
             gateway.bus.tryEmit(ChangeEvent.Refresh)
             runCurrent()
             gateway.children["series-1"] = v2
-            stopEpoch.value = 1L
+            gateway.bus.tryEmit(ChangeEvent.Upserted(ids = listOf("series-1"), libraryId = null))
             runCurrent()
             repeat(8) {
                 gates.reversed().forEach { it.complete(Unit) }
@@ -2027,6 +2127,251 @@ class DetailViewModelTest {
             runCurrent()
 
             assertEquals(listOf("s2-real"), viewModel.state.value.episodes.map { it.id })
+        }
+    }
+
+    // -- docs/07 §5: browse read outcomes on a series page ----------------------------------
+
+    /** A series gateway whose season and all-episodes reads fail ([BrowseFailed]) while [failing]. */
+    private class FlakySeriesGateway(private val fake: FakeCoreGateway, var failing: Boolean) : CoreGateway by fake {
+        override suspend fun children(parentId: String, sort: SortOrder, offset: UInt, limit: UInt): List<Card> {
+            if (failing && parentId == "series-1") throw BrowseFailed()
+            return fake.children(parentId, sort, offset, limit)
+        }
+
+        override suspend fun seriesEpisodes(seriesId: String): List<Card> {
+            if (failing) throw BrowseFailed()
+            return fake.seriesEpisodes(seriesId)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a failed series read shows the list error and a Retry on a good read clears it`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1, name = "Season 1")
+        val episode = testCard(id = "ep-1", itemType = "Episode", indexNumber = 1, parentIndexNumber = 1)
+        val fake = FakeCoreGateway(
+            childrenByParent = mapOf("series-1" to listOf(season1), "season-1" to listOf(episode)),
+            seriesEpisodesBySeriesId = mapOf("series-1" to listOf(episode)),
+        )
+        val gateway = FlakySeriesGateway(fake, failing = true)
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            val failed = viewModel.state.value
+            assertTrue("a failed read is not an empty series", failed.listError)
+            assertTrue("a failed read still settles the page", failed.seasonsSettled)
+            assertTrue(failed.seasons.isEmpty())
+
+            gateway.failing = false
+            viewModel.retryLists()
+            runCurrent()
+
+            val retried = viewModel.state.value
+            assertFalse(retried.listError)
+            assertEquals(listOf("season-1"), retried.seasons.map { it.id })
+            assertEquals("season-1", retried.selectedSeasonId)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a mirror that is not open yet keeps the seasons unsettled until the read succeeds`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val season1 = testCard(id = "season-1", itemType = "Season", indexNumber = 1, name = "Season 1")
+        val fake = FakeCoreGateway(
+            childrenByParent = mapOf("series-1" to listOf(season1), "season-1" to emptyList()),
+            seriesEpisodesBySeriesId = mapOf("series-1" to emptyList()),
+        )
+        var notReady = true
+        val gateway = object : CoreGateway by fake {
+            override suspend fun children(parentId: String, sort: SortOrder, offset: UInt, limit: UInt): List<Card> {
+                if (notReady) throw BrowseNotReady()
+                return fake.children(parentId, sort, offset, limit)
+            }
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            assertFalse("not ready is neither empty nor failed", viewModel.state.value.seasonsSettled)
+            assertFalse(viewModel.state.value.listError)
+
+            advanceTimeBy(5_000)
+            runCurrent()
+            assertFalse("still waiting while the mirror stays closed", viewModel.state.value.seasonsSettled)
+
+            notReady = false
+            advanceTimeBy(1_000)
+            runCurrent()
+            val settled = viewModel.state.value
+            assertTrue(settled.seasonsSettled)
+            assertFalse(settled.listError)
+            assertEquals(listOf("season-1"), settled.seasons.map { it.id })
+        }
+    }
+
+    // -- docs/07 §5: the list error follows the newest read of each list ---------------------
+
+    /** Every browse read parks on its own deferred, so a test completes them in any order. */
+    private class ScriptedBrowseGateway(private val fake: FakeCoreGateway) : CoreGateway by fake {
+        val seasonReads = mutableListOf<CompletableDeferred<List<Card>>>()
+        val allReads = mutableListOf<CompletableDeferred<List<Card>>>()
+        val episodeReads = mutableListOf<CompletableDeferred<List<Card>>>()
+
+        override suspend fun children(parentId: String, sort: SortOrder, offset: UInt, limit: UInt): List<Card> {
+            val read = CompletableDeferred<List<Card>>()
+            (if (parentId == "series-1") seasonReads else episodeReads) += read
+            return read.await()
+        }
+
+        override suspend fun seriesEpisodes(seriesId: String): List<Card> {
+            val read = CompletableDeferred<List<Card>>()
+            allReads += read
+            return read.await()
+        }
+    }
+
+    private val listSeries = testCard(id = "series-1", itemType = "Series")
+    private val listSeasons = listOf(
+        testCard(id = "season-1", itemType = "Season", indexNumber = 1),
+        testCard(id = "season-2", itemType = "Season", indexNumber = 2),
+    )
+    private val listEpisode = testCard(id = "ep-1", itemType = "Episode", indexNumber = 1, parentIndexNumber = 1)
+
+    private fun CompletableDeferred<List<Card>>.fail() = completeExceptionally(BrowseFailed())
+
+    private inline fun withScriptedSeries(block: (ScriptedBrowseGateway, DetailViewModel) -> Unit) {
+        val gateway = ScriptedBrowseGateway(FakeCoreGateway())
+        withDetailViewModel(DetailViewModel(gateway, listSeries, ResourceUiStrings.default)) { block(gateway, it) }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `the seasons read decides the list error, a stale failure after a newer success does not`() = runTest {
+        for ((name, outcome) in listOf("ok" to false, "failed" to true)) {
+            withScriptedSeries { gateway, viewModel ->
+                runCurrent()
+                gateway.allReads[0].complete(emptyList())
+                if (outcome) gateway.seasonReads[0].fail() else gateway.seasonReads[0].complete(listSeasons)
+                runCurrent()
+                assertEquals("seasons $name", outcome, viewModel.state.value.listError)
+            }
+        }
+        withScriptedSeries { gateway, viewModel ->
+            runCurrent()
+            gateway.allReads[0].complete(emptyList())
+            viewModel.retryLists()
+            runCurrent()
+            gateway.seasonReads[1].complete(listSeasons)
+            gateway.allReads[1].complete(emptyList())
+            runCurrent()
+            gateway.seasonReads[0].fail()
+            runCurrent()
+            assertFalse("seasons stale failure", viewModel.state.value.listError)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `the all-episodes read decides the list error, a stale failure after a newer success does not`() = runTest {
+        for ((name, outcome) in listOf("ok" to false, "failed" to true)) {
+            withScriptedSeries { gateway, viewModel ->
+                runCurrent()
+                gateway.seasonReads[0].complete(listSeasons)
+                if (outcome) gateway.allReads[0].fail() else gateway.allReads[0].complete(listOf(listEpisode))
+                runCurrent()
+                assertEquals("allEpisodes $name", outcome, viewModel.state.value.listError)
+            }
+        }
+        withScriptedSeries { gateway, viewModel ->
+            runCurrent()
+            gateway.seasonReads[0].complete(listSeasons)
+            viewModel.retryLists()
+            runCurrent()
+            gateway.seasonReads[1].complete(listSeasons)
+            gateway.allReads[1].complete(listOf(listEpisode))
+            runCurrent()
+            gateway.allReads[0].fail()
+            runCurrent()
+            assertFalse("allEpisodes stale failure", viewModel.state.value.listError)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a network-served season read decides the list error, a stale one does not`() = runTest {
+        for ((name, outcome) in listOf("ok" to false, "failed" to true)) {
+            withScriptedSeries { gateway, viewModel ->
+                runCurrent()
+                gateway.seasonReads[0].complete(listSeasons) // all-episodes stays parked: episodes come from the network
+                runCurrent()
+                viewModel.selectSeason("season-1")
+                runCurrent()
+                if (outcome) gateway.episodeReads.last().fail() else gateway.episodeReads.last().complete(listOf(listEpisode))
+                runCurrent()
+                assertEquals("episodes $name", outcome, viewModel.state.value.listError)
+            }
+        }
+        withScriptedSeries { gateway, viewModel ->
+            runCurrent()
+            gateway.seasonReads[0].complete(listSeasons)
+            runCurrent()
+            viewModel.selectSeason("season-1")
+            runCurrent()
+            val older = gateway.episodeReads.last()
+            viewModel.selectSeason("season-2")
+            runCurrent()
+            gateway.episodeReads.last().complete(listOf(listEpisode))
+            older.fail()
+            runCurrent()
+            assertFalse("episodes stale failure", viewModel.state.value.listError)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a season served from memory clears an earlier episodes failure`() = runTest {
+        withScriptedSeries { gateway, viewModel ->
+            runCurrent()
+            gateway.seasonReads[0].complete(listSeasons)
+            runCurrent()
+            viewModel.selectSeason("season-1")
+            runCurrent()
+            gateway.episodeReads.last().fail()
+            runCurrent()
+            assertTrue("the failed season read is shown", viewModel.state.value.listError)
+
+            gateway.allReads[0].complete(listOf(listEpisode)) // memory can answer now
+            runCurrent()
+
+            assertFalse("the memory-served season is a good read", viewModel.state.value.listError)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a mirror that never opens settles the page as failed within the wait budget`() = runTest {
+        val series = testCard(id = "series-1", itemType = "Series")
+        val fake = FakeCoreGateway()
+        val gateway = object : CoreGateway by fake {
+            override suspend fun children(parentId: String, sort: SortOrder, offset: UInt, limit: UInt): List<Card> =
+                throw BrowseNotReady()
+
+            override suspend fun seriesEpisodes(seriesId: String): List<Card> = throw BrowseNotReady()
+        }
+
+        withDetailViewModel(DetailViewModel(gateway, series, ResourceUiStrings.default)) { viewModel ->
+            runCurrent()
+            advanceTimeBy(9_000)
+            runCurrent()
+            assertFalse("still waiting inside the budget", viewModel.state.value.seasonsSettled)
+
+            advanceTimeBy(2_000)
+            runCurrent()
+
+            assertTrue("the wait is bounded", viewModel.state.value.seasonsSettled)
+            assertTrue("a read that never became ready reads as failed", viewModel.state.value.listError)
         }
     }
 }

@@ -71,7 +71,6 @@ fun SignInScreen(
     onSignedIn: () -> Unit,
     reauthorizationTarget: ReauthorizationTarget? = null,
     viewModel: SignInViewModel = viewModel(
-        key = reauthorizationTarget?.let { "reauthorize-${it.index}-${it.userId}" } ?: "sign-in-add",
         factory = SignInViewModelFactory(AppGraph.gateway, AppGraph.strings, reauthorizationTarget),
     ),
 ) {
@@ -93,17 +92,13 @@ fun SignInScreen(
         if (state.error != null) scrollState.scrollTo(scrollState.maxValue)
     }
 
-    // Reauthorization has no discovery list to land on, so its first action takes focus and the
-    // first D-pad press acts instead of waking focus.
-    LaunchedEffect(reauthorizationTarget) {
-        if (reauthorizationTarget != null) requestFocusUntilSuccess { quickConnectRequester.requestFocus() }
-    }
-
-    // Only when there is a selectable row: with every result already saved, no row carries the
-    // requester, and this would otherwise retry forever.
+    // docs/15 §4: open on Quick Connect, never a text field (it would raise the IME); a discovered
+    // server landing later takes focus while the address is untouched.
+    LaunchedEffect(Unit) { requestFocusUntilSuccess { quickConnectRequester.requestFocus() } }
+    // With every result already saved no row carries the requester, which would retry forever.
     val hasSelectableDiscoveredRow = state.discoveredServers.any { !it.alreadySaved }
     LaunchedEffect(hasSelectableDiscoveredRow) {
-        if (hasSelectableDiscoveredRow && !state.serverUrlTouched) {
+        if (hasSelectableDiscoveredRow && !state.serverUrlTouched && reauthorizationTarget == null) {
             requestFocusUntilSuccess { firstDiscoveredRowRequester.requestFocus() }
         }
     }
@@ -151,7 +146,11 @@ fun SignInScreen(
                         viewModel.selectDiscoveredServer(server)
                         focusScope.launch { requestFocusUntilSuccess { quickConnectRequester.requestFocus() } }
                     },
-                    onRetry = viewModel::retryDiscovery,
+                    // The retried chip leaves composition; without a seed the framework would pick the text field.
+                    onRetry = {
+                        viewModel.retryDiscovery()
+                        focusScope.launch { requestFocusUntilSuccess { quickConnectRequester.requestFocus() } }
+                    },
                 )
                 JellybeamTextField(
                     label = stringResource(R.string.sign_in_server_url_label),
@@ -179,7 +178,7 @@ fun SignInScreen(
                     if (state.quickConnectActive) R.string.quick_connect_use_password
                     else R.string.quick_connect_button,
                 ),
-                enabled = !state.isSigningIn,
+                inert = state.isSigningIn,
                 onClick = viewModel::toggleQuickConnect,
                 modifier = Modifier.focusRequester(quickConnectRequester),
             )
@@ -225,7 +224,6 @@ fun SignInScreen(
                     state.error?.let { SignInErrorCard(it) }
                     SignInButton(
                         text = stringResource(R.string.quick_connect_retry),
-                        enabled = true,
                         onClick = viewModel::retryQuickConnect,
                     )
                 }
@@ -250,7 +248,7 @@ fun SignInScreen(
                         if (reauthorizationTarget == null) R.string.sign_in_button
                         else R.string.reauthorize_button,
                     ),
-                    enabled = !state.isSigningIn,
+                    inert = state.isSigningIn,
                     onClick = viewModel::signIn,
                 )
                 if (state.isSigningIn) {
@@ -352,12 +350,21 @@ private fun JellybeamTextField(
     }
 }
 
+/** docs/15 §4: [inert] keeps the button focusable while its action runs but ignores Select and mutes it. */
 @Composable
-private fun SignInButton(text: String, enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun SignInButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, inert: Boolean = false) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    val background = if (isFocused) JellybeamTheme.Pistacchio else JellybeamTheme.Surface
-    val textColor = if (isFocused) JellybeamTheme.Notte else JellybeamTheme.Panna
+    val background = when {
+        !isFocused -> JellybeamTheme.Surface
+        inert -> JellybeamTheme.Pistacchio.copy(alpha = 0.5f)
+        else -> JellybeamTheme.Pistacchio
+    }
+    val textColor = when {
+        isFocused -> JellybeamTheme.Notte
+        inert -> JellybeamTheme.Grigio
+        else -> JellybeamTheme.Panna
+    }
 
     Box(
         modifier = modifier
@@ -373,8 +380,7 @@ private fun SignInButton(text: String, enabled: Boolean, onClick: () -> Unit, mo
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
-                enabled = enabled,
-                onClick = onClick,
+                onClick = { if (!inert) onClick() },
             )
             .padding(vertical = 14.dp),
         contentAlignment = Alignment.Center,

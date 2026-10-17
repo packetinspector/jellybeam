@@ -80,6 +80,8 @@ class CardFormattingTest {
         // Partial minutes ceil too: 6m01s -> "7m".
         assertEquals("7m", CardFormatting.formatRuntime(strings, (6L * 60 + 1) * 10_000_000))
         assertEquals("0m", CardFormatting.formatRuntime(strings, 0L))
+        // A 3:00 episode's container runs 180.05 s: Up Next and the series page both read "3m".
+        assertEquals("3m", CardFormatting.formatRuntime(strings, 1_800_520_000L))
     }
 
     @Test

@@ -48,10 +48,15 @@ fn permissive_device_profile() -> DeviceProfile {
 }
 
 async fn authenticated_client() -> JellyfinClient {
-    let (client, result) =
-        JellyfinClient::authenticate_by_name(BASE_URL, identity(), ADMIN_USER, ADMIN_PASS)
-            .await
-            .expect("authenticate_by_name against local dev server");
+    let (client, result) = JellyfinClient::authenticate_by_name(
+        &jellyfin_api::build_http_client(),
+        BASE_URL,
+        identity(),
+        ADMIN_USER,
+        ADMIN_PASS,
+    )
+    .await
+    .expect("authenticate_by_name against local dev server");
     assert!(
         result.access_token.is_some(),
         "server did not return an access token"
@@ -73,6 +78,7 @@ async fn authenticate_by_name_succeeds() {
 #[ignore]
 async fn wrong_password_is_unauthorized() {
     let result = JellyfinClient::authenticate_by_name(
+        &jellyfin_api::build_http_client(),
         BASE_URL,
         identity(),
         ADMIN_USER,
@@ -401,9 +407,15 @@ async fn websocket_connects_and_can_receive_or_time_out() {
 #[tokio::test]
 #[ignore]
 async fn quick_connect_initiate_returns_a_code_against_live_dev_server() {
-    let result = JellyfinClient::quick_connect_initiate(BASE_URL, &identity())
-        .await
-        .expect("Initiate against the live dev server (is Quick Connect enabled? see dev/setup-server.sh)");
+    let result = JellyfinClient::quick_connect_initiate(
+        &jellyfin_api::build_http_client(),
+        BASE_URL,
+        &identity(),
+    )
+    .await
+    .expect(
+        "Initiate against the live dev server (is Quick Connect enabled? see dev/setup-server.sh)",
+    );
     let code = result
         .code
         .expect("live Initiate response should include a Code");

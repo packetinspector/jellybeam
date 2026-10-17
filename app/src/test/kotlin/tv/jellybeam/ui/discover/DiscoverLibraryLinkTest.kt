@@ -2,9 +2,15 @@ package tv.jellybeam.ui.discover
 
 import tv.jellybeam.MainDispatcherRule
 import tv.jellybeam.data.FakeCoreGateway
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import uniffi.jellybeam_core.ItemDetail
@@ -44,6 +50,7 @@ private fun testItemDetail(id: String = "item-1", name: String = "The Prestidigi
     writers = emptyList(),
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class DiscoverLibraryLinkTest {
 
     @get:Rule
@@ -124,5 +131,25 @@ class DiscoverLibraryLinkTest {
         val card = resolveLibraryCard(fake, "movie-2")
 
         assertEquals(false, card?.played)
+    }
+
+    @Test
+    fun `a lookup cancelled while the mirror read is pending does not return a result`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val fake = FakeCoreGateway(itemDetailResultsByItemId = mapOf("movie-1" to Result.success(testItemDetail(id = "movie-1"))))
+        fake.cardByIdGate = gate
+        var returned = false
+        val lookup = launch {
+            resolveLibraryCard(fake, "movie-1")
+            returned = true
+        }
+        runCurrent()
+        assertEquals("the lookup is parked in the mirror read", listOf("movie-1"), fake.cardByIdCalls)
+
+        lookup.cancel()
+        runCurrent()
+
+        assertFalse("a cancelled lookup rethrows instead of falling back and returning", returned)
+        assertTrue(fake.getItemDetailCalls.isEmpty())
     }
 }

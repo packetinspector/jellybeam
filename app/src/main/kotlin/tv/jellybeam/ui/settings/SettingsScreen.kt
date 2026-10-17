@@ -20,7 +20,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -106,7 +105,7 @@ private val SettingsSectionSaver: Saver<SettingsSection, String> = Saver(
  * refocus of the already-active row is a no-op and can't disturb the pane's focus/scroll state.
  * Toggle/chip rows write through immediately -- no save button.
  *
- * Focus machinery: [isTop]/[focusGate] are [tv.jellybeam.MainActivity]'s retained-screen contract.
+ * Focus machinery: [isTop] is [tv.jellybeam.MainActivity]'s retained-screen contract.
  * Restore goes through [tv.jellybeam.ui.focus.FocusRestorer]: [selectedKey] is the active rail row
  * ([railFocusKey]), [fallback] its [FocusRequester], so a first mount lands on Home row 0 and a
  * later becoming-top restores the last-focused pane row/chip (§2 rule 1) before falling back to
@@ -122,14 +121,6 @@ private val SettingsSectionSaver: Saver<SettingsSection, String> = Saver(
 @Composable
 fun SettingsScreen(
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate for this entry -- closed while hidden/transitioning; opened before
-     * each explicit focus placement. See [tv.jellybeam.MainActivity.RetainedScreenLayer].
-     */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
-    /** docs/14-seerr-discover.md: [tv.jellybeam.MainActivity]'s `seerrEpoch` bump, so the drawer's
-     * Discover entry appears/disappears without a restart. No-op default for other call sites.
-     */
-    onSeerrConfigChanged: () -> Unit = {},
     /** docs/21-user-reporting.md §1.2: pushes [tv.jellybeam.nav.Screen.Report]. No-op default for
      * other call sites (e.g. focus/section tests). */
     onReportProblem: () -> Unit = {},
@@ -158,7 +149,6 @@ fun SettingsScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = !state.isLoading,
         selectedKey = { railFocusKey(activeSection) },
         fallback = { railFocusRequesters.getValue(activeSection).asFocusTarget() },
@@ -205,7 +195,7 @@ fun SettingsScreen(
                     ) {
                         CompositionLocalProvider(
                             LocalSettingsPaneEntryKey provides paneEntry,
-                            LocalSettingsFocusGate provides focusGate,
+                            LocalSettingsRailEntry provides railFocusRequesters.getValue(activeSection),
                         ) {
                             when (activeSection) {
                                 SettingsSection.HOME -> HomeSectionContent(state, viewModel)
@@ -213,7 +203,7 @@ fun SettingsScreen(
                                 SettingsSection.PLAYBACK -> PlaybackSectionContent(state, viewModel)
                                 SettingsSection.OSD -> OsdSectionContent(state, viewModel)
                                 SettingsSection.SUBTITLES -> SubtitlesSectionContent(state, viewModel)
-                                SettingsSection.DISCOVER -> DiscoverSectionContent(onSeerrConfigChanged = onSeerrConfigChanged)
+                                SettingsSection.DISCOVER -> DiscoverSectionContent()
                                 SettingsSection.TROUBLESHOOTING -> TroubleshootingSectionContent(state, viewModel, onReportProblem)
                                 SettingsSection.UPDATES -> UpdatesSectionContent(isTop, viewModel::setAutomaticUpdateChecks) {
                                     activeSection = SettingsSection.HOME

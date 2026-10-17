@@ -41,6 +41,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.ui.nav.LocalDrawerLeftEdgeSuppressed
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.placeByKeys
 import tv.jellybeam.ui.focus.requestFocusWithRetry
@@ -88,13 +89,13 @@ internal fun IndexRail(
     gridState: LazyGridState,
     viewModel: LibraryViewModel,
     memory: FocusMemory,
-    focusGate: MutableState<Boolean>,
     railRequester: FocusRequester,
     isTop: Boolean,
     originKey: String?,
     columns: Int,
     modifier: Modifier = Modifier,
 ) {
+    val focusGate = LocalFocusGate.current
     val scope = rememberCoroutineScope()
     var railFocused by remember { mutableStateOf(false) }
     // docs/16 §4.4: a repeat retargets the in-flight load+scroll job; it loops until its last read

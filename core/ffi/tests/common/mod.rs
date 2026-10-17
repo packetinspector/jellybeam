@@ -65,3 +65,30 @@ pub(crate) fn signed_in_core_with_settled_mirror(
 
     (dir, core, account)
 }
+
+/// A live children read as its rows; a read that is not ready or failed is empty here, since a
+/// live test only walks a library that already synced.
+pub trait ChildrenRows {
+    fn children(
+        &self,
+        parent_id: String,
+        sort: jellybeam_core::SortOrder,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<jellybeam_core::Card>;
+}
+
+impl ChildrenRows for JellybeamCore {
+    fn children(
+        &self,
+        parent_id: String,
+        sort: jellybeam_core::SortOrder,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<jellybeam_core::Card> {
+        match self.children_read(parent_id, sort, offset, limit) {
+            jellybeam_core::BrowseRead::Items { cards } => cards,
+            _ => Vec::new(),
+        }
+    }
+}

@@ -39,7 +39,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
@@ -86,9 +85,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -112,13 +111,17 @@ import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
 import tv.jellybeam.ui.cards.SkeletonBlock
 import tv.jellybeam.ui.cards.rememberSkeletonPulseAlpha
+import tv.jellybeam.ui.common.ActiveWhileTop
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
 import tv.jellybeam.ui.focus.FocusTarget
 import tv.jellybeam.ui.focus.RefreshRestoreOwner
+import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.refreshGuardEligible
+import tv.jellybeam.ui.focus.PlacementToken
 import tv.jellybeam.ui.focus.rememberFocusMemory
 import tv.jellybeam.ui.focus.restoreNow
 import tv.jellybeam.ui.home.common.EmptyLibraryState
@@ -233,14 +236,11 @@ private val SKELETON_ART_RADIUS = 2.dp
 internal fun ClassicHomeScreen(
     onOpenDetail: (Card) -> Unit,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate: closed while hidden/transitioning; opened before each explicit
-     * focus placement. See [tv.jellybeam.MainActivity.RetainedScreenLayer].
-     */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: ClassicHomeViewModel = viewModel(
         factory = ClassicHomeViewModelFactory(AppGraph.gateway, AppGraph.strings, launchWarmup = AppGraph.launchWarmup),
     ),
 ) {
+    val focusGate = LocalFocusGate.current
     val feedState by viewModel.state.collectAsState()
     val chrome = feedState.chrome
     val state = feedState.content
@@ -294,41 +294,36 @@ internal fun ClassicHomeScreen(
     // Guards a rapid open/close/open/close double-tap from launching a second restore coroutine
     // while the first is mid-flight.
     var drawerRestoreJob by remember { mutableStateOf<Job?>(null) }
+    // docs/15 §5: the open drawer holds a placement token, so a stray default-focus grab while it
+    // animates cannot corrupt the record before the close-time restore reads it.
+    var drawerToken by remember { mutableStateOf<PlacementToken?>(null) }
     // docs/15-focus-and-selection.md §3: [RefreshRestoreOwner] owns the refresh guard's (below)
-    // `restoreNow` coroutine and its freeze.
-    val refreshOwner = remember { RefreshRestoreOwner() }
+    // `restoreNow` coroutine.
+    val refreshOwner = rememberRefreshRestoreOwner(isTop)
     if (drawerFocusCoordinator != null) {
         SideEffect {
             drawerFocusCoordinator.onDrawerOpened = {
-                // Same freeze as a becoming-non-top transition: a stray default-focus grab while
-                // the drawer animates must not corrupt the record before this file's restore reads
-                // it. `releaseFreeze` cancels any in-flight refresh restore first, so this freeze
-                // is unambiguously the drawer's.
-                refreshOwner.ownershipLost(releaseFreeze = true)
-                memory.frozen = true
+                refreshOwner.ownershipLost()
+                if (drawerToken == null) drawerToken = memory.beginPlacement()
             }
             drawerFocusCoordinator.onDrawerClosed = { navigatingAway ->
-                if (navigatingAway) {
-                    // Keep memory frozen; the incoming screen owns placement.
-                    true
-                } else {
-                    drawerRestoreJob?.cancel()
-                    drawerRestoreJob = coroutineScope.launch {
+                drawerRestoreJob?.cancel()
+                if (!navigatingAway) {
+                    // Undispatched: the restore holds its own token before the drawer's is released.
+                    drawerRestoreJob = coroutineScope.launch(start = CoroutineStart.UNDISPATCHED) {
                         memory.restoreNow(focusGate, fallback = homeFallback, tag = "home-drawer")
                     }
-                    true
                 }
+                // Navigating away: offTop covers the window until the incoming screen places.
+                drawerToken?.let(memory::endPlacement)
+                drawerToken = null
+                true
             }
         }
     }
 
-    // refreshNow on every return to Home -- a stale-to-fresh Continue-Watching/hero swap must not
-    // happen live, in full view. Independent of `FocusRestorer`'s focus-placement effect: refresh
-    // is data, not focus.
     LaunchedEffect(isTop) {
-        if (isTop && !homeWasTop) {
-            viewModel.refreshNow()
-        } else if (!isTop && homeWasTop) {
+        if (!isTop && homeWasTop) {
             // A shelf's horizontal offset is retained across push/pop, but focus only re-enters
             // one shelf (or the hero); every other shelf keeps a scroll position with no focus
             // anchor, so its first cards sit half off-screen. Reset every shelf except the one
@@ -360,35 +355,9 @@ internal fun ClassicHomeScreen(
         homeWasTop = isTop
     }
 
-    // docs/16-library-sort-filter.md §4.6, docs/17-mini-player.md §6: feeds this screen's
-    // top-of-stack-and-resumed signal into HomeFeed's changeRefreshScheduler and the
-    // pollSyncing/pollSyncStatus gating.
-    LaunchedEffect(isTop) {
-        viewModel.setActive(isTop)
-    }
+    ActiveWhileTop(isTop, viewModel::setActive)
 
-    // [refreshOwner] must not outlive Home's ownership of focus, lost the moment it's no longer
-    // top. Separate from the `homeWasTop`-transition effect above so this reruns on every `isTop`
-    // value. `releaseFreeze` stays `false`: [FocusRestorer]'s own effect independently sets
-    // `memory.frozen = true` on the same transition.
-    LaunchedEffect(isTop) {
-        if (!isTop) refreshOwner.ownershipLost()
-    }
-
-    // Init owns first composition; subsequent host resumes cover playback/background returns.
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, viewModel) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) viewModel.onHostResume()
-            // The refresh guard's `resumed` check only gates a new restore from starting; losing
-            // RESUMED must cancel any in-flight refresh-restore job the same way losing `isTop`
-            // does.
-            if (event == Lifecycle.Event.ON_PAUSE) refreshOwner.ownershipLost()
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
     // Plain `remember`, not keyed on [isTop]: Home composes exactly once per session, so this must
     // never reset just because Home was hidden/revealed by navigation. `isLoading` is set false
     // exactly once, permanently, so a later refresh re-observing it is a no-op, never a re-trigger.
@@ -530,7 +499,6 @@ internal fun ClassicHomeScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = ready,
         fallback = homeFallback,
         tag = "home",
@@ -540,7 +508,8 @@ internal fun ClassicHomeScreen(
     // then 3. Never index." A live refresh can drop the focused Continue Watching card from the
     // id-keyed LazyRow, clearing focus with nothing re-placing it. [shelves]/[hero] are this
     // screen's refresh signal. One `withFrameNanos` lets Compose apply the new list before this
-    // reads [homeHasFocus]; only a refresh that left focus nowhere triggers a restore. Gated to
+    // reads [homeHasFocus]; only a refresh that left focus nowhere triggers a restore, and one that
+    // moved the still-focused card out of its row (the played item going first) gets a scroll back. Gated to
     // `isTop` so a background refresh under another screen leaves placement to [FocusRestorer]'s
     // becoming-top effect instead.
     //
@@ -549,28 +518,29 @@ internal fun ClassicHomeScreen(
     // because a refresh stole it. An unseeded run here would both fire the scroll-flash [ready]
     // prevents and swallow the real seed.
     //
-    // [RefreshRestoreOwner] owns this guard's lifetime and freeze-reads: (A)
-    // [refreshOwner.ownsFreeze] tells `eligible` below that a currently-true `memory.frozen`
-    // belongs to a refresh job, not a drawer/navigation freeze, so cancellation doesn't
-    // permanently block a replacement. (B) The guard's restore work must not outlive Home's focus
-    // ownership or survive a transition mid-`frame`: [refreshOwner]'s epoch invalidates a waiting
-    // trigger the instant `ownershipLost()` runs, and `eligible` reads [latestIsTop] live.
+    // [RefreshRestoreOwner] owns this guard's lifetime: a running refresh restore's own token never
+    // blocks its replacement (`frozenBesides`), a drawer or navigation freeze does; `eligible`
+    // reads [latestIsTop] live after the frame, so a waiting trigger never outlives a loss.
     val latestIsTop by rememberUpdatedState(isTop)
     LaunchedEffect(shelves, hero) {
         refreshOwner.onContentChanged(
             scope = coroutineScope,
             frame = { withFrameNanos {} },
-            eligible = { ownsFreeze ->
+            eligible = { ownTokens ->
                 refreshGuardEligible(
                     isTop = latestIsTop,
                     seeded = memory.seeded,
                     resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
-                    hasFocus = homeHasFocus,
-                    frozen = memory.frozen,
-                    ownsFreeze = ownsFreeze,
+                    // A kept focus that the refresh moved out of its row is owed a scroll, not a placement.
+                    hasFocus = homeHasFocus && keptFocusOutOfView(memory.focusedKey, shelfListStates::visibleCardIds) == null,
+                    frozenByOthers = memory.frozenBesides(ownTokens),
                 )
             },
-            restore = {
+            restore = restore@{
+                keptFocusOutOfView(memory.focusedKey, shelfListStates::visibleCardIds)?.let { key ->
+                    memory.scrollTo?.invoke(key)
+                    return@restore
+                }
                 memory.restoreNow(
                     focusGate,
                     fallback = { homeRefreshFallback(memory, shelves, shelfListStates, homeFallback) },
@@ -857,6 +827,21 @@ internal fun ClassicHomeScreen(
             }
         }
     }
+}
+
+private fun Map<String, LazyListState>.visibleCardIds(shelfId: String): Set<Any>? =
+    this[shelfId]?.layoutInfo?.visibleItemsInfo?.mapTo(HashSet()) { it.key }
+
+/**
+ * docs/15 §3: a refresh can keep focus on a shelf card yet move it out of its row (Continue
+ * Watching puts the played item first); returns that card's key so the guard scrolls it back, else
+ * null. A card still partly on screen counts as in view, so a refresh never fights a D-pad scroll.
+ */
+internal fun keptFocusOutOfView(focusedKey: String?, visibleCardIds: (shelfId: String) -> Set<Any>?): String? {
+    val body = focusedKey?.removePrefix("shelf:")?.takeIf { it != focusedKey } ?: return null
+    val (shelfId, cardId) = body.split("/card:", limit = 2).takeIf { it.size == 2 } ?: return null
+    val visible = visibleCardIds(shelfId) ?: return null
+    return focusedKey.takeUnless { cardId in visible }
 }
 
 /**
@@ -1245,7 +1230,6 @@ private fun Shelf(
     onFirstCellPositioned: (() -> Unit)?,
     onOpenDetail: (Card) -> Unit,
 ) {
-    var focusedIndex by remember(spec.title) { mutableStateOf<Int?>(null) }
     // CELL_GAP passed explicitly so this can never silently drift from the gap the LazyRow below
     // actually
     // lays cards out with.
@@ -1310,14 +1294,9 @@ private fun Shelf(
                 contentPadding = PaddingValues(horizontal = PAGE_MARGIN),
             ) {
                 itemsIndexed(spec.items, key = { _, card -> card.id }, contentType = { _, _ -> spec.kind }) { index, card ->
-                    // docs/07 §4: isFocused reads through derivedStateOf, keyed per-index, rather
-                    // than
-                    // straight off the shared `focusedIndex` state -- otherwise one D-pad press
-                    // would
-                    // invalidate the whole row instead of just the two cells whose boolean flips.
-                    // The ring
-                    // shows from the moment initial focus lands, not gated on a prior D-pad press.
-                    val isFocused by remember(index) { derivedStateOf { focusedIndex == index } }
+                    // docs/07 §4: per-cell state keyed by card id, so a press recomposes only the two
+                    // cells that flip and the ring moves with its card when a refresh reorders the row.
+                    var isFocused by remember { mutableStateOf(false) }
 
                     // docs/15-focus-and-selection.md §5: [focusKey] first in the chain -- it must
                     // sit above
@@ -1332,13 +1311,10 @@ private fun Shelf(
                         .focusKey(memory, "shelf:${spec.id}/card:${card.id}")
                         .animateItem()
                         .onFocusChanged { focusState ->
+                            isFocused = focusState.isFocused
                             if (focusState.isFocused) {
-                                focusedIndex = index
                                 PreloadOnDwell.default.onCardFocused(card.id, card.itemType)
                             } else {
-                                if (focusedIndex == index) {
-                                    focusedIndex = null
-                                }
                                 PreloadOnDwell.default.onCardUnfocused(card.id)
                             }
                         }

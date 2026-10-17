@@ -4,6 +4,7 @@ import tv.jellybeam.MainDispatcherRule
 import kotlinx.coroutines.Dispatchers
 import tv.jellybeam.data.FakeCoreGateway
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.data.SettingsStore
 import tv.jellybeam.data.defaultTestSettings
 import androidx.lifecycle.ViewModelStore
 import java.util.concurrent.CountDownLatch
@@ -12,6 +13,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -84,7 +87,7 @@ class SettingsViewModelTest {
                 persisted += settings
             }
         }
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSkipBack(30u)
         viewModel.selectSkipForward(60u)
@@ -115,7 +118,7 @@ class SettingsViewModelTest {
         val seeded = defaultTestSettings().copy(nextUpRewatching = true, skipBackSecs = 30u)
         val gateway = FakeCoreGateway(viewsList = listOf(movies, shows), settings = seeded)
 
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         assertFalse(viewModel.state.value.isLoading)
         assertEquals(seeded, viewModel.state.value.settings)
@@ -128,7 +131,7 @@ class SettingsViewModelTest {
     fun `toggling next-up rewatching flips only that field and writes the whole record`() = runTest {
         val seeded = defaultTestSettings().copy(nextUpRewatching = false)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleNextUpRewatching()
 
@@ -141,7 +144,7 @@ class SettingsViewModelTest {
     fun `toggling hide-watched-in-latest flips only that field`() = runTest {
         val seeded = defaultTestSettings().copy(hideWatchedInLatest = false)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleHideWatchedInLatest()
 
@@ -153,7 +156,7 @@ class SettingsViewModelTest {
     fun `toggling show-virtual-episodes flips only that field`() = runTest {
         val seeded = defaultTestSettings().copy(showVirtualEpisodes = false)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleShowVirtualEpisodes()
 
@@ -165,7 +168,7 @@ class SettingsViewModelTest {
     fun `toggling autoplay enabled flips only that field`() = runTest {
         val seeded = defaultTestSettings().copy(autoplayEnabled = true)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleAutoplayEnabled()
 
@@ -180,7 +183,7 @@ class SettingsViewModelTest {
     fun `toggling a shown library hides it (adds to hiddenLibraryIds)`() = runTest {
         val seeded = defaultTestSettings().copy(hiddenLibraryIds = emptyList())
         val gateway = FakeCoreGateway(viewsList = listOf(movies, shows), settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleLibraryVisibility(movies.id)
 
@@ -191,7 +194,7 @@ class SettingsViewModelTest {
     fun `toggling an already-hidden library shows it again (removes from hiddenLibraryIds)`() = runTest {
         val seeded = defaultTestSettings().copy(hiddenLibraryIds = listOf(movies.id, shows.id))
         val gateway = FakeCoreGateway(viewsList = listOf(movies, shows), settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleLibraryVisibility(movies.id)
 
@@ -204,7 +207,7 @@ class SettingsViewModelTest {
     fun `selecting a next-up cutoff chip sets that value exactly`() = runTest {
         val seeded = defaultTestSettings().copy(nextUpCutoffDays = null)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectNextUpCutoff(90u)
 
@@ -214,7 +217,7 @@ class SettingsViewModelTest {
     @Test
     fun `selecting a shelf size chip sets that value exactly`() = runTest {
         val gateway = FakeCoreGateway(settings = defaultTestSettings().copy(homeShelfSize = 20u))
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectHomeShelfSize(30u)
 
@@ -224,7 +227,7 @@ class SettingsViewModelTest {
     @Test
     fun `selecting a resume art chip sets that value exactly`() = runTest {
         val gateway = FakeCoreGateway(settings = defaultTestSettings().copy(homeResumeArt = ResumeArt.EPISODE))
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectHomeResumeArt(ResumeArt.SERIES_THUMB)
 
@@ -235,7 +238,7 @@ class SettingsViewModelTest {
     @Test
     fun `the favorites row toggle flips the home setting`() = runTest {
         val gateway = FakeCoreGateway(settings = defaultTestSettings().copy(homeShowFavorites = true))
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleHomeShowFavorites()
 
@@ -246,7 +249,7 @@ class SettingsViewModelTest {
     fun `selecting Off for next-up cutoff sets it back to null`() = runTest {
         val seeded = defaultTestSettings().copy(nextUpCutoffDays = 365u)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectNextUpCutoff(null)
 
@@ -257,7 +260,7 @@ class SettingsViewModelTest {
     fun `selecting a skip-back chip writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(skipBackSecs = 10u)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSkipBack(30u)
 
@@ -268,7 +271,7 @@ class SettingsViewModelTest {
     fun `selecting a skip-forward chip writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(skipForwardSecs = 10u)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSkipForward(60u)
 
@@ -279,7 +282,7 @@ class SettingsViewModelTest {
     fun `selecting an autoplay-delay chip writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(autoplayDelaySecs = 5u)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectAutoplayDelay(30u)
 
@@ -292,7 +295,7 @@ class SettingsViewModelTest {
     fun `selectPlaybackQuality persists the chosen mode`() = runTest {
         val seeded = defaultTestSettings().copy(playbackQuality = PlaybackQuality.DirectPlay)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectPlaybackQuality(PlaybackQuality.Auto)
         assertEquals(seeded.copy(playbackQuality = PlaybackQuality.Auto), viewModel.state.value.settings)
@@ -313,7 +316,7 @@ class SettingsViewModelTest {
             stillWatching = defaultTestSettings().stillWatching.copy(mode = StillWatchingMode.AFTER_EPISODES),
         )
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectStillWatchingMode(StillWatchingMode.AFTER_HOURS)
 
@@ -329,7 +332,7 @@ class SettingsViewModelTest {
             stillWatching = defaultTestSettings().stillWatching.copy(episodes = 3u),
         )
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectStillWatchingEpisodes(5u)
 
@@ -345,7 +348,7 @@ class SettingsViewModelTest {
             stillWatching = defaultTestSettings().stillWatching.copy(hours = 3f),
         )
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectStillWatchingHours(2f)
 
@@ -361,7 +364,7 @@ class SettingsViewModelTest {
             stillWatching = defaultTestSettings().stillWatching.copy(timeoutSecs = 120u),
         )
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectStillWatchingTimeout(60u)
 
@@ -377,7 +380,7 @@ class SettingsViewModelTest {
             stillWatching = defaultTestSettings().stillWatching.copy(resetOnInput = true),
         )
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleStillWatchingResetOnInput()
 
@@ -391,7 +394,7 @@ class SettingsViewModelTest {
     fun `selecting a startup-screen chip stores that view's id`() = runTest {
         val seeded = defaultTestSettings().copy(startupScreenViewId = null)
         val gateway = FakeCoreGateway(viewsList = listOf(movies, shows), settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectStartupScreen(shows.id)
 
@@ -402,7 +405,7 @@ class SettingsViewModelTest {
     fun `selecting Home for startup screen stores null`() = runTest {
         val seeded = defaultTestSettings().copy(startupScreenViewId = movies.id)
         val gateway = FakeCoreGateway(viewsList = listOf(movies, shows), settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectStartupScreen(null)
 
@@ -415,7 +418,7 @@ class SettingsViewModelTest {
     fun `selecting a subtitle scale chip writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(subtitleScale = 1.0f)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSubtitleScale(1.5f)
 
@@ -427,7 +430,7 @@ class SettingsViewModelTest {
     fun `selecting a subtitle position chip writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(subtitlePosition = SubtitlePositionPreset.DEFAULT)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSubtitlePosition(SubtitlePositionPreset.HIGHEST)
 
@@ -438,7 +441,7 @@ class SettingsViewModelTest {
     fun `toggling subtitle bold flips only that field`() = runTest {
         val seeded = defaultTestSettings().copy(subtitleBold = false)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleSubtitleBold()
 
@@ -450,7 +453,7 @@ class SettingsViewModelTest {
     fun `selecting a subtitle background opacity chip writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(subtitleBackgroundOpacity = 0.0f)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSubtitleBackgroundOpacity(0.75f)
 
@@ -461,7 +464,7 @@ class SettingsViewModelTest {
     fun `selecting a subtitle color chip writes only that field`() = runTest {
         val seeded = defaultTestSettings()
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSubtitleColor(SubtitleColorPreset.LIGHT_GREEN)
 
@@ -472,7 +475,7 @@ class SettingsViewModelTest {
     fun `toggling system subtitle style flips only that field`() = runTest {
         val seeded = defaultTestSettings()
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleSubtitleUseSystemStyle()
 
@@ -483,7 +486,7 @@ class SettingsViewModelTest {
     fun `toggling full styling flips only that field`() = runTest {
         val seeded = defaultTestSettings()
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleSubtitleFullAssStyling()
 
@@ -496,7 +499,7 @@ class SettingsViewModelTest {
     fun `selecting a skip-intro action writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(skipIntro = SegmentAction.ASK)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSkipIntro(SegmentAction.OFF)
 
@@ -508,7 +511,7 @@ class SettingsViewModelTest {
     fun `selecting a skip-outro action writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(skipOutro = SegmentAction.ASK)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSkipOutro(SegmentAction.AUTO_SKIP)
 
@@ -519,7 +522,7 @@ class SettingsViewModelTest {
     fun `selecting a skip-recap action writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(skipRecap = SegmentAction.ASK)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSkipRecap(SegmentAction.OFF)
 
@@ -530,7 +533,7 @@ class SettingsViewModelTest {
     fun `selecting a skip-preview action writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(skipPreview = SegmentAction.ASK)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSkipPreview(SegmentAction.AUTO_SKIP)
 
@@ -541,7 +544,7 @@ class SettingsViewModelTest {
     fun `selecting a skip-commercial action writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(skipCommercial = SegmentAction.AUTO_SKIP)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectSkipCommercial(SegmentAction.ASK)
 
@@ -554,7 +557,7 @@ class SettingsViewModelTest {
     fun `toggling show clock flips only that field`() = runTest {
         val seeded = defaultTestSettings().copy(showClock = true)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleShowClock()
 
@@ -568,7 +571,7 @@ class SettingsViewModelTest {
     fun `toggling tolerate mislabeled levels flips only that field`() = runTest {
         val seeded = defaultTestSettings().copy(tolerateMislabeledLevels = true)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleTolerateMislabeledLevels()
 
@@ -582,7 +585,7 @@ class SettingsViewModelTest {
     fun `toggling preload on focus flips only that field`() = runTest {
         val seeded = defaultTestSettings().copy(preloadOnFocus = true)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.togglePreloadOnFocus()
 
@@ -596,7 +599,7 @@ class SettingsViewModelTest {
     fun `toggleMiniPlayer flips the flag and persists`() = runTest {
         val seeded = defaultTestSettings().copy(miniPlayerEnabled = false)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleMiniPlayer()
 
@@ -610,7 +613,7 @@ class SettingsViewModelTest {
     fun `selecting an OSD detail chip writes only that field`() = runTest {
         val seeded = defaultTestSettings().copy(osdDetail = OsdDetailSetting.FULL)
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.selectOsdDetail(OsdDetailSetting.MINIMAL)
 
@@ -622,7 +625,7 @@ class SettingsViewModelTest {
     fun `FFmpeg audio toggles independently write only their codec preference`() = runTest {
         val seeded = defaultTestSettings()
         val gateway = FakeCoreGateway(settings = seeded)
-        val viewModel = SettingsViewModel(gateway, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
 
         viewModel.togglePreferFfmpegTrueHd()
         assertEquals(seeded.copy(preferFfmpegTrueHd = true), viewModel.state.value.settings)
@@ -647,7 +650,7 @@ class SettingsViewModelTest {
         val seeded = defaultTestSettings().copy(diagnosticLoggingEnabled = false)
         val gateway = FakeCoreGateway(settings = seeded)
         val diagnostics = FakeDiagnosticsController()
-        val viewModel = SettingsViewModel(gateway, diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleDiagnosticLogging()
 
@@ -661,7 +664,7 @@ class SettingsViewModelTest {
         val seeded = defaultTestSettings().copy(crashReportsEnabled = true)
         val gateway = FakeCoreGateway(settings = seeded)
         val diagnostics = FakeDiagnosticsController().apply { crashPendingValue = true }
-        val viewModel = SettingsViewModel(gateway, diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleCrashReports()
 
@@ -676,7 +679,7 @@ class SettingsViewModelTest {
         val seeded = defaultTestSettings().copy(crashReportsEnabled = false)
         val gateway = FakeCoreGateway(settings = seeded)
         val diagnostics = FakeDiagnosticsController()
-        val viewModel = SettingsViewModel(gateway, diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
 
         viewModel.toggleCrashReports()
 
@@ -688,7 +691,7 @@ class SettingsViewModelTest {
     fun `clearDiagnostics clears both the log and any crash capture`() = runTest {
         val gateway = FakeCoreGateway(settings = defaultTestSettings())
         val diagnostics = FakeDiagnosticsController().apply { crashPendingValue = true }
-        val viewModel = SettingsViewModel(gateway, diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
 
         viewModel.clearDiagnostics()
 
@@ -716,7 +719,8 @@ class SettingsViewModelTest {
             override fun clearDiagnostics() = error("disk")
             override fun crashPending(): Boolean = true
         }
-        val viewModel = SettingsViewModel(FakeCoreGateway(settings = defaultTestSettings()), diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
+        val gateway = FakeCoreGateway(settings = defaultTestSettings())
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), diagnostics = diagnostics, ioDispatcher = Dispatchers.Main)
 
         viewModel.clearDiagnostics()
 
@@ -750,7 +754,8 @@ class SettingsViewModelTest {
         val ioDispatcher = Executor { task -> pool.execute { task.run(); tasksDone.countDown() } }.asCoroutineDispatcher()
         val store = ViewModelStore()
         try {
-            val viewModel = SettingsViewModel(FakeCoreGateway(), diagnostics = diagnostics, ioDispatcher = ioDispatcher)
+            val gateway = FakeCoreGateway()
+            val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, CoroutineScope(SupervisorJob())), diagnostics = diagnostics, ioDispatcher = ioDispatcher)
             store.put("settings", viewModel)
             assertTrue(firstStarted.await(5, TimeUnit.SECONDS))
 
@@ -791,7 +796,8 @@ class SettingsViewModelTest {
         val store = ViewModelStore()
         try {
             val seeded = defaultTestSettings().copy(crashReportsEnabled = true)
-            val viewModel = SettingsViewModel(FakeCoreGateway(settings = seeded), diagnostics = diagnostics, ioDispatcher = pool.asCoroutineDispatcher())
+            val gateway = FakeCoreGateway(settings = seeded)
+            val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, CoroutineScope(SupervisorJob())), diagnostics = diagnostics, ioDispatcher = pool.asCoroutineDispatcher())
             store.put("settings", viewModel)
             waitUntil { order.size == 1 }
 

@@ -3,7 +3,7 @@
 //! Fully pure: tracks in, prefs in, chosen ids out,
 //! unit-testable without a live player session.
 
-use crate::prefs::{LanguagePrefs, SeriesTrackPref, SubtitleMode};
+use crate::prefs::{LanguagePrefs, SeriesTrackPref, SubtitleMode, TrackMemory};
 
 /// A single audio/video/subtitle track, as reported by the playback backend.
 #[derive(Debug, Clone)]
@@ -161,7 +161,7 @@ pub fn resolve_track_selection(
     series_pref: Option<&SeriesTrackPref>,
     global: &LanguagePrefs,
 ) -> TrackDecision {
-    let audio = if let Some(key) = series_pref.and_then(|p| p.audio.as_ref()) {
+    let audio = if let Some(key) = series_pref.and_then(|p| p.audio.key()) {
         find_track_by_key(tracks, TrackKind::Audio, key)
     } else {
         global.audio.as_deref().and_then(|lang| {
@@ -184,7 +184,11 @@ pub fn resolve_track_selection(
             current_or_default_track(tracks, TrackKind::Audio).and_then(|t| t.lang.clone())
         });
 
-    let subtitle = if let Some(key) = series_pref.and_then(|p| p.subtitle.as_ref()) {
+    let remembered_subtitle = series_pref.map(|p| &p.subtitle);
+    let subtitle = if let Some(TrackMemory::Off) = remembered_subtitle {
+        // docs/18 §3.1: a remembered "subtitles off" decides before the global mode.
+        SubtitleDecision::Off
+    } else if let Some(key) = remembered_subtitle.and_then(TrackMemory::key) {
         find_track_by_key(tracks, TrackKind::Subtitle, key)
             .map(SubtitleDecision::Track)
             .unwrap_or(SubtitleDecision::Leave)
@@ -234,6 +238,7 @@ pub fn resolve_track_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prefs::TrackMemory;
 
     #[test]
     fn lang_matches_is_case_insensitive() {
@@ -472,8 +477,8 @@ mod tests {
         ];
         // Series memory wins outright over conflicting global prefs, not blended.
         let series_pref = SeriesTrackPref {
-            audio: Some("eng".to_string()),
-            subtitle: Some("spa".to_string()),
+            audio: TrackMemory::Key("eng".to_string()),
+            subtitle: TrackMemory::Key("spa".to_string()),
         };
         let global = LanguagePrefs {
             audio: Some("jpn".to_string()),
@@ -493,8 +498,8 @@ mod tests {
         for (saved_from, offered) in [("en", "eng"), ("eng", "en"), ("de", "ger"), ("deu", "ger")] {
             let saved = track_pref_key(&track(TrackKind::Subtitle, 9, Some(saved_from)));
             let series_pref = SeriesTrackPref {
-                audio: None,
-                subtitle: saved.clone(),
+                audio: TrackMemory::Unset,
+                subtitle: saved.clone().map_or(TrackMemory::Unset, TrackMemory::Key),
             };
             let tracks = vec![
                 track(TrackKind::Audio, 1, Some("jpn")),
@@ -509,8 +514,8 @@ mod tests {
             );
             // A key saved before keys were normalized still matches.
             let legacy = SeriesTrackPref {
-                audio: None,
-                subtitle: Some(saved_from.to_string()),
+                audio: TrackMemory::Unset,
+                subtitle: TrackMemory::Key(saved_from.to_string()),
             };
             let decision = resolve_track_selection(&tracks, Some(&legacy), &global);
             assert_eq!(decision.subtitle, SubtitleDecision::Track(-1002));
@@ -553,5 +558,131 @@ mod tests {
             let decision = resolve_track_selection(&tracks, None, &only_forced);
             assert_eq!(decision.subtitle, expected, "selected={selected}");
         }
+    }
+
+    /// One audio track and three subtitles: a plain English one, a Spanish one the stream flags
+    /// default, and a forced English one that `OnlyForced` would pick.
+    fn remembered_choice_tracks() -> Vec<Track> {
+        vec![
+            track(TrackKind::Audio, 1, Some("eng")),
+            track(TrackKind::Audio, 2, Some("jpn")),
+            track(TrackKind::Subtitle, 10, Some("eng")),
+            default_flag(track(TrackKind::Subtitle, 11, Some("spa"))),
+            forced_flag(track(TrackKind::Subtitle, 12, Some("eng"))),
+        ]
+    }
+
+    fn global_mode(mode: SubtitleMode) -> LanguagePrefs {
+        LanguagePrefs {
+            subtitle_mode: mode,
+            ..no_global_prefs()
+        }
+    }
+
+    fn subtitle_memory(memory: TrackMemory) -> SeriesTrackPref {
+        SeriesTrackPref {
+            audio: TrackMemory::Unset,
+            subtitle: memory,
+        }
+    }
+
+    /// docs/12 (track selection, "Choices are remembered per series") and docs/18 §3.1: each
+    /// remembered subtitle state against each global mode, with a default-flagged and a forced
+    /// track present; every mismatching row is reported together.
+    #[test]
+    fn a_remembered_subtitle_choice_decides_before_the_global_mode() {
+        use SubtitleDecision::{Leave, Off, Track as Pick};
+        let tracks = remembered_choice_tracks();
+        let rows: Vec<(&str, TrackMemory, SubtitleMode, SubtitleDecision)> = vec![
+            ("Unset", TrackMemory::Unset, SubtitleMode::Default, Leave),
+            ("Unset", TrackMemory::Unset, SubtitleMode::Always, Pick(11)),
+            (
+                "Unset",
+                TrackMemory::Unset,
+                SubtitleMode::OnlyForced,
+                Pick(12),
+            ),
+            ("Unset", TrackMemory::Unset, SubtitleMode::None, Off),
+            ("Off", TrackMemory::Off, SubtitleMode::Default, Off),
+            ("Off", TrackMemory::Off, SubtitleMode::Always, Off),
+            ("Off", TrackMemory::Off, SubtitleMode::OnlyForced, Off),
+            ("Off", TrackMemory::Off, SubtitleMode::None, Off),
+            (
+                "Key(eng)",
+                TrackMemory::Key("eng".into()),
+                SubtitleMode::Default,
+                Pick(10),
+            ),
+            (
+                "Key(eng)",
+                TrackMemory::Key("eng".into()),
+                SubtitleMode::Always,
+                Pick(10),
+            ),
+            (
+                "Key(eng)",
+                TrackMemory::Key("eng".into()),
+                SubtitleMode::OnlyForced,
+                Pick(10),
+            ),
+            (
+                "Key(eng)",
+                TrackMemory::Key("eng".into()),
+                SubtitleMode::None,
+                Pick(10),
+            ),
+            // A remembered key with no matching track is unspecified; it keeps leaving the stream's
+            // own selection alone in every mode.
+            (
+                "Key(fre)",
+                TrackMemory::Key("fre".into()),
+                SubtitleMode::Default,
+                Leave,
+            ),
+            (
+                "Key(fre)",
+                TrackMemory::Key("fre".into()),
+                SubtitleMode::Always,
+                Leave,
+            ),
+            (
+                "Key(fre)",
+                TrackMemory::Key("fre".into()),
+                SubtitleMode::OnlyForced,
+                Leave,
+            ),
+            (
+                "Key(fre)",
+                TrackMemory::Key("fre".into()),
+                SubtitleMode::None,
+                Leave,
+            ),
+        ];
+        let mismatches: Vec<String> = rows
+            .into_iter()
+            .filter_map(|(label, memory, mode, expected)| {
+                let pref = subtitle_memory(memory);
+                let got =
+                    resolve_track_selection(&tracks, Some(&pref), &global_mode(mode)).subtitle;
+                (got != expected).then(|| {
+                    format!("memory {label} x {mode:?}: expected {expected:?}, got {got:?}")
+                })
+            })
+            .collect();
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    /// docs/12 "Choices are remembered per series": the audio and subtitle halves are independent.
+    #[test]
+    fn remembering_subtitles_off_leaves_the_remembered_audio_choice_in_force() {
+        let tracks = remembered_choice_tracks();
+        let pref = SeriesTrackPref {
+            audio: TrackMemory::Key("jpn".to_string()),
+            subtitle: TrackMemory::Off,
+        };
+        let decision =
+            resolve_track_selection(&tracks, Some(&pref), &global_mode(SubtitleMode::Always));
+        assert_eq!(decision.audio, Some(2));
+        assert_eq!(decision.subtitle, SubtitleDecision::Off);
     }
 }

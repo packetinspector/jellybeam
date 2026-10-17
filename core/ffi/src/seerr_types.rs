@@ -228,6 +228,34 @@ pub struct SeerrTvDetail {
     pub seasons: Vec<SeerrSeasonStatus>,
 }
 
+/// A title's detail after a request mutation (`seerr_submit_request_detail` /
+/// `seerr_cancel_request_detail`), read with one GET: `card`, `genres`, `cast`, `trailer_url`,
+/// `active_request`, `can_request*` and (TV) `seasons` are current; `similar`, `recommendations`
+/// and both scores are empty/`None`, so the caller merges the request fields into the detail it
+/// already shows instead of replacing it.
+#[derive(uniffi::Enum, Debug, Clone, PartialEq)]
+pub enum SeerrRequestDetail {
+    Movie { detail: SeerrMovieDetail },
+    Tv { detail: SeerrTvDetail },
+}
+
+#[cfg(test)]
+impl SeerrRequestDetail {
+    pub fn active_request(&self) -> Option<&SeerrActiveRequest> {
+        match self {
+            Self::Movie { detail } => detail.active_request.as_ref(),
+            Self::Tv { detail } => detail.active_request.as_ref(),
+        }
+    }
+
+    pub fn can_request(&self) -> bool {
+        match self {
+            Self::Movie { detail } => detail.can_request,
+            Self::Tv { detail } => detail.can_request,
+        }
+    }
+}
+
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct SeerrProfile {
     pub id: i64,

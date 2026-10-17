@@ -61,7 +61,11 @@ fields declared).
 
 Cookie sessions: capture `connect.sid` from the login response manually (no reqwest
 cookie-store feature); on a 401 mid-session, re-login **once** with the stored secret,
-then surface the error. Secrets are stored like Jellyfin tokens (plaintext in the core
+then surface the error. Each call that gets the 401 logs in on its own (concurrent stale calls
+may each log in). A 401 that survives it is
+`CoreError::SeerrSessionExpired`, never `Unauthorized` (Jellyfin reauthorization); a relogin that
+got no answer is the transport error (`SeerrUnreachable`), not an expired session.
+Secrets are stored like Jellyfin tokens (plaintext in the core
 data dir, never logged, never committed).
 
 ### Per-account config
@@ -70,21 +74,25 @@ data dir, never logged, never committed).
 identity, each holding `{seerr_url, method, identity, secret}`. `seerr_status`/all Seerr
 calls resolve the entry for the *active* session. Tolerant load (missing/corrupt file →
 not configured). The live client handle sits in `JellybeamCore`'s `State`, built lazily on
-first Seerr call and cleared at every session-swap point (sign_in/restore/switch/sign_out/
-remove-active), same as the playback preload cache.
+first Seerr call and cleared at every session-swap point (sign_in/restore/switch/
+remove-active), same as the playback preload cache. Removing a saved account
+prunes that account's entry, secret included, right after the session list commits.
 
 ### URL validation (`seerr_connect`)
 
 The user may enter a bare host. Expand to candidates (as-given, http/https, `:5055`
 variants — Seerr's default port), normalize to `…/api/v1`, and try a **real login** on
-each with tight timeouts (2s connect / 6s read) until one succeeds. Because each probe
+each with tight timeouts (2s connect / 6s read) until one succeeds; those timeouts end with the
+probe (the saved connection is rebuilt on the normal 10s / 30s). Because each probe
 sends the secret, a bare host ranks every https candidate before any http one
 (`https://host`, `https://host:5055`, then the http forms; https never inherits http's
 port 80) so an https-only server's credential never travels in cleartext first; the
 cost is one failed TLS attempt on plain-http LAN installs, and an explicitly typed
 scheme is honored as typed. Save only on success, and immediately fetch
 `/settings/public` for `movie4kEnabled`/`series4kEnabled`/`cacheImages`/
-`partialRequestsEnabled` (cached on the client handle).
+`partialRequestsEnabled` (cached on the client handle; the same read runs when a handle is
+rebuilt). The read is capped at 5s; a failed or slow read leaves the toggles off for that
+handle (the next connect or rebuild reads again).
 
 The connect and the lazy handle rebuild both capture the active `(server_url, user_id)`
 before the network work and cache the resulting handle only if that identity is still
@@ -129,18 +137,34 @@ Records/enums (`seerr_types.rs`):
 `seerr_disconnect`, `seerr_home`, `seerr_browse(kind, page, filters)`,
 `seerr_genres(media_type)`, `seerr_search(query, page)`, `seerr_movie(tmdb_id)`,
 `seerr_tv(tmdb_id)`, `seerr_person(person_id)`, `seerr_request_options(media_type, is_4k)`,
-`seerr_submit_request(input)`, `seerr_cancel_request(request_id)`, `seerr_my_requests`.
+`seerr_submit_request_detail(input) -> SeerrRequestDetail`,
+`seerr_cancel_request_detail(media_type, tmdb_id, request_id) -> SeerrRequestDetail`,
+`seerr_my_requests`. `SeerrRequestDetail` is `Movie{detail}` / `Tv{detail}` read with one GET after
+the mutation (submit = pre-read + POST/PUT + GET, cancel = DELETE + GET): request, availability,
+seasons and cast are current, `similar`/`recommendations`/scores are empty, so the caller merges
+rather than replaces. The app merges the returned request fields (card, active request,
+requestability, TV seasons) into the detail on screen and makes no second read.
 
 Errors: new `CoreError::SeerrNotConfigured`; a request that never got an answer is
 `CoreError::SeerrUnreachable{reason}` (an `UnreachableReason`, worded by the app as "Couldn't
 reach Seerr (connection refused)…", never the URL or transport text); otherwise map to the
-existing `Unauthorized`/`Api{detail}` shapes. Never leak secrets through `Display`.
+existing `Api{detail}` shape. A Seerr 401 that survives the one relogin is
+`CoreError::SeerrSessionExpired` (Discover prompts for new Seerr credentials; it never opens
+Jellyfin reauthorization). A submit or cancel that reached Seerr but whose detail GET failed is
+`CoreError::SeerrChangeUnconfirmed`: the server changed, so the revision still moves; the title
+page closes its dialogs, re-reads once, and on a second failure shows the error beside the card.
+Any failed submit or cancel also shows its error beside the card and re-reads the title; Request
+and Cancel stay usable (the server-side pre-read keeps a repeat from duplicating). Never leak secrets through
+`Display`.
 
 ### Request semantics (in Rust, tested)
 
 - Movie: single request. TV: per-season; seasons already pending/processing/available are
   **not requestable**; submitting while the caller already has a PENDING request for the
   item updates it (`PUT /request/{id}`) instead of creating a duplicate (`POST /request`).
+  Seerr's `PUT` replaces the request's season list, so the body is the union of the seasons the
+  request already holds and the newly asked ones. The existing-request pre-read must succeed:
+  a failed read fails the submit rather than being taken for "no request".
 - 4K request paths exist but are shown only when the server enables them
   (`movie4kEnabled`/`series4kEnabled` from public settings).
 - Ratings endpoints 404 for many titles: treated as "no score", never an error.
@@ -160,16 +184,24 @@ existing `Unauthorized`/`Api{detail}` shapes. Never leak secrets through `Displa
 ### Performance
 
 - `seerr_home` fetches all rows concurrently (`tokio::join!`) and fails open per row
-  (an errored row is omitted). Result cached in-core for 60s per account.
-- Browse pages: size 20 (server default), page cache in-core per kind+filters, invalidated
-  on session swap and on any successful request submission/cancellation.
+  (an errored row is omitted; every row failing is an error, not an empty home, and is never
+  cached). Result cached in-core for 60s per account and dropped by a submit/cancel; a fetch
+  that straddles one (generation counter bumped by the invalidation) is returned but not cached.
+- `seerr_my_requests` resolves up to 50 titles with 10 detail fetches in flight, in server order.
+- Browse pages: size 20 (server default), fetched live per call; not cached.
 - Genre lists cached for the process lifetime.
 - Images ride the existing app-wide Coil loader (RGB_565, 256MB disk cache).
 
 ## UI (Jellybeam brand, existing components)
 
 - **Drawer**: "Discover" entry between the libraries and Search, present only when
-  `seerr_status().configured`. Re-evaluated on session swap and after connect/disconnect.
+  `seerr_status().configured`. Re-evaluated on session swap and after connect/disconnect, and
+  hidden from an account change until the new account's read lands.
+- **Revision**: the gateway's `seerrRevision` moves once per successful connect, disconnect,
+  submit or cancel (a change that landed with its detail unreadable included), bumped inside the
+  core call so a caller cancelled mid-call still announces it; the drawer entry follows it.
+  Discover home and My Requests reload each time they return to the top (a change is always
+  made on another screen), and rows already shown stay up during a reload.
 - **Discover home**: eager Column of `LazyRow` shelves (Home recipe): Trending,
   Movies, TV, Upcoming Movies, Upcoming TV — plus a top action row (Search,
   My Requests, Movies, TV as chips). PosterCard geometry per docs/07; availability shown
@@ -219,7 +251,11 @@ existing `Unauthorized`/`Api{detail}` shapes. Never leak secrets through `Displa
   profile/root-folder pickers only when `SeerrRequestOptions` has entries, cast row,
   Similar + Recommended rows, critic/audience scores when present. If
   `jellyfin_item_id` is set, the primary action is "Go to library" routing to the
-  native detail page.
+  native detail page. Submit and cancel run through one funnel: a single busy slot
+  (starting, submitting, cancelling) admits one at a time, and while it is held every action,
+  both dialogs' Back and their buttons are inert. A failure shows its message (in the open
+  request dialog, or on the page for a cancel) and re-reads the title; until that read
+  succeeds, Request, Request 4K and Cancel request are disabled.
 - **My Requests**: grid of the account's requests with status badges; Select opens detail.
 - **Person**: header + credits grid.
 - **Settings → Discover**: status row, URL / method chips / identity / secret fields

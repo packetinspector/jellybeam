@@ -12,6 +12,7 @@ import java.net.UnknownHostException
 import tv.jellybeam.MainDispatcherRule
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.FakeCoreGateway
+import tv.jellybeam.data.SettingsStore
 import tv.jellybeam.data.asFailure
 import tv.jellybeam.data.defaultTestSettings
 import tv.jellybeam.data.leaveEverythingAloneDecision
@@ -47,7 +48,9 @@ import uniffi.jellybeam_core.MediaSegment
 import uniffi.jellybeam_core.MediaSegmentKind
 import uniffi.jellybeam_core.NoHandle
 import uniffi.jellybeam_core.OsdDetailSetting
+import uniffi.jellybeam_core.PlaybackOsdDetail
 import uniffi.jellybeam_core.PlaybackPlan
+import uniffi.jellybeam_core.PlaybackRequest
 import uniffi.jellybeam_core.PlayMethodFfi
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingDecision
@@ -56,6 +59,7 @@ import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackKindFfi
+import uniffi.jellybeam_core.TrackMemoryFfi
 import uniffi.jellybeam_core.TrickplayMetaFfi
 
 /** Hard ceiling for every `runTest` below, so a hang (see [tearDown]'s doc) fails fast. */
@@ -170,6 +174,13 @@ class PlaybackViewModelTest {
      */
     private fun testReportScope(): CoroutineScope = CoroutineScope(UnconfinedTestDispatcher())
 
+    /** A gateway whose OSD detail for [plan] carries [meta] as its trickplay manifest. */
+    private fun osdGateway(plan: PlaybackPlan, meta: TrickplayMetaFfi?) = FakeCoreGateway(
+        preparePlaybackResult = Result.success(plan),
+        itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail())),
+        osdTrickplay = meta,
+    )
+
     /** Every session-starting test must run inside this (or guarantee stop/abandon in a
      * `finally`): a live progress ticker otherwise spins forever under runTest's cleanup.
      */
@@ -191,8 +202,8 @@ class PlaybackViewModelTest {
         reportScope: CoroutineScope = testReportScope(),
         startFromBeginning: Boolean = false,
         clock: Clock = Clock.SYSTEM,
-        onStopReported: () -> Unit = {},
         parseSidecar: suspend (String, String) -> SidecarCues? = { _, text -> sampleSidecarCues().takeIf { text == "ok" } },
+        settingsStore: SettingsStore = SettingsStore(gateway, testReportScope()),
     ): PlaybackViewModel =
         PlaybackViewModel(
             gateway,
@@ -200,10 +211,10 @@ class PlaybackViewModelTest {
             itemId,
             strings = ResourceUiStrings.default,
             reportScope = reportScope,
-            onStopReported = onStopReported,
             startFromBeginning = startFromBeginning,
             clock = clock,
             parseSidecar = parseSidecar,
+            settingsStore = settingsStore,
         ).also { viewModelsToClear += it }
 
     @After
@@ -393,37 +404,6 @@ class PlaybackViewModelTest {
         }
     }
 
-    // -- docs/17-mini-player.md §6: the PiP-dismissal stop-report edge -----
-
-    @Test
-    fun `stopPlaybackOnce invokes onStopReported after the gateway stop`() = runTest(timeout = TEST_TIMEOUT) {
-        val plan = samplePlan()
-        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
-        val player = FakePlaybackPlayer().apply { positionTicks = 123_000_000L }
-        var reportedCount = 0
-        var stopPlaybackCallsWhenReported = -1
-
-        val viewModel = buildViewModel(
-            gateway,
-            player,
-            plan.itemId,
-            onStopReported = {
-                reportedCount++
-                stopPlaybackCallsWhenReported = gateway.stopPlaybackCalls.size
-            },
-        )
-        withSession(viewModel) {
-            viewModel.stopPlaybackOnce()
-
-            assertEquals(1, reportedCount)
-            assertEquals(
-                "onStopReported must run after gateway.stopPlayback has already landed",
-                1,
-                stopPlaybackCallsWhenReported,
-            )
-        }
-    }
-
     @Test
     fun `natural end reports the final position and emits a silent finish exactly once`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan(runtimeTicks = 123_000_000L)
@@ -465,7 +445,7 @@ class PlaybackViewModelTest {
         val player = FakePlaybackPlayer().apply { positionTicks = 99_000_000L }
         // Built directly: this test triggers onCleared() itself, so tearDown()'s clear is
         // redundant.
-        val viewModel = PlaybackViewModel(gateway, player, plan.itemId, ResourceUiStrings.default, testReportScope())
+        val viewModel = PlaybackViewModel(gateway, player, plan.itemId, ResourceUiStrings.default, testReportScope(), settingsStore = SettingsStore(gateway, testReportScope()))
         withSession(viewModel) {
             assertTrue("listener must be registered once the session starts", player.hasActiveListener)
 
@@ -592,6 +572,70 @@ class PlaybackViewModelTest {
         itemType = "Episode",
         seriesId = "series-1",
     )
+
+    private fun FakeCoreGateway.neighborLookups() = accountBoundCalls.count { it.first == "episodeNeighbors" }
+
+    /** docs/12 §8: a failed lookup is repeated once, on entering the next-up trigger zone. */
+    @Test
+    fun `a failed neighbours lookup is retried on entering the trigger zone and then answers`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = episodePlan("ep-1")
+        val nextCard = testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)
+        val gateway = FakeCoreGateway(preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan)))
+        gateway.episodeNeighborsGates.add(CompletableDeferred<EpisodeNeighbors>().apply { completeExceptionally(IllegalStateException("offline")) })
+        gateway.episodeNeighborsGates.add(CompletableDeferred(EpisodeNeighbors(previous = null, next = nextCard)))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            assertEquals(1, gateway.neighborLookups())
+            assertFalse(viewModel.state.value.hasNextEpisode)
+
+            player.positionTicks = 100_000_000L // 10s remaining: outside the zone
+            advanceOneTick()
+            assertEquals("outside the zone nothing is retried", 1, gateway.neighborLookups())
+
+            player.positionTicks = 170_000_000L
+            advanceOneTick()
+            assertEquals(2, gateway.neighborLookups())
+            assertTrue(viewModel.state.value.hasNextEpisode)
+
+            advanceOneTick()
+            advanceOneTick()
+            assertEquals("an answered retry is not repeated", 2, gateway.neighborLookups())
+        }
+    }
+
+    @Test
+    fun `a neighbours lookup that fails twice is never retried a third time`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = episodePlan("ep-1")
+        val gateway = FakeCoreGateway(preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan)))
+        repeat(2) {
+            gateway.episodeNeighborsGates.add(CompletableDeferred<EpisodeNeighbors>().apply { completeExceptionally(IllegalStateException("offline")) })
+        }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.positionTicks = 170_000_000L
+            repeat(4) { advanceOneTick() }
+            assertEquals(2, gateway.neighborLookups())
+            assertFalse(viewModel.state.value.hasNextEpisode)
+        }
+    }
+
+    @Test
+    fun `a known lookup with no next episode is never retried`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = episodePlan("ep-1")
+        val gateway = FakeCoreGateway(preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan)))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            assertEquals(1, gateway.neighborLookups())
+            player.positionTicks = 170_000_000L
+            repeat(4) { advanceOneTick() }
+            assertEquals(1, gateway.neighborLookups())
+            assertFalse(viewModel.state.value.hasNextEpisode)
+            assertNull(viewModel.state.value.nextUp)
+        }
+    }
 
     @Test
     fun `the next-up card appears once remaining time crosses the threshold, not before`() = runTest(timeout = TEST_TIMEOUT) {
@@ -1024,8 +1068,7 @@ class PlaybackViewModelTest {
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
             advanceOneTick()
-            gateway.parkedEpoch.value = 0uL
-            gateway.accountEpoch.value = 1uL
+            gateway.setEpochs(epoch = 1uL, parked = 0uL)
             runCurrent()
 
             viewModel.stillWatchingStop()
@@ -1559,9 +1602,10 @@ class PlaybackViewModelTest {
         val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
         val player = FakePlaybackPlayer()
 
-        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        val store = SettingsStore(gateway, testReportScope())
+        val viewModel = buildViewModel(gateway, player, plan.itemId, settingsStore = store)
         withSession(viewModel) {
-            gateway.setSettings(gateway.settings.copy(subtitleColor = SubtitleColorPreset.LIGHT_GREEN))
+            store.update { it.copy(subtitleColor = SubtitleColorPreset.LIGHT_GREEN) }
             viewModel.refreshSubtitleStyle()
             assertEquals(SubtitleColorPreset.LIGHT_GREEN, viewModel.state.value.subtitleStyle.color)
         }
@@ -1609,6 +1653,73 @@ class PlaybackViewModelTest {
             assertEquals(SegmentAction.AUTO_SKIP, actions.commercial)
         }
     }
+
+    // -- A tick whose position report is cancelled must not evaluate next-up or auto-skip. --
+
+    /** A 20s episode with a next episode and an auto-skipped commercial at 16s-19s, so a tick at
+     * 17s both crosses the next-up threshold and enters the segment.
+     */
+    private fun tickEffectsFixture(): Triple<FakeCoreGateway, FakePlaybackPlayer, PlaybackPlan> {
+        val plan = episodePlan("ep-1")
+        val nextCard = testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)
+        val commercial = sampleSegment(MediaSegmentKind.COMMERCIAL, 160_000_000L, 190_000_000L)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan)),
+            nextEpisodeByItemId = mapOf("ep-1" to nextCard),
+            mediaSegmentsByItemId = mapOf("ep-1" to listOf(commercial)),
+            settings = defaultTestSettings().copy(skipCommercial = SegmentAction.AUTO_SKIP),
+        )
+        val player = FakePlaybackPlayer()
+        return Triple(gateway, player, plan)
+    }
+
+    @Test
+    fun `a tick whose position report completes still evaluates next-up and auto-skip`() = runTest(timeout = TEST_TIMEOUT) {
+        val (gateway, player, plan) = tickEffectsFixture()
+        gateway.reportPositionGate = CompletableDeferred()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.isPlaying = true
+            player.positionTicks = 170_000_000L
+            advanceOneTick()
+            assertEquals("the tick is parked in the position report", 1, gateway.reportPositionEntered)
+
+            gateway.reportPositionGate!!.complete(Unit)
+            runCurrent()
+
+            assertNotNull("the next-up card appears", viewModel.state.value.nextUp)
+            assertEquals(1, gateway.noteEpisodeFinishedCalls.size)
+            assertEquals(listOf("ep-2"), gateway.preloadPlaybackCalls)
+            assertEquals("the commercial is auto-skipped", listOf(2_000L), player.seekCalls)
+        }
+    }
+
+    @Test
+    fun `ending the session while a tick is reporting position evaluates no next-up and no auto-skip`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val (gateway, player, plan) = tickEffectsFixture()
+            gateway.reportPositionGate = CompletableDeferred()
+            val viewModel = buildViewModel(gateway, player, plan.itemId)
+            withSession(viewModel) {
+                player.isPlaying = true
+                player.positionTicks = 170_000_000L
+                advanceOneTick()
+                assertEquals("the tick is parked in the position report", 1, gateway.reportPositionEntered)
+
+                viewModel.stopPlaybackOnce()
+                gateway.reportPositionGate!!.complete(Unit)
+                runCurrent()
+
+                val effects = buildList {
+                    if (viewModel.state.value.nextUp != null) add("next-up card")
+                    if (viewModel.state.value.stillWatching != null) add("still-watching card")
+                    if (gateway.noteEpisodeFinishedCalls.isNotEmpty()) add("still-watching decision")
+                    if (gateway.preloadPlaybackCalls.isNotEmpty()) add("next-episode preload")
+                    if (player.seekCalls.isNotEmpty()) add("auto-skip seek")
+                }
+                assertEquals("an ended session evaluates no tick effects", emptyList<String>(), effects)
+            }
+        }
 
     // -- docs/09-settings-plan.md skip-segment settings: AutoSkip driver ----
 
@@ -1769,7 +1880,7 @@ class PlaybackViewModelTest {
     @Test
     fun `seek with no trickplay manifest fetched returns null and never calls trickplayLocate`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan(runtimeTicks = 72_000_000_000L)
-        // getTrickplayResult defaults to null -- the fetch resolves (Unconfined) to "no manifest".
+        // osdTrickplay defaults to null -- the detail carries "no manifest".
         val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
         val player = FakePlaybackPlayer()
 
@@ -1785,15 +1896,15 @@ class PlaybackViewModelTest {
     fun `seek with a resolved trickplay manifest resolves the target position and tile`() = runTest(timeout = TEST_TIMEOUT) {
         val meta = sampleTrickplayMeta()
         val plan = samplePlan(runtimeTicks = 72_000_000_000L) // 2h runtime
-        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan), getTrickplayResult = meta)
+        val gateway = osdGateway(plan, meta)
         val player = FakePlaybackPlayer()
 
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
-            // fetchTrickplay awaits enrichmentGate (docs/12 §11); the fetch resolves
+            // The OSD detail fetch awaits enrichmentGate (docs/12 §11); it resolves
             // (Unconfined) right after the simulated first frame unblocks it.
             player.fireRenderedFirstFrame()
-            assertEquals(listOf(FakeCoreGateway.GetTrickplayCall(plan.itemId, plan.mediaSourceId)), gateway.getTrickplayCalls)
+            assertEquals(listOf(plan.mediaSourceId), gateway.getPlaybackOsdDetailMediaSources)
 
             val result = viewModel.seek(30_000L)
 
@@ -1810,43 +1921,45 @@ class PlaybackViewModelTest {
     fun `seek clamps the trickplay preview target to the item duration, same as the underlying seek`() = runTest(timeout = TEST_TIMEOUT) {
         val meta = sampleTrickplayMeta()
         val plan = samplePlan(runtimeTicks = PlaybackTicks.msToTicks(20_000L)) // 20s item
-        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan), getTrickplayResult = meta)
+        val gateway = osdGateway(plan, meta)
         val player = FakePlaybackPlayer()
 
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
-            player.fireRenderedFirstFrame() // unblocks fetchTrickplay's enrichmentGate await (docs/12 §11)
+            player.fireRenderedFirstFrame() // unblocks the OSD detail fetch's enrichmentGate await (docs/12 §11)
             val result = viewModel.seek(100_000L) // way past the 20s duration
             assertNotNull(result)
             assertEquals(20_000L, result!!.targetPositionMs)
         }
     }
 
-    /** A seek before [PlaybackViewModel.fetchTrickplay] resolves fails open via `trickplayMeta ==
-     * null`; a later seek in the same session resolves a real preview.
+    /** A seek before the OSD detail fetch resolves fails open via `trickplayMeta == null`; a later
+     * seek in the same session resolves a real preview.
      */
     @Test
     fun `a seek before the trickplay fetch resolves fails open with no preview`() = runTest(timeout = TEST_TIMEOUT) {
         val meta = sampleTrickplayMeta()
         val plan = samplePlan(runtimeTicks = 72_000_000_000L)
-        val fake = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
-        val trickplayResult = CompletableDeferred<TrickplayMetaFfi?>()
+        val fake = osdGateway(plan, null)
+        val detail = CompletableDeferred<PlaybackOsdDetail>()
         // Delegation (`by fake`) forwards every other member, including the trickplay lookups.
         val gateway = object : CoreGateway by fake {
-            override suspend fun getTrickplay(itemId: String, mediaSourceId: String, accountEpoch: ULong?): TrickplayMetaFfi? =
-                trickplayResult.await()
+            override suspend fun getPlaybackOsdDetail(itemId: String, mediaSourceId: String, accountEpoch: ULong?): PlaybackOsdDetail =
+                detail.await()
         }
         val player = FakePlaybackPlayer()
 
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
-            // Unblocks fetchTrickplay's enrichmentGate await (docs/12 §11) so it reaches
-            // gateway.getTrickplay, which then races the seek below via trickplayResult.
+            // Unblocks the enrichmentGate await (docs/12 §11) so the fetch is in flight,
+            // racing the seek below via the deferred detail.
             player.fireRenderedFirstFrame()
             assertNull("a seek racing ahead of an in-flight trickplay fetch must fail open", viewModel.seek(30_000L))
             assertNull(viewModel.trickplayMeta)
 
-            trickplayResult.complete(meta)
+            detail.complete(
+                PlaybackOsdDetail(container = null, mediaStreams = emptyList(), chapters = emptyList(), sizeBytes = null, path = null, trickplay = meta),
+            )
             runCurrent()
             val result = viewModel.seek(30_000L)
             assertNotNull("once the fetch resolves, the same session's later seeks must resolve a real preview", result)
@@ -1857,31 +1970,30 @@ class PlaybackViewModelTest {
     // first rendered frame or a 1500ms fallback; segments and episode neighbors stay immediate. --
 
     @Test
-    fun `OSD detail, trickplay and server name are not requested before the first frame`() = runTest(timeout = TEST_TIMEOUT) {
+    fun `OSD detail (with its trickplay manifest) and server name are not requested before the first frame`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan()
         val gateway = FakeCoreGateway(
             preparePlaybackResult = Result.success(plan),
             itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail())),
-            getTrickplayResult = sampleTrickplayMeta(),
+            osdTrickplay = sampleTrickplayMeta(),
             serverDisplayNameValue = "shelf.test",
         )
         val player = FakePlaybackPlayer()
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
             assertTrue(gateway.getPlaybackOsdDetailCalls.isEmpty())
-            assertTrue(gateway.getTrickplayCalls.isEmpty())
             assertEquals(0, gateway.serverDisplayNameCallCount)
         }
     }
 
     @Test
-    fun `OSD detail, trickplay and server name are requested right after the first rendered frame`() = runTest(timeout = TEST_TIMEOUT) {
+    fun `OSD detail (with its trickplay manifest) and server name are requested right after the first rendered frame`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan()
         val meta = sampleTrickplayMeta()
         val gateway = FakeCoreGateway(
             preparePlaybackResult = Result.success(plan),
             itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail())),
-            getTrickplayResult = meta,
+            osdTrickplay = meta,
             serverDisplayNameValue = "shelf.test",
         )
         val player = FakePlaybackPlayer()
@@ -1889,20 +2001,20 @@ class PlaybackViewModelTest {
         withSession(viewModel) {
             player.fireRenderedFirstFrame()
             assertEquals(listOf(plan.itemId), gateway.getPlaybackOsdDetailCalls)
-            assertEquals(listOf(FakeCoreGateway.GetTrickplayCall(plan.itemId, plan.mediaSourceId)), gateway.getTrickplayCalls)
+            assertEquals(listOf(plan.mediaSourceId), gateway.getPlaybackOsdDetailMediaSources)
             assertEquals(1, gateway.serverDisplayNameCallCount)
         }
     }
 
     @Test
-    fun `OSD detail, trickplay and server name are requested 1500ms after load when no frame ever renders`() =
+    fun `OSD detail (with its trickplay manifest) and server name are requested 1500ms after load when no frame ever renders`() =
         runTest(timeout = TEST_TIMEOUT) {
             val plan = samplePlan()
             val meta = sampleTrickplayMeta()
             val gateway = FakeCoreGateway(
                 preparePlaybackResult = Result.success(plan),
                 itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail())),
-                getTrickplayResult = meta,
+                osdTrickplay = meta,
                 serverDisplayNameValue = "shelf.test",
             )
             val player = FakePlaybackPlayer()
@@ -1915,10 +2027,70 @@ class PlaybackViewModelTest {
                 advanceTimeBy(1L) // crosses the 1500ms fallback
                 runCurrent()
                 assertEquals(listOf(plan.itemId), gateway.getPlaybackOsdDetailCalls)
-                assertEquals(listOf(FakeCoreGateway.GetTrickplayCall(plan.itemId, plan.mediaSourceId)), gateway.getTrickplayCalls)
+                assertEquals(listOf(plan.mediaSourceId), gateway.getPlaybackOsdDetailMediaSources)
                 assertEquals(1, gateway.serverDisplayNameCallCount)
             }
         }
+
+    /** docs/10: one enrichment fetch per playback -- the OSD detail carries the trickplay manifest. */
+    @Test
+    fun `the trickplay manifest comes from the one OSD detail fetch, with no separate trickplay request`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 72_000_000_000L)
+        val meta = sampleTrickplayMeta()
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail())),
+            osdTrickplay = meta,
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireRenderedFirstFrame()
+            assertEquals(listOf(plan.itemId), gateway.getPlaybackOsdDetailCalls)
+            assertEquals(listOf(plan.mediaSourceId), gateway.getPlaybackOsdDetailMediaSources)
+            assertEquals(meta, viewModel.trickplayMeta)
+            assertNotNull(viewModel.seek(30_000L))
+        }
+    }
+
+    /** docs/10: Play dispatches the negotiation before the main thread builds the lazy ExoPlayer. */
+    @Test
+    fun `preparePlayback is dispatched, and the plan adopted, before the player is built`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val fake = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val gate = CompletableDeferred<Unit>().also { fake.preparePlaybackGates[plan.itemId] = it }
+        val order = mutableListOf<String>()
+        val gateway = object : CoreGateway by fake {
+            override suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean, request: PlaybackRequest): PlaybackPlan {
+                order += "prepare"
+                return fake.preparePlayback(itemId, startFromBeginning, request)
+            }
+        }
+        val player = FakePlaybackPlayer().apply { onListenerAdded = { order += "playerBuilt" } }
+
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            assertEquals("the negotiation is in flight and the player is not built yet", listOf("prepare"), order)
+            gate.complete(Unit)
+            runCurrent()
+            assertEquals("the player is wired once, when the plan is adopted", listOf("prepare", "playerBuilt"), order)
+            assertEquals(plan, player.loadedPlan)
+        }
+    }
+
+    /** docs/09: the settings store is the one reader -- a start and every resume share its single read. */
+    @Test
+    fun `starting and resuming read the settings once, through the store`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            viewModel.refreshSubtitleStyle()
+            viewModel.refreshSubtitleStyle()
+            assertEquals(1, gateway.getSettingsCallCount)
+        }
+    }
 
     @Test
     fun `media segments and episode neighbors are fetched immediately, not gated on the first frame`() = runTest(timeout = TEST_TIMEOUT) {
@@ -1932,7 +2104,7 @@ class PlaybackViewModelTest {
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
             assertEquals(segments, viewModel.state.value.mediaSegments)
-            assertEquals(listOf("ep-1"), gateway.previousEpisodeBeforeCalls)
+            assertEquals(listOf("ep-1"), gateway.episodeNeighborsItemIds)
             assertEquals(listOf("ep-1"), gateway.nextEpisodeAfterCalls)
             // Contrast: the gated fetches haven't fired yet.
             assertTrue(gateway.getPlaybackOsdDetailCalls.isEmpty())
@@ -2503,8 +2675,8 @@ class PlaybackViewModelTest {
             assertNull(applied.subtitleTrackId)
 
             assertEquals(
-                listOf(FakeCoreGateway.RememberTrackChoiceCall("series-1", TrackKindFfi.AUDIO, gateway.trackPrefKeyOf(japaneseInfo))),
-                gateway.rememberTrackChoiceCalls,
+                listOf(FakeCoreGateway.RememberTrackMemoryCall("series-1", TrackKindFfi.AUDIO, TrackMemoryFfi.Key(gateway.trackPrefKeyOf(japaneseInfo)!!))),
+                gateway.rememberTrackMemoryCalls,
             )
 
             val picker = viewModel.state.value.trackPicker!!
@@ -2514,7 +2686,7 @@ class PlaybackViewModelTest {
     }
 
     @Test
-    fun `chooseSubtitle with Off applies OFF, remembers a null key, and marks Off selected`() = runTest(timeout = TEST_TIMEOUT) {
+    fun `chooseSubtitle with Off applies OFF, remembers Off, and marks Off selected`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan(seriesId = "series-1")
         val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
         val player = FakePlaybackPlayer()
@@ -2544,8 +2716,8 @@ class PlaybackViewModelTest {
             assertNull(applied.subtitleTrackId)
 
             assertEquals(
-                listOf(FakeCoreGateway.RememberTrackChoiceCall("series-1", TrackKindFfi.SUBTITLE, null)),
-                gateway.rememberTrackChoiceCalls,
+                listOf(FakeCoreGateway.RememberTrackMemoryCall("series-1", TrackKindFfi.SUBTITLE, TrackMemoryFfi.Off)),
+                gateway.rememberTrackMemoryCalls,
             )
             assertTrue(viewModel.state.value.trackPicker!!.subtitleTracks[0].selected)
         }
@@ -2572,8 +2744,8 @@ class PlaybackViewModelTest {
             assertEquals(englishSubtitleChoice.id, applied.subtitleTrackId)
 
             assertEquals(
-                listOf(FakeCoreGateway.RememberTrackChoiceCall("series-1", TrackKindFfi.SUBTITLE, gateway.trackPrefKeyOf(englishSubtitleInfo))),
-                gateway.rememberTrackChoiceCalls,
+                listOf(FakeCoreGateway.RememberTrackMemoryCall("series-1", TrackKindFfi.SUBTITLE, TrackMemoryFfi.Key(gateway.trackPrefKeyOf(englishSubtitleInfo)!!))),
+                gateway.rememberTrackMemoryCalls,
             )
             val picker = viewModel.state.value.trackPicker!!
             assertFalse(picker.subtitleTracks[0].selected) // Off
@@ -2582,7 +2754,7 @@ class PlaybackViewModelTest {
     }
 
     @Test
-    fun `a Movie plan applies the picker's choice but never calls rememberTrackChoice`() = runTest(timeout = TEST_TIMEOUT) {
+    fun `a Movie plan applies the picker's choice but never calls rememberTrackMemory`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan(itemId = "movie-1", seriesId = null)
         val gateway = FakeCoreGateway(preparePlaybackResultsByItemId = mapOf("movie-1" to Result.success(plan)))
         val player = FakePlaybackPlayer()
@@ -2599,7 +2771,7 @@ class PlaybackViewModelTest {
             // resolveTrackSelectionOnce call.
             assertEquals(2, player.applyTrackDecisionCalls.size)
             assertEquals(japaneseId, player.applyTrackDecisionCalls.last().first.audioTrackId)
-            assertTrue("a Movie (no seriesId) has nothing to key a per-series memory on", gateway.rememberTrackChoiceCalls.isEmpty())
+            assertTrue("a Movie (no seriesId) has nothing to key a per-series memory on", gateway.rememberTrackMemoryCalls.isEmpty())
         }
     }
 
@@ -2620,7 +2792,7 @@ class PlaybackViewModelTest {
             viewModel.chooseSubtitle(9_999L)
 
             assertEquals(callsBeforeStaleChoice, player.applyTrackDecisionCalls.size)
-            assertTrue(gateway.rememberTrackChoiceCalls.isEmpty())
+            assertTrue(gateway.rememberTrackMemoryCalls.isEmpty())
         }
     }
 
@@ -2635,7 +2807,7 @@ class PlaybackViewModelTest {
             viewModel.openTrackPicker()
             assertNotNull(viewModel.state.value.trackPicker)
 
-            viewModel.closeTrackPicker()
+            viewModel.closeSurface()
             assertNull(viewModel.state.value.trackPicker)
         }
     }
@@ -2733,7 +2905,7 @@ class PlaybackViewModelTest {
             viewModel.openInfoOverlay()
             assertEquals(player.livePlaybackStatsValue, viewModel.state.value.statsSheetLive)
 
-            viewModel.closeInfoOverlay()
+            viewModel.closeSurface()
             assertNull(viewModel.state.value.statsSheetLive)
         }
     }
@@ -2792,7 +2964,7 @@ class PlaybackViewModelTest {
             val content = viewModel.state.value.libraryInfoOverlay as LibraryInfoOverlayState.Content
             assertEquals("4 times", content.value.fields.single { it.label == "Watched" }.value)
 
-            viewModel.closeLibraryInfoOverlay()
+            viewModel.closeSurface()
             assertNull(viewModel.state.value.libraryInfoOverlay)
         }
     }
@@ -3003,6 +3175,79 @@ class PlaybackViewModelTest {
 
             assertEquals(listOf(15_000L, -15_000L), player.seekCalls)
             assertEquals(before, viewModel.positionTicks.value)
+        }
+    }
+
+    @Test
+    fun `a skip leaves the undo token carrying the pre-skip position and segment`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 200_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            assertNull(viewModel.state.value.skipUndo)
+
+            val before = checkNotNull(viewModel.skipSegment(sampleSegment(MediaSegmentKind.OUTRO, 100_000_000L, 150_000_000L)))
+
+            assertEquals(SkipUndoState(before, MediaSegmentKind.OUTRO), viewModel.state.value.skipUndo)
+        }
+    }
+
+    @Test
+    fun `undo within the window seeks back to the pre-skip position and clears the token`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 200_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            val before = checkNotNull(viewModel.skipSegment(sampleSegment(MediaSegmentKind.OUTRO, 100_000_000L, 150_000_000L)))
+            player.positionTicks = 150_000_000L // the player has landed at the segment end
+            advanceTimeBy(SKIP_UNDO_WINDOW_MS - 1)
+
+            viewModel.undoSkip()
+
+            assertEquals(listOf(15_000L, -15_000L), player.seekCalls)
+            assertEquals(before, viewModel.positionTicks.value)
+            assertNull(viewModel.state.value.skipUndo)
+        }
+    }
+
+    @Test
+    fun `after the window the token is cleared and undo does nothing`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 200_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            viewModel.skipSegment(sampleSegment(MediaSegmentKind.OUTRO, 100_000_000L, 150_000_000L))
+            advanceTimeBy(SKIP_UNDO_WINDOW_MS - 1)
+            runCurrent()
+            assertNotNull("still offered one tick before expiry", viewModel.state.value.skipUndo)
+
+            advanceTimeBy(1)
+            runCurrent()
+            assertNull(viewModel.state.value.skipUndo)
+
+            viewModel.undoSkip()
+
+            assertEquals(listOf(15_000L), player.seekCalls)
+        }
+    }
+
+    @Test
+    fun `dismissing the toast clears the token without seeking`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 200_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            viewModel.skipSegment(sampleSegment(MediaSegmentKind.OUTRO, 100_000_000L, 150_000_000L))
+
+            viewModel.dismissSkipUndo()
+            viewModel.undoSkip()
+
+            assertNull(viewModel.state.value.skipUndo)
+            assertEquals(listOf(15_000L), player.seekCalls)
         }
     }
 
@@ -3893,7 +4138,7 @@ class PlaybackViewModelTest {
         val player = FakePlaybackPlayer()
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
-            assertEquals(listOf("ep-2"), gateway.previousEpisodeBeforeCalls)
+            assertEquals(listOf("ep-2"), gateway.episodeNeighborsItemIds)
             assertTrue(viewModel.state.value.hasPreviousEpisode)
             assertTrue(viewModel.state.value.hasNextEpisode)
         }
@@ -3941,7 +4186,7 @@ class PlaybackViewModelTest {
         val moviePlayer = FakePlaybackPlayer()
         val movieViewModel = buildViewModel(movieGateway, moviePlayer, moviePlan.itemId)
         withSession(movieViewModel) {
-            assertTrue(movieGateway.previousEpisodeBeforeCalls.isEmpty())
+            assertTrue(movieGateway.episodeNeighborsItemIds.isEmpty())
             assertFalse(movieViewModel.state.value.hasPreviousEpisode)
             assertFalse(movieViewModel.state.value.hasNextEpisode)
         }
@@ -4046,7 +4291,7 @@ class PlaybackViewModelTest {
             assertTrue(viewModel.state.value.speedMenuOpen)
             assertFalse(viewModel.state.value.chaptersMenuOpen)
 
-            viewModel.closeSpeedMenu()
+            viewModel.closeSurface()
             assertFalse(viewModel.state.value.speedMenuOpen)
         }
     }
@@ -4127,7 +4372,7 @@ class PlaybackViewModelTest {
             assertTrue(viewModel.state.value.chaptersMenuOpen)
             assertFalse(viewModel.state.value.speedMenuOpen)
 
-            viewModel.closeChaptersMenu()
+            viewModel.closeSurface()
             assertFalse(viewModel.state.value.chaptersMenuOpen)
         }
     }
@@ -4353,7 +4598,7 @@ class PlaybackViewModelTest {
 
             assertEquals(subtitlesOff, player.applyTrackDecisionCalls.last().first)
             assertEquals(listOf("session-1" to 5), gateway.fetchExternalSubtitleCalls)
-            assertEquals("a loaded sidecar is remembered", 1, gateway.rememberTrackChoiceCalls.size)
+            assertEquals("a loaded sidecar is remembered", 1, gateway.rememberTrackMemoryCalls.size)
             assertNotNull(viewModel.state.value.sidecarCues)
             assertTrue(viewModel.state.value.trackPicker!!.subtitleTracks.single { it.id == sidecarId }.selected)
 
@@ -4450,7 +4695,7 @@ class PlaybackViewModelTest {
             val rows = viewModel.state.value.trackPicker!!.subtitleTracks
             assertTrue("Off reads selected again", rows.first().selected)
             assertEquals("en srt · External · Unavailable", rows.single { it.id == ExternalSubtitles.idFor(5) }.meta)
-            assertTrue("a broken file is never remembered for the series", gateway.rememberTrackChoiceCalls.isEmpty())
+            assertTrue("a broken file is never remembered for the series", gateway.rememberTrackMemoryCalls.isEmpty())
         }
     }
 
@@ -4769,7 +5014,7 @@ class PlaybackViewModelTest {
 
             assertEquals(listOf("session-1" to 5, "session-2" to 5), gateway.fetchExternalSubtitleCalls)
             assertNotNull(viewModel.state.value.sidecarCues)
-            assertEquals("the manual pick is still remembered once it loads", 1, gateway.rememberTrackChoiceCalls.size)
+            assertEquals("the manual pick is still remembered once it loads", 1, gateway.rememberTrackMemoryCalls.size)
         }
     }
 
@@ -5100,7 +5345,7 @@ class PlaybackViewModelTest {
     }
 
     @Test
-    fun `a plan landing during an account call waits for it, then loads or closes by the account`() =
+    fun `a plan landing during an account call is judged at once by the core's account`() =
         runTest(timeout = TEST_TIMEOUT) {
             for (accountChanged in listOf(false, true)) {
                 val plan = samplePlan()
@@ -5109,13 +5354,9 @@ class PlaybackViewModelTest {
                 val player = FakePlaybackPlayer()
                 val viewModel = buildViewModel(gateway, player, plan.itemId)
                 withSession(viewModel) {
-                    gateway.accountCallInFlight.value = true
+                    // A sign-in on another screen is still running; the core may already have reset.
+                    if (accountChanged) gateway.accountEpoch = 1uL
                     gate.complete(Unit)
-                    runCurrent()
-                    assertTrue("held while the account call runs", player.loadedPlans.isEmpty())
-
-                    if (accountChanged) gateway.accountEpoch.value = 1uL
-                    gateway.accountCallInFlight.value = false
                     runCurrent()
 
                     if (accountChanged) {
@@ -5137,9 +5378,7 @@ class PlaybackViewModelTest {
         val player = FakePlaybackPlayer()
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
-            gateway.accountCallInFlight.value = true // a sign-in attempt that then fails
-            runCurrent()
-            gateway.accountCallInFlight.value = false
+            gateway.accountEpoch = gateway.accountEpoch // a sign-in attempt that fails re-reports the same epoch
             runCurrent()
 
             assertEquals(listOf(plan), player.loadedPlans)
@@ -5155,7 +5394,7 @@ class PlaybackViewModelTest {
         val player = FakePlaybackPlayer()
         val viewModel = buildViewModel(gateway, player, plan.itemId)
         withSession(viewModel) {
-            gateway.accountEpoch.value = 1uL
+            gateway.accountEpoch = 1uL
             runCurrent()
 
             assertEquals(PlaybackEvent.Finish, viewModel.events.replayCache.single())
@@ -5180,8 +5419,7 @@ class PlaybackViewModelTest {
         withSession(viewModel) {
             advanceOneTick()
             // The core kept this playback on its account (epoch 0) across the switch to epoch 1.
-            gateway.parkedEpoch.value = 0uL
-            gateway.accountEpoch.value = 1uL
+            gateway.setEpochs(epoch = 1uL, parked = 0uL)
             runCurrent()
 
             assertNoEvent(viewModel)
@@ -5209,12 +5447,11 @@ class PlaybackViewModelTest {
         val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
         val viewModel = buildViewModel(gateway, FakePlaybackPlayer(), plan.itemId)
         withSession(viewModel) {
-            gateway.parkedEpoch.value = 0uL
-            gateway.accountEpoch.value = 1uL
+            gateway.setEpochs(epoch = 1uL, parked = 0uL)
             runCurrent()
             assertNoEvent(viewModel)
 
-            gateway.parkedEpoch.value = null
+            gateway.parkedEpoch = null
             runCurrent()
 
             assertEquals(PlaybackEvent.Finish, viewModel.events.replayCache.single())
@@ -5819,7 +6056,7 @@ class PlaybackViewModelTest {
             runCurrent()
             assertTrue("nothing prepared before the restore", gateway.preparePlaybackCalls.isEmpty())
 
-            gateway.accountEpoch.value = 1uL
+            gateway.accountEpoch = 1uL
             restored.complete(Unit)
             runCurrent()
 
@@ -5853,5 +6090,690 @@ class PlaybackViewModelTest {
             gate.complete(Unit)
             runCurrent()
         }
+    }
+
+    // -- docs/17 §2, docs/18 §2.1: everything a session launches belongs to that session ------
+
+    /** docs/17 §2: the Undo toast belongs to the session whose segment was skipped. */
+    @Test
+    fun `an Undo offered by one episode's credits skip seeks nothing once autoplay loaded the next episode`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val plan1 = episodePlan("ep-1")
+            val plan2 = episodePlan("ep-2", itemName = "Episode Two")
+            val nextCard = testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)
+            val credits = sampleSegment(MediaSegmentKind.OUTRO, 160_000_000L, 190_000_000L)
+            val gateway = FakeCoreGateway(
+                preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan1), "ep-2" to Result.success(plan2)),
+                nextEpisodeByItemId = mapOf("ep-1" to nextCard),
+                mediaSegmentsByItemId = mapOf("ep-1" to listOf(credits)),
+            )
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, plan1.itemId)
+            withSession(viewModel) {
+                player.positionTicks = 150_000_000L
+                advanceOneTick()
+                viewModel.skipSegment(credits)
+                assertNotNull("the credits skip offers its Undo", viewModel.state.value.skipUndo)
+
+                viewModel.playNextEpisode() // autoplay: the next episode reaches READY inside the 5s window
+                runCurrent()
+                assertEquals(plan2, player.loadedPlan)
+                val seeksOnceNextEpisodeLoaded = player.seekCalls.size
+
+                viewModel.undoSkip() // Select with the OSD hidden
+                runCurrent()
+
+                assertEquals(
+                    "an Undo from the old session must not seek the new item",
+                    seeksOnceNextEpisodeLoaded,
+                    player.seekCalls.size,
+                )
+            }
+        }
+
+    @Test
+    fun `an Undo offered by a credits skip still seeks back within the same session`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = episodePlan("ep-1")
+        val credits = sampleSegment(MediaSegmentKind.OUTRO, 160_000_000L, 190_000_000L)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan)),
+            mediaSegmentsByItemId = mapOf("ep-1" to listOf(credits)),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.positionTicks = 150_000_000L
+            advanceOneTick()
+            viewModel.skipSegment(credits)
+            viewModel.undoSkip()
+
+            assertEquals(listOf(4_000L, -4_000L), player.seekCalls)
+            assertNull(viewModel.state.value.skipUndo)
+        }
+    }
+
+    /** docs/18 §2.1: a tick parked in its report when replaceItem starts a newer session lands on nothing. */
+    @Test
+    fun `a position report held across replaceItem evaluates nothing against the new item`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan1 = episodePlan("ep-1")
+        val plan3 = episodePlan("ep-3", itemName = "Episode Three")
+        val commercial = sampleSegment(MediaSegmentKind.COMMERCIAL, 160_000_000L, 190_000_000L)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan1), "ep-3" to Result.success(plan3)),
+            nextEpisodeByItemId = mapOf(
+                "ep-1" to testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2),
+                "ep-3" to testCard(id = "ep-4", itemType = "Episode", name = "Episode Four", indexNumber = 4),
+            ),
+            mediaSegmentsByItemId = mapOf("ep-1" to listOf(commercial), "ep-3" to listOf(commercial)),
+            settings = defaultTestSettings().copy(skipCommercial = SegmentAction.AUTO_SKIP),
+        )
+        val held = CompletableDeferred<Unit>().also { gateway.reportPositionGate = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan1.itemId)
+        withSession(viewModel) {
+            player.isPlaying = true
+            player.positionTicks = 170_000_000L
+            advanceOneTick()
+            assertEquals("the tick is parked in the position report", 1, gateway.reportPositionEntered)
+
+            gateway.reportPositionGate = null
+            viewModel.replaceItem("ep-3")
+            runCurrent()
+            assertEquals(plan3, player.loadedPlan)
+            held.complete(Unit)
+            runCurrent()
+
+            val effects = buildList {
+                if (viewModel.state.value.nextUp != null) add("next-up card")
+                if (gateway.noteEpisodeFinishedCalls.isNotEmpty()) add("still-watching decision")
+                if (gateway.preloadPlaybackCalls.isNotEmpty()) add("next-episode preload")
+                if (player.seekCalls.isNotEmpty()) add("auto-skip seek")
+            }
+            assertEquals("a replaced session evaluates no tick effects", emptyList<String>(), effects)
+        }
+    }
+
+    /** docs/18 §2.1: a late answer is the session's own or nothing, even for the same item id. */
+    @Test
+    fun `a first session's late neighbours lookup publishes nothing into the replacement of the same item`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val plan = episodePlan("ep-1")
+            val freshNext = testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)
+            val stalePrevious = testCard(id = "stale-prev", itemType = "Episode", name = "Stale Previous", indexNumber = 0)
+            val staleNext = testCard(id = "stale-next", itemType = "Episode", name = "Stale Next", indexNumber = 9)
+            val gateway = FakeCoreGateway(
+                preparePlaybackResultsByItemId = mapOf(
+                    "ep-1" to Result.success(plan),
+                    "ep-2" to Result.success(episodePlan("ep-2", itemName = "Episode Two")),
+                ),
+                nextEpisodeByItemId = mapOf("ep-1" to freshNext),
+            )
+            val first = CompletableDeferred<EpisodeNeighbors>().also { gateway.episodeNeighborsGates.add(it) }
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, plan.itemId)
+            withSession(viewModel) {
+                assertFalse("the first lookup is parked", viewModel.state.value.hasNextEpisode)
+
+                viewModel.replaceItem("ep-1")
+                runCurrent()
+                assertTrue("the second session's own lookup answered", viewModel.state.value.hasNextEpisode)
+                assertFalse(viewModel.state.value.hasPreviousEpisode)
+
+                first.complete(EpisodeNeighbors(previous = stalePrevious, next = staleNext))
+                runCurrent()
+
+                assertFalse("the first session's answer must not add a previous episode", viewModel.state.value.hasPreviousEpisode)
+                viewModel.playNextEpisode()
+                runCurrent()
+                assertEquals("Next episode is the second session's own answer", "ep-2", gateway.preparePlaybackCalls.last())
+            }
+        }
+
+    @Test
+    fun `a first session's late OSD detail publishes nothing into the replacement of the same item`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val plan = samplePlan()
+            val freshChapters = listOf(sampleChapter("Fresh Chapter", 0L))
+            val gateway = FakeCoreGateway(
+                preparePlaybackResultsByItemId = mapOf(plan.itemId to Result.success(plan)),
+                itemDetailResultsByItemId = mapOf(
+                    plan.itemId to Result.success(sampleItemDetail(container = "fresh-container", chapters = freshChapters)),
+                ),
+            )
+            val first = CompletableDeferred<PlaybackOsdDetail>().also { gateway.playbackOsdDetailGates.add(it) }
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, plan.itemId)
+            withSession(viewModel) {
+                player.fireRenderedFirstFrame() // releases the enrichment gate: the first fetch parks on `first`
+                assertEquals(listOf(plan.itemId), gateway.getPlaybackOsdDetailCalls)
+
+                viewModel.replaceItem(plan.itemId)
+                runCurrent()
+                player.fireRenderedFirstFrame()
+                assertEquals("fresh-container", viewModel.state.value.playbackStatsDetail?.container)
+
+                first.complete(
+                    PlaybackOsdDetail(
+                        container = "stale-container",
+                        mediaStreams = emptyList(),
+                        chapters = listOf(sampleChapter("Stale Chapter", 0L)),
+                        sizeBytes = null,
+                        path = null,
+                        trickplay = null,
+                    ),
+                )
+                runCurrent()
+
+                assertEquals("stats detail stays the second session's", "fresh-container", viewModel.state.value.playbackStatsDetail?.container)
+                assertEquals("chapters stay the second session's", freshChapters, viewModel.state.value.chapters)
+            }
+        }
+
+    @Test
+    fun `a first session's late media segments publish nothing into the replacement of the same item`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val plan = samplePlan()
+            val freshSegments = listOf(sampleSegment(MediaSegmentKind.INTRO, 0L, 50_000_000L))
+            val gateway = FakeCoreGateway(
+                preparePlaybackResultsByItemId = mapOf(plan.itemId to Result.success(plan)),
+                mediaSegmentsByItemId = mapOf(plan.itemId to freshSegments),
+            )
+            val first = CompletableDeferred<List<MediaSegment>>().also { gateway.mediaSegmentsGates.add(it) }
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, plan.itemId)
+            withSession(viewModel) {
+                viewModel.replaceItem(plan.itemId)
+                runCurrent()
+                assertEquals(freshSegments, viewModel.state.value.mediaSegments)
+
+                first.complete(listOf(sampleSegment(MediaSegmentKind.OUTRO, 160_000_000L, 190_000_000L)))
+                runCurrent()
+
+                assertEquals("segments stay the second session's", freshSegments, viewModel.state.value.mediaSegments)
+            }
+        }
+
+    /** docs/18 §2.1: a request names the account its session plays on, never one read after a switch. */
+    @Test
+    fun `a first session's parked enrichment fetches request nothing on the account of a Play elsewhere`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val plan1 = samplePlan()
+            val plan2 = samplePlan(itemId = "other-1", playSessionId = "session-other")
+            val gateway = FakeCoreGateway(
+                preparePlaybackResultsByItemId = mapOf(plan1.itemId to Result.success(plan1), "other-1" to Result.success(plan2)),
+            )
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, plan1.itemId)
+            withSession(viewModel) {
+                advanceOneTick() // t=1.0s: the first session's enrichment gate (1.5s fallback) still holds its fetches
+
+                gateway.setEpochs(epoch = 1uL, parked = 0uL) // switch account; the playback is parked on its own
+                runCurrent()
+                viewModel.replaceItem("other-1") // Play from the account now browsed
+                runCurrent()
+                assertEquals(1uL, viewModel.accountEpoch)
+
+                advanceTimeBy(600L) // t=1.6s: only the first session's gate has opened
+                runCurrent()
+
+                val enrichment = setOf("getPlaybackOsdDetail", "serverDisplayName")
+                assertEquals(
+                    "the first session requests nothing under the new account's epoch",
+                    emptyList<Pair<String, ULong?>>(),
+                    gateway.accountBoundCalls.filter { it.first in enrichment && it.second == 1uL },
+                )
+            }
+        }
+
+    /** docs/17 §2: a Play intent arriving mid-transition is the newest request and wins. */
+    @Test
+    fun `a Play intent arriving during an autoplay transition is what ends up playing`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan1 = episodePlan("ep-1")
+        val plan2 = episodePlan("ep-2", itemName = "Episode Two")
+        val intentPlan = samplePlan(itemId = "movie-b", itemName = "Movie B", playSessionId = "session-b")
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf(
+                "ep-1" to Result.success(plan1),
+                "ep-2" to Result.success(plan2),
+                "movie-b" to Result.success(intentPlan),
+            ),
+            nextEpisodeByItemId = mapOf("ep-1" to testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)),
+        )
+        val autoplayGate = CompletableDeferred<Unit>().also { gateway.preparePlaybackGates["ep-2"] = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan1.itemId)
+        withSession(viewModel) {
+            viewModel.playNextEpisode() // autoplay: ep-2's prepare is in flight
+            runCurrent()
+            assertEquals(listOf("ep-1", "ep-2"), gateway.preparePlaybackCalls)
+
+            viewModel.replaceItem("movie-b") // PiP Play intent
+            runCurrent()
+            autoplayGate.complete(Unit)
+            runCurrent()
+
+            assertEquals("the newest request plays", "movie-b", player.loadedPlans.last().itemId)
+            assertEquals("Movie B", viewModel.state.value.itemName)
+        }
+    }
+
+    // -- docs/18 §2.1 / docs/17 §2: one stop funnel, one scope for a negotiation, one surface funnel ----
+
+    private enum class FinalStop { STOP_ONCE, NATURAL_END, STILL_WATCHING_TIMEOUT, FATAL_ERROR }
+
+    @Test
+    fun `every final stop lands before a replacement prepares, and names the old session with its position`() = runTest(timeout = TEST_TIMEOUT) {
+        val failures = mutableListOf<String>()
+        for (entry in FinalStop.values()) {
+            try {
+            val plan = episodePlan("ep-1")
+            val settings = defaultTestSettings().let { it.copy(stillWatching = it.stillWatching.copy(timeoutSecs = 5u)) }
+            val gateway = FakeCoreGateway(
+                preparePlaybackResultsByItemId = mapOf(
+                    "ep-1" to Result.success(plan),
+                    "other" to Result.success(samplePlan(itemId = "other", playSessionId = "session-other")),
+                ),
+                nextEpisodeByItemId = mapOf("ep-1" to testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)),
+                noteEpisodeFinishedDecisions = ArrayDeque(listOf(StillWatchingDecision.ASK_STILL_WATCHING)),
+                settings = settings,
+            )
+            val player = FakePlaybackPlayer().apply { positionTicks = 170_000_000L }
+            val viewModel = buildViewModel(gateway, player, plan.itemId)
+            withSession(viewModel) {
+                if (entry == FinalStop.STILL_WATCHING_TIMEOUT) {
+                    advanceOneTick()
+                    assertNotNull("$entry: the card is up", viewModel.state.value.stillWatching)
+                }
+                val gate = CompletableDeferred<Unit>().also { gateway.stopPlaybackGate = it }
+                when (entry) {
+                    FinalStop.STOP_ONCE -> viewModel.stopPlaybackOnce()
+                    FinalStop.NATURAL_END -> player.firePlaybackStateChanged(Player.STATE_ENDED)
+                    FinalStop.STILL_WATCHING_TIMEOUT -> {
+                        advanceTimeBy(5_000L)
+                        runCurrent()
+                    }
+                    FinalStop.FATAL_ERROR -> {
+                        player.fireRenderedFirstFrame()
+                        player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+                    }
+                }
+                assertEquals("$entry: the final stop is on its way to the core", 1, gateway.stopPlaybackEntered)
+
+                viewModel.replaceItem("other") // PiP Play-from-Home
+                runCurrent()
+                assertFalse("$entry: the replacement waits for the old stop", "other" in gateway.preparePlaybackCalls)
+
+                gate.complete(Unit)
+                runCurrent()
+                assertEquals("$entry", listOf(plan.playSessionId), gateway.stopPlaybackSessionIds)
+                assertEquals("$entry", listOf(170_000_000L), gateway.stopPlaybackCalls)
+                assertTrue("$entry: then the replacement prepares", "other" in gateway.preparePlaybackCalls)
+            }
+            } catch (e: AssertionError) {
+                failures += e.message.orEmpty()
+            }
+        }
+        assertTrue(failures.joinToString("\n"), failures.isEmpty())
+    }
+
+    @Test
+    fun `a stop before a chained negotiation lands starts no second fallback and disposes the landing`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true, embeddedSubtitles = listOf(assStream))
+        val landed = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "landed", embeddedSubtitles = listOf(assStream))
+        val gate = CompletableDeferred<Unit>()
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(landed),
+        ).apply { prepareTranscodeFallbackGate = gate }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true, enText to false))
+            runCurrent()
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            viewModel.chooseSubtitle(TrackMapping.toId(1, 0)) // the landing will chain a second negotiation
+
+            viewModel.stopPlaybackOnce()
+            gate.complete(Unit)
+            runCurrent()
+
+            assertEquals("no second fallback", 1, gateway.prepareTranscodeFallbackCalls.size)
+            assertEquals("the stop names the session the negotiation took over", listOf(plan.playSessionId), gateway.stopPlaybackSessionIds)
+            assertEquals("the landing never loads", listOf(plan), player.loadedPlans)
+            assertFalse("the stop ends the landed session in the core", "landed" in gateway.abandonPlaybackSessionIds)
+        }
+    }
+
+    /** [FakeCoreGateway] whose [getItemDetail] is held at [gate]; [cancelled] records a cancelled wait. */
+    private class HeldItemDetailGateway(
+        private val inner: FakeCoreGateway,
+        val gate: CompletableDeferred<Unit>,
+    ) : CoreGateway by inner {
+        var cancelled = false
+
+        override suspend fun getItemDetail(itemId: String, accountEpoch: ULong?): ItemDetail {
+            try {
+                gate.await()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                cancelled = true
+                throw e
+            }
+            return inner.getItemDetail(itemId, accountEpoch)
+        }
+    }
+
+    @Test
+    fun `opening any other surface cancels a loading library info request and the late result changes nothing`() = runTest(timeout = TEST_TIMEOUT) {
+        val opens: List<Pair<String, (PlaybackViewModel) -> Unit>> = listOf(
+            "Speed" to { it.openSpeedMenu() },
+            "Chapters" to { it.openChaptersMenu() },
+            "Tracks" to { it.openTrackPicker() },
+            "Stats" to { it.openInfoOverlay() },
+        )
+        val failures = mutableListOf<String>()
+        for ((name, open) in opens) {
+            try {
+            val plan = samplePlan()
+            val inner = FakeCoreGateway(
+                preparePlaybackResult = Result.success(plan),
+                itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail())),
+            )
+            val gateway = HeldItemDetailGateway(inner, CompletableDeferred())
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, plan.itemId)
+            withSession(viewModel) {
+                player.fireTracksChanged(tracksOf(enAudio to true))
+                player.fireRenderedFirstFrame() // the stats sheet needs the OSD detail
+                runCurrent()
+                viewModel.openLibraryInfoOverlay()
+                assertTrue("$name: loading", viewModel.state.value.openSurface is OpenSurface.LibraryInfo)
+
+                open(viewModel)
+                val opened = viewModel.state.value.openSurface
+                assertFalse("$name: replaced the library info", opened is OpenSurface.LibraryInfo || opened is OpenSurface.None)
+                assertTrue("$name: the request is cancelled", gateway.cancelled)
+
+                gateway.gate.complete(Unit)
+                runCurrent()
+                assertEquals("$name: the late result changes nothing", opened, viewModel.state.value.openSurface)
+            }
+            } catch (e: AssertionError) {
+                failures += e.message.orEmpty()
+            }
+        }
+        assertTrue(failures.joinToString("\n"), failures.isEmpty())
+    }
+
+    private enum class SurfaceExit { BACK, ESCAPE, SESSION_END, TRANSITION_START }
+
+    /** docs/12 §12: Back, Escape, a session end and a transition start each close whatever surface is up and kill its library-info request. */
+    @Test
+    fun `every way a surface can end leaves none open and no library info request alive`() = runTest(timeout = TEST_TIMEOUT) {
+        val opens: List<Pair<String, (PlaybackViewModel) -> Unit>> = listOf(
+            "Speed" to { it.openSpeedMenu() },
+            "Chapters" to { it.openChaptersMenu() },
+            "Tracks" to { it.openTrackPicker() },
+            "Stats" to { it.openInfoOverlay() },
+            "LibraryInfo" to { it.openLibraryInfoOverlay() },
+        )
+        val failures = mutableListOf<String>()
+        for (exit in SurfaceExit.values()) {
+            for ((name, open) in opens) {
+                try {
+                    val plan = samplePlan()
+                    val inner = FakeCoreGateway(
+                        preparePlaybackResultsByItemId = mapOf(
+                            plan.itemId to Result.success(plan),
+                            "other" to Result.success(samplePlan(itemId = "other", playSessionId = "session-other")),
+                        ),
+                        itemDetailResultsByItemId = mapOf(plan.itemId to Result.success(sampleItemDetail())),
+                    )
+                    val gateway = HeldItemDetailGateway(inner, CompletableDeferred())
+                    val player = FakePlaybackPlayer()
+                    val viewModel = buildViewModel(gateway, player, plan.itemId)
+                    val otherGate = CompletableDeferred<Unit>().also { inner.preparePlaybackGates["other"] = it }
+                    withSession(viewModel) {
+                        player.fireTracksChanged(tracksOf(enAudio to true))
+                        player.fireRenderedFirstFrame()
+                        runCurrent()
+                        open(viewModel)
+                        assertFalse("$exit/$name: opened", viewModel.state.value.openSurface is OpenSurface.None)
+
+                        when (exit) {
+                            SurfaceExit.BACK, SurfaceExit.ESCAPE -> viewModel.closeSurface()
+                            SurfaceExit.SESSION_END -> viewModel.stopPlaybackOnce()
+                            SurfaceExit.TRANSITION_START -> viewModel.replaceItem("other")
+                        }
+                        assertEquals("$exit/$name: closed", OpenSurface.None, viewModel.state.value.openSurface)
+                        if (name == "LibraryInfo") assertTrue("$exit/$name: the request is cancelled", gateway.cancelled)
+
+                        gateway.gate.complete(Unit)
+                        otherGate.complete(Unit)
+                        runCurrent()
+                        assertEquals("$exit/$name: a late result reopens nothing", OpenSurface.None, viewModel.state.value.openSurface)
+                    }
+                } catch (e: AssertionError) {
+                    failures += e.message.orEmpty()
+                }
+            }
+        }
+        assertTrue(failures.joinToString("\n"), failures.isEmpty())
+    }
+
+    // -- docs/17 §2: the MediaSession's commands reach the view model ----------------------------
+
+    @Test
+    fun `a remote stop reports the final position once and finishes like Back`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer().apply { positionTicks = 42_000_000L }
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            viewModel.stopFromRemote()
+            viewModel.stopFromRemote()
+
+            assertEquals(listOf(42_000_000L), gateway.stopPlaybackCalls)
+            assertEquals(listOf(plan.playSessionId), gateway.stopPlaybackSessionIds)
+            assertEquals(1, player.stopAndClearCallCount)
+            assertEquals(PlaybackEvent.Finish, viewModel.events.replayCache.single())
+        }
+    }
+
+    @Test
+    fun `a remote absolute seek goes through the seek path and honours an unseekable file`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(startPositionTicks = 100_000_000L) // 10s in
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            viewModel.seekToPositionMs(40_000L)
+
+            assertEquals(listOf(30_000L), player.seekCalls)
+            assertEquals(400_000_000L, viewModel.positionTicks.value)
+
+            player.seekabilityValue = Seekability.UNSEEKABLE
+            viewModel.seekToPositionMs(60_000L)
+
+            assertEquals(listOf(30_000L), player.seekCalls)
+        }
+    }
+
+    // -- docs/17 §2: a remote Stop is never dropped, whatever the session is doing ---------------
+
+    private enum class StopMoment { PLAYING, AUTOPLAY_AWAITING_LANDING, AUTOPLAY_AWAITING_RESTORE, REPLACE_AWAITING_LANDING, AUTOPLAY_PREPARING }
+
+    @Test
+    fun `a remote stop during any transition stops the old session once, loads nothing and finishes`() = runTest(timeout = TEST_TIMEOUT) {
+        val failures = mutableListOf<String>()
+        for (moment in StopMoment.values()) {
+            try {
+                val plan1 = samplePlan(itemId = "ep-1", itemType = "Episode", seriesId = "series-1", playSessionId = "session-1", runtimeTicks = 200_000_000L)
+                val plan2 = samplePlan(itemId = "ep-2", itemType = "Episode", seriesId = "series-1", playSessionId = "session-2", runtimeTicks = 200_000_000L)
+                val other = samplePlan(itemId = "other", playSessionId = "session-other")
+                val gateway = FakeCoreGateway(
+                    preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan1), "ep-2" to Result.success(plan2), "other" to Result.success(other)),
+                    nextEpisodeByItemId = mapOf("ep-1" to testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)),
+                )
+                val player = FakePlaybackPlayer().apply { positionTicks = 42_000_000L }
+                val viewModel = buildViewModel(gateway, player, plan1.itemId)
+                withSession(viewModel) {
+                    val stopGate = CompletableDeferred<Unit>()
+                    val restored = CompletableDeferred<Unit>()
+                    val prepareGate = CompletableDeferred<Unit>()
+                    when (moment) {
+                        StopMoment.PLAYING -> Unit
+                        StopMoment.AUTOPLAY_AWAITING_LANDING -> {
+                            gateway.stopPlaybackGate = stopGate
+                            viewModel.playNextEpisode()
+                        }
+                        StopMoment.AUTOPLAY_AWAITING_RESTORE -> {
+                            gateway.accountRestored = restored
+                            viewModel.playNextEpisode()
+                        }
+                        StopMoment.REPLACE_AWAITING_LANDING -> {
+                            gateway.stopPlaybackGate = stopGate
+                            viewModel.replaceItem("other")
+                        }
+                        StopMoment.AUTOPLAY_PREPARING -> {
+                            gateway.preparePlaybackGates["ep-2"] = prepareGate
+                            viewModel.playNextEpisode()
+                        }
+                    }
+                    runCurrent()
+
+                    viewModel.stopFromRemote()
+                    stopGate.complete(Unit)
+                    restored.complete(Unit)
+                    prepareGate.complete(Unit)
+                    runCurrent()
+
+                    assertEquals("$moment: S1 is stopped once, with its position", listOf(plan1.playSessionId), gateway.stopPlaybackSessionIds)
+                    assertEquals("$moment", listOf(42_000_000L), gateway.stopPlaybackCalls)
+                    assertEquals("$moment: the refused title never loads", listOf(plan1), player.loadedPlans)
+                    assertEquals("$moment: Finish is emitted", PlaybackEvent.Finish, viewModel.events.replayCache.lastOrNull())
+                    if (moment == StopMoment.AUTOPLAY_PREPARING) {
+                        assertEquals("$moment: the landed prepare is abandoned", listOf("session-2"), gateway.abandonPlaybackSessionIds)
+                    } else {
+                        assertFalse("$moment: the next plan is never loaded", "ep-2" in gateway.preparePlaybackCalls || "other" in gateway.preparePlaybackCalls)
+                    }
+                }
+            } catch (e: AssertionError) {
+                failures += e.message.orEmpty()
+            }
+        }
+        assertTrue(failures.joinToString("\n"), failures.isEmpty())
+    }
+
+    private enum class Ending { REMOTE_STOP, BACK }
+    private enum class EndingCard { STILL_WATCHING, STILL_WATCHING_PARKED, NEXT_UP, PLAYING }
+
+    /** What [PlaybackScreen]'s Back does: each press peels one layer; the last one finishes the activity, which stops the session. */
+    private fun pressBack(viewModel: PlaybackViewModel) {
+        while (true) {
+            val state = viewModel.state.value
+            when (resolveBackAction(pickerOpen = false, nextUpShown = state.nextUp != null, osdVisible = false, stillWatchingShown = state.stillWatching != null)) {
+                BackAction.STOP_STILL_WATCHING -> return viewModel.stillWatchingStop()
+                BackAction.DISMISS_NEXT_UP -> viewModel.dismissNextUp()
+                else -> return viewModel.stopPlaybackOnce()
+            }
+        }
+    }
+
+    @Test
+    fun `Stop and Back end the session the same way with the card up, parked, next-up shown or playing`() = runTest(timeout = TEST_TIMEOUT) {
+        val failures = mutableListOf<String>()
+        for (ending in Ending.values()) for (card in EndingCard.values()) {
+            val label = "$ending x $card"
+            try {
+                val plan = episodePlan("ep-1")
+                val settings = defaultTestSettings().let { it.copy(stillWatching = it.stillWatching.copy(timeoutSecs = 5u)) }
+                val decision = if (card == EndingCard.NEXT_UP) StillWatchingDecision.COUNTDOWN else StillWatchingDecision.ASK_STILL_WATCHING
+                val gateway = FakeCoreGateway(
+                    preparePlaybackResultsByItemId = mapOf("ep-1" to Result.success(plan)),
+                    nextEpisodeByItemId = mapOf("ep-1" to testCard(id = "ep-2", itemType = "Episode", name = "Episode Two", indexNumber = 2)),
+                    noteEpisodeFinishedDecisions = ArrayDeque(listOf(decision)),
+                    settings = settings.let { if (card == EndingCard.NEXT_UP) it.copy(autoplayEnabled = false) else it },
+                )
+                val player = FakePlaybackPlayer().apply { positionTicks = if (card == EndingCard.PLAYING) 42_000_000L else 170_000_000L }
+                val viewModel = buildViewModel(gateway, player, plan.itemId)
+                withSession(viewModel) {
+                    if (card != EndingCard.PLAYING) advanceOneTick()
+                    when (card) {
+                        EndingCard.STILL_WATCHING, EndingCard.STILL_WATCHING_PARKED -> assertNotNull("$label: the card is up", viewModel.state.value.stillWatching)
+                        EndingCard.NEXT_UP -> assertNotNull("$label: next-up is shown", viewModel.state.value.nextUp)
+                        EndingCard.PLAYING -> Unit
+                    }
+                    if (card == EndingCard.STILL_WATCHING_PARKED) {
+                        gateway.setEpochs(epoch = 1uL, parked = 0uL)
+                        runCurrent()
+                    }
+
+                    when (ending) {
+                        Ending.REMOTE_STOP -> viewModel.stopFromRemote()
+                        Ending.BACK -> pressBack(viewModel)
+                    }
+                    val events = viewModel.events.replayCache.toList()
+                    advanceTimeBy(10_000L)
+                    runCurrent()
+
+                    assertEquals("$label: one stop, with the position", listOf(player.positionTicks), gateway.stopPlaybackCalls)
+                    assertEquals("$label: nothing happens after the timeout", events, viewModel.events.replayCache.toList())
+                    assertEquals("$label: nothing else is prepared", listOf("ep-1"), gateway.preparePlaybackCalls)
+                    val expected = when (card) {
+                        EndingCard.STILL_WATCHING -> PlaybackEvent.FinishToDetail("ep-2")
+                        else -> PlaybackEvent.Finish
+                    }
+                    if (card == EndingCard.STILL_WATCHING || card == EndingCard.STILL_WATCHING_PARKED || ending == Ending.REMOTE_STOP) {
+                        val want = if (card == EndingCard.STILL_WATCHING_PARKED) PlaybackEvent.Finish else expected
+                        assertEquals("$label: the event", listOf<PlaybackEvent>(want), events)
+                    }
+                }
+            } catch (e: AssertionError) {
+                failures += e.message.orEmpty()
+            }
+        }
+        assertTrue(failures.joinToString("\n"), failures.isEmpty())
+    }
+
+    // -- docs/10 / docs/17 §2: the player is wired only by start, and a dead VM leaves a live VM's hook alone ----
+
+    @Test
+    fun `the player is neither built nor wired before the account restore lets Play start`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val restored = CompletableDeferred<Unit>().also { gateway.accountRestored = it }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            runCurrent()
+            assertFalse("not wired before the restore", player.hasActiveListener)
+            assertTrue("no prepare yet", gateway.preparePlaybackCalls.isEmpty())
+
+            restored.complete(Unit)
+            runCurrent()
+
+            assertEquals(listOf(plan.itemId), gateway.preparePlaybackCalls)
+            assertTrue("wired once the plan is adopted", player.hasActiveListener)
+        }
+    }
+
+    @Test
+    fun `clearing a view model after a newer one installed its decoder hook leaves the newer hook`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val player = FakePlaybackPlayer()
+        val first = buildViewModel(FakeCoreGateway(preparePlaybackResult = Result.success(plan)), player, plan.itemId)
+        val second = buildViewModel(FakeCoreGateway(preparePlaybackResult = Result.success(plan)), player, plan.itemId)
+        val installed = player.onVideoDecoderInitialized
+        try {
+            assertNotNull("the newer view model owns the hook", installed)
+
+            ViewModelStore().apply { put("first", first) }.clear()
+
+            assertSame("the newer view model's hook survives", installed, player.onVideoDecoderInitialized)
+        } finally {
+            ViewModelStore().apply { put("second", second) }.clear() // a live session would keep runTest's scheduler busy
+        }
+        assertNull("clearing the owner removes it", player.onVideoDecoderInitialized)
     }
 }

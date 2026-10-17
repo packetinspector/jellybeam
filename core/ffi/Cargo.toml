@@ -39,12 +39,8 @@ update-test-fixture = ["app-updates/update-test-fixture"]
 
 [dependencies]
 app-updates = { path = "../app-updates" }
-# 0.29.x (the version this crate's spec was written against) is no longer
-# the latest stable release on crates.io; 0.32.0 is, and it still ships the
-# same proc-macro surface (`uniffi::setup_scaffolding!()`, `#[uniffi::export]`,
-# `uniffi::uniffi_bindgen_main()`) this crate uses, so it's what's pinned
-# here.
-uniffi = { version = "0.32", default-features = false }
+# >= 0.32.1: the generated Kotlin checksum check fails on aarch64 before it.
+uniffi = { version = "0.32.2", default-features = false }
 # `Datelike::year()` only, to pull a series' end year out of `BaseItemDto`'s
 # `EndDate` (`ItemDetail::end_year`, docs/11-detail-ux-spec.md tier 1 item
 # 10's year-range rule) -- same feature set media-cache/jellyfin-api already
@@ -82,11 +78,9 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
-# "net"/"io-util" only for `seerr.rs`'s own test-only scripted mock server
-# (proving `seerr_submit_request` invalidates the home cache end-to-end) --
-# unioned with this crate's own `[dependencies]` tokio feature set for test
-# builds, same convention jellyfin-api's `[dev-dependencies]` tokio entry
-# uses.
+# Test-only: breaks a mirror's schema so the browse reads' "query failed" outcome is reachable.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Test-only: "net"/"io-util" for `seerr.rs`'s scripted mock server (`seerr_submit_request_detail` cache test).
 tokio = { workspace = true, features = ["net", "io-util"] }
 
 [lints]

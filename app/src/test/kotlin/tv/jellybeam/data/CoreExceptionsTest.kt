@@ -116,14 +116,31 @@ class CoreExceptionsTest {
     }
 
     @Test
-    fun `Seerr's own 401, the sign-in flows and other failures never open re-authorization`() {
+    fun `the QuickConnect flows and other failures never open re-authorization`() {
         val unauthorized = CoreException.Unauthorized(account = null)
 
-        assertFalse(routesToReauthorization("ffi.seerrHome", unauthorized))
-        assertFalse(routesToReauthorization("ffi.seerrPersonDiscoverCredits", unauthorized))
         assertFalse(routesToReauthorization("ffi.pollQuickConnect", unauthorized))
         assertFalse(routesToReauthorization("ffi.completeQuickConnectReauthorization", unauthorized))
         assertFalse(routesToReauthorization("ffi.getItemDetail", CoreException.Api("boom")))
+    }
+
+    /** docs/14: Seerr's login is its own session; none of its failures is the Jellyfin token's. */
+    @Test
+    fun `no Seerr error routes to Jellyfin re-authorization from a Seerr call`() {
+        val seerrErrors = listOf(
+            CoreException.SeerrSessionExpired(),
+            CoreException.SeerrChangeUnconfirmed(),
+            CoreException.SeerrInvalidCredentials(uniffi.jellybeam_core.SeerrAuthMethod.API_KEY),
+            CoreException.SeerrUnreachable(UnreachableReason.TIMED_OUT),
+            CoreException.SeerrNotConfigured(),
+        )
+        val sections = listOf("ffi.seerrHome", "ffi.seerrSubmitRequestDetail", "ffi.seerrCancelRequestDetail", "ffi.seerrConnect")
+
+        for (error in seerrErrors) {
+            for (section in sections) {
+                assertFalse("$section $error", routesToReauthorization(section, error))
+            }
+        }
     }
 
     @Test
@@ -131,5 +148,6 @@ class CoreExceptionsTest {
         assertEquals("unauthorized", CoreException.Unauthorized(account = null).diagLabel())
         assertEquals("api", CoreException.Api("GET http://media.example.test/Items failed").diagLabel())
         assertEquals("server_unreachable", CoreException.ServerUnreachable(host, UnreachableReason.TIMED_OUT, "").diagLabel())
+        assertEquals("seerr_change_unconfirmed", CoreException.SeerrChangeUnconfirmed().diagLabel())
     }
 }

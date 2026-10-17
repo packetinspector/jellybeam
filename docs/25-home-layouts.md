@@ -408,8 +408,9 @@ Classic meets today:
   - Honour `focusGate` and docs/15's rules.
   - Restore focus when becoming top, through the shared `FocusMemory`.
   - Provide a fallback when the drawer closes.
-- **Refresh.** Call its ViewModel's `setActive(isTop)` and `onHostResume()`,
-  so hidden-Home sampling and resume catch-up (docs/17 §6) behave the same.
+- **Refresh.** Feed `isTop` to its ViewModel's `setActive` through
+  `ActiveWhileTop`, so a hidden Home only marks itself dirty and refreshes
+  once on return (docs/16 §4.6).
 - **Artwork.** Use the shared card image URLs and width bucketing
   (`CardFormatting.bucketedImageWidth`, docs/07 §1), so each layout's images
   share renditions and the image cache with every other screen, instead of
@@ -425,9 +426,10 @@ Classic meets today:
 of it. Each layout's ViewModel owns one instance: composition, not
 inheritance. It holds:
 
-- The refresh-conflation guard (`refreshInFlight`/`refreshQueued`).
-- `ChangeRefreshScheduler` and the `setActive` gating.
-- The PiP stop-epoch hook and `onHostResume`.
+- `ChangeRefreshScheduler` (every refresh after the first load; a playback
+  stop arrives as its mirror write's change event, docs/17 §6) and the
+  `setActive` gating; a lock keeps the first load and the scheduler's runs
+  from overlapping.
 - The `LaunchWarmup.takeHome()` hand-off and the stale-prefetch trailing
   refresh.
 - `pollSyncing` and `pollSyncStatus`.
@@ -593,7 +595,7 @@ its own variant.
    shipping the groundwork alone adds no visible Settings row.
 
 **Retiring the drawn feed.** As soon as committed differs from drawn, the
-feed is retired: its `ChangeRefreshScheduler`, stop-epoch, resume hooks,
+feed is retired: its `ChangeRefreshScheduler`,
 sync-status polling and lazy host reads stop starting gateway calls, and its
 queued refresh is cleared.
 - If the viewer switches back before leaving Settings, the old composition
@@ -778,8 +780,7 @@ Kotlin:
   can't do, so it would prove nothing.
 - **Retired feed and swap** (C3), with that blocking fake:
   - Retire the feed while each kind of call (snapshot, chrome read, status
-    poll) is blocked. Then emit change events, a stop epoch and a host resume.
-    No new call starts.
+    poll) is blocked. Then emit change events. No new call starts.
   - Swap while the old snapshot is blocked. The new feed's first request
     starts at once, without waiting. Then release the old call: its result is
     never applied, and no exception escapes.
@@ -1010,8 +1011,7 @@ the tree today:
 - **Tests:** `FakeCoreGateway`, `FakeHomeGateway`, `LaunchWarmupTest`,
   `HomeViewModelTest` and `ShelfAssemblyTest`.
 
-The remaining mentions of `homeSnapshot` in `MainActivity` and
-`PlaybackReports` are comments only; they're updated when their wording goes
+The remaining mentions of `homeSnapshot` in `MainActivity` are comments only; they're updated when their wording goes
 stale.
 
 **Docs.**

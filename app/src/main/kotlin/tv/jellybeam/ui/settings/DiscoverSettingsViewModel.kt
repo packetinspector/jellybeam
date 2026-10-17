@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,7 +30,6 @@ data class DiscoverSettingsUiState(
     val isConnecting: Boolean = false,
     val error: String? = null,
     val disconnectConfirmVisible: Boolean = false,
-    val isDisconnecting: Boolean = false,
 )
 
 /** Backs the Settings > Discover section (docs/14-seerr-discover.md): reads `seerr_status()` on
@@ -42,7 +42,7 @@ class DiscoverSettingsViewModel(private val gateway: CoreGateway, private val st
 
     init {
         viewModelScope.launch {
-            val status = runCatching { gateway.seerrStatus() }.getOrElse { notConfiguredStatus() }
+            val status = runCatchingCancellable { gateway.seerrStatus() }.getOrElse { notConfiguredStatus() }
             _state.update {
                 it.copy(
                     isLoading = false,
@@ -60,17 +60,14 @@ class DiscoverSettingsViewModel(private val gateway: CoreGateway, private val st
     fun onIdentityChange(identity: String) = _state.update { it.copy(identity = identity, error = null) }
     fun onSecretChange(secret: String) = _state.update { it.copy(secret = secret, error = null) }
 
-    /** [onConnected] bumps [tv.jellybeam.MainActivity]'s `seerrEpoch` so the drawer's "Discover" entry
-     * appears without an app restart.
-     */
-    fun connect(onConnected: () -> Unit) {
+    /** The gateway's `seerrRevision` bump (not a callback) shows the drawer's "Discover" entry (docs/14). */
+    fun connect() {
         val current = _state.value
         _state.update { it.copy(isConnecting = true, error = null) }
         viewModelScope.launch {
             try {
                 val status = gateway.seerrConnect(current.url.trim(), current.method, current.identity.trim(), current.secret)
                 _state.update { it.copy(isConnecting = false, status = status, secret = "", error = null) }
-                onConnected()
             } catch (e: CoreException) {
                 _state.update { it.copy(isConnecting = false, error = e.displayMessage(strings)) }
             }
@@ -80,17 +77,13 @@ class DiscoverSettingsViewModel(private val gateway: CoreGateway, private val st
     fun openDisconnectConfirm() = _state.update { it.copy(disconnectConfirmVisible = true) }
     fun dismissDisconnectConfirm() = _state.update { it.copy(disconnectConfirmVisible = false) }
 
-    /** [onDisconnected] bumps `seerrEpoch` (see [connect]). Best-effort like
-     * `JellybeamCore::seerr_disconnect` itself: never throws.
-     */
-    fun disconnect(onDisconnected: () -> Unit) {
-        _state.update { it.copy(isDisconnecting = true) }
+    /** Best-effort like `JellybeamCore::seerr_disconnect` itself: never throws. */
+    fun disconnect() {
         viewModelScope.launch {
             gateway.seerrDisconnect()
             _state.update {
                 DiscoverSettingsUiState(isLoading = false, status = notConfiguredStatus())
             }
-            onDisconnected()
         }
     }
 }

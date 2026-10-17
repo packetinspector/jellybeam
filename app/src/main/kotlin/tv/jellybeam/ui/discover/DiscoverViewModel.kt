@@ -9,7 +9,11 @@ import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.SeerrHomeRow
@@ -31,13 +35,27 @@ class DiscoverViewModel(private val gateway: CoreGateway, private val strings: U
     private val _state = MutableStateFlow(DiscoverUiState())
     val state: StateFlow<DiscoverUiState> = _state.asStateFlow()
 
+    private var loadJob: Job? = null
+
+    private var active = true
+
     init {
         refresh()
+        // A change landing while this list is top (Back during the POST) reloads it; one landing while away is covered by the return.
+        gateway.seerrRevision.drop(1).onEach { if (active) refresh() }.launchIn(viewModelScope)
+    }
+
+    /** Fed by the screen's `isTop`: each return to the top reloads, since a Seerr change is always made on another screen (docs/14). */
+    fun setActive(isActive: Boolean) {
+        if (isActive && !active) refresh()
+        active = isActive
     }
 
     private fun refresh() {
-        _state.update { it.copy(isLoading = true, error = null, notConfigured = false) }
-        viewModelScope.launch {
+        loadJob?.cancel()
+        // Rows already on screen stay up during a reload; only an empty screen shows the skeleton (docs/14).
+        _state.update { it.copy(isLoading = it.rows.isEmpty(), error = null, notConfigured = false) }
+        loadJob = viewModelScope.launch {
             try {
                 val home = gateway.seerrHome()
                 _state.update { it.copy(isLoading = false, rows = home.rows.map { row -> row.copy(cards = distinctSeerrCards(row.cards)) }) }
@@ -45,6 +63,7 @@ class DiscoverViewModel(private val gateway: CoreGateway, private val strings: U
                 _state.update {
                     it.copy(
                         isLoading = false,
+                        rows = emptyList(),
                         notConfigured = e is CoreException.SeerrNotConfigured,
                         error = e.displayMessage(strings),
                     )

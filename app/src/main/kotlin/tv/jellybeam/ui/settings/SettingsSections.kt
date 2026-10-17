@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.FocusRequester
@@ -736,13 +737,11 @@ internal fun TroubleshootingSectionContent(state: SettingsUiState, viewModel: Se
  * Discover section (docs/14-seerr-discover.md): status row, method chips, URL/identity/secret
  * fields (the `JellybeamTextField` recipe from [tv.jellybeam.ui.signin.SignInScreen]), a Connect button
  * (spinner while connecting, inline error), and a confirmation-gated Disconnect. Values write
- * through only on Connect (see [DiscoverSettingsViewModel]). [onSeerrConfigChanged] is
- * [tv.jellybeam.MainActivity]'s `seerrEpoch` bump, so the drawer's Discover entry appears/disappears
- * without an app restart.
+ * through only on Connect (see [DiscoverSettingsViewModel]). The gateway's `seerrRevision`
+ * moves on connect/disconnect, so the drawer's Discover entry appears/disappears without a restart.
  */
 @Composable
 internal fun DiscoverSectionContent(
-    onSeerrConfigChanged: () -> Unit,
     viewModel: DiscoverSettingsViewModel = viewModel(factory = DiscoverSettingsViewModelFactory(AppGraph.gateway, AppGraph.strings)),
 ) {
     val state by viewModel.state.collectAsState()
@@ -752,7 +751,7 @@ internal fun DiscoverSectionContent(
     // would leave the D-pad with nothing to move; hand focus to the new layout's first chip on
     // every layout change after the first (pane entry owns the first). A chip, never a text
     // field: landing in a field opens editing and the D-pad stops moving.
-    val focusGate = LocalSettingsFocusGate.current
+    val focusGate = LocalFocusGate.current
     val connectedRequester = remember { FocusRequester() }
     val confirmRequester = remember { FocusRequester() }
     val formRequester = remember { FocusRequester() }
@@ -801,7 +800,7 @@ internal fun DiscoverSectionContent(
                         SettingsChip(
                             label = stringResource(R.string.settings_discover_disconnect_confirm),
                             selected = true,
-                            onSelect = { viewModel.disconnect(onSeerrConfigChanged) },
+                            onSelect = { viewModel.disconnect() },
                             key = "discover/disconnect_confirm",
                             focusRequester = confirmRequester,
                         )
@@ -871,7 +870,7 @@ internal fun DiscoverSectionContent(
             SettingsChip(
                 label = stringResource(if (state.isConnecting) R.string.settings_discover_connecting else R.string.settings_discover_connect),
                 selected = true,
-                onSelect = { if (!state.isConnecting) viewModel.connect(onSeerrConfigChanged) },
+                onSelect = { if (!state.isConnecting) viewModel.connect() },
                 key = "discover/connect",
             )
         }

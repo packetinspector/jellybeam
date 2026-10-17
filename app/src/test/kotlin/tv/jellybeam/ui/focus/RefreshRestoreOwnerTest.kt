@@ -6,7 +6,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -17,31 +16,6 @@ import org.junit.Test
  * one-frame wait is explicit, not timing-dependent.
  */
 class RefreshRestoreOwnerTest {
-
-    @Test
-    fun `ownership lost during the frame wait cancels the trigger before eligible runs`() = runTest {
-        val owner = RefreshRestoreOwner()
-        val frameGate = CompletableDeferred<Unit>()
-        var eligibleCalls = 0
-        var restoreStarts = 0
-
-        val trigger = launch {
-            owner.onContentChanged(
-                scope = this,
-                frame = { frameGate.await() },
-                eligible = { eligibleCalls++; true },
-                restore = { restoreStarts++ },
-            )
-        }
-        runCurrent() // trigger reaches `frame()` and suspends on frameGate
-
-        owner.ownershipLost()
-        frameGate.complete(Unit)
-        trigger.join()
-
-        assertEquals("epoch invalidation must short-circuit before eligible is even consulted", 0, eligibleCalls)
-        assertEquals(0, restoreStarts)
-    }
 
     @Test
     fun `eligible reading a live flag catches a transition that lands during the frame wait`() = runTest {
@@ -70,12 +44,12 @@ class RefreshRestoreOwnerTest {
     }
 
     @Test
-    fun `a second trigger supersedes a running restore and inherits ownsFreeze`() = runTest {
+    fun `a second trigger supersedes a running restore and sees its own token`() = runTest {
         val owner = RefreshRestoreOwner()
         val firstRestoreGate = CompletableDeferred<Unit>()
         val secondRestoreGate = CompletableDeferred<Unit>()
         var firstCancelled = false
-        var secondSawOwnsFreeze = false
+        var secondSawOwnTokens = -1
         var secondRestoreStarted = false
 
         launch {
@@ -94,13 +68,13 @@ class RefreshRestoreOwnerTest {
             )
         }
         runCurrent()
-        assertTrue("restore started -> ownsFreeze true", owner.ownsFreeze)
+        assertEquals("restore running -> one own token", 1, owner.ownTokens)
 
         launch {
             owner.onContentChanged(
                 scope = this,
                 frame = {},
-                eligible = { ownsFreeze -> secondSawOwnsFreeze = ownsFreeze; true },
+                eligible = { own -> secondSawOwnTokens = own; true },
                 restore = {
                     secondRestoreStarted = true
                     secondRestoreGate.await()
@@ -110,17 +84,16 @@ class RefreshRestoreOwnerTest {
         runCurrent()
 
         assertTrue("the first restore's coroutine must actually be cancelled", firstCancelled)
-        assertTrue("the second trigger's eligible must see the freeze as refresh-owned", secondSawOwnsFreeze)
+        assertEquals("the second trigger's eligible must discount the running restore", 1, secondSawOwnTokens)
         assertTrue(secondRestoreStarted)
-        assertTrue(owner.ownsFreeze)
 
         secondRestoreGate.complete(Unit)
         runCurrent()
-        assertFalse("a run that finishes on its own releases ownsFreeze", owner.ownsFreeze)
+        assertEquals("a finished run holds nothing", 0, owner.ownTokens)
     }
 
     @Test
-    fun `ownershipLost releaseFreeze controls whether ownsFreeze survives the cancellation`() = runTest {
+    fun `ownershipLost cancels the running restore and drops its own token count`() = runTest {
         val owner = RefreshRestoreOwner()
         val restoreGate = CompletableDeferred<Unit>()
 
@@ -133,28 +106,14 @@ class RefreshRestoreOwnerTest {
             )
         }
         runCurrent()
-        assertTrue(owner.ownsFreeze)
+        assertEquals(1, owner.ownTokens)
 
-        owner.ownershipLost() // plain loss of top/resumed -- no new owner of the freeze
-        assertTrue("a plain ownership loss leaves ownsFreeze true for a possible refresh successor", owner.ownsFreeze)
-
-        launch {
-            owner.onContentChanged(
-                scope = this,
-                frame = {},
-                eligible = { true },
-                restore = { restoreGate.await() },
-            )
-        }
-        runCurrent()
-        assertTrue(owner.ownsFreeze)
-
-        owner.ownershipLost(releaseFreeze = true)
-        assertFalse("releaseFreeze = true hands the freeze to the new owner", owner.ownsFreeze)
+        owner.ownershipLost()
+        assertEquals(0, owner.ownTokens)
     }
 
     @Test
-    fun `drawer-style eligible blocks while open and invalidates a trigger pending across the open`() = runTest {
+    fun `drawer-style eligible blocks a trigger the drawer opened across, and a later one restores`() = runTest {
         // Same shape as Library's own guard: `eligible = { !drawerOpen &&
         // refreshGuardEligible(...) }`.
         val owner = RefreshRestoreOwner()
@@ -172,15 +131,14 @@ class RefreshRestoreOwnerTest {
         }
         runCurrent()
 
-        // Drawer opens then closes mid-wait; the flag alone would read false
-        // again by the time eligible runs, but the epoch bump must still invalidate.
+        // The drawer opens mid-wait, as onDrawerOpened writes the flag and calls ownershipLost.
         drawerOpen = true
         owner.ownershipLost()
-        drawerOpen = false
         frameGate.complete(Unit)
         trigger.join()
 
-        assertEquals("epoch invalidation, not the flag's final value, must decide this", 0, restoreStarts)
+        assertEquals("the live flag decides", 0, restoreStarts)
+        drawerOpen = false
 
         var secondEligible = false
         launch {

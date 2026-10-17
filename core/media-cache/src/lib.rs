@@ -424,7 +424,7 @@ pub enum MirrorChange {
 }
 
 impl Mirror {
-    /// Opens (or drop-and-recreates on version mismatch). Spawns the writer task and the
+    /// Opens (or drop-and-recreates on version mismatch). Spawns the writer thread and the
     /// sync engine (initial sync if empty; subscribes to the EventBus for live
     /// LibraryChanged/UserDataChanged deltas + NeedsReconcile).
     ///
@@ -460,16 +460,15 @@ impl Mirror {
         .await
         .map_err(|e| CacheError::Db(e.to_string()))??;
 
-        let (write_tx, write_rx) = tokio::sync::mpsc::channel(256);
         let (changes_tx, _) = tokio::sync::broadcast::channel(256);
-        let writer_changes_tx = changes_tx.clone();
-        tokio::task::spawn_blocking(move || writer::run(conn, write_rx, writer_changes_tx));
+        let writer = writer::WriterHandle::spawn(conn, changes_tx.clone())
+            .map_err(|e| CacheError::Db(e.to_string()))?;
 
         let state = std::sync::Arc::new_cyclic(|weak| MirrorState {
             playback_active,
             ..MirrorState::new(
                 client,
-                writer::WriterHandle::new(write_tx),
+                writer,
                 read_pool,
                 db_path,
                 changes_tx,
@@ -733,11 +732,14 @@ impl Mirror {
         query::next_up(&self.inner.read_pool.acquire(), limit)
     }
 
-    /// Re-fetches `/Shows/NextUp` against the current [`NextUpOptions`] immediately, rather
-    /// than waiting for the next opportunistic trigger. The Settings sheet calls this right
-    /// after changing the cutoff/rewatching knobs.
-    pub async fn refresh_next_up(&self) {
-        sync::refresh_next_up(&self.inner).await;
+    /// The options the next `/Shows/NextUp` fetch will use, as last pushed by
+    /// [`Self::set_next_up_options`].
+    pub fn next_up_options(&self) -> NextUpOptions {
+        *self
+            .inner
+            .next_up_options
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `hide_watched`: excludes already-played items (see `query::latest`). Does not affect
@@ -1191,23 +1193,20 @@ mod tests {
         assert!(matches!(second, Some(MirrorChange::Removed { .. })));
     }
 
-    /// Shared harness for tests needing a fully wired `Mirror` (real writer task + read
+    /// Shared harness for tests needing a fully wired `Mirror` (real writer thread + read
     /// pool), so they don't re-paste the `MirrorState` field list.
     fn test_mirror(client: jellyfin_api::JellyfinClient, path: &std::path::Path) -> Mirror {
         use crate::pool::ReadPool;
         use crate::writer::WriterHandle;
 
         let (conn, _empty) = schema::open_and_prepare(path).expect("open");
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
         let (changes_tx, _) = tokio::sync::broadcast::channel(64);
-        let writer_changes_tx = changes_tx.clone();
-        let _writer_task =
-            tokio::task::spawn_blocking(move || writer::run(conn, rx, writer_changes_tx));
+        let writer = WriterHandle::spawn(conn, changes_tx.clone()).expect("writer thread");
         let read_pool = std::sync::Arc::new(ReadPool::open(path, 2).expect("read pool"));
         let state = std::sync::Arc::new_cyclic(|weak| {
             MirrorState::new(
                 client,
-                WriterHandle::new(tx),
+                writer,
                 read_pool,
                 path.to_path_buf(),
                 changes_tx,
@@ -1216,6 +1215,37 @@ mod tests {
             )
         });
         Mirror { inner: state }
+    }
+
+    /// The writer is no runtime's blocking task: dropping the runtime under a live mirror returns.
+    #[test]
+    fn a_runtime_dropped_under_a_live_mirror_returns() {
+        use jellyfin_api::{ClientIdentity, JellyfinClient};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mirror = runtime.block_on(async {
+            let client = JellyfinClient::from_token(
+                "http://127.0.0.1:1",
+                ClientIdentity {
+                    client: "Jellybeam Test".to_string(),
+                    device: "test".to_string(),
+                    device_id: "test-device".to_string(),
+                    version: "0.1.0".to_string(),
+                },
+                "tok",
+            );
+            let mirror = test_mirror(client, &dir.path().join("mirror.db"));
+            mirror.apply_local_user_data("item-a", 1, None).await;
+            mirror
+        });
+        let started = std::time::Instant::now();
+        drop(runtime);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        drop(mirror);
     }
 
     /// docs/07 Watch state: requests coalesce into one wake, `take` returns the strongest

@@ -68,6 +68,7 @@ async fn wait_for<F: Fn() -> usize>(
 #[ignore = "requires a live Jellyfin server at localhost:8096 (see dev/README.md: make server-up)"]
 async fn initial_sync_against_live_server_matches_corpus_counts() {
     let (client, _auth) = JellyfinClient::authenticate_by_name(
+        &jellyfin_api::build_http_client(),
         BASE_URL,
         identity(),
         "jellybeam-admin",

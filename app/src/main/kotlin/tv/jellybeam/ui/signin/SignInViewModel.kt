@@ -7,6 +7,7 @@ import tv.jellybeam.AppGraph
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.R
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,11 +16,15 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.coroutineScope
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.DiscoveredServer
 
 /** Prefilled per docs/05-conventions-and-servers.md -- the emulator's route to the dev server. */
 private const val DEFAULT_SERVER_URL = "http://10.0.2.2:8096"
+
+/** How long the server honours a Quick Connect code (docs/18 §2.1); polling stops after it. */
+internal const val QUICK_CONNECT_CODE_LIFETIME_MS = 10 * 60_000L
 
 /** Non-secret identity of the saved account whose credential is being refreshed. */
 data class ReauthorizationTarget(
@@ -95,7 +100,7 @@ class SignInViewModel(
         if (discoveryJob?.isActive == true) return
         discoveryJob = viewModelScope.launch {
             _state.update { it.copy(isDiscovering = true) }
-            val servers = runCatching { gateway.discoverServers() }.getOrDefault(emptyList())
+            val servers = runCatchingCancellable { gateway.discoverServers() }.getOrDefault(emptyList())
             _state.update { current ->
                 val prefill = singleUnsavedServerToPrefill(servers, current.serverUrlTouched)
                 current.copy(
@@ -128,10 +133,6 @@ class SignInViewModel(
                 error = null,
             )
         }
-    }
-
-    override fun onCleared() {
-        discoveryJob?.cancel()
     }
 
     fun onUsernameChange(value: String) {
@@ -205,45 +206,55 @@ class SignInViewModel(
         }
         quickConnectJob = viewModelScope.launch {
             try {
-                if (!gateway.quickConnectEnabled(serverUrl)) {
+                val request = gateway.initiateQuickConnect(serverUrl)
+                _state.update { it.copy(quickConnectCode = request.code) }
+                // The server's code lifetime (docs/18 §2.1): past it the code can never be approved, so stop polling.
+                // Checked between polls, never cancelling one: a poll in flight at the deadline that returns approved completes.
+                var approved = false
+                coroutineScope {
+                    var expired = false
+                    val deadline = launch {
+                        delay(QUICK_CONNECT_CODE_LIFETIME_MS)
+                        expired = true
+                    }
+                    while (!approved && !expired) {
+                        delay(2_000L)
+                        if (expired) break
+                        approved = gateway.pollQuickConnect(serverUrl, request.secret)
+                    }
+                    deadline.cancel()
+                }
+                if (!approved) {
                     _state.update {
                         it.copy(
                             isQuickConnecting = false,
-                            error = strings.get(R.string.signin_error_quick_connect_disabled),
+                            error = strings.get(R.string.signin_error_quick_connect_expired),
                         )
                     }
                     return@launch
                 }
-                val request = gateway.initiateQuickConnect(serverUrl)
-                _state.update { it.copy(quickConnectCode = request.code) }
-                while (true) {
-                    delay(2_000L)
-                    if (gateway.pollQuickConnect(serverUrl, request.secret)) {
-                        // docs/21 §2.1: Quick Connect's own auth path, distinct from
-                        // CoreGateway's signIn/reauthorizeSession events.
-                        val startNs = System.nanoTime()
-                        val target = reauthorizationTarget
-                        try {
-                            if (target == null) {
-                                gateway.completeQuickConnect(serverUrl, request.secret)
-                            } else {
-                                gateway.completeQuickConnectReauthorization(target.index, request.secret)
-                            }
-                            AppGraph.diag.event("auth.quickconnect") {
-                                ms("ms", (System.nanoTime() - startNs) / 1_000_000)
-                                tag("result", "ok")
-                            }
-                        } catch (e: CoreException) {
-                            AppGraph.diag.event("auth.quickconnect") {
-                                ms("ms", (System.nanoTime() - startNs) / 1_000_000)
-                                tag("result", "error")
-                            }
-                            throw e
-                        }
-                        _state.update { it.copy(isQuickConnecting = false, signedIn = true) }
-                        return@launch
+                // docs/21 §2.1: Quick Connect's own auth path, distinct from
+                // CoreGateway's signIn/reauthorizeSession events.
+                val startNs = System.nanoTime()
+                val target = reauthorizationTarget
+                try {
+                    if (target == null) {
+                        gateway.completeQuickConnect(serverUrl, request.secret)
+                    } else {
+                        gateway.completeQuickConnectReauthorization(target.index, request.secret)
                     }
+                    AppGraph.diag.event("auth.quickconnect") {
+                        ms("ms", (System.nanoTime() - startNs) / 1_000_000)
+                        tag("result", "ok")
+                    }
+                } catch (e: CoreException) {
+                    AppGraph.diag.event("auth.quickconnect") {
+                        ms("ms", (System.nanoTime() - startNs) / 1_000_000)
+                        tag("result", "error")
+                    }
+                    throw e
                 }
+                _state.update { it.copy(isQuickConnecting = false, signedIn = true) }
             } catch (e: CoreException) {
                 _state.update {
                     it.copy(

@@ -40,16 +40,21 @@ fn identity() -> ClientIdentity {
 /// Authenticates fresh against the live dev server; panics with a message
 /// pointing at the likely cause instead of an opaque `ApiError`.
 async fn authenticated_client() -> JellyfinClient {
-    let (client, _auth) =
-        JellyfinClient::authenticate_by_name(BASE_URL, identity(), USERNAME, PASSWORD)
-            .await
-            .unwrap_or_else(|err| {
-                panic!(
-                    "failed to authenticate against {BASE_URL} as '{USERNAME}': {err:?}. \
+    let (client, _auth) = JellyfinClient::authenticate_by_name(
+        &jellyfin_api::build_http_client(),
+        BASE_URL,
+        identity(),
+        USERNAME,
+        PASSWORD,
+    )
+    .await
+    .unwrap_or_else(|err| {
+        panic!(
+            "failed to authenticate against {BASE_URL} as '{USERNAME}': {err:?}. \
                      Is the dev Jellyfin server running with the jellybeam-admin/jellybeam-test \
                      account seeded?"
-                )
-            });
+        )
+    });
     client
 }
 

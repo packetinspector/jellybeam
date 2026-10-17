@@ -16,7 +16,6 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -85,10 +84,6 @@ fun DiscoverGridScreen(
     genreName: String?,
     onOpenDetail: (mediaType: SeerrMediaType, tmdbId: Long) -> Unit,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate for this entry -- see [tv.jellybeam.ui.library.LibraryScreen]'s own
-     * param doc.
-     */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: DiscoverGridViewModel = viewModel(
         factory = DiscoverGridViewModelFactory(
             gateway = AppGraph.gateway,
@@ -131,7 +126,6 @@ fun DiscoverGridScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = state.cards.isNotEmpty(),
         fallback = {
             if (memory.seeded) {

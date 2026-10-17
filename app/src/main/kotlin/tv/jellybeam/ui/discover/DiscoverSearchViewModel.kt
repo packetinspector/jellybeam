@@ -12,16 +12,23 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import tv.jellybeam.data.runCatchingCancellable
 import uniffi.jellybeam_core.SeerrCard
 
 /** Same debounce window as [tv.jellybeam.ui.search.SearchViewModel]. */
 private const val QUERY_DEBOUNCE_MS = 300L
 
+/** How the last search ended; [Unavailable] is a failed search, which must not read as "No matches" (docs/14). */
+enum class DiscoverSearchPhase { Loading, Loaded, Unavailable }
+
 data class DiscoverSearchUiState(
     val query: String = "",
-    val isSearching: Boolean = false,
     val results: List<SeerrCard> = emptyList(),
-)
+    val phase: DiscoverSearchPhase = DiscoverSearchPhase.Loaded,
+) {
+    val isSearching: Boolean get() = phase == DiscoverSearchPhase.Loading
+    val unavailable: Boolean get() = phase == DiscoverSearchPhase.Unavailable
+}
 
 /** [tv.jellybeam.ui.search.SearchViewModel]'s recipe (debounce + generation-guard), querying
  * `seerr_search` instead of the local mirror. Page 1 only -- docs/14 calls append-on-scroll here
@@ -53,15 +60,21 @@ class DiscoverSearchViewModel(private val gateway: CoreGateway) : ViewModel() {
         latestGeneration = generation
 
         if (query.isBlank()) {
-            _state.update { it.copy(isSearching = false, results = emptyList()) }
+            _state.update { it.copy(phase = DiscoverSearchPhase.Loaded, results = emptyList()) }
             return
         }
 
-        _state.update { it.copy(isSearching = true) }
+        _state.update { it.copy(phase = DiscoverSearchPhase.Loading) }
         viewModelScope.launch {
-            val results = distinctSeerrCards(runCatching { gateway.seerrSearch(query, 1) }.getOrNull()?.cards.orEmpty())
+            val page = runCatchingCancellable { gateway.seerrSearch(query, 1) }.getOrNull()
             if (generation == latestGeneration) {
-                _state.update { it.copy(isSearching = false, results = results) }
+                _state.update {
+                    if (page == null) {
+                        it.copy(phase = DiscoverSearchPhase.Unavailable, results = emptyList())
+                    } else {
+                        it.copy(phase = DiscoverSearchPhase.Loaded, results = distinctSeerrCards(page.cards))
+                    }
+                }
             }
         }
     }

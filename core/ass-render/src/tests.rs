@@ -102,8 +102,8 @@ fn showing(engine: &Engine, sink: &BufferSink, text_payload: &str) {
 
 fn showing_in(engine: &Engine, sink: Box<dyn FrameSink>, text_payload: &str) {
     engine.begin_item();
-    engine.add_track("t".into(), HEADER.as_bytes().to_vec());
-    engine.select(Some("t".into()));
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), engine.item());
+    engine.select(Some("t".into()), engine.item());
     engine.set_sink(Some((sink, 640, 360)));
     engine.add_sample("t".into(), 1_000_000, sample(500, text_payload));
     engine.set_position(2_000_000, false);
@@ -131,8 +131,8 @@ fn every_sample_of_a_batch_is_fed() {
     let engine = Engine::spawn(config()).unwrap();
     let sink = BufferSink::default();
     engine.begin_item();
-    engine.add_track("t".into(), HEADER.as_bytes().to_vec());
-    engine.select(Some("t".into()));
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), engine.item());
+    engine.select(Some("t".into()), engine.item());
     engine.set_sink(Some((Box::new(sink.clone()), 640, 360)));
     engine.add_samples(
         "t".into(),
@@ -146,6 +146,7 @@ fn every_sample_of_a_batch_is_fed() {
                 sample(500, "2,0,Default,,0,0,0,,{\\an9\\pos(630,10)}Right"),
             ),
         ],
+        engine.item(),
     );
     engine.set_position(2_000_000, false);
     wait_for("both lines", || {
@@ -160,8 +161,8 @@ fn a_held_overlay_draws_nothing_until_released() {
     let sink = BufferSink::default();
     engine.begin_item();
     engine.hold_frames(true);
-    engine.add_track("t".into(), HEADER.as_bytes().to_vec());
-    engine.select(Some("t".into()));
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), engine.item());
+    engine.select(Some("t".into()), engine.item());
     engine.set_sink(Some((Box::new(sink.clone()), 640, 360)));
     engine.add_sample(
         "t".into(),
@@ -208,7 +209,7 @@ fn begin_item_erases_the_overlay_and_frees_fonts() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/NotoSans-Latin.ttf"),
     )
     .unwrap();
-    engine.add_font("extra.ttf".into(), font);
+    engine.add_font("extra.ttf".into(), font, engine.item());
     wait_for("font held", || engine.stats().font_bytes > 0);
     wait_for("ink", || !sink.ink().is_empty());
     engine.begin_item();
@@ -223,8 +224,8 @@ fn a_4k_surface_renders_at_most_1080p() {
     let engine = Engine::spawn(config()).unwrap();
     let sink = BufferSink::default();
     engine.begin_item();
-    engine.add_track("t".into(), HEADER.as_bytes().to_vec());
-    engine.select(Some("t".into()));
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), engine.item());
+    engine.select(Some("t".into()), engine.item());
     engine.set_video_size(3840, 2160);
     engine.set_sink(Some((Box::new(sink.clone()), 3840, 2160)));
     // The window is sized at its first copy, after the canvas.
@@ -264,8 +265,8 @@ fn a_batch_of_refused_samples_is_counted_and_an_unknown_track_drops_its_batch() 
             ),
         )
     };
-    engine.add_samples("nope".into(), vec![huge(10), huge(11)]);
-    engine.add_samples("t".into(), vec![huge(2), huge(3), huge(4)]);
+    engine.add_samples("nope".into(), vec![huge(10), huge(11)], engine.item());
+    engine.add_samples("t".into(), vec![huge(2), huge(3), huge(4)], engine.item());
     wait_for("every refusal counted", || {
         engine.stats().events_skipped == 3
     });
@@ -439,8 +440,8 @@ fn lines_delivered_again_cost_no_budget() {
     let engine = Engine::spawn(config()).unwrap();
     let sink = BufferSink::default();
     engine.begin_item();
-    engine.add_track("t".into(), HEADER.as_bytes().to_vec());
-    engine.select(Some("t".into()));
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), engine.item());
+    engine.select(Some("t".into()), engine.item());
     engine.set_sink(Some((Box::new(sink.clone()), 640, 360)));
     engine.set_position(0, false);
     // 60 lines of 250 KB, far ahead so none shows or ends: 15 MB live, under every input limit.
@@ -471,8 +472,8 @@ fn colours_convert_from_the_header_matrix_to_the_videos() {
         let engine = Engine::spawn(config()).unwrap();
         let sink = BufferSink::default();
         engine.begin_item();
-        engine.add_track("t".into(), header.as_bytes().to_vec());
-        engine.select(Some("t".into()));
+        engine.add_track("t".into(), header.as_bytes().to_vec(), engine.item());
+        engine.select(Some("t".into()), engine.item());
         engine.set_video_colour(VideoColour {
             matrix: VideoMatrix::Bt709,
             full_range: false,
@@ -522,7 +523,7 @@ fn a_whole_script_shows_and_still_shows_after_playing_far_past_it() {
     let sink = BufferSink::default();
     engine.begin_item();
     assert!(engine.add_script("s".into(), script(&[SCRIPT_LINE]), engine.item()));
-    engine.select(Some("s".into()));
+    engine.select(Some("s".into()), engine.item());
     engine.set_sink(Some((Box::new(sink.clone()), 640, 360)));
     engine.set_position(2_000_000, false);
     wait_for("ink", || !sink.ink().is_empty());
@@ -552,16 +553,16 @@ fn a_new_script_replaces_the_last_one() {
     engine.begin_item();
     let item = engine.item();
     assert!(engine.add_script("a".into(), script(&[SCRIPT_LINE]), item));
-    engine.select(Some("a".into()));
+    engine.select(Some("a".into()), engine.item());
     wait_for("selected", || engine.stats().track_selected);
     assert!(engine.add_script("b".into(), script(&[SCRIPT_LINE]), item));
     wait_for("the old script deselected", || {
         !engine.stats().track_selected
     });
-    engine.select(Some("a".into()));
-    engine.select(Some("b".into()));
+    engine.select(Some("a".into()), engine.item());
+    engine.select(Some("b".into()), engine.item());
     wait_for("the new one selectable", || engine.stats().track_selected);
-    engine.select(Some("a".into()));
+    engine.select(Some("a".into()), engine.item());
     wait_for("the old one gone", || !engine.stats().track_selected);
 }
 
@@ -569,13 +570,159 @@ fn a_new_script_replaces_the_last_one() {
 fn unselect_clears_only_its_own_track() {
     let engine = Engine::spawn(config()).unwrap();
     engine.begin_item();
-    engine.add_track("t".into(), HEADER.as_bytes().to_vec());
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), engine.item());
     assert!(engine.add_script("s".into(), script(&[SCRIPT_LINE]), engine.item()));
-    engine.select(Some("s".into()));
+    engine.select(Some("s".into()), engine.item());
     // The embedded track's renderer, disabled late, can't clear the sidecar picked meanwhile.
-    engine.unselect("t".into());
+    engine.unselect("t".into(), engine.item());
     engine.set_position(0, false);
     wait_for("still selected", || engine.stats().track_selected);
-    engine.unselect("s".into());
+    engine.unselect("s".into(), engine.item());
+    wait_for("deselected", || !engine.stats().track_selected);
+}
+
+/// Two items begun: returns (the ended item, the live one).
+fn two_items(engine: &Engine) -> (u64, u64) {
+    engine.begin_item();
+    let ended = engine.item();
+    engine.begin_item();
+    (ended, engine.item())
+}
+
+/// A round trip through the render thread: everything sent before it has been applied.
+fn settle(engine: &Engine, item: u64) {
+    assert!(!engine.add_script("barrier".into(), script(&[]), item));
+}
+
+fn noto_font() -> Vec<u8> {
+    std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/NotoSans-Latin.ttf"))
+        .unwrap()
+}
+
+#[test]
+fn a_font_stamped_for_an_ended_item_is_dropped() {
+    let engine = Engine::spawn(config()).unwrap();
+    let (ended, live) = two_items(&engine);
+    engine.add_font("late.ttf".into(), noto_font(), ended);
+    settle(&engine, live);
+    assert_eq!(engine.stats().font_bytes, 0);
+}
+
+#[test]
+fn a_font_stamped_for_the_live_item_is_held() {
+    let engine = Engine::spawn(config()).unwrap();
+    let (_, live) = two_items(&engine);
+    engine.add_font("now.ttf".into(), noto_font(), live);
+    wait_for("font held", || engine.stats().font_bytes > 0);
+}
+
+#[test]
+fn a_track_stamped_for_an_ended_item_is_dropped() {
+    let engine = Engine::spawn(config()).unwrap();
+    let (ended, live) = two_items(&engine);
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), ended);
+    engine.select(Some("t".into()), engine.item());
+    settle(&engine, live);
+    assert!(!engine.stats().track_selected, "no track to select");
+}
+
+#[test]
+fn a_track_stamped_for_the_live_item_can_be_selected() {
+    let engine = Engine::spawn(config()).unwrap();
+    let (_, live) = two_items(&engine);
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), live);
+    engine.select(Some("t".into()), engine.item());
+    wait_for("selected", || engine.stats().track_selected);
+}
+
+#[test]
+fn samples_stamped_for_an_ended_item_never_reach_the_live_items_track() {
+    let engine = Engine::spawn(config()).unwrap();
+    let sink = BufferSink::default();
+    let (ended, live) = two_items(&engine);
+    // Same key in both items: only the stamp tells the late batch it is not this item's.
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), live);
+    engine.select(Some("t".into()), engine.item());
+    engine.set_sink(Some((Box::new(sink.clone()), 640, 360)));
+    engine.add_samples(
+        "t".into(),
+        vec![(
+            1_000_000,
+            sample(500, "1,0,Default,,0,0,0,,{\\an9\\pos(630,10)}Late"),
+        )],
+        ended,
+    );
+    engine.add_samples(
+        "t".into(),
+        vec![(
+            1_000_000,
+            sample(500, "2,0,Default,,0,0,0,,{\\an7\\pos(10,10)}Live"),
+        )],
+        live,
+    );
+    engine.set_position(2_000_000, false);
+    wait_for("the live line", || {
+        let ink = sink.ink();
+        !ink.is_empty() && ink.x0 < 100
+    });
+    settle(&engine, live);
+    std::thread::sleep(Duration::from_millis(150));
+    let ink = sink.ink();
+    assert!(ink.x1 < 400, "the late line drew on the right: {ink:?}");
+}
+
+#[test]
+fn oversized_samples_stamped_for_an_ended_item_are_not_counted() {
+    let engine = Engine::spawn(config()).unwrap();
+    let (ended, live) = two_items(&engine);
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), live);
+    let huge = |i: u32| {
+        (
+            1_000_000,
+            sample(
+                500,
+                &format!("{i},0,Default,,0,0,0,,{}", "x".repeat(300 << 10)),
+            ),
+        )
+    };
+    engine.add_samples("t".into(), vec![huge(1), huge(2)], ended);
+    settle(&engine, live);
+    assert_eq!(engine.stats().events_skipped, 0, "the late batch was fed");
+    engine.add_samples("t".into(), vec![huge(3)], live);
+    wait_for("the live batch counted", || {
+        engine.stats().events_skipped == 1
+    });
+}
+
+#[test]
+fn a_select_stamped_for_an_ended_item_does_not_select_the_live_items_track() {
+    let engine = Engine::spawn(config()).unwrap();
+    let (ended, live) = two_items(&engine);
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), live);
+    engine.select(Some("t".into()), ended);
+    settle(&engine, live);
+    assert!(
+        !engine.stats().track_selected,
+        "the late select was applied"
+    );
+    engine.select(Some("t".into()), live);
+    wait_for("selected", || engine.stats().track_selected);
+}
+
+#[test]
+fn an_unselect_stamped_for_an_ended_item_leaves_the_live_items_selection() {
+    let engine = Engine::spawn(config()).unwrap();
+    let (ended, live) = two_items(&engine);
+    // Same key in both items: only the stamp tells the late unselect it is not this item's.
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), live);
+    engine.select(Some("t".into()), live);
+    wait_for("selected", || engine.stats().track_selected);
+    engine.unselect("t".into(), ended);
+    settle(&engine, live);
+    assert!(
+        engine.stats().track_selected,
+        "the late unselect deselected the live track"
+    );
+    engine.unselect("t".into(), live);
     wait_for("deselected", || !engine.stats().track_selected);
 }

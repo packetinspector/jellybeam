@@ -1,6 +1,7 @@
 package tv.jellybeam.ui.discover
 
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.data.runCatchingCancellable
 import uniffi.jellybeam_core.Card
 
 /**
@@ -9,13 +10,13 @@ import uniffi.jellybeam_core.Card
  * via the mirror-only [CoreGateway.cardById], falling back to a best-effort [Card] rebuilt from
  * [CoreGateway.getItemDetail] (no image tags, so it renders over
  * [tv.jellybeam.ui.cards.PlaceholderTile] art)
- * for an id the mirror hasn't synced yet. Fails open (`null`) rather than throwing -- the caller
+ * for an id the mirror hasn't synced yet. Fails open (`null`) rather than throwing, but cancellation propagates -- the caller
  * (`MainActivity.openDiscoverLibraryItem`) must never navigate to a broken Detail page.
  */
 suspend fun resolveLibraryCard(gateway: CoreGateway, itemId: String): Card? {
     // Mirror-first (normal case); synthetic rebuild below is the fallback.
-    runCatching { gateway.cardById(itemId) }.getOrNull()?.let { return it }
-    val detail = runCatching { gateway.getItemDetail(itemId) }.getOrNull() ?: return null
+    runCatchingCancellable { gateway.cardById(itemId) }.getOrNull()?.let { return it }
+    val detail = runCatchingCancellable { gateway.getItemDetail(itemId) }.getOrNull() ?: return null
     return Card(
         id = detail.id,
         itemType = detail.itemType,

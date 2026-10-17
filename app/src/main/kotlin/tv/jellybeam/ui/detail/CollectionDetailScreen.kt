@@ -28,7 +28,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,7 +54,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
@@ -67,14 +65,15 @@ import tv.jellybeam.ui.cards.PreloadOnDwell
 import tv.jellybeam.ui.cards.WatchIndicator
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
 import tv.jellybeam.ui.focus.FocusTarget
 import tv.jellybeam.ui.focus.RefreshRestoreOwner
+import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.refreshGuardEligible
-import tv.jellybeam.ui.focus.releaseCancelledFreezeInPlace
 import tv.jellybeam.ui.focus.restoreNow
 import tv.jellybeam.ui.nav.LocalDrawerFocusCoordinator
 import tv.jellybeam.ui.theme.BackdropScrim
@@ -99,12 +98,12 @@ internal fun CollectionDetailScreen(
     viewModel: DetailViewModel,
     onOpenDetail: (Card) -> Unit,
     isTop: Boolean,
-    focusGate: MutableState<Boolean>,
     memory: FocusMemory,
     contentEndInset: Dp,
     contentWidth: Dp,
     panelOpen: Boolean,
 ) {
+    val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
     val members = state.members
@@ -123,7 +122,6 @@ internal fun CollectionDetailScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = state.membersSettled,
         fallback = collectionFallback,
         tag = "detail-collection",
@@ -153,24 +151,11 @@ internal fun CollectionDetailScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     var collectionHasFocus by remember(card.id) { mutableStateOf(false) }
     val focusMarked = remember(card.id) { booleanArrayOf(false) }
-    val refreshOwner = remember { RefreshRestoreOwner() }
+    val refreshOwner = rememberRefreshRestoreOwner(isTop)
     val latestIsTop by rememberUpdatedState(isTop)
-    LaunchedEffect(isTop) {
-        if (!isTop) refreshOwner.ownershipLost()
-    }
     LaunchedEffect(panelOpen) {
-        if (panelOpen) {
-            refreshOwner.ownershipLost()
-        } else {
-            refreshOwner.releaseCancelledFreezeInPlace(memory, ownsFocus = latestIsTop)
-        }
-    }
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) refreshOwner.ownershipLost()
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        // The panel holds focus outside the page; its close needs no release (docs/15 §5).
+        if (panelOpen) refreshOwner.ownershipLost()
     }
     var drawerOpen by remember(card.id) { mutableStateOf(false) }
     val drawerFocusCoordinator = LocalDrawerFocusCoordinator.current
@@ -180,9 +165,8 @@ internal fun CollectionDetailScreen(
                 drawerOpen = true
                 refreshOwner.ownershipLost()
             }
-            drawerFocusCoordinator.onDrawerClosed = { navigatingAway ->
+            drawerFocusCoordinator.onDrawerClosed = { _ ->
                 drawerOpen = false
-                refreshOwner.releaseCancelledFreezeInPlace(memory, ownsFocus = !navigatingAway && latestIsTop)
                 false
             }
         }
@@ -192,15 +176,14 @@ internal fun CollectionDetailScreen(
         refreshOwner.onContentChanged(
             scope = guardScope,
             frame = { withFrameNanos {} },
-            eligible = { ownsFreeze ->
+            eligible = { ownTokens ->
                 !latestPanelOpen && !drawerOpen &&
                     refreshGuardEligible(
                         isTop = latestIsTop,
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = collectionHasFocus,
-                        frozen = memory.frozen,
-                        ownsFreeze = ownsFreeze,
+                        frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },
             restore = {

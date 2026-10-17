@@ -82,8 +82,8 @@ CREATE TABLE IF NOT EXISTS items (
     -- filter (`query::library_grid`). Schema v12.
     series_status TEXT,
     dto BLOB NOT NULL,
-    -- Local write clock (unix millis), not server-meaningful; debugging only, do not sort
-    -- user-facing lists by it (see `last_played_date` above).
+    -- Local write clock (unix millis): the stale-write guard of the favorites and user-state
+    -- sweeps, an index tiebreaker; not server-meaningful, so user-facing lists don't sort by it.
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_items_browse ON items(parent_id, item_type, sort_name COLLATE NOCASE);

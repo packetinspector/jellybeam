@@ -7,7 +7,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import tv.jellybeam.data.CoreGateway
@@ -42,7 +41,7 @@ class PersonViewModel(private val gateway: CoreGateway, private val strings: UiS
     /** Declared before `init` so the first load's handle survives initialization (Retry cancels it). */
     private var load: Job? = null
 
-    /** Drives [changeRefreshScheduler]'s sampling rate: top of the stack and resumed, same as Detail. */
+    /** Top of the stack and resumed; [changeRefreshScheduler] refreshes only while true. */
     private val _active = MutableStateFlow(true)
 
     fun setActive(active: Boolean) {
@@ -52,12 +51,13 @@ class PersonViewModel(private val gateway: CoreGateway, private val strings: UiS
     /**
      * docs/11 §Person page: a mirror change to any shown card re-reads the shown cards, whether it
      * lands while this page is hidden or after it is back, so a played toggle whose count commits
-     * late still shows. Filtered before the scheduler so conflation can't swallow a relevant event.
+     * late still shows. [affectsShownCards] decides per event, ahead of conflation, so a relevant event is never swallowed.
      * The scheduler's loop is the only reader, so two reads can never publish out of order.
      */
     private val changeRefreshScheduler: ChangeRefreshScheduler<ChangeEvent> = ChangeRefreshScheduler(
         scope = viewModelScope,
-        events = gateway.changeEvents().filter(::affectsShownCards),
+        events = gateway.changeEvents(),
+        affects = ::affectsShownCards,
         active = _active.asStateFlow(),
         refresh = ::reloadShownCards,
     )
@@ -98,12 +98,8 @@ class PersonViewModel(private val gateway: CoreGateway, private val strings: UiS
 
     fun retry() = refresh()
 
-    /**
-     * Back on top after a title may have been played: asks for one read of the shown cards, for a
-     * change that landed before this page existed to observe it; later changes arrive through
-     * [changeRefreshScheduler], which serves both in order.
-     */
-    fun refreshLibrary() = changeRefreshScheduler.requestRefresh()
+    /** Back on top after a title may have been played: one read of the shown cards, served by the scheduler's loop. */
+    fun refreshLibrary() = changeRefreshScheduler.markDirty()
 
     /**
      * Re-reads the shown library cards from the mirror, which every played toggle and playback

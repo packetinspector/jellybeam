@@ -243,13 +243,13 @@ private fun RemoveConfirmation(
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             ServerAction(
                 text = stringResource(R.string.server_remove_cancel),
-                enabled = !removing,
+                inert = removing,
                 modifier = Modifier.weight(1f).focusRequester(cancelRequester),
                 onClick = onCancel,
             )
             ServerAction(
                 text = stringResource(if (removing) R.string.server_removing else R.string.server_remove_confirm),
-                enabled = !removing,
+                inert = removing,
                 modifier = Modifier.weight(1f),
                 destructive = true,
                 onClick = onConfirm,
@@ -258,23 +258,28 @@ private fun RemoveConfirmation(
     }
 }
 
+/** [inert] keeps a busy action focusable but ignores Select and mutes it (docs/15 §4). */
 @Composable
 private fun ServerAction(
     text: String,
     modifier: Modifier = Modifier,
     detail: String? = null,
-    enabled: Boolean = true,
+    inert: Boolean = false,
     destructive: Boolean = false,
     onClick: () -> Unit,
 ) {
     val interactions = remember { MutableInteractionSource() }
     val focused by interactions.collectIsFocusedAsState()
     val background = when {
-        focused && destructive -> DestructiveFocus
-        focused -> JellybeamTheme.Pistacchio
+        focused && destructive -> if (inert) DestructiveFocus.copy(alpha = 0.5f) else DestructiveFocus
+        focused -> if (inert) JellybeamTheme.Pistacchio.copy(alpha = 0.5f) else JellybeamTheme.Pistacchio
         else -> JellybeamTheme.Surface
     }
-    val foreground = if (focused) JellybeamTheme.Notte else JellybeamTheme.Panna
+    val foreground = when {
+        focused -> JellybeamTheme.Notte
+        inert -> JellybeamTheme.Grigio
+        else -> JellybeamTheme.Panna
+    }
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -283,8 +288,7 @@ private fun ServerAction(
             .clickable(
                 interactionSource = interactions,
                 indication = null,
-                enabled = enabled,
-                onClick = onClick,
+                onClick = { if (!inert) onClick() },
             )
             .padding(horizontal = 18.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.SpaceBetween,

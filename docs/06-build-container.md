@@ -103,7 +103,7 @@ Fastest to slowest, by scope:
 
 - `./build.sh check-fast [package]` — offline Kotlin unit tests only, no lint; pass a
   dotted package prefix (e.g. `tv.jellybeam.player`) to narrow the run.
-- `./build.sh check` — the pre-commit gate: `testReleaseUnitTest` + `lintDebug`, no APK.
+- `./build.sh check` — the pre-commit gate: `testReleaseUnitTest` + `lintDebug`, no APK. It first runs `tools/check-cancellation.sh`, which scans `app/src/main` (test sources are out of scope) and fails on a bare `runCatching` line not pinned in `tools/cancellation-allowlist.txt`.
 - `./build.sh test` — `cargo test --workspace` inside the container (host arch; set
   `JELLYBEAM_TEST_JOBS` to change cargo's parallel jobs, default 2, which keeps the
   memory-limited container from being exhausted), then

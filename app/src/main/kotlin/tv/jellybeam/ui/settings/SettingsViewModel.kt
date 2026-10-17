@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.AppGraph
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.data.SettingsStore
 import tv.jellybeam.diag.DiagStatus
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
@@ -16,6 +17,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -261,13 +264,14 @@ internal fun drainDiagnosticsWrites(queue: java.util.Queue<() -> Unit>) {
 }
 
 /**
- * Backs the Settings screen (docs/09-settings-plan.md slice 2): loads the whole [Settings]
- * record plus [CoreGateway.views] once on entry, then write-through on every row change -- each
- * `toggle*`/`select*` call computes the whole updated record, applies it to [state] immediately,
- * and pushes it to [CoreGateway.setSettings] via the shared [updateSettings] primitive.
+ * Backs the Settings screen (docs/09-settings-plan.md slice 2): mirrors the [SettingsStore] record
+ * plus [CoreGateway.views] loaded once on entry, and writes every row change through
+ * [SettingsStore.update] via the shared [updateSettings] primitive.
  */
 class SettingsViewModel(
     private val gateway: CoreGateway,
+    /** docs/09: the one settings store; [SettingsUiState.settings] mirrors it and every row writes through it. */
+    private val settingsStore: SettingsStore,
     /** docs/21 §6: injected so tests observe a fake status instead of the real [AppGraph.diag]. */
     private val diagStatus: StateFlow<DiagStatus> = AppGraph.diag.status,
     private val diagnostics: DiagnosticsController = AppGraphDiagnosticsController,
@@ -277,7 +281,6 @@ class SettingsViewModel(
 
     private val _state = MutableStateFlow(SettingsUiState())
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
-    private val settingsWrites = Mutex()
     // Declared before init, whose first refreshCrashPending() uses both.
     private var crashPendingJob: Job? = null
 
@@ -288,6 +291,7 @@ class SettingsViewModel(
     private val diagnosticsIo = Mutex()
 
     init {
+        viewModelScope.launch { settingsStore.settings.filterNotNull().collect { settings -> _state.update { it.copy(settings = settings) } } }
         viewModelScope.launch { refresh() }
         refreshCrashPending()
         viewModelScope.launch { diagStatus.collect { status -> _state.update { it.copy(diagStatus = status) } } }
@@ -312,12 +316,15 @@ class SettingsViewModel(
     }
 
     private suspend fun refresh() {
-        val (settings, views) = coroutineScope {
-            val settingsJob = async { gateway.getSettings() }
+        val views = coroutineScope {
+            val settingsJob = async { settingsStore.load() }
             val viewsJob = async { gateway.views() }
-            settingsJob.await() to viewsJob.await()
+            settingsJob.await()
+            viewsJob.await()
         }
-        _state.update { it.copy(isLoading = false, settings = settings, views = views) }
+        // The store collector is the one writer of `settings`; loading ends once it has caught up.
+        _state.first { it.settings == settingsStore.settings.value }
+        _state.update { it.copy(isLoading = false, views = views) }
     }
 
     fun setAutomaticUpdateChecks(value: Boolean) {
@@ -326,10 +333,8 @@ class SettingsViewModel(
     }
 
     private fun updateSettings(transform: (Settings) -> Settings) {
-        val updated = transform(_state.value.settings)
-        _state.update { it.copy(settings = updated) }
-        // Whole-record writes must finish in input order, even when an earlier IO call stalls.
-        viewModelScope.launch { settingsWrites.withLock { gateway.setSettings(updated) } }
+        // UNDISPATCHED: the store publishes the new record before this returns; it persists in input order.
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { settingsStore.update(transform) }
         // docs/21 §2.1: one line per settings write, no field name/value (never server addresses
         // or API keys, per the table's own field note).
         AppGraph.diag.event("settings.change")
@@ -489,6 +494,6 @@ class SettingsViewModelFactory(private val gateway: CoreGateway) : ViewModelProv
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(SettingsViewModel::class.java))
-        return SettingsViewModel(gateway) as T
+        return SettingsViewModel(gateway, AppGraph.settingsStore) as T
     }
 }

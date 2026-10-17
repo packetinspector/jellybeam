@@ -34,12 +34,14 @@ class ClassicHomeViewModelTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
-    /** Must match [tv.jellybeam.ui.common.ChangeRefreshScheduler]'s default `visiblePeriodMs`. */
+    /** Must match [tv.jellybeam.ui.common.ChangeRefreshScheduler]'s default `restMs`. */
     private val testVisiblePeriodMs = 500L
 
     /** The feed's poll loop runs on `viewModelScope`; clear it before `runTest` ends. */
     private inline fun withViewModel(gateway: CoreGateway, block: (ClassicHomeViewModel) -> Unit) {
         val viewModel = ClassicHomeViewModel(gateway, ResourceUiStrings.default)
+        // Home on screen: a hidden Home only marks itself dirty (docs/16 §4.6).
+        viewModel.setActive(true)
         try {
             block(viewModel)
         } finally {

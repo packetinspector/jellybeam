@@ -80,6 +80,9 @@ private const val ANIM_OUT_MS = 240
 private const val FOCUS_SCALE_ANIM_MS = 120
 private val RING_WIDTH = 3.dp
 private val RING_GAP = 3.dp
+
+/** How far [focusRing] draws past its element's bounds: the gap plus the full stroke. */
+internal val FOCUS_RING_EXTENT = RING_GAP + RING_WIDTH
 private val ART_RADIUS = 2.dp
 private val ART_SHAPE = RoundedCornerShape(ART_RADIUS)
 

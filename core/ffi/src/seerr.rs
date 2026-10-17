@@ -5,6 +5,7 @@
 //! boundary.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use futures_util::StreamExt;
 use crate::error::{CoreError, UnreachableReason};
 use crate::object::JellybeamCore;
 use crate::seerr_types::*;
+use crate::session::same_server;
 
 // --- Timeouts --------------------------------------------------------------
 
@@ -20,6 +22,22 @@ use crate::seerr_types::*;
 /// candidate must fail fast so trying 2-4 candidates still feels instant.
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const PROBE_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
+
+// Test seam: a test shortens the probe timeouts for the connects it runs on its own thread.
+#[cfg(test)]
+thread_local! {
+    static PROBE_TIMEOUTS_OVERRIDE: std::cell::Cell<Option<(Duration, Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `(connect, request)` timeouts for `seerr_connect`'s candidate probing.
+fn probe_timeouts() -> (Duration, Duration) {
+    #[cfg(test)]
+    if let Some(timeouts) = PROBE_TIMEOUTS_OVERRIDE.with(|cell| cell.get()) {
+        return timeouts;
+    }
+    (PROBE_CONNECT_TIMEOUT, PROBE_REQUEST_TIMEOUT)
+}
 
 /// Normal timeouts for every other Seerr call, same magnitude as
 /// `jellyfin-api`'s own connect/request timeouts.
@@ -31,8 +49,26 @@ const NORMAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const HOME_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Cap on in-flight detail fetches for per-request/per-instance lookups --
-/// bounds fan-out on a typically-small Seerr instance.
-const MAX_CONCURRENT_DETAIL_FETCHES: usize = 3;
+/// bounds fan-out on a Seerr instance while keeping My Requests (up to 50) to a few round trips.
+const MAX_CONCURRENT_DETAIL_FETCHES: usize = 10;
+
+/// Longest a `/settings/public` read may hold a connect or handle build (docs/14 "Auth").
+const PUBLIC_SETTINGS_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Test seam: a test shortens the settings read cap for the calls it runs on its own thread.
+#[cfg(test)]
+thread_local! {
+    static PUBLIC_SETTINGS_TIMEOUT_OVERRIDE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn public_settings_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = PUBLIC_SETTINGS_TIMEOUT_OVERRIDE.with(std::cell::Cell::get) {
+        return timeout;
+    }
+    PUBLIC_SETTINGS_TIMEOUT
+}
 
 // --- On-disk per-account config store ---------------------------------------
 
@@ -64,7 +100,7 @@ impl SeerrConfigFile {
     fn find(&self, server_url: &str, user_id: &str) -> Option<&SeerrConfigEntry> {
         self.entries
             .iter()
-            .find(|e| e.server_url == server_url && e.user_id == user_id)
+            .find(|e| same_server(&e.server_url, server_url) && e.user_id == user_id)
     }
 
     /// Inserts `entry`, or replaces an existing entry for the same
@@ -73,7 +109,7 @@ impl SeerrConfigFile {
         if let Some(existing) = self
             .entries
             .iter_mut()
-            .find(|e| e.server_url == entry.server_url && e.user_id == entry.user_id)
+            .find(|e| same_server(&e.server_url, &entry.server_url) && e.user_id == entry.user_id)
         {
             *existing = entry;
         } else {
@@ -83,7 +119,7 @@ impl SeerrConfigFile {
 
     fn remove(&mut self, server_url: &str, user_id: &str) {
         self.entries
-            .retain(|e| !(e.server_url == server_url && e.user_id == user_id));
+            .retain(|e| !(same_server(&e.server_url, server_url) && e.user_id == user_id));
     }
 }
 
@@ -162,6 +198,8 @@ struct SeerrHandleInner {
     cache_images: bool,
     application_title: Option<String>,
     home_cache: Mutex<Option<(Instant, SeerrHome)>>,
+    /// Bumped by every home invalidation; a home fetch stores only if it is unchanged.
+    home_gen: AtomicU64,
     genre_cache: Mutex<GenreCache>,
 }
 
@@ -179,7 +217,7 @@ impl SeerrHandle {
         api_base_url: &str,
         public: seerr_api::PublicSettings,
     ) -> Self {
-        SeerrHandle {
+        Self {
             inner: Arc::new(SeerrHandleInner {
                 client,
                 user_id,
@@ -189,6 +227,7 @@ impl SeerrHandle {
                 cache_images: public.cache_images,
                 application_title: public.application_title,
                 home_cache: Mutex::new(None),
+                home_gen: AtomicU64::new(0),
                 genre_cache: Mutex::new(GenreCache::default()),
             }),
         }
@@ -236,22 +275,33 @@ impl SeerrHandle {
         })
     }
 
-    fn cache_home(&self, home: SeerrHome) {
-        *self
+    fn home_generation(&self) -> u64 {
+        self.inner.home_gen.load(Ordering::SeqCst)
+    }
+
+    /// Stores `home` only if no invalidation ran since `generation` was read, so a fetch that
+    /// straddles a submit/cancel never caches its pre-mutation snapshot (docs/14 Performance).
+    fn cache_home(&self, generation: u64, home: SeerrHome) {
+        let mut cache = self
             .inner
             .home_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), home));
+            .unwrap_or_else(|e| e.into_inner());
+        if self.home_generation() == generation {
+            *cache = Some((Instant::now(), home));
+        }
     }
 
     /// Drops the cached home snapshot after a submit/cancel, so a stale
     /// availability badge doesn't sit for up to [`HOME_CACHE_TTL`].
     fn invalidate_home(&self) {
-        *self
+        let mut cache = self
             .inner
             .home_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+            .unwrap_or_else(|e| e.into_inner());
+        self.inner.home_gen.fetch_add(1, Ordering::SeqCst);
+        *cache = None;
     }
 
     fn cached_genres(&self, media_type: SeerrMediaType) -> Option<Vec<SeerrGenre>> {
@@ -295,10 +345,18 @@ async fn build_handle(entry: &SeerrConfigEntry) -> Result<SeerrHandle, CoreError
         request_timeout: NORMAL_REQUEST_TIMEOUT,
     })
     .await?;
-    // Public settings are a UI-gating nicety: a fetch failure degrades to
-    // "every 4K/caching toggle off" rather than failing the connection.
-    let public = client.public_settings().await.unwrap_or_default();
+    let public = public_settings_or_default(&client).await;
     Ok(SeerrHandle::new(client, user.id, &entry.seerr_url, public))
+}
+
+/// `/settings/public` capped at [`PUBLIC_SETTINGS_TIMEOUT`]: the toggles only gate UI, so a
+/// failed or slow read leaves them off for this handle rather than failing it (docs/14 "Auth").
+async fn public_settings_or_default(client: &seerr_api::SeerrClient) -> seerr_api::PublicSettings {
+    tokio::time::timeout(public_settings_timeout(), client.public_settings())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
 }
 
 // --- Pure decision functions (unit-tested below) ----------------------------
@@ -823,51 +881,132 @@ fn trailer_url_from(videos: &[seerr_api::RelatedVideo]) -> Option<String> {
         .and_then(|v| v.url.clone())
 }
 
+/// The movie detail from one `GET /movie/{id}`; `similar`/`recommendations`/`scores` come from
+/// the sibling fetches [`JellybeamCore::seerr_movie`] makes and are empty/`None` on the
+/// single-GET mutation path ([`SeerrRequestDetail`]).
+fn movie_detail_from(
+    handle: &SeerrHandle,
+    details: &seerr_api::MovieDetails,
+    similar: Vec<SeerrCard>,
+    recommendations: Vec<SeerrCard>,
+    (critics_score, audience_score): (Option<i32>, Option<i32>),
+) -> SeerrMovieDetail {
+    let images = handle.images();
+    let card = card_from_movie_details(details, images);
+    let can_request = movie_can_request(card.availability);
+    SeerrMovieDetail {
+        runtime_minutes: details.runtime.map(|r| r.round() as i32),
+        genres: details
+            .genres
+            .iter()
+            .map(|g| seerr_genre(g.id, g.name.clone()))
+            .collect(),
+        cast: details
+            .credits
+            .as_ref()
+            .map_or_else(Vec::new, |c| cast_from_credits(&c.cast, images)),
+        similar,
+        recommendations,
+        trailer_url: trailer_url_from(&details.related_videos),
+        critics_score,
+        audience_score,
+        active_request: active_request_for(details.media_info.as_ref(), handle.user_id()),
+        can_request,
+        can_request_4k: can_request && handle.movie4k_enabled(),
+        card,
+    }
+}
+
+/// [`movie_detail_from`]'s TV counterpart; `seasons` reflects SD availability only -- see
+/// [`build_season_statuses`].
+fn tv_detail_from(
+    handle: &SeerrHandle,
+    details: &seerr_api::TvDetails,
+    similar: Vec<SeerrCard>,
+    recommendations: Vec<SeerrCard>,
+    (critics_score, audience_score): (Option<i32>, Option<i32>),
+) -> SeerrTvDetail {
+    let images = handle.images();
+    let card = card_from_tv_details(details, images);
+    let seasons = build_season_statuses(&details.seasons, details.media_info.as_ref());
+    let can_request = tv_can_request(&seasons);
+    SeerrTvDetail {
+        genres: details
+            .genres
+            .iter()
+            .map(|g| seerr_genre(g.id, g.name.clone()))
+            .collect(),
+        cast: details
+            .credits
+            .as_ref()
+            .map_or_else(Vec::new, |c| cast_from_credits(&c.cast, images)),
+        similar,
+        recommendations,
+        trailer_url: trailer_url_from(&details.related_videos),
+        critics_score,
+        audience_score,
+        active_request: active_request_for(details.media_info.as_ref(), handle.user_id()),
+        can_request,
+        // docs/14's FFI contract exposes exactly one (SD) season
+        // list, so `can_request_4k` reuses the SD requestability
+        // signal, gated by the server's own `series4kEnabled` toggle.
+        can_request_4k: can_request && handle.series4k_enabled(),
+        seasons,
+        card,
+    }
+}
+
+/// The season list a TV `PUT /request/{id}` must carry: Seerr replaces the request's seasons
+/// with the body's, so the request's existing seasons ride along with the newly asked ones
+/// (docs/14 Request semantics). Sorted and de-duplicated.
+fn merged_seasons(existing: &[seerr_api::Season], requested: &[i32]) -> Vec<i32> {
+    let mut seasons: Vec<i32> = existing
+        .iter()
+        .filter_map(|s| s.season_number)
+        .chain(requested.iter().copied())
+        .collect();
+    seasons.sort_unstable();
+    seasons.dedup();
+    seasons
+}
+
 // --- JellybeamCore private helpers ---------------------------------------------
 
 impl JellybeamCore {
-    fn active_seerr_identity(&self) -> Option<(String, String)> {
-        let saved = crate::session::load(self.data_dir())?;
-        Some((saved.server_url, saved.user_id))
-    }
-
-    /// Caches `handle` as the live connection only while `captured` (the
-    /// identity read before the network work began) is still the active
-    /// account. A connect or lazy rebuild that completes after a session
-    /// swap would otherwise re-populate the slot the swap cleared with the
-    /// previous account's session; the persisted config entry is keyed
-    /// correctly either way. Returns whether the handle was cached.
-    pub(crate) fn cache_seerr_handle_if_active(
-        &self,
-        captured: &(String, String),
-        handle: SeerrHandle,
-    ) -> bool {
-        let mut state = self.lock_state();
-        if self.active_seerr_identity().as_ref() != Some(captured) {
+    /// Caches `handle` as the live connection only while `epoch`, captured with the identity
+    /// the network work began under, is still the installed account's (docs/18 §2.1); a late
+    /// completion would otherwise refill the slot a swap cleared with the previous account's
+    /// session. Returns whether the handle was cached.
+    pub(crate) fn cache_seerr_handle_if_active(&self, epoch: u64, handle: SeerrHandle) -> bool {
+        let cached = self.store_if_epoch(epoch, |caches| caches.seerr = Some(handle));
+        if !cached {
             tracing::info!("seerr session completed after an account switch; dropped");
-            return false;
         }
-        state.seerr = Some(handle);
-        true
+        cached
     }
 
     /// Returns the cached handle, or builds one from stored config (a
     /// network round trip -- the exception to `seerr_status`'s zero-network
     /// contract). `Err(SeerrNotConfigured)` when there's no saved connection.
     pub(crate) fn require_seerr_handle(&self) -> Result<SeerrHandle, CoreError> {
-        if let Some(handle) = self.lock_state().seerr.clone() {
+        let cached = self
+            .lock_state()
+            .account
+            .installed()
+            .and_then(|i| i.caches.seerr.clone());
+        if let Some(handle) = cached {
             return Ok(handle);
         }
         let identity = self
-            .active_seerr_identity()
+            .installed_identity()
             .ok_or(CoreError::SeerrNotConfigured)?;
         let entry = load_config(self.data_dir())
-            .find(&identity.0, &identity.1)
+            .find(&identity.account.server_url, &identity.account.user_id)
             .cloned()
             .ok_or(CoreError::SeerrNotConfigured)?;
         let intent = self.seerr_config().current();
         let handle = self.runtime().block_on(build_handle(&entry))?;
-        self.cache_rebuilt_seerr_handle(intent, &identity, handle)
+        self.cache_rebuilt_seerr_handle(intent, identity.epoch, handle)
     }
 
     /// Caches a lazily rebuilt handle only if no connect or disconnect began
@@ -875,23 +1014,165 @@ impl JellybeamCore {
     fn cache_rebuilt_seerr_handle(
         &self,
         intent: u64,
-        identity: &(String, String),
+        epoch: u64,
         handle: SeerrHandle,
     ) -> Result<SeerrHandle, CoreError> {
         let cached = self
             .seerr_config()
             .commit(intent, || {
-                self.cache_seerr_handle_if_active(identity, handle.clone())
+                self.cache_seerr_handle_if_active(epoch, handle.clone())
                     .then_some(handle)
             })
             .flatten();
         match cached {
             Some(handle) => Ok(handle),
+            // docs/18 §2.1: only the cache of the account the rebuild began under may answer.
             None => self
-                .lock_state()
-                .seerr
-                .clone()
+                .read_if_epoch(epoch, |caches| caches.seerr.clone())
+                .flatten()
                 .ok_or(CoreError::SeerrNotConfigured),
+        }
+    }
+
+    fn submit_request_in(
+        &self,
+        handle: &SeerrHandle,
+        input: SeerrRequestInput,
+    ) -> Result<(), CoreError> {
+        let client = handle.client();
+        let media_type_str: &'static str = match input.media_type {
+            SeerrMediaType::Movie => "movie",
+            SeerrMediaType::Tv => "tv",
+        };
+        let seasons = if input.seasons.is_empty() {
+            None
+        } else {
+            Some(input.seasons.clone())
+        };
+
+        let existing_requests = match input.media_type {
+            SeerrMediaType::Movie => self
+                .runtime()
+                .block_on(client.movie_details(input.tmdb_id))?
+                .media_info
+                .map(|m| m.requests)
+                .unwrap_or_default(),
+            SeerrMediaType::Tv => self
+                .runtime()
+                .block_on(client.tv_details(input.tmdb_id))?
+                .media_info
+                .map(|m| m.requests)
+                .unwrap_or_default(),
+        };
+        let action = decide_request_action(&existing_requests, input.is_4k, handle.user_id());
+
+        match action {
+            RequestAction::Update { request_id } => {
+                // PUT replaces the request's season list, so the seasons it already holds ride along.
+                let seasons = seasons.map(|requested| {
+                    let held = existing_requests
+                        .iter()
+                        .find(|r| r.id == request_id)
+                        .map_or(&[][..], |r| r.seasons.as_slice());
+                    merged_seasons(held, &requested)
+                });
+                self.runtime().block_on(client.request_update(
+                    request_id,
+                    seerr_api::RequestUpdateBody {
+                        media_type: media_type_str,
+                        seasons,
+                        is4k: input.is_4k,
+                        server_id: input.server_id,
+                        profile_id: input.profile_id,
+                        root_folder: input.root_folder,
+                    },
+                ))?;
+            }
+            RequestAction::Create => {
+                self.runtime()
+                    .block_on(client.request_create(seerr_api::RequestCreateBody {
+                        media_type: media_type_str,
+                        media_id: input.tmdb_id,
+                        seasons,
+                        is4k: input.is_4k,
+                        server_id: input.server_id,
+                        profile_id: input.profile_id,
+                        root_folder: input.root_folder,
+                    }))?;
+            }
+        }
+        // The submitted item's availability badge just changed; a stale
+        // 60s-cached home snapshot would keep showing its old state.
+        handle.invalidate_home();
+        Ok(())
+    }
+
+    fn cancel_request_in(&self, handle: &SeerrHandle, request_id: i64) -> Result<(), CoreError> {
+        self.runtime()
+            .block_on(handle.client().request_delete(request_id))?;
+        handle.invalidate_home();
+        Ok(())
+    }
+
+    /// The post-mutation detail: one GET, no sibling fetches (see [`SeerrRequestDetail`]).
+    fn request_detail_in(
+        &self,
+        handle: &SeerrHandle,
+        media_type: SeerrMediaType,
+        tmdb_id: i64,
+    ) -> Result<SeerrRequestDetail, CoreError> {
+        let client = handle.client();
+        Ok(match media_type {
+            SeerrMediaType::Movie => {
+                let details = self.runtime().block_on(client.movie_details(tmdb_id))?;
+                SeerrRequestDetail::Movie {
+                    detail: movie_detail_from(
+                        handle,
+                        &details,
+                        Vec::new(),
+                        Vec::new(),
+                        (None, None),
+                    ),
+                }
+            }
+            SeerrMediaType::Tv => {
+                let details = self.runtime().block_on(client.tv_details(tmdb_id))?;
+                SeerrRequestDetail::Tv {
+                    detail: tv_detail_from(handle, &details, Vec::new(), Vec::new(), (None, None)),
+                }
+            }
+        })
+    }
+
+    /// [`Self::request_detail_in`] after a mutation that landed: an unreadable detail is
+    /// [`CoreError::SeerrChangeUnconfirmed`], so the caller still sees that the server changed.
+    fn changed_request_detail(
+        &self,
+        handle: &SeerrHandle,
+        media_type: SeerrMediaType,
+        tmdb_id: i64,
+    ) -> Result<SeerrRequestDetail, CoreError> {
+        self.request_detail_in(handle, media_type, tmdb_id)
+            .map_err(|e| {
+                tracing::warn!(error = %e, "a seerr change landed but its detail could not be read");
+                CoreError::SeerrChangeUnconfirmed
+            })
+    }
+
+    /// Drops the saved Seerr connection (secret included) of an account that left the saved list
+    /// (docs/14 Per-account config). Called after the session list commit; the intent bump also
+    /// refuses a connect for that account still in flight.
+    pub(crate) fn prune_seerr_entry(&self, server_url: &str, user_id: &str) {
+        self.seerr_config()
+            .apply(|| self.remove_seerr_entry(server_url, user_id));
+    }
+
+    /// Drops the saved entry of `(server_url, user_id)`; the caller holds the config intent lock.
+    fn remove_seerr_entry(&self, server_url: &str, user_id: &str) {
+        let mut config = load_config(self.data_dir());
+        config.remove(server_url, user_id);
+        if let Err(e) = save_config(self.data_dir(), &config) {
+            tracing::warn!(error = %e, "failed to persist seerr config after removing an entry");
         }
     }
 
@@ -900,7 +1181,7 @@ impl JellybeamCore {
     fn commit_seerr_connect(
         &self,
         intent: u64,
-        identity: &(String, String),
+        epoch: u64,
         entry: SeerrConfigEntry,
         handle: SeerrHandle,
     ) -> Result<(), CoreError> {
@@ -911,7 +1192,7 @@ impl JellybeamCore {
                 save_config(self.data_dir(), &config).map_err(|e| CoreError::Cache {
                     detail: format!("failed to persist seerr config: {e}"),
                 })?;
-                self.cache_seerr_handle_if_active(identity, handle);
+                self.cache_seerr_handle_if_active(epoch, handle);
                 Ok(())
             })
             .unwrap_or(Err(CoreError::Api {
@@ -970,18 +1251,24 @@ impl JellybeamCore {
             identity: None,
             app_title: None,
         };
-        let Some((server_url, user_id)) = self.active_seerr_identity() else {
-            return not_configured;
+        // One lock, so the identity and the cached handle belong to the same account.
+        let (identity, app_title) = {
+            let state = self.lock_state();
+            let Some(identity) = Self::installed_identity_locked(&state) else {
+                return not_configured;
+            };
+            let app_title = state
+                .account
+                .installed()
+                .and_then(|i| i.caches.seerr.as_ref())
+                .and_then(SeerrHandle::app_title);
+            (identity, app_title)
         };
         let config = load_config(self.data_dir());
-        let Some(entry) = config.find(&server_url, &user_id) else {
+        let Some(entry) = config.find(&identity.account.server_url, &identity.account.user_id)
+        else {
             return not_configured;
         };
-        let app_title = self
-            .lock_state()
-            .seerr
-            .as_ref()
-            .and_then(SeerrHandle::app_title);
         SeerrStatus {
             configured: true,
             seerr_url: Some(entry.seerr_url.clone()),
@@ -1001,7 +1288,7 @@ impl JellybeamCore {
         identity: String,
         secret: String,
     ) -> Result<SeerrStatus, CoreError> {
-        let (server_url, user_id) = self.active_seerr_identity().ok_or(CoreError::NotSignedIn)?;
+        let installed = self.installed_identity().ok_or(CoreError::NotSignedIn)?;
         let intent = self.seerr_config().begin();
 
         let candidates = seerr_api::url::candidate_urls(&url);
@@ -1012,6 +1299,7 @@ impl JellybeamCore {
         }
 
         let seerr_method: seerr_api::SeerrAuthMethod = method.into();
+        let (probe_connect_timeout, probe_request_timeout) = probe_timeouts();
         let mut last_error: Option<CoreError> = None;
         let mut connected: Option<(seerr_api::SeerrClient, seerr_api::User, String)> = None;
         for candidate in &candidates {
@@ -1022,8 +1310,8 @@ impl JellybeamCore {
                         method: seerr_method,
                         identity: &identity,
                         secret: &secret,
-                        connect_timeout: PROBE_CONNECT_TIMEOUT,
-                        request_timeout: PROBE_REQUEST_TIMEOUT,
+                        connect_timeout: probe_connect_timeout,
+                        request_timeout: probe_request_timeout,
                     }));
             match attempt {
                 Ok((client, user)) => {
@@ -1050,22 +1338,22 @@ impl JellybeamCore {
             })
         })?;
 
-        let public = self
-            .runtime()
-            .block_on(client.public_settings())
-            .unwrap_or_default();
-        let app_title = public.application_title.clone();
+        // docs/14 "Auth": the tight probe timeouts end with the probe; the saved connection
+        // runs on the normal ones, and its settings read is capped on top of them.
+        let client = client.with_timeouts(NORMAL_CONNECT_TIMEOUT, NORMAL_REQUEST_TIMEOUT)?;
+        let public = self.runtime().block_on(public_settings_or_default(&client));
+        let handle = SeerrHandle::new(client, user.id, &seerr_url, public);
+        let app_title = handle.app_title();
 
         let entry = SeerrConfigEntry {
-            server_url: server_url.clone(),
-            user_id: user_id.clone(),
+            server_url: installed.account.server_url,
+            user_id: installed.account.user_id,
             seerr_url: seerr_url.clone(),
             method,
             identity,
             secret,
         };
-        let handle = SeerrHandle::new(client, user.id, &seerr_url, public);
-        self.commit_seerr_connect(intent, &(server_url, user_id), entry.clone(), handle)?;
+        self.commit_seerr_connect(intent, installed.epoch, entry.clone(), handle)?;
 
         Ok(SeerrStatus {
             configured: true,
@@ -1077,28 +1365,25 @@ impl JellybeamCore {
     }
 
     /// Removes the active account's saved Seerr connection and drops the
-    /// live handle. Best-effort, like `sign_out`.
+    /// live handle. Best-effort, like `remove_session`.
     pub fn seerr_disconnect(&self) {
-        let Some((server_url, user_id)) = self.active_seerr_identity() else {
+        let Some(identity) = self.installed_identity() else {
             return;
         };
         self.seerr_config().apply(|| {
-            let mut config = load_config(self.data_dir());
-            config.remove(&server_url, &user_id);
-            if let Err(e) = save_config(self.data_dir(), &config) {
-                tracing::warn!(error = %e, "failed to persist seerr config after disconnect");
-            }
-            self.lock_state().seerr = None;
+            self.remove_seerr_entry(&identity.account.server_url, &identity.account.user_id);
+            self.store_if_epoch(identity.epoch, |caches| caches.seerr = None);
         });
     }
 
     /// Trending/Movies/TV/Upcoming rows, fetched concurrently; a failed row
-    /// is dropped (fail open). Cached 60s.
+    /// is dropped, all rows failing is the first row's error. Cached 60s.
     pub fn seerr_home(&self) -> Result<SeerrHome, CoreError> {
         let handle = self.require_seerr_handle()?;
         if let Some(cached) = handle.cached_home() {
             return Ok(cached);
         }
+        let generation = handle.home_generation();
         let client = handle.client();
         let no_filters = seerr_api::BrowseFilters::default();
         let (trending, movies, tv, upcoming_movies, upcoming_tv) = self.runtime().block_on(async {
@@ -1111,44 +1396,58 @@ impl JellybeamCore {
             )
         });
         let images = handle.images();
+        let outcomes = [
+            (
+                "trending",
+                "Trending",
+                trending.map(|page| cards_from_mixed_results(&page.results, images)),
+            ),
+            (
+                "movies",
+                "Movies",
+                movies.map(|page| cards_from_results(&page.results, SeerrMediaType::Movie, images)),
+            ),
+            (
+                "tv",
+                "TV",
+                tv.map(|page| cards_from_results(&page.results, SeerrMediaType::Tv, images)),
+            ),
+            (
+                "upcoming_movies",
+                "Upcoming Movies",
+                upcoming_movies
+                    .map(|page| cards_from_results(&page.results, SeerrMediaType::Movie, images)),
+            ),
+            (
+                "upcoming_tv",
+                "Upcoming TV",
+                upcoming_tv
+                    .map(|page| cards_from_results(&page.results, SeerrMediaType::Tv, images)),
+            ),
+        ];
         let mut rows = Vec::new();
-        if let Ok(page) = trending {
-            rows.push(SeerrHomeRow {
-                id: "trending".to_string(),
-                title: "Trending".to_string(),
-                cards: cards_from_mixed_results(&page.results, images),
-            });
+        let mut first_error = None;
+        for (id, title, outcome) in outcomes {
+            match outcome {
+                Ok(cards) => rows.push(SeerrHomeRow {
+                    id: id.to_string(),
+                    title: title.to_string(),
+                    cards,
+                }),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
         }
-        if let Ok(page) = movies {
-            rows.push(SeerrHomeRow {
-                id: "movies".to_string(),
-                title: "Movies".to_string(),
-                cards: cards_from_results(&page.results, SeerrMediaType::Movie, images),
-            });
-        }
-        if let Ok(page) = tv {
-            rows.push(SeerrHomeRow {
-                id: "tv".to_string(),
-                title: "TV".to_string(),
-                cards: cards_from_results(&page.results, SeerrMediaType::Tv, images),
-            });
-        }
-        if let Ok(page) = upcoming_movies {
-            rows.push(SeerrHomeRow {
-                id: "upcoming_movies".to_string(),
-                title: "Upcoming Movies".to_string(),
-                cards: cards_from_results(&page.results, SeerrMediaType::Movie, images),
-            });
-        }
-        if let Ok(page) = upcoming_tv {
-            rows.push(SeerrHomeRow {
-                id: "upcoming_tv".to_string(),
-                title: "Upcoming TV".to_string(),
-                cards: cards_from_results(&page.results, SeerrMediaType::Tv, images),
-            });
+        // docs/14 Performance: a home with no row at all is an error the UI can retry, and is
+        // never cached; any loaded row is shown.
+        if rows.is_empty() {
+            if let Some(error) = first_error {
+                return Err(error.into());
+            }
         }
         let home = SeerrHome { rows };
-        handle.cache_home(home.clone());
+        handle.cache_home(generation, home.clone());
         Ok(home)
     }
 
@@ -1283,40 +1582,23 @@ impl JellybeamCore {
         });
         let details = details?;
         let images = handle.images();
-        let card = card_from_movie_details(&details, images);
-        let (critics_score, audience_score) = scores_from_ratings(
+        let scores = scores_from_ratings(
             ratings
                 .ok()
                 .flatten()
                 .map(|r| (r.critics_score, r.audience_score)),
         );
-        let can_request = movie_can_request(card.availability);
-
-        Ok(SeerrMovieDetail {
-            runtime_minutes: details.runtime.map(|r| r.round() as i32),
-            genres: details
-                .genres
-                .iter()
-                .map(|g| seerr_genre(g.id, g.name.clone()))
-                .collect(),
-            cast: details
-                .credits
-                .as_ref()
-                .map_or_else(Vec::new, |c| cast_from_credits(&c.cast, images)),
-            similar: similar
+        Ok(movie_detail_from(
+            &handle,
+            &details,
+            similar
                 .map(|p| cards_from_results(&p.results, SeerrMediaType::Movie, images))
                 .unwrap_or_default(),
-            recommendations: recommendations
+            recommendations
                 .map(|p| cards_from_results(&p.results, SeerrMediaType::Movie, images))
                 .unwrap_or_default(),
-            trailer_url: trailer_url_from(&details.related_videos),
-            critics_score,
-            audience_score,
-            active_request: active_request_for(details.media_info.as_ref(), handle.user_id()),
-            can_request,
-            can_request_4k: can_request && handle.movie4k_enabled(),
-            card,
-        })
+            scores,
+        ))
     }
 
     /// Same concurrency/fail-open shape as [`Self::seerr_movie`]. `seasons`
@@ -1335,44 +1617,23 @@ impl JellybeamCore {
         });
         let details = details?;
         let images = handle.images();
-        let card = card_from_tv_details(&details, images);
-        let seasons = build_season_statuses(&details.seasons, details.media_info.as_ref());
-        let can_request = tv_can_request(&seasons);
-        let (critics_score, audience_score) = scores_from_ratings(
+        let scores = scores_from_ratings(
             ratings
                 .ok()
                 .flatten()
                 .map(|r| (r.critics_score, r.audience_score)),
         );
-
-        Ok(SeerrTvDetail {
-            genres: details
-                .genres
-                .iter()
-                .map(|g| seerr_genre(g.id, g.name.clone()))
-                .collect(),
-            cast: details
-                .credits
-                .as_ref()
-                .map_or_else(Vec::new, |c| cast_from_credits(&c.cast, images)),
-            similar: similar
+        Ok(tv_detail_from(
+            &handle,
+            &details,
+            similar
                 .map(|p| cards_from_results(&p.results, SeerrMediaType::Tv, images))
                 .unwrap_or_default(),
-            recommendations: recommendations
+            recommendations
                 .map(|p| cards_from_results(&p.results, SeerrMediaType::Tv, images))
                 .unwrap_or_default(),
-            trailer_url: trailer_url_from(&details.related_videos),
-            critics_score,
-            audience_score,
-            active_request: active_request_for(details.media_info.as_ref(), handle.user_id()),
-            can_request,
-            // docs/14's FFI contract exposes exactly one (SD) season
-            // list, so `can_request_4k` reuses the SD requestability
-            // signal, gated by the server's own `series4kEnabled` toggle.
-            can_request_4k: can_request && handle.series4k_enabled(),
-            seasons,
-            card,
-        })
+            scores,
+        ))
     }
 
     /// Cast + crew, each capped at 25 distinct titles after de-duplication across the two
@@ -1480,79 +1741,32 @@ impl JellybeamCore {
         Ok(SeerrRequestOptions { servers })
     }
 
-    /// Movie: single request. TV: per-season, only seasons the caller
-    /// marked `requestable`. Updates (`PUT`) an existing PENDING request
-    /// instead of duplicating.
-    pub fn seerr_submit_request(&self, input: SeerrRequestInput) -> Result<(), CoreError> {
+    /// Movie: single request. TV: per-season, only seasons the caller marked `requestable`.
+    /// Updates (`PUT`) the caller's PENDING request instead of duplicating, keeping the seasons
+    /// it already holds. Pre-read GET, the mutation, then one detail GET (docs/14 Request
+    /// semantics); an unreadable pre-read fails the call instead of guessing "no request", and a
+    /// detail that cannot be read after the change is `SeerrChangeUnconfirmed`.
+    pub fn seerr_submit_request_detail(
+        &self,
+        input: SeerrRequestInput,
+    ) -> Result<SeerrRequestDetail, CoreError> {
         let handle = self.require_seerr_handle()?;
-        let client = handle.client();
-        let media_type_str: &'static str = match input.media_type {
-            SeerrMediaType::Movie => "movie",
-            SeerrMediaType::Tv => "tv",
-        };
-        let seasons = if input.seasons.is_empty() {
-            None
-        } else {
-            Some(input.seasons.clone())
-        };
-
-        let existing_requests = match input.media_type {
-            SeerrMediaType::Movie => self
-                .runtime()
-                .block_on(client.movie_details(input.tmdb_id))
-                .ok()
-                .and_then(|d| d.media_info)
-                .map(|m| m.requests)
-                .unwrap_or_default(),
-            SeerrMediaType::Tv => self
-                .runtime()
-                .block_on(client.tv_details(input.tmdb_id))
-                .ok()
-                .and_then(|d| d.media_info)
-                .map(|m| m.requests)
-                .unwrap_or_default(),
-        };
-        let action = decide_request_action(&existing_requests, input.is_4k, handle.user_id());
-
-        match action {
-            RequestAction::Update { request_id } => {
-                self.runtime().block_on(client.request_update(
-                    request_id,
-                    seerr_api::RequestUpdateBody {
-                        media_type: media_type_str,
-                        seasons,
-                        is4k: input.is_4k,
-                        server_id: input.server_id,
-                        profile_id: input.profile_id,
-                        root_folder: input.root_folder,
-                    },
-                ))?;
-            }
-            RequestAction::Create => {
-                self.runtime()
-                    .block_on(client.request_create(seerr_api::RequestCreateBody {
-                        media_type: media_type_str,
-                        media_id: input.tmdb_id,
-                        seasons,
-                        is4k: input.is_4k,
-                        server_id: input.server_id,
-                        profile_id: input.profile_id,
-                        root_folder: input.root_folder,
-                    }))?;
-            }
-        }
-        // The submitted item's availability badge just changed; a stale
-        // 60s-cached home snapshot would keep showing its old state.
-        handle.invalidate_home();
-        Ok(())
+        let (media_type, tmdb_id) = (input.media_type, input.tmdb_id);
+        self.submit_request_in(&handle, input)?;
+        self.changed_request_detail(&handle, media_type, tmdb_id)
     }
 
-    pub fn seerr_cancel_request(&self, request_id: i64) -> Result<(), CoreError> {
+    /// Cancels `request_id`, then reads the title's detail once: DELETE + one GET; an unreadable
+    /// detail is `SeerrChangeUnconfirmed`.
+    pub fn seerr_cancel_request_detail(
+        &self,
+        media_type: SeerrMediaType,
+        tmdb_id: i64,
+        request_id: i64,
+    ) -> Result<SeerrRequestDetail, CoreError> {
         let handle = self.require_seerr_handle()?;
-        self.runtime()
-            .block_on(handle.client().request_delete(request_id))?;
-        handle.invalidate_home();
-        Ok(())
+        self.cancel_request_in(&handle, request_id)?;
+        self.changed_request_detail(&handle, media_type, tmdb_id)
     }
 
     /// The account's own requests (server auto-scoped); one this app can't

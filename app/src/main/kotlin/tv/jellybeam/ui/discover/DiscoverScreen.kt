@@ -21,7 +21,6 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -47,6 +46,7 @@ import tv.jellybeam.R
 import tv.jellybeam.ui.cards.POSTER_CELL_WIDTH
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
 import tv.jellybeam.ui.cards.rememberSkeletonPulseAlpha
+import tv.jellybeam.ui.common.ActiveWhileTop
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
 import tv.jellybeam.ui.focus.asFocusTarget
@@ -86,12 +86,11 @@ fun DiscoverScreen(
     onOpenSearch: () -> Unit,
     onOpenMyRequests: () -> Unit,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate for this entry -- see [tv.jellybeam.ui.search.SearchScreen]'s own
-     * param doc. */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: DiscoverViewModel = viewModel(factory = DiscoverViewModelFactory(AppGraph.gateway, AppGraph.strings)),
 ) {
     val state by viewModel.state.collectAsState()
+    // docs/14: a Seerr change made while this screen was off the top shows on return.
+    ActiveWhileTop(isTop, viewModel::setActive)
     val moviesLabel = stringResource(R.string.discover_chip_movies)
     val tvLabel = stringResource(R.string.discover_chip_tv)
 
@@ -127,7 +126,6 @@ fun DiscoverScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = !state.isLoading,
         fallback = {
             val staleKey = memory.lastKey

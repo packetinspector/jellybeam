@@ -242,8 +242,14 @@ Owner: `PlaybackOsdController`, ticked every 250ms.
 - Hidden OSD, Back: not a wake key -- it reaches the Back chain and exits,
   **except while a glide is active** (see the Back chain below), where it
   cancels the glide instead.
-- Hardware media play / pause keys are never consumed here, hidden or
-  visible; they reach the MediaSession callback and do not reveal chrome.
+- Hardware media transport keys (play / pause / stop / fast forward /
+  rewind) are never consumed here, hidden or visible, while a MediaSession
+  exists; they reach it (docs/17 §2) and act at once. With no session (before
+  the first frame, after a non-PiP stop released it) the activity swallows them, key
+  down and key up, never passing them to another app's session. Play only resumes the intent: it never restarts a
+  finished item (the still-watching card stays up) or prepares the player. Play / pause / stop do not
+  reveal chrome; a hidden fast forward / rewind briefly reveals the OSD to
+  show where it landed.
 - Page Up / Channel Up and Page Down / Channel Down (`PageKeys`, pure and
   tested; most Android TV remotes send the Channel rocker, not Page keys)
   are chapter transport, hidden or visible: Up jumps to the next chapter's
@@ -425,8 +431,8 @@ Notte text and markers. Up / Down clamp, no wrap.
   trailing in Grigio. A real chapter title sits under the number in
   Archivo 12sp Grigio, wrapped to two lines; blank names and names that only
   restate the number ("Chapter 12") show none; the playing chapter carries a 6dp leading
-  "current" dot, derived per chapter change, not per tick. Opens at the
-  first row. Select jumps to the chapter's start and closes the menu;
+  "current" dot, derived per chapter change, not per tick. Opens on the
+  playing chapter (the first row before any). Select jumps to the chapter's start and closes the menu;
   focus returns to the Chapters button.
 
 ## 13. Cards (bottom-right)
@@ -476,7 +482,7 @@ empty rule, `0S` and the next episode's start are one instant. Still-watching re
 `StillWatchingState.deadlineMs`. Either loop touches only the draw phase for the
 rule and recomposes the numeral text on a whole-second change, not every frame.
 
-Up-next: eyebrow "UP NEXT", third line is the runtime only ("22 MIN"; omitted when
+Up-next: eyebrow "UP NEXT", third line is the runtime only ("22m", the card runtime format of docs/07 §1; omitted when
 the item has no known runtime -- no codec/resolution/synopsis), action label "Play
 Next". With autoplay on, the rule depletes and the numeral counts down as described
 above; with autoplay off, the rule shows its bare track and the numeral is absent --

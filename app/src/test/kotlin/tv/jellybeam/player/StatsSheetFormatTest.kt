@@ -62,6 +62,7 @@ class StatsSheetFormatTest {
         chapters = emptyList(),
         sizeBytes = sizeBytes,
         path = path,
+        trickplay = null,
     )
 
     private fun liveStats(

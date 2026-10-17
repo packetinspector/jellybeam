@@ -19,7 +19,9 @@ session resolves.
 <!-- verified: app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml; app/src/main/res/drawable-xhdpi/banner.png; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamWordmark.kt; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamLockup.kt; app/src/main/kotlin/tv/jellybeam/ui/home/HomeScreen.kt EmptyLibraryState/HomeMasthead; app/src/main/kotlin/tv/jellybeam/ui/common/EmptyStateFormat.kt; app/src/main/kotlin/tv/jellybeam/ui/search/SearchScreen.kt SearchNoResults; app/src/main/kotlin/tv/jellybeam/ui/signin/SignInScreen.kt quick connect column; app/src/main/kotlin/tv/jellybeam/ui/settings/AboutSection.kt; app/src/main/kotlin/tv/jellybeam/ui/launch/LaunchScreen.kt; app/src/main/res/values/themes.xml Theme.Jellybeam.Starting; app/src/main/kotlin/tv/jellybeam/MainActivity.kt installSplashScreen -->
 
 **Browsing & library** — mirror-backed instant browse everywhere (local SQLite
-mirror, no server round-trip for navigation); Home shelves (resume, next-up,
+mirror, no server round-trip for navigation; the library list in the menu follows
+server changes live, and a library's sort and filter choice is saved even if you leave
+right after changing it); Home shelves (resume, next-up,
 favorites, latest, per-library visibility; a user-set shelf size caps every row,
 and Next Up never repeats a Continue Watching title and moves on as soon as an
 episode is finished or marked watched, here or on another device; watched, unwatched and
@@ -96,7 +98,8 @@ visibility toggle); hide-watched-in-Latest; startup screen (Home or a chosen
 library, stale id falls back to Home); password or Jellyfin Quick Connect sign-in
 (an address typed without a scheme gets http://, and a failed attempt says what
 went wrong in plain words -- not a valid address, server unreachable with the
-reason, HTTPS not offered so try http://, answered but not a Jellyfin server
+reason, HTTPS not offered so try http://, the server's certificate refused
+(no http:// advice), answered but not a Jellyfin server
 with the HTTP status, or wrong username or password -- in a card kept on
 screen above the Sign in button on a scrollable form; a saved token that the
 server rejects is still the separate "authorization expired" path);
@@ -107,8 +110,8 @@ hit is probed and, on failure, replaced by the first reachable of `https://host`
 `https://host:8920`, `http://host:8096` and the same on the responder's IP);
 multi-server/multi-account session persistence, instant account switching
 (a video keeps playing on its own server, next-up included, while you browse
-another, every server's library sync pausing until it ends; signing out of or
-removing its account stops it; an expired-token error prompts only for the
+another, every server's library sync pausing until it ends; removing its account
+stops it; an expired-token error prompts only for the
 account it came from while you are using it, never for the one you switched
 to),
 add-server, in-place password/Quick Connect reauthorization of expired saved
@@ -138,7 +141,7 @@ Play through the server's static stream even when the server, having no
 codec facts from the plugin, reports Direct Play as unsupported and offers
 only a transcode; every single-file video kind (`Video`, `MusicVideo`,
 `Recording`) gets the same Play/Resume action as a movie.
-<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/detail/DetailRegions.kt regionShow(); app/src/main/kotlin/tv/jellybeam/ui/detail/DetailSkeletons.kt RegionReveal; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailScreen.kt; core/jellyfin-core/src/playback.rs is_codec_blind()/choose(); core/jellyfin-api/src/lib.rs stream_url() item-id path; core/ffi/src/types.rs ViewKind::ChannelFolder, LiveSort; core/ffi/src/object.rs live_children() sort mapping; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailFormatting.kt OTHER_SINGLE_VIDEO_ITEM_TYPES; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt liveChildren() doc comment; app/src/main/kotlin/tv/jellybeam/nav/Screen.kt screenForLibraryCard(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryViewModel.kt ViewKind.isLive branches/liveSortFor() in refresh()/loadNextPage()/onBecameTop(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryScreen.kt ChannelFolderList diversion; app/src/main/kotlin/tv/jellybeam/ui/library/ChannelFolderList.kt; app/src/main/kotlin/tv/jellybeam/ui/library/RecordingFormatting.kt --> Empty Home retains D-pad access to libraries and server management, including before the first titles arrive.
+<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/detail/DetailRegions.kt regionShow(); app/src/main/kotlin/tv/jellybeam/ui/detail/DetailSkeletons.kt RegionReveal; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailScreen.kt; core/jellyfin-core/src/playback.rs is_codec_blind()/choose(); core/jellyfin-api/src/lib.rs stream_url() item-id path; core/ffi/src/types.rs ViewKind::ChannelFolder, LiveSort; core/ffi/src/object.rs live_children() sort mapping; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailFormatting.kt OTHER_SINGLE_VIDEO_ITEM_TYPES; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt liveChildren() doc comment; app/src/main/kotlin/tv/jellybeam/nav/Screen.kt screenForLibraryCard(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryViewModel.kt ViewKind.isLive branches/liveSortFor() in refresh()/loadNextPage()/onBecameTop(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryScreen.kt ChannelFolderList diversion; app/src/main/kotlin/tv/jellybeam/ui/library/ChannelFolderList.kt; app/src/main/kotlin/tv/jellybeam/ui/library/RecordingFormatting.kt --> Empty Home retains D-pad access to libraries and server management, including before the first titles arrive. A first sign-in keeps the loading skeleton until its first sync writes titles, so an empty library message appears only for a library that is really empty.
 
 
 **Navigation** — a left-edge nav drawer (Home, every library, Discover when
@@ -160,7 +163,12 @@ audience scores, availability, Similar/Recommended shelves) with Request
 and Request 4K (per-server quality-profile/root-folder picker when the
 server exposes more than one option, TV per-season picker with already-
 covered seasons shown inert), Cancel request, a "Go to library" shortcut
-for titles already in the Jellyfin library, and a My Requests page; connect
+for titles already in the Jellyfin library (a failed request or cancel shows
+its error and keeps both actions off until the title can be re-read; the
+shelves and My Requests refresh in place after a request, reloading once
+when you return to them; while a request or cancel runs its pills stay
+focused but dimmed, and focus lands back on the pill that started it, or
+the one that replaced it, once the dialog closes), and a My Requests page; connect
 via Jellyfin login, Seerr local login, or an API key from Settings >
 Discover. Zero impact on cold start (a local-only "is Discover configured"
 check gates the drawer entry; no Seerr network call happens until the
@@ -170,7 +178,13 @@ browsing or playback. Every Discover card list is de-duplicated before it
 reaches a grid or shelf (a popularity-sorted browse can repeat a title on the
 next page; a person's cast-plus-crew credits can repeat one), paging carries
 on by itself past a page that added nothing, and My Requests keys its cells by
-request id so one title with several requests shows each of them.
+request id so one title with several requests shows each of them. A request
+or cancel made on a title shows on Discover and My Requests when you go back,
+and connecting or disconnecting reloads them; the request and cancel buttons
+stay busy until the refreshed title is on screen (a second press does nothing),
+a failed request or cancel shows its message beside the title with the buttons
+still usable, and a failed Discover
+search says search isn't available instead of "No matches".
 
 **Playback** — Direct Play by default, with an opt-in Quality setting
 (docs/18): Direct Play never transcodes and refuses a file the server would
@@ -236,7 +250,7 @@ Full) — Full adds a codec strip, an ENDS wall-clock readout, and speed +
 stats controls; restructured control row (episode previous/next for
 episodic content, resolved from the local mirror with one post-load server
 fallback for newly/deep-linked items, a combined audio-and-subtitles button with a
-non-default-track dot, a scrolling chapters menu when markers exist (numbered rows, real chapter titles wrapped underneath), and separate
+non-default-track dot, a scrolling chapters menu when markers exist (numbered rows, real chapter titles wrapped underneath, opening on the playing chapter), and separate
 library-info and playback-stats sheets); playback speed control, 0.5–2x
 (Full mode, per-session only — not persisted across playback sessions),
 ENDS-aware; server-configured item and series names shown verbatim; exact
@@ -278,14 +292,14 @@ backoff and jitter, so a dropped socket (screen off, brief Wi-Fi loss, a
 server restart) reconnects on its own with no app-level retry logic and no
 Android lifecycle hook needed for correctness — every successful reconnect
 triggers a resume+delta+reconcile pass that heals whatever changed while
-disconnected. Signing out, switching accounts, or removing the active
+disconnected. Switching accounts or removing the active
 account stops that socket and its reconnect loop outright rather than
 leaving it running in the background. Card art (Home, Library, Search, and
 Discover posters) that fails to load retries on its own instead of showing
 a blank/blurhash tile for the rest of that screen's life: bounded backoff
 (up to three attempts, 2s/4s/8s) restarts automatically on a failed load,
-plus one immediate retry whenever the app returns to the foreground. Art from the disk or memory cache appears at once with no fade and no placeholder flash; only art fetched over the network cross-fades in, and slower loads show the blurhash or pulse after a 250 ms grace. Static named fallbacks for missing artwork; loading pulses stop when image retries are exhausted, avoiding perpetual animation on incomplete libraries. The Home sync pill names the library being synced by its server-configured name with an item count ("Syncing Movies — 40 of 120…"), during the cold-start skeleton and for background syncs after it, and never shows a library id. Failed or cancelled initial library syncs release their syncing state and buffered-update waiters without recording a successful sync cursor.
-<!-- verified: core/jellyfin-core/src/event_bus.rs EventBus::spawn/supervise (Backoff, USEFUL_CONNECTION_DURATION), EventBusHandle::shutdown; core/ffi/src/object.rs open_mirror (spawn ordering doc comment), stop_event_bus and its call sites in sign_out/switch_session/remove_session/open_mirror re-entry/Drop -->
+plus one immediate retry whenever the app returns to the foreground. Art from the disk or memory cache appears at once with no fade and no placeholder flash; only art fetched over the network cross-fades in, and slower loads show the blurhash or pulse after a 250 ms grace. Static named fallbacks for missing artwork; loading pulses stop when image retries are exhausted, avoiding perpetual animation on incomplete libraries. The Home sync pill names the library being synced by its server-configured name with an item count ("Syncing Movies — 40 of 120…"), during the cold-start skeleton and for background syncs after it, and never shows a library id; it stays hidden while a video plays (the sync waits for playback, mini player included). Failed or cancelled initial library syncs release their syncing state and buffered-update waiters without recording a successful sync cursor.
+<!-- verified: core/jellyfin-core/src/event_bus.rs EventBus::spawn/supervise (Backoff, USEFUL_CONNECTION_DURATION), EventBusHandle::shutdown; core/ffi/src/object.rs open_begin/build_bundle/open_finish, stop_event_bus and its callers dispose_account_reset/open_begin/open_finish/Drop -->
 <!-- verified: app/src/main/kotlin/tv/jellybeam/ui/cards/CardArt.kt IMAGE_LOAD_MAX_RETRIES = 3, IMAGE_LOAD_RETRY_BASE_MS = 2000L, imageRetryDelayMs, CardArtImage's retryAttempt/retryToken LaunchedEffects; app/src/main/kotlin/tv/jellybeam/AppForeground.kt resumeCount, bumped from MainActivity.onResume; app/src/main/kotlin/tv/jellybeam/ui/discover/DiscoverPosterCard.kt SeerrPosterArt (same recipe) -->
 
 
@@ -299,10 +313,11 @@ expired or revoked token opens re-authorization from whichever screen hit it
 -- Detail, Home, Library, Search, not only Play -- and, because browsing reads
 the local mirror and would never notice, the saved token is also checked with
 one authenticated request at launch, on account switch and on return to the
-foreground (at most once a minute); the screen underneath
+foreground (at most once a minute), and a live-events connection the server
+rejects prompts too, even while the app sits idle; the screen underneath
 is left alone while the prompt is up; Seerr's own sign-in failures never
 trigger it.
-<!-- verified: core/ffi/src/device_id.rs for_server; core/ffi/src/object.rs client_identity/saved_identity, install_authenticated_session, reauthorization_account; core/jellyfin-api/src/lib.rs JellyfinClient::check; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt ffi()/noteCoreFailure; data/CoreExceptions.kt routesToReauthorization; player/PlaybackActivity.kt AuthorizationRecoveryCoordinator; MainActivity.kt authorizationRecoveryCoordinator collector, checkSession; core/ffi/src/object.rs validate_session -->
+<!-- verified: core/ffi/src/device_id.rs for_server; core/ffi/src/object.rs client_identity/saved_identity, install_authenticated_session, reauthorization_account; core/jellyfin-api/src/lib.rs JellyfinClient::check; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt ffi()/noteCoreFailure; data/CoreExceptions.kt routesToReauthorization; player/PlaybackActivity.kt AuthorizationRecoveryCoordinator; MainActivity.kt authorizationRecoveryCoordinator collector, checkSession; core/ffi/src/object.rs validate_session, bus_reauthorization_locked, ChangeListener::on_unauthorized -->
 
 **Server compatibility** — support floor 10.11; the server's version is
 captured from `/System/Info/Public` at sign-in and persisted on the
@@ -314,7 +329,7 @@ refresh event so gated screens re-evaluate; `server_at_least(major, minor)`
 fails closed (unknown version means "not at least") so 12.0-only calls stay
 on the 10.11 path until the version is known. The server's own name rides
 the same refresh and persist path for the About section.
-<!-- verified: core/jellyfin-api/src/lib.rs ServerVersion/PublicServerInfo/refresh_public_system_info; core/ffi/src/session.rs SessionFile.server_version/server_name; core/ffi/src/object.rs State.server_version, server_at_least, refresh_server_version_once, spawn_server_version_reconnect_watch, SERVER_VERSION_REFRESH_INTERVAL; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt serverAtLeast -->
+<!-- verified: core/jellyfin-api/src/lib.rs ServerVersion/PublicServerInfo/refresh_public_system_info; core/ffi/src/session.rs SessionFile.server_version/server_name; core/ffi/src/object.rs State.server_version, server_at_least, refresh_server_version_once, spawn_server_version_poll, spawn_bus_forwarder, SERVER_VERSION_REFRESH_INTERVAL; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt serverAtLeast -->
 
 **Performance** — embedded Baseline Profile (`app/src/main/baseline-prof.txt`,
 merged with the profiles Compose/Coil/lifecycle ship): the release APK
@@ -328,16 +343,17 @@ per process. The Rust core ships link-time optimized and stripped, and the
 APK packages only the ABIs the core is built for. Cold start gets a head
 start: session restore, the mirror open and Home's first snapshot begin at
 process start and overlap the first frame instead of waiting for it. Home, Library, and Detail stay live during a sync burst
-instead of freezing on stale data until it quiets down: a shared
-leading-refresh + bounded-periodic-sampling scheduler (500ms while the
-screen is on top, 3s while a retained screen is hidden, with an immediate
-catch-up refresh when it becomes top again) replaces a resetting debounce
-that could never fire while the mirror kept delivering changes every
-~250ms. The nav drawer's library list
+instead of freezing on stale data until it quiets down: a shared scheduler
+refreshes the screen on top at the first change and then at most every
+500ms, while a hidden screen (under another page, the player, sign-in or
+server management) does no work and refreshes once when it is back on top,
+so finishing a playback costs Home a couple of reads instead of a burst. It
+replaces a resetting debounce that could never fire while the mirror kept
+delivering changes every ~250ms. The nav drawer's library list
 uses a lighter conflate-and-delay loop with the same leading-refresh/
 bounded-rate/guaranteed-trailing-refresh shape, sized for its much smaller
 payload.
-<!-- verified: core/Cargo.toml [profile.release]; app/build.gradle.kts ndkVersion, abiFilters; app/src/main/kotlin/tv/jellybeam/data/LaunchWarmup.kt; app/src/main/kotlin/tv/jellybeam/JellybeamApp.kt AppGraph.launchWarmup; app/src/main/kotlin/tv/jellybeam/ui/common/ChangeRefreshScheduler.kt; app/src/main/kotlin/tv/jellybeam/ui/home/HomeViewModel.kt changeRefreshScheduler; app/src/main/kotlin/tv/jellybeam/ui/library/LibraryViewModel.kt changeRefreshScheduler; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailViewModel.kt changeRefreshScheduler; app/src/main/kotlin/tv/jellybeam/MainActivity.kt JellybeamRoot drawer changeEvents conflate; core/media-cache/src/lib.rs recv_changes 250ms window -->
+<!-- verified: core/Cargo.toml [profile.release]; app/build.gradle.kts ndkVersion, abiFilters; app/src/main/kotlin/tv/jellybeam/data/LaunchWarmup.kt; app/src/main/kotlin/tv/jellybeam/JellybeamApp.kt AppGraph.launchWarmup; app/src/main/kotlin/tv/jellybeam/ui/common/ChangeRefreshScheduler.kt (+ActiveWhileTop); app/src/main/kotlin/tv/jellybeam/ui/home/common/HomeFeed.kt changeRefreshScheduler; app/src/main/kotlin/tv/jellybeam/ui/library/LibraryViewModel.kt changeRefreshScheduler; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailViewModel.kt changeRefreshScheduler; app/src/main/kotlin/tv/jellybeam/MainActivity.kt JellybeamRoot drawer changeEvents conflate; core/media-cache/src/lib.rs recv_changes 250ms window -->
 
 **Settings** — whole-record Rust-owned settings store (`get_settings`/
 `set_settings`, tolerant load/migration, atomic file replacement and ordered
@@ -429,8 +445,15 @@ changes, and is discarded on sign-out. One shared mechanism (`FocusMemory`
 + `FocusRestorer`, `ui/focus/`) replaces per-screen restore code. Focus is
 the 3dp Pistacchio ring only; selection is a fill (controls) or a leading
 check (list rows); "current" is a 6dp dot (drawer section, playing
-chapter). Stacked rows never overpaint a neighbour's ring.
-<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/focus/FocusMemory.kt; ui/cards/CardArt.kt focusRing zIndex; ui/detail/DetailScreen.kt, ui/settings/SettingsScreen.kt, ui/search/SearchScreen.kt FocusRestorer call sites; player/PlaybackScreen.kt restoreInvokerFocus/OsdRowLeading -->
+chapter). Stacked rows never overpaint a neighbour's ring, and a ring is
+never cut at the screen edge. A page left holding no focus (a touch tap, a
+removed item) takes it back on the next D-pad press; a Retry that reloads
+a page lands on its first action. Leaving Add server, server management or
+reauthorization with Back returns to the page underneath with its focus and
+scroll restored. Sign-in surfaces start on Quick Connect (or a discovered
+server), never in a text field, and Sign in and Remove stay focused while
+they run.
+<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/focus/FocusOwner.kt, FocusMemory.kt, LayerReentry.kt, RingClearance.kt; MainActivity.kt RetainedScreenLayer/rememberSaveableStateHolder; ui/cards/CardArt.kt focusRing zIndex; ui/detail/DetailScreen.kt, ui/settings/SettingsScreen.kt, ui/search/SearchScreen.kt FocusRestorer call sites; player/PlaybackScreen.kt restoreInvokerFocus/OsdRowLeading -->
 
 ## Why Jellybeam — differentiators
 
@@ -558,18 +581,24 @@ public display.)*
   second with no refresh — with a delta sync on every start plus a
   five-minute reconcile pass as the backstop for whatever the socket misses
   while disconnected (screen off, brief network loss, a server restart);
-  every screen refreshes live as the mirror changes.
+  every screen refreshes live as the mirror changes. A title page for a
+  movie or episode closes when the title is removed from the library, and a
+  season or episode list that fails to load says so with a Retry instead of
+  showing an empty series.
   <!-- verified: core/media-cache/src/schema.rs; core/media-cache/src/sync.rs RECONCILE_INTERVAL + delta_sync + apply_bus_event NeedsReconcile handling; core/ffi/src/object.rs open_mirror (jellyfin_core::EventBus::spawn + spawn_bus_forwarder), spawn_listener_task (mirror change stream); core/jellyfin-core/src/event_bus.rs supervise() reconnect/backoff; core/ffi/tests/live_local_server.rs websocket_delivers_a_change_made_by_another_session measured ~0.8 s against 10.10.7 and 12.0 dev servers; on the TV against the live server the same day, a played-flag change from another device produced exactly one Home refresh ~2 s later (0 refreshes in the idle 15 s before), observed through PerfLog's ffi.homeSnapshot lines -->
 - Sorting and filtering a library never leaves the grid and never asks
   the server: sort field, direction, watched state, genre, decade, and
   series status are all mirror queries answered in milliseconds, with a
   right-edge index rail that jumps by letter, month, decade, or duration.
+  A filter combination that matches nothing opens the filter strip on its
+  own with focus on it, so Reset is one press away instead of stranding
+  focus on a grid with no posters.
   <!-- verified: core/media-cache/src/query.rs library_grid_checked()/library_grid_groups()/library_genres(); app/src/main/kotlin/tv/jellybeam/ui/library/LibrarySortStrip.kt; app/src/main/kotlin/tv/jellybeam/ui/library/IndexRail.kt; docs/16-library-sort-filter.md -->
 - Search is instant, powered by a real SQLite FTS5 full-text index —
   results appear as you type, entirely against the local mirror, matching
   word prefixes in titles, original titles and series names (not synopses).
   <!-- verified: core/media-cache/src/schema.rs "CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(" -->
-- All local writes go through a single dedicated writer task with strict
+- All local writes go through a single dedicated writer thread with strict
   command ordering, so the mirror can never be corrupted by concurrent
   writes racing each other.
   <!-- verified: core/media-cache/src/writer.rs top-of-file doc comment "The single writer: owns the read-write Connection, drains a command..." -->
@@ -584,12 +613,17 @@ public display.)*
   account. If playback is the first live request to discover that a saved
   token expired, Jellybeam exits the failed player and opens that account's
   reauthorization screen automatically instead of leaving an unauthorized
-  toast as a dead end.
-  <!-- verified: core/ffi/src/error.rs typed Unauthorized mapping; core/ffi/src/object.rs switch_session()/reauthorize_session()/complete_quick_connect_reauthorization()/remove_session(); app/src/main/kotlin/tv/jellybeam/player/PlaybackViewModel.kt + PlaybackActivity.kt; app/src/main/kotlin/tv/jellybeam/MainActivity.kt authorizationRecoveryCoordinator collector; object.rs reauthorization_* and remove_session_* tests -->
+  toast as a dead end. Refreshing a saved account that isn't the one being
+  browsed updates its credential without switching to it. Removing an account
+  also signs that device session out on the server, best effort and never
+  holding up the removal. A damaged account list is set
+  aside rather than overwritten, so saved accounts aren't silently lost.
+  <!-- verified: core/ffi/src/object.rs install_reauthenticated_session parked branch, spawn_logout; core/ffi/src/session.rs open_list/quarantine_corrupt; core/ffi/src/error.rs typed Unauthorized mapping; core/ffi/src/object.rs switch_session()/reauthorize_session()/complete_quick_connect_reauthorization()/remove_session(); app/src/main/kotlin/tv/jellybeam/player/PlaybackViewModel.kt + PlaybackActivity.kt; app/src/main/kotlin/tv/jellybeam/MainActivity.kt authorizationRecoveryCoordinator collector; object.rs reauthorization_* and remove_session_* tests -->
 - Jellyfin Quick Connect lets you authorize the TV from an already signed-in
   Jellyfin client instead of typing a username and password with a remote. The
-  short code is displayed on TV; its secret stays in memory, polling is
-  lifecycle-cancellable, and approval commits through the same transactional
+  short code is displayed on TV; its secret stays in memory, polling stops when
+  you leave the screen or once the code expires (10 minutes), the address may be
+  typed without `http://`, and approval commits through the same transactional
   mirror-before-account-switch path as password sign-in.
   <!-- verified: core/jellyfin-api/src/lib.rs quick_connect_* / authenticate_with_quick_connect; core/ffi/src/object.rs initiate_quick_connect()/poll_quick_connect()/complete_quick_connect(); app/src/main/kotlin/tv/jellybeam/ui/signin/SignInViewModel.kt -->
 - Finds your Jellyfin server on the LAN at sign-in — no typing URLs with a
@@ -634,8 +668,10 @@ public display.)*
   <!-- verified: gradle/libs.versions.toml and app/build.gradle.kts contain no analytics/crash-reporting dependency; app/src/main/AndroidManifest.xml declares INTERNET, ACCESS_NETWORK_STATE and REQUEST_INSTALL_PACKAGES; core/app-updates/src/policy.rs pins the GitHub repository -->
 - Audio and subtitle track choices are remembered per series, not per
   episode, so a show's dub/subtitle preference sticks across every episode
-  without re-selecting it.
-  <!-- verified: core/playback-policy/src/prefs.rs per-series lookup doc comments; core/ffi/src/track_prefs.rs "Load previously saved per-series track prefs" -->
+  without re-selecting it. Choosing subtitles Off is remembered too: the
+  next episode stays subtitle-free even when the default mode would turn
+  them on.
+  <!-- verified: core/playback-policy/src/prefs.rs per-series lookup doc comments (TrackMemory::Off); core/ffi/src/track_prefs.rs "Load previously saved per-series track prefs"; PlaybackViewModel.chooseSubtitle remembers TrackMemoryFfi.Off; docs/18 §3.1 -->
 - Trickplay scrubbing shows the server's own thumbnail tiles while you
   seek, and keeps showing them through an accelerating hold-to-seek: the
   only Jellyfin client we know of that does. The thumbnail is re-sampled
@@ -703,6 +739,15 @@ public display.)*
   global play/pause remote button, and Assistant can all see and control
   what's on screen.
   <!-- verified: app/src/main/kotlin/tv/jellybeam/player/MediaSessionHolder.kt; gradle/libs.versions.toml androidx-media3-session comment -->
+- Remote media keys act whether or not the on-screen controls are showing:
+  Stop ends playback and saves the position (like Back, and also while the
+  next title is still loading or the "Still watching?" card is up), Fast
+  Forward and Rewind skip by the Settings skip-forward and skip-back seconds,
+  and Play / Pause toggle playback without restarting a finished item. Media
+  keys pressed before the first frame are ignored rather than reaching another
+  app. Keys a button-remapper app or the cast shell sends work too, in
+  fullscreen and in the mini player.
+  <!-- verified: app/src/main/kotlin/tv/jellybeam/player/MediaKeyRouter.kt MediaKeyRouter/MediaKeys; app/src/test/kotlin/tv/jellybeam/player/MediaKeyRouterTest.kt; PlaybackViewModel.stopFromRemote -->
 
 ## Planned
 

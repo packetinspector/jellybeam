@@ -1,0 +1,55 @@
+# <repo-relative path> | <exact trimmed source line>; one entry per bare runCatching line, reason on the # line above.
+# tools/check-cancellation.sh (docs/05 Coroutines) compares each file's lines with these as a multiset, so line numbers never matter.
+# A bare runCatching is allowed only where nothing in the block suspends or runs on a coroutine.
+# PackageManager read in a plain function
+app/src/main/kotlin/tv/jellybeam/JellybeamApp.kt | runCatching { appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName }
+# Activity-side profile verifier, not coroutine code
+app/src/main/kotlin/tv/jellybeam/MainActivity.kt | runCatching {
+app/src/main/kotlin/tv/jellybeam/MainActivity.kt | runCatching {
+# epoch re-read in a NonCancellable finally; a throw there would replace the call's own result
+app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt | runCatching {
+# getCompleted on a finished deferred rethrows its stored cancellation as data
+app/src/main/kotlin/tv/jellybeam/data/LaunchWarmup.kt | val prefetched = runCatching { deferred.getCompleted() }.getOrNull() ?: return null
+# PiP params call on the main thread
+app/src/main/kotlin/tv/jellybeam/player/PlaybackActivity.kt | runCatching { this@PlaybackActivity.setPictureInPictureParams(pipController.params()) }
+# await of a child inside NonCancellable; a bare catch keeps the prepared plan
+app/src/main/kotlin/tv/jellybeam/player/PlaybackViewModel.kt | plan to runCatching { settingsDeferred.await() }.getOrNull()
+# JNI overlay construction (Throwable) and blocking OkHttp range read, off coroutines
+app/src/main/kotlin/tv/jellybeam/player/PlayerHolder.kt | ): ByteArray? = runCatching {
+app/src/main/kotlin/tv/jellybeam/player/PlayerHolder.kt | assOverlay = runCatching { AssOverlay() }
+# Locale lookup, pure
+app/src/main/kotlin/tv/jellybeam/player/TrackReapply.kt | return runCatching { Locale.forLanguageTag(code).isO3Language }.getOrNull()?.takeIf { it.isNotEmpty() } ?: code
+# OkHttp callback thread and bitmap decoder, no coroutine
+app/src/main/kotlin/tv/jellybeam/player/TrickplayPreviewer.kt | return runCatching { decoder.decodeRegion(Rect(x, y, x + width, y + height), options) }.getOrNull()?.asImageBitmap()
+app/src/main/kotlin/tv/jellybeam/player/TrickplayPreviewer.kt | runCatching { body.byteStream().readNBytesCapped(TrickplayTransport.SHEET_MAX_BYTES) }.getOrNull()
+app/src/main/kotlin/tv/jellybeam/player/TrickplayPreviewer.kt | val decoder = runCatching { BitmapRegionDecoder.newInstance(sheet, 0, sheet.size, false) }.getOrNull() ?: return null
+# Media3 subtitle parser factory on the playback thread
+app/src/main/kotlin/tv/jellybeam/player/ass/PlainSsa.kt | parser = runCatching { DefaultSubtitleParserFactory().create(format) }.getOrNull()
+# date parse, pure
+app/src/main/kotlin/tv/jellybeam/ui/cards/CardFormatting.kt | ?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }
+# URI parse, pure
+app/src/main/kotlin/tv/jellybeam/ui/common/EmptyStateFormat.kt | val uri = runCatching { URI(serverUrl ?: return null) }.getOrNull() ?: return null
+# date parse, pure
+app/src/main/kotlin/tv/jellybeam/ui/detail/DetailFormatting.kt | dateStr?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }?.let { mediumDateFormat(locale).format(it) }
+app/src/main/kotlin/tv/jellybeam/ui/detail/DetailFormatting.kt | val added = dateCreated?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() } ?: return null
+# date parse, pure
+app/src/main/kotlin/tv/jellybeam/ui/detail/PersonFormatting.kt | rfc3339?.take(10)?.let { runCatching { LocalDate.parse(it).format(mediumDateFormatter(locale)) }.getOrNull() }
+# date parse, pure
+app/src/main/kotlin/tv/jellybeam/ui/library/RecordingFormatting.kt | premiereDate?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }
+# date and URI parse, pure
+app/src/main/kotlin/tv/jellybeam/ui/settings/AboutFormatting.kt | runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrNull()
+app/src/main/kotlin/tv/jellybeam/ui/settings/AboutFormatting.kt | val uri = runCatching { URI(url) }.getOrNull() ?: return null
+# PackageManager read in a composable
+app/src/main/kotlin/tv/jellybeam/ui/settings/AboutSection.kt | runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+# synchronous diagnostics writes; a throwing write is logged so the rest still run
+app/src/main/kotlin/tv/jellybeam/ui/settings/SettingsViewModel.kt | runCatching(write).onFailure { android.util.Log.w("SettingsViewModel", "diagnostics write failed: ${it.javaClass.simpleName}") }
+# date format, pure
+app/src/main/kotlin/tv/jellybeam/ui/settings/UpdatesSection.kt | runCatching { LocalDate.parse(snapshot?.publishedAt.orEmpty().take(10)).format(mediumDateFormatter(AppLocale.format)).uppercaseUi() }.getOrDefault("")
+# PackageInstaller calls, synchronous
+app/src/main/kotlin/tv/jellybeam/updates/AndroidUpdateInstaller.kt | .forEach { runCatching { manager.abandonSession(it.sessionId) } }
+app/src/main/kotlin/tv/jellybeam/updates/AndroidUpdateInstaller.kt | runCatching { manager.abandonSession(id) }
+app/src/main/kotlin/tv/jellybeam/updates/AndroidUpdateInstaller.kt | if (id >= 0 && runCatching { manager.abandonSession(id) }.isFailure && sessionExists()) return false
+app/src/main/kotlin/tv/jellybeam/updates/AndroidUpdateInstaller.kt | return id >= 0 && sessionExists() && runCatching { manager.openSession(id).use { it.commit(callback(id, generation).intentSender) } }.isSuccess
+# startActivity from UI callbacks, synchronous
+app/src/main/kotlin/tv/jellybeam/updates/UpdateCoordinator.kt | runCatching { activity.get()?.startActivity(intent) }.onFailure { pendingConfirmation = intent }
+app/src/main/kotlin/tv/jellybeam/updates/UpdateCoordinator.kt | runCatching { activity.get()?.startActivity(intent) }.onFailure { permissionReturn = false; permissionNeeded = true }

@@ -24,7 +24,6 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -56,7 +55,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.time.LocalDate
 import kotlinx.coroutines.Job
@@ -70,15 +68,17 @@ import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.cards.CollectionStackCard
 import tv.jellybeam.ui.cards.PosterCard
+import tv.jellybeam.ui.common.ActiveWhileTop
 import tv.jellybeam.ui.detail.CollectionFormatting
 import tv.jellybeam.ui.cards.PreloadOnDwell
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusRestorer
 import tv.jellybeam.ui.focus.RefreshRestoreOwner
+import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.placeByKeys
 import tv.jellybeam.ui.focus.refreshGuardEligible
-import tv.jellybeam.ui.focus.releaseCancelledFreezeInPlace
 import tv.jellybeam.ui.focus.restoreNow
 import tv.jellybeam.ui.focus.rememberFocusMemory
 import tv.jellybeam.ui.focus.requestFocusWithRetry
@@ -120,7 +120,7 @@ private val SUMMARY_SEPARATOR_HPADDING = 12.dp
  * empty-result gate).
  */
 private fun GridFilters.isAnyActive(): Boolean =
-    watched != WatchedFilter.ANY || genre != null || decade != null || status != StatusFilter.ANY
+    watched != WatchedFilter.ANY || genre != null || decade != null || status != StatusFilter.ANY || itemType != null
 
 /**
  * A `ViewKind.LIBRARY` view's full poster grid (docs/07 §3): title shows the server-configured
@@ -136,7 +136,7 @@ private fun GridFilters.isAnyActive(): Boolean =
  * Any other [ViewKind] (both [ViewKind.isLive]) is diverted to [ChannelFolderList] instead: a
  * plugin channel's recordings have no art, no runtime, and mostly identical names.
  *
- * [isTop]/[focusGate] are [tv.jellybeam.MainActivity]'s `JellybeamRoot`/`RetainedScreenLayer` wiring,
+ * [isTop] is [tv.jellybeam.MainActivity]'s `JellybeamRoot`/`RetainedScreenLayer` wiring,
  * same contract as every other retained screen.
  *
  * docs/15-focus-and-selection.md §2-§5: [tv.jellybeam.ui.focus.FocusMemory] keys every cell
@@ -157,15 +157,12 @@ fun LibraryScreen(
     view: ViewSnapshot,
     onOpenDetail: (Card) -> Unit,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate: closed while hidden/transitioning; opened before each explicit
-     * focus placement. See [tv.jellybeam.MainActivity.RetainedScreenLayer].
-     */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: LibraryViewModel = viewModel(
         key = "library-${view.id}",
         factory = LibraryViewModelFactory(AppGraph.gateway, view),
     ),
 ) {
+    val focusGate = LocalFocusGate.current
     val state by viewModel.state.collectAsState()
 
     if (view.kind != ViewKind.LIBRARY) {
@@ -175,7 +172,6 @@ fun LibraryScreen(
             viewModel = viewModel,
             onOpenDetail = onOpenDetail,
             isTop = isTop,
-            focusGate = focusGate,
         )
         return
     }
@@ -222,11 +218,7 @@ fun LibraryScreen(
         if (isTop) viewModel.onBecameTop()
     }
 
-    // docs/16 §4.6, docs/17-mini-player.md §6: feeds this screen's top-of-stack-and-resumed
-    // signal into LibraryViewModel.changeRefreshScheduler.
-    LaunchedEffect(isTop) {
-        viewModel.setActive(isTop)
-    }
+    ActiveWhileTop(isTop, viewModel::setActive)
 
     // docs/16 §4.2/§6: a return to top always finds the strip closed and its panel gone; neither
     // is a becoming-top restore target.
@@ -244,22 +236,12 @@ fun LibraryScreen(
     // with nothing re-placing it); `onFocusChanged.hasFocus` covers the strip and rail too.
     var libraryHasFocus by remember { mutableStateOf(false) }
 
-    // [RefreshRestoreOwner] (docs/15 §3) owns the refresh guard's `restoreNow` coroutine and its
-    // freeze. [refreshGuardEligible] is the shared predicate this guard and Home's read.
-    val refreshOwner = remember { RefreshRestoreOwner() }
+    // [RefreshRestoreOwner] (docs/15 §3) owns the refresh guard's `restoreNow` coroutine.
+    // [refreshGuardEligible] is the shared predicate this guard and Home's read.
+    val refreshOwner = rememberRefreshRestoreOwner(isTop)
     // Live top state read via `rememberUpdatedState`, never the captured `isTop` parameter: the
     // refresh guard's eligibility and the drawer close's in-place check.
     val latestIsTop by rememberUpdatedState(isTop)
-
-    // Mirrors HomeScreen's ON_PAUSE branch: losing RESUMED must cancel an in-flight
-    // refresh-restore job the same way losing `isTop` does below.
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) refreshOwner.ownershipLost()
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
 
     // docs/15 §3: opening the drawer leaves this screen top+resumed with focus moved outside its
     // root and [memory] not frozen, so a live refresh while open could satisfy the guard below
@@ -275,10 +257,8 @@ fun LibraryScreen(
                 drawerOpen = true
                 refreshOwner.ownershipLost()
             }
-            drawerFocusCoordinator.onDrawerClosed = { navigatingAway ->
+            drawerFocusCoordinator.onDrawerClosed = { _ ->
                 drawerOpen = false
-                // In-place close only: a navigating-away close must keep the navigation freeze.
-                refreshOwner.releaseCancelledFreezeInPlace(memory, ownsFocus = !navigatingAway && latestIsTop)
                 false
             }
         }
@@ -312,7 +292,6 @@ fun LibraryScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = state.items.isNotEmpty(),
         fallback = libraryFallback,
         tag = "library",
@@ -332,15 +311,14 @@ fun LibraryScreen(
         refreshOwner.onContentChanged(
             scope = scope,
             frame = { withFrameNanos {} },
-            eligible = { ownsFreeze ->
+            eligible = { ownTokens ->
                 !drawerOpen &&
                     refreshGuardEligible(
                         isTop = latestIsTop,
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = libraryHasFocus,
-                        frozen = memory.frozen,
-                        ownsFreeze = ownsFreeze,
+                        frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },
             restore = {
@@ -349,19 +327,15 @@ fun LibraryScreen(
         )
     }
 
-    // This guard's restore work must not outlive Library's ownership of focus; reruns on every
-    // `isTop` value.
-    LaunchedEffect(isTop) {
-        if (!isTop) refreshOwner.ownershipLost()
-    }
-
     // docs/16 §4.2/§6: Back and Down-off-the-strip's-last-row share this one closing path.
     // [stripOriginKey] is only safe to refocus if [state]'s sort/filters still match
     // [stripOriginSort]/[stripOriginFilters]; otherwise the origin card may have moved or dropped
     // out of the filtered set, and this lands on the grid's first item instead. Either branch
     // finishes with `animateScrollToItem(0)`, since a plain bring-into-view can leave row 0
-    // partially scrolled out of the space the collapsing strip just revealed.
-    val closeStrip: () -> Unit = {
+    // partially scrolled out of the space the collapsing strip just revealed. An empty grid has
+    // nothing for focus to land on, so the strip stays: it is the way back out (Reset).
+    val closeStrip: () -> Unit = closeStrip@{
+        if (state.items.isEmpty()) return@closeStrip
         stripOpen = false
         panel = null
         val originKey = stripOriginKey
@@ -370,12 +344,7 @@ fun LibraryScreen(
         scope.launch {
             if (moved || originKey == null) {
                 gridState.scrollToItem(0)
-                val firstId = state.items.firstOrNull()?.id
-                if (firstId != null) {
-                    memory.placeByKeys(listOf("card:$firstId"), focusGate)
-                } else {
-                    requestFocusWithRetry(focusGate) { initialFocusRequester.requestFocus() }
-                }
+                state.items.firstOrNull()?.let { memory.placeByKeys(listOf("card:${it.id}"), focusGate) }
             } else {
                 memory.placeByKeys(listOf(originKey), focusGate)
             }
@@ -383,9 +352,30 @@ fun LibraryScreen(
         }
     }
 
+    // docs/16 §6, docs/15 §2: a loaded grid with no posters under active filters opens the strip
+    // itself and lands focus on it, so Reset is reachable (a grid with no cell would hold none).
+    val seed = librarySeed(
+        isLoading = state.isLoading,
+        count = state.items.size,
+        filtersActive = state.filters.isAnyActive(),
+        userOpen = stripOpen,
+    )
+    LaunchedEffect(seed, isTop) {
+        if (view.supportsSortFilter && isTop && seed == LibrarySeed.STRIP && !stripOpen) {
+            stripOriginKey = null
+            stripOriginSort = state.sort
+            stripOriginFilters = state.filters
+            stripOpen = true
+            requestFocusWithRetry(focusGate) {
+                activeSortChipRequester.requestFocus()
+                true
+            }
+        }
+    }
+
     // `panel == null` leaves an open panel's own Back handling to [LibrarySortStrip] (offered
     // first, LIFO).
-    BackHandler(enabled = isTop && stripOpen && panel == null) { closeStrip() }
+    BackHandler(enabled = isTop && stripOpen && panel == null && state.items.isNotEmpty()) { closeStrip() }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -581,7 +571,6 @@ fun LibraryScreen(
                             state = state,
                             viewModel = viewModel,
                             isTop = isTop,
-                            focusGate = focusGate,
                             activeSortChipRequester = activeSortChipRequester,
                             panel = panel,
                             onPanelChange = { panel = it },
@@ -611,7 +600,6 @@ fun LibraryScreen(
                     gridState = gridState,
                     viewModel = viewModel,
                     memory = memory,
-                    focusGate = focusGate,
                     railRequester = railRequester,
                     isTop = isTop,
                     originKey = railOriginKey,

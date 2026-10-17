@@ -1,11 +1,13 @@
 package tv.jellybeam.ui.cards
 
+import tv.jellybeam.AppForeground
 import tv.jellybeam.data.FakeCoreGateway
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -20,6 +22,12 @@ import org.junit.Test
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PreloadOnDwellTest {
+
+    /** A card dwells only while MainActivity is resumed, which sets [AppForeground.browsing]. */
+    @Before
+    fun browsing() {
+        AppForeground.browsing.value = true
+    }
 
     @Test
     fun `sustained focus past the dwell threshold fires exactly one preload`() = runTest {

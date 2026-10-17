@@ -27,7 +27,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -63,10 +62,12 @@ import tv.jellybeam.ui.cards.PosterCard
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberHeaderPageBringIntoViewSpec
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
+import tv.jellybeam.ui.common.ActiveWhileTop
 import tv.jellybeam.ui.discover.DiscoverErrorMessage
 import tv.jellybeam.ui.discover.DiscoverPosterSkeletonRow
 import tv.jellybeam.ui.discover.SeerrPosterCard
 import tv.jellybeam.ui.discover.seerrCardKey
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
 import tv.jellybeam.ui.focus.FocusTarget
@@ -99,10 +100,9 @@ fun PersonScreen(
     onOpenDetail: (Card) -> Unit,
     onOpenDiscoverDetail: (mediaType: SeerrMediaType, tmdbId: Long) -> Unit,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate for this entry (see [tv.jellybeam.ui.library.LibraryScreen]). */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: PersonViewModel = viewModel(factory = PersonViewModelFactory(AppGraph.gateway, AppGraph.strings, personId)),
 ) {
+    val focusGate = LocalFocusGate.current
     val state by viewModel.state.collectAsState()
     val page = state.page
     val strings = rememberUiStrings()
@@ -143,8 +143,8 @@ fun PersonScreen(
     // A title opened from here may come back played: its badge is re-read on return, and mirror
     // changes keep it current from then on (the scheduler samples faster while top).
     var leftTop by remember { mutableStateOf(false) }
+    ActiveWhileTop(isTop, viewModel::setActive)
     LaunchedEffect(isTop) {
-        viewModel.setActive(isTop)
         if (!isTop) {
             leftTop = true
         } else if (leftTop) {
@@ -156,7 +156,6 @@ fun PersonScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         // An error lands focus on Retry instead of leaving nothing focused.
         ready = state.error != null || PersonPageLogic.focusReady(page != null, page?.library?.size ?: 0, state.discoverPending),
         fallback = {
@@ -261,7 +260,6 @@ fun PersonScreen(
                     scope.launch { memory.placeByKeys(listOf(OVERVIEW_MORE_KEY), focusGate) }
                 },
                 isTop = isTop,
-                focusGate = focusGate,
             )
         }
     }

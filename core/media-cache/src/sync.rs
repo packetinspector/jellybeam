@@ -1266,7 +1266,6 @@ async fn bus_listener(state: Weak<MirrorState>, mut bus: broadcast::Receiver<Bus
 async fn apply_bus_event(state: &MirrorState, event: BusEvent) {
     match event {
         BusEvent::Server(server_event) => apply_server_event(state, server_event).await,
-        BusEvent::Connected | BusEvent::Disconnected => {}
         // This is the reconnect signal: delta covers the disconnected window and the
         // user-state refresher covers what delta can't (a UserData-only change this
         // session's own WS never saw).
@@ -2320,7 +2319,6 @@ mod tests {
     use crate::writer::WriterHandle;
     use jellyfin_api::{ClientIdentity, JellyfinClient};
     use serde_json::json;
-    use tokio::sync::mpsc;
 
     fn identity() -> ClientIdentity {
         ClientIdentity {
@@ -2340,11 +2338,10 @@ mod tests {
         assert!(fields.iter().any(|f| f == "SortName"), "{fields:?}");
     }
 
-    /// Wires a real writer task + read pool against a fresh temp mirror.
+    /// Wires a real writer thread + read pool against a fresh temp mirror.
     struct TestMirror {
         _dir: tempfile::TempDir,
         state: Arc<MirrorState>,
-        _writer_task: tokio::task::JoinHandle<()>,
     }
 
     impl TestMirror {
@@ -2359,17 +2356,13 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             let path = dir.path().join("mirror.db");
             let (conn, _empty) = crate::schema::open_and_prepare(&path).expect("open");
-            let (tx, rx) = mpsc::channel(64);
             let (changes_tx, _) = tokio::sync::broadcast::channel(64);
-            let writer_changes_tx = changes_tx.clone();
-            let writer_task = tokio::task::spawn_blocking(move || {
-                crate::writer::run(conn, rx, writer_changes_tx)
-            });
+            let writer = WriterHandle::spawn(conn, changes_tx.clone()).expect("writer thread");
             let read_pool = Arc::new(ReadPool::open(&path, 2).expect("read pool"));
             let state = Arc::new_cyclic(|weak| {
                 MirrorState::new(
                     client,
-                    WriterHandle::new(tx),
+                    writer,
                     read_pool,
                     path.clone(),
                     changes_tx,
@@ -2377,11 +2370,7 @@ mod tests {
                     local_pending,
                 )
             });
-            Self {
-                _dir: dir,
-                state,
-                _writer_task: writer_task,
-            }
+            Self { _dir: dir, state }
         }
 
         /// Convenience for call sites (like `initial_sync`) that take a `Weak<MirrorState>`.
@@ -5092,7 +5081,7 @@ mod tests {
         );
     }
 
-    /// Drives `event_bus::supervise`'s reconnect sequence (`Connected` then `NeedsReconcile`)
+    /// Drives `event_bus::supervise`'s reconnect signal (`NeedsReconcile` on every connect)
     /// through `bus_listener` end-to-end, asserting `reconcile_all` heals a mismatch
     /// immediately without waiting on `reconcile_timer`.
     #[tokio::test]
@@ -5133,7 +5122,6 @@ mod tests {
         let (bus_tx, bus_rx) = broadcast::channel::<BusEvent>(16);
         tokio::spawn(bus_listener(mirror.weak(), bus_rx));
 
-        bus_tx.send(BusEvent::Connected).expect("send Connected");
         bus_tx
             .send(BusEvent::NeedsReconcile)
             .expect("send NeedsReconcile");

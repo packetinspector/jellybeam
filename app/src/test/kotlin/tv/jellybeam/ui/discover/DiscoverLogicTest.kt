@@ -8,7 +8,6 @@ import uniffi.jellybeam_core.SeerrAvailability
 import uniffi.jellybeam_core.SeerrCard
 import uniffi.jellybeam_core.SeerrMediaType
 import uniffi.jellybeam_core.SeerrSeasonStatus
-import uniffi.jellybeam_core.SeerrStatus
 
 /** docs/14-seerr-discover.md's own house "one tested rule, not N inline checks" convention -- see
  * DiscoverLogic.kt's class doc comment for what each function decides.
@@ -152,20 +151,6 @@ class DiscoverLogicTest {
     fun `an already distinct list is returned unchanged`() {
         val cards = listOf(card(SeerrMediaType.MOVIE, 1), card(SeerrMediaType.TV, 2))
         assertEquals(cards, distinctSeerrCards(cards))
-    }
-
-    // -- shouldShowDiscoverDrawerEntry ------------------------------------------
-
-    @Test
-    fun `drawer entry is hidden when discover is not configured`() {
-        val status = SeerrStatus(configured = false, seerrUrl = null, method = null, identity = null, appTitle = null)
-        assertFalse(shouldShowDiscoverDrawerEntry(status))
-    }
-
-    @Test
-    fun `drawer entry shows once discover is configured`() {
-        val status = SeerrStatus(configured = true, seerrUrl = "https://seerr.test", method = null, identity = "viewer", appTitle = null)
-        assertTrue(shouldShowDiscoverDrawerEntry(status))
     }
 
     // -- Season request picker --------------------------------------------------

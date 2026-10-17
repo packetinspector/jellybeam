@@ -201,6 +201,32 @@ class NavBackStackTest {
     }
 
     @Test
+    fun `pushing past the cap leaves every surviving entry's key untouched`() {
+        // docs/07 §5: Compose keeps a retained layer (and its ViewModel) only while its key holds,
+        // so eviction of the oldest intermediate entry must not re-key the ones that stay.
+        var stack = NavBackStack.of(Screen.Home)
+        repeat(NavBackStack.MAX_RETAINED_ENTRIES + 4) { index ->
+            val before = stack.entries.map { it.entryIdentity() }.zip(stack.entryKeys()).toMap()
+
+            stack = stack.push(Screen.Detail(testCard(id = "card-$index")))
+
+            val after = stack.entries.map { it.entryIdentity() }.zip(stack.entryKeys())
+            after.forEach { (identity, key) ->
+                before[identity]?.let { assertEquals("push #$index re-keyed $identity", it, key) }
+            }
+        }
+    }
+
+    @Test
+    fun `entry keys stay unique across pushes, evictions and a repeated title`() {
+        var stack = NavBackStack.of(Screen.Home)
+        repeat(NavBackStack.MAX_RETAINED_ENTRIES + 4) { index ->
+            stack = stack.push(Screen.Detail(testCard(id = "card-${index % 3}")))
+            assertEquals("push #$index", stack.entries.size, stack.entryKeys().toSet().size)
+        }
+    }
+
+    @Test
     fun `pop leaves every surviving entry's key untouched`() {
         val stack = NavBackStack.of(Screen.Home)
             .push(Screen.Detail(testCard(id = "a")))
@@ -289,5 +315,41 @@ class NavBackStackTest {
         assertEquals(listOf(Screen.Home, movies), onMovies.entries)
         assertEquals(listOf(Screen.Home, shows), onMovies.forDrawerPick(shows).entries)
         assertEquals(listOf(Screen.Home), onMovies.push(Screen.Search).forDrawerPick(Screen.Home).entries)
+    }
+
+    // ---- popIfTop ------------------------------------------------------------
+
+    @Test
+    fun `popIfTop pops when the entry is the top`() {
+        val stack = NavBackStack.of(Screen.Home).push(Screen.Detail(testCard(id = "a")))
+
+        val popped = stack.popIfTop(stack.ids.last())
+
+        assertEquals(listOf(Screen.Home), popped.entries)
+    }
+
+    @Test
+    fun `popIfTop leaves the stack alone when the entry already left`() {
+        val stack = NavBackStack.of(Screen.Home).push(Screen.Detail(testCard(id = "a")))
+        val goneId = stack.ids.last()
+        val after = stack.pop().push(Screen.Library(ViewSnapshot(id = "v1", name = "Movies", kind = ViewKind.LIBRARY)))
+
+        assertEquals(after.entries, after.popIfTop(goneId).entries)
+    }
+
+    @Test
+    fun `popIfTop leaves the stack alone when another screen was pushed over the entry`() {
+        val stack = NavBackStack.of(Screen.Home).push(Screen.Detail(testCard(id = "a")))
+        val detailId = stack.ids.last()
+        val over = stack.push(Screen.Detail(testCard(id = "b")))
+
+        assertEquals(over.entries, over.popIfTop(detailId).entries)
+    }
+
+    @Test
+    fun `popIfTop never pops the root`() {
+        val stack = NavBackStack.of(Screen.Home)
+
+        assertEquals(stack.entries, stack.popIfTop(stack.ids.last()).entries)
     }
 }

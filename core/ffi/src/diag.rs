@@ -36,9 +36,15 @@ impl From<Level> for DiagLevel {
 /// Kotlin-implemented sink for forwarded `tracing` records (docs/21 §2.1).
 /// One record per `event()` call, on the emitting thread -- see
 /// [`install_diag_sink`] for the cost contract.
-#[uniffi::export(with_foreign)]
+#[uniffi::export(foreign)]
 pub trait DiagSink: Send + Sync {
-    fn on_record(&self, level: DiagLevel, target: String, message: String, fields: String);
+    fn on_record(
+        &self,
+        level: DiagLevel,
+        target: String,
+        message: String,
+        fields: String,
+    ) -> Result<(), crate::error::CallbackError>;
 }
 
 /// The only string/Debug/Error field names forwarded as scrubbed text
@@ -354,7 +360,8 @@ impl Subscriber for DiagSubscriber {
         let metadata = event.metadata();
         let mut visitor = EventVisitor::default();
         event.record(&mut visitor);
-        self.sink.on_record(
+        // Dropped, not logged: a WARN about a failed record would re-enter this sink.
+        let _ = self.sink.on_record(
             DiagLevel::from(*metadata.level()),
             metadata.target().to_string(),
             visitor.message.unwrap_or_default(),
@@ -386,11 +393,18 @@ mod tests {
     }
 
     impl DiagSink for TestSink {
-        fn on_record(&self, level: DiagLevel, target: String, message: String, fields: String) {
+        fn on_record(
+            &self,
+            level: DiagLevel,
+            target: String,
+            message: String,
+            fields: String,
+        ) -> Result<(), crate::error::CallbackError> {
             self.records
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push((level, target, message, fields));
+            Ok(())
         }
     }
 
@@ -508,11 +522,18 @@ mod tests {
         let body = "Private Title / plancklike-user /media/family/x.mkv storeserver.example.test"
             .to_string();
         let err = jellyfin_api::ApiError::Status { code: 500, body };
+        // A host-naming CoreError's Display is forwarded the same way: as a label only.
+        let unreachable = crate::CoreError::ServerUnreachable {
+            host: "storeserver.example.test".to_string(),
+            reason: crate::error::UnreachableReason::ConnectionRefused,
+            detail: String::new(),
+        };
         let records = run_with_sink(|| {
             tracing::warn!(error = %err, "sync failed");
             tracing::warn!(err = ?err, "sync failed");
+            tracing::warn!(error = %unreachable, "sign-in failed");
         });
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
         for (_, _, _, fields) in &records {
             assert!(!fields.contains("Private Title"));
             assert!(!fields.contains("plancklike-user"));
@@ -521,6 +542,7 @@ mod tests {
         }
         assert_eq!(records[0].3, "error=http_500");
         assert_eq!(records[1].3, "err=http_500");
+        assert_eq!(records[2].3, "error=other");
     }
 
     #[test]
@@ -570,7 +592,8 @@ mod tests {
                 _target: String,
                 _message: String,
                 _fields: String,
-            ) {
+            ) -> Result<(), crate::error::CallbackError> {
+                Ok(())
             }
         }
         let installed = install_diag_sink(Arc::new(NoopSink));

@@ -151,7 +151,10 @@ fields. Presets are a Kotlin concern (the chip row), the core accepts any
   in Cap mode.
 - `prepare_playback` joins a same-item in-flight preload instead of
   aborting it, reusing the negotiation already under way; a preload for
-  any other item is aborted as before.
+  any other item is aborted and Play negotiates at once, never waiting on it.
+  A repeated dwell trigger renegotiates a cache at least half its 30 s TTL
+  old (the old entry serves Play until the refresh publishes); Play still
+  consumes a cache until the full TTL.
 
 ### 2.1 Playback ownership
 
@@ -193,26 +196,29 @@ overlap a negotiation; these rules give every overlap one outcome.
   abandoned or the account changes, and the stop's position when a stop
   revokes the claim.
 - **Account boundary.** Every sign-in, reauthentication, Quick Connect,
-  restore, switch, sign-out and removal of the active account goes through
-  one reset, and the epoch advances. A live playback (installed, retiring
+  restore, switch and removal of the active account goes through
+  one reset, and the epoch advances (removing the active account also
+  installs the next saved one in the same call, so the app sees one change; any result that started
+  under an older epoch, a mirror open included, writes nothing). A live playback (installed, retiring
   or negotiating) outlives it: its account (client and mirror) is parked
   with the epoch its requests carry, so the player keeps reporting, falls
   back, renegotiates, fetches sidecars, reads trickplay, segments and OSD
   detail and plays next-up on the server it started on, while browsing
   moves to the new account. A parked account resolves to the installed
   client whenever it is the same saved account again (a re-sign-in's fresh
-  token, a switch back). The newest admitted request that has not failed
-  names the playing account: a switch parks the account the newest playback is on, replacing
+  token, a switch back). The newest playback still negotiating or streaming
+  names the playing account (a stopped one names none, so a switch after a
+  stop parks nothing): a switch parks the account the newest playback is on, replacing
   an older parked one (a playback started on the browsed account after the
   kept one ended), so its negotiation survives a further switch. Only
   leaving the account that plays ends it:
-  signing out of it, or removing it (active or not), clears the claim and
+  removing it (active or not) clears the claim and
   stops the installed session at its last reported position (it keeps its
   resume point, at most a second old), with its sidecars cleared. The
   parked account is released when a request on the current account
   installs or its account is left; not when its playback stops, since
   next-up stops before it prepares. Leaving it ends playback only while
-  its playback is the newest admitted; otherwise it is just dropped, so a
+  its playback is the newest one; otherwise it is just dropped, so a
   newer playback negotiating elsewhere is untouched. Every 401 names the
   account whose token was rejected (the HTTP client attaches its server and
   user where it sees the status), and `reauthorization_account` re-authorizes
@@ -222,7 +228,8 @@ overlap a negotiation; these rules give every overlap one outcome.
   account after its teardown ends the playback, while that account is saved.
   A 401 from any other account, one switched away from or removed, prompts
   nobody, never the browsed account in its place; switching back re-checks
-  that token. "Still watching?" Stop
+  that token. A rejected live-events socket asks the same way, once per
+  bus and only while its bus is installed. "Still watching?" Stop
   on a parked playback closes instead of opening a detail page the browsed
   account would resolve. A parked account resolves to the installed one field by
   field, so a switch back still has its mirror until Kotlin reopens it.
@@ -235,10 +242,10 @@ overlap a negotiation; these rules give every overlap one outcome.
   that replaced it. Removing an account nothing plays on is not an account
   change, and neither is restoring the account already installed (a
   recreated Activity, a failed switch).
-- Kotlin reads `parked_account_epoch()` then `account_epoch()` after every
+- Kotlin reads `account_epochs()` (both under one lock) after every
   account call (`RealCoreGateway`, in a `NonCancellable` `finally`, so a
-  cancelled caller still refreshes and reopens); a request owns playback
-  while its epoch is either. `AccountChanged` is logged, never swallowed
+  cancelled caller still publishes); a request owns playback while its
+  epoch is either. `AccountChanged` is logged, never swallowed
   as stale.
 
 Session threading rules shared by every path above:
@@ -270,10 +277,10 @@ Session threading rules shared by every path above:
   (`planOutcome`); otherwise it is abandoned by its own `play_session_id`, and the player closes if
   the account changed under it. A failure reaches the viewer only from its owner
   (`failureOutcome`), which also decides re-authorization: the fallback call never routes a 401 to
-  recovery through the gateway. A plan or failure that lands while an
-  account call is in flight waits for it (`CoreGateway.awaitAccountCalls`) and
-  is then judged against ownership: still open, it publishes; closed, the
-  player closes. A live owner whose epoch no longer owns playback closes; the watch starts once
+  recovery through the gateway. A plan or failure is judged against the
+  core's ownership as it is now (`CoreGateway.playbackOwnershipOpenNow`),
+  even while an account call is in flight: still open, it publishes; closed,
+  the player closes. A live owner whose epoch no longer owns playback closes; the watch starts once
   the first request is minted after the launch restore
   (`awaitAccountRestored`), so a cold start never closes itself. A transcode
   negotiation in flight owns the session it retires: stop and abandon name
@@ -338,8 +345,8 @@ Session threading rules shared by every path above:
     loads the new plan (same tolerate/decoder preferences), re-seeds
     `_positionTicks`, updates `playMethod`/`transcodeReason`, keeps every
     other session field (next-up, segments, trickplay). Failure → the
-    fatal path with the core's message. `sessionEnded` stays false
-    throughout (the core swapped reporting sessions itself).
+    fatal path with the core's message. The owner stays
+    `SessionOwner.Playing` throughout (the core swapped reporting sessions itself).
   - `start()` runs the native prepare under `NonCancellable` (the JNI call
     cannot be cancelled anyway); its plan goes through the request owner
     (§3), so a plan whose owner was cleared meanwhile is abandoned by its own
@@ -366,8 +373,8 @@ Session threading rules shared by every path above:
   per-session reset, by `endSessionForStop`/`abandonPlaybackOnce` (same set
   of leftover-job cancels as the reconnect/buffering/library-info jobs), and
   by `chooseAudio`/`chooseSubtitle` before applying the manual decision.
-  Belt and braces: the coroutine also re-checks a captured `sessionGeneration`
-  snapshot and a `manualTrackChoiceMade` flag before applying, same
+  Belt and braces: the coroutine also re-checks its captured
+  `SessionScope` and a `manualTrackChoiceMade` flag before applying, same
   "cancellation is cooperative, re-check on the other side too" shape
   `maybeFallBackToTranscode` already uses for the transcode-fallback result.
   A late automatic result can therefore never overwrite a newer session or a

@@ -27,7 +27,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -106,9 +105,6 @@ fun SearchScreen(
     /** MainActivity's zero-network Seerr gate; the Discover section exists only while it is true. */
     discoverConfigured: Boolean,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate for this entry -- closed while hidden/transitioning; opened
-     * before each explicit focus placement. See [tv.jellybeam.MainActivity.RetainedScreenLayer]. */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: SearchViewModel = viewModel(factory = SearchViewModelFactory(AppGraph.gateway)),
 ) {
     val state by viewModel.state.collectAsState()
@@ -146,7 +142,6 @@ fun SearchScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = true,
         fallback = { fieldFocusRequester.asFocusTarget() },
         tag = "search",

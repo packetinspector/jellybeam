@@ -6,7 +6,7 @@ dp≈px below.
 ## 1. Home screen composition
 
 The ViewModel owns the initial snapshot load. Composition and the first host-resume
-event do not request duplicate loads; later host resumes, returns to Home, and
+event do not request duplicate loads; later host resumes (which cut the refresh rest, so a return from playback shows at once), returns to Home, and
 mirror changes still refresh, including changes received during the initial load.
 
 Shelf order, empty-shelf hiding and the hero are decided in the core (`core/ffi/src/home/classic.rs`, docs/25 §3); `size` is the Shelf size setting (10/20/30, default 20):
@@ -112,7 +112,8 @@ Play/Resume plays it.
 - Startup: persisted startup_screen matched against current session's libraries; Home default; stale id → Home (root.rs:2588-2601).
 - Enter/click on ANY card (Home or Library) opens Detail — never direct play (root.rs:4040-4097). Playback starts only from Detail's Play/Resume, or the episode-thumbnail one-click-play glyph (bottom-left of 16:9 thumb).
 - On an Episode detail page, activating a sibling episode swaps in place (`nav.replace`) — Back skips visited siblings; from Series/Season detail it pushes (`nav.go`).
-- History: browser-style back/forward stacks over Home / Library{id} / Detail{item_id}.
+- History: browser-style back/forward stacks over Home / Library{id} / Detail{item_id}. Each stack entry carries an id from a counter that only grows, assigned at push; it keys the entry's retained layer and ViewModel, so pushing past the retention cap never re-keys an entry that stays.
+- **Browse reads.** `children_read` / `series_episodes_read` return `NotReady` (mirror not open), `Failed` (query failed) or `Items` (possibly empty). A screen keeps loading on `NotReady` for at most 10 s, then reads it as `Failed`; it shows an error with Retry on `Failed`, and treats only an empty `Items` as empty. A series page's list error follows the newest read of each list (seasons, all episodes, the selected season's episodes, a season served from memory included): a stale failure after a newer success never raises it. The library list (`views`) is read when the mirror opens and again on a views change or a merged `Refresh` (never on item changes); the core's change listener is registered before the mirror opens so no early event is lost, and Home and the drawer share it. A Movie/Episode page closes on a `Removed` for its item, or on a `Refresh` after which the mirror no longer holds it (a failed probe never closes it); it pops only its own entry, and only while that entry is on top. A playback stop reaching a page across an epoch gap (stops conflated) counts as a stop of an unknown item, so the page refreshes.
 - **Nav drawer and menu spine.** The drawer opens on D-pad Left
   once `moveFocus(Left)` fails inside the screen (a true left edge, never a guess) and closes
   on Right or Back. Its closed edge is always on screen as the *menu spine*: a non-focusable
@@ -128,8 +129,7 @@ Play/Resume plays it.
   strip is never a focus target, and the feature carries no copy, coach mark, or setting.
   Not on Search or Discover Search (no drawer there) and not during playback.
 - **Favorites entry.** Directly under Home, only while the user has at least one favorite
-  (`has_favorites`, re-checked with the library list on every mirror change, one write so the
-  drawer recomposes once). It opens the Favorites page: the library grid scoped to every
+  (`has_favorites`, re-checked on every mirror change; the library list beside it moves only on a views change). It opens the Favorites page: the library grid scoped to every
   favorite (docs/16 §2.7). Settings › Home › Favorites row hides only the Home shelf.
 
 ## 6. Metrics (theme.rs)

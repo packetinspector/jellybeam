@@ -4,14 +4,19 @@ import java.lang.reflect.Proxy
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import tv.jellybeam.player.authorizationRecoveryCoordinator
+import uniffi.jellybeam_core.AccountEpochs
 import uniffi.jellybeam_core.AccountIdentity
+import uniffi.jellybeam_core.ChangeListener
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.JellybeamCoreInterface
@@ -28,7 +33,7 @@ class RealCoreGatewayReauthorizationTest {
         delegate: JellybeamCoreInterface = Proxy.newProxyInstance(
             JellybeamCoreInterface::class.java.classLoader,
             arrayOf(JellybeamCoreInterface::class.java),
-        ) { _, method, _ -> if (method.name.substringBefore('-') == "accountEpoch") 0L else null } as JellybeamCoreInterface,
+        ) { _, method, _ -> if (method.name.substringBefore('-') == "accountEpochs") AccountEpochs(epoch = 0uL, parked = null) else null } as JellybeamCoreInterface,
     ) : JellybeamCoreInterface by delegate {
         override fun getItemDetail(itemId: String, accountEpoch: ULong?): ItemDetail = throw error
         override fun seerrHome(): SeerrHome = throw error
@@ -65,5 +70,30 @@ class RealCoreGatewayReauthorizationTest {
         runCatching { gateway.seerrHome() }
 
         assertNull(authorizationRecoveryCoordinator.requests.value)
+    }
+
+    @Test
+    fun `a live-events 401 asks to re-authorize the account it names`() = runBlocking<Unit> {
+        val listener = CompletableDeferred<ChangeListener>()
+        val core = Proxy.newProxyInstance(
+            javaClass.classLoader,
+            arrayOf(JellybeamCoreInterface::class.java),
+        ) { _, method, args ->
+            when (method.name.substringBefore('-')) {
+                "accountEpochs" -> AccountEpochs(epoch = 0uL, parked = null)
+                "setChangeListener" -> { listener.complete(args!![0] as ChangeListener); null }
+                else -> null
+            }
+        } as JellybeamCoreInterface
+        val scope = CoroutineScope(Job())
+        val gateway = RealCoreGateway(core = CompletableDeferred(core), backgroundScope = scope)
+        val collecting = gateway.changeEvents().onEach { }.launchIn(scope)
+
+        withTimeout(5_000) { listener.await() }.onUnauthorized(rejected)
+        collecting.cancel()
+
+        val request = authorizationRecoveryCoordinator.requests.value
+        assertEquals(rejected, request?.account)
+        assertEquals("a socket's 401, not a failed playback", false, request?.failedPlayback)
     }
 }

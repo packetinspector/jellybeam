@@ -4,10 +4,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.R
+import tv.jellybeam.data.BrowseNotReady
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
-import tv.jellybeam.player.PlaybackReports
 import tv.jellybeam.ui.common.ChangeRefreshScheduler
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
@@ -17,15 +17,16 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.CollectionInfo
@@ -38,6 +39,12 @@ private const val BOXSET_ITEM_TYPE = CollectionFormatting.BOXSET_ITEM_TYPE
 
 /** docs/11-detail-ux-spec.md tier 2 item 13: "up to [limit]... from a live GetSimilar call." */
 private const val SIMILAR_LIMIT = 16u
+
+/** How long [DetailViewModel.browse] waits before asking again while the mirror is not open. */
+private const val BROWSE_NOT_READY_RETRY_MS = 1_000L
+
+/** How long a browse read waits for the mirror to open before it counts as failed (docs/07 §5). */
+private const val BROWSE_NOT_READY_BUDGET_MS = 10_000L
 
 /** How long [DetailUiState.toast] stays before [DetailViewModel] clears it (docs/19 §1.4). */
 private const val TOAST_DURATION_MS = 2_500L
@@ -151,6 +158,13 @@ data class DetailUiState(
     val pendingPlayback: PendingPlayback? = null,
     /** A "Go to series" row's target, consumed once by [DetailScreen] to navigate. */
     val pendingSeriesNavigation: Card? = null,
+    /** True once the mirror dropped this Movie/Episode; [DetailScreen] then pops (docs/07 §5). */
+    val itemRemoved: Boolean = false,
+    /**
+     * Series only: a season, episode or all-episodes read failed (docs/07 §5), as opposed to
+     * returning nothing; [DetailScreen] shows an error with Retry ([DetailViewModel.retryLists]).
+     */
+    val listError: Boolean = false,
 )
 
 /**
@@ -163,8 +177,6 @@ class DetailViewModel(
     private val card: Card,
     /** docs/27 §3: toast and menu text. */
     private val strings: UiStrings,
-    /** docs/17 §6's mini-player dismissal edge; injected so a test can drive it directly. */
-    private val stopEpoch: Flow<Long> = PlaybackReports.stopEpoch,
     /** docs/19 §3.3's "Play something random" -- injected so tests are deterministic. */
     private val random: Random = Random.Default,
 ) : ViewModel() {
@@ -205,6 +217,9 @@ class DetailViewModel(
     /** Bumped by each [DetailUiState.allEpisodes] read, so an older read never lands over a newer one. */
     private var allEpisodesSeq = 0
 
+    /** The newest recorded outcome of each series list; [DetailUiState.listError] is "any failed". Main-thread only. */
+    private val listOutcomes = ListOutcomes()
+
     private suspend fun refreshShowVirtualEpisodes() {
         showVirtualEpisodes = runCatchingCancellable { gateway.getSettings().showVirtualEpisodes }.getOrNull()
     }
@@ -221,10 +236,7 @@ class DetailViewModel(
         return DetailFormatting.episodesOfSeason(season, state.allEpisodes, showVirtual)
     }
 
-    /**
-     * Drives [changeRefreshScheduler]'s sampling rate, same shape as Home/Library: whether the
-     * screen is top of its stack ([setActive]); `true` until told otherwise (500ms, not the 3s hidden rate).
-     */
+    /** Whether the screen is top of its stack ([setActive]); [changeRefreshScheduler] refreshes only while true. */
     private val _active = MutableStateFlow(true)
 
     fun setActive(active: Boolean) {
@@ -232,14 +244,13 @@ class DetailViewModel(
     }
 
     /**
-     * [ChangeRefreshScheduler] drives the mirror-relevant refresh (header card; for a Series, the
-     * season/episode quiet re-query). Filtered before the scheduler so conflation can't swallow a
-     * relevant event landing earlier in a burst than an irrelevant one.
+     * The mirror-relevant refresh (header card; for a Series, the season/episode quiet re-query); a
+     * playback stop arrives as its item's Upserted (docs/17 §6). [affectsThisDetail] decides per event, ahead of conflation.
      */
     private val changeRefreshScheduler: ChangeRefreshScheduler<ChangeEvent> = ChangeRefreshScheduler(
         scope = viewModelScope,
-        // Unlimited buffer: the suspending filter must not make this subscriber lag the DROP_OLDEST bus.
-        events = gateway.changeEvents().buffer(Channel.UNLIMITED).filter(::affectsThisDetail),
+        events = gateway.changeEvents(),
+        affects = ::affectsThisDetail,
         active = _active.asStateFlow(),
         refresh = {
             refreshCard()
@@ -279,12 +290,19 @@ class DetailViewModel(
             _state.update { it.copy(collections = collections) }
         }
         viewModelScope.launch { refreshMemberOfCollections() }
-        // Re-query on mirror changes for every item type, including [DetailUiState.card] itself,
-        // quietly (no isLoading flips, selection preserved). docs/17 §6: a PiP dismissal's stop
-        // report has no live Detail screen in its call stack; `drop(1)` skips the flow's seed.
-        viewModelScope.launch {
-            // The scheduler's one loop owns refreshes, so a stop report never overlaps a change refresh.
-            stopEpoch.drop(1).collect { changeRefreshScheduler.requestRefresh() }
+        // docs/07 §5: a Movie/Episode the mirror dropped has nothing left to show; a merged Refresh
+        // may hide its Removed, so it probes the mirror (a failed probe never closes the page).
+        if (card.itemType != SERIES_ITEM_TYPE && card.itemType != BOXSET_ITEM_TYPE) {
+            viewModelScope.launch {
+                gateway.changeEvents().buffer(Channel.UNLIMITED).first { event ->
+                    when (event) {
+                        is ChangeEvent.Removed -> card.id in event.ids
+                        ChangeEvent.Refresh -> probeCardPresence { gateway.cardById(card.id) } == CardPresence.Gone
+                        else -> false
+                    }
+                }
+                _state.update { it.copy(itemRemoved = true) }
+            }
         }
     }
 
@@ -312,8 +330,8 @@ class DetailViewModel(
     private fun loadCollection(): Job {
         collectionJob?.cancel()
         return viewModelScope.launch {
-            val members = runCatchingCancellable { gateway.children(card.id, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE) }
-                .getOrNull()?.let { DetailFormatting.dedupeById(it) { member -> member.id } }
+            val members = browse { gateway.children(card.id, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE) }
+                ?.let { DetailFormatting.dedupeById(it) { member -> member.id } }
             if (members == null) {
                 _state.update { it.copy(membersSettled = true) }
                 return@launch
@@ -366,25 +384,53 @@ class DetailViewModel(
      */
     private suspend fun loadAllEpisodes(seriesId: String) {
         val seq = ++allEpisodesSeq
-        val allEpisodes = try {
-            gateway.seriesEpisodes(seriesId)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            emptyList()
-        }
+        val allEpisodes = browse { gateway.seriesEpisodes(seriesId) }
         refreshShowVirtualEpisodes()
-        publishAllEpisodes(seq, allEpisodes)
+        publishAllEpisodes(seq, allEpisodes.orEmpty(), failed = allEpisodes == null)
+    }
+
+    /**
+     * Records the outcome of read [seq] of [source] and re-derives [DetailUiState.listError]; an
+     * outcome older than the newest recorded for [source] is dropped (docs/07 §5).
+     */
+    private fun recordRead(source: ReadSource, seq: Int, ok: Boolean) {
+        listOutcomes.record(source, seq, ok)
+        _state.update { it.copy(listError = listOutcomes.anyFailed) }
+    }
+
+    /**
+     * One mirror browse read for a screen that must tell its outcomes apart (docs/07 §5): rows
+     * (possibly none), or `null` when the read failed. A mirror that is not open yet is waited
+     * out for [BROWSE_NOT_READY_BUDGET_MS], so the page keeps loading rather than settling on
+     * nothing; past the budget it reads as failed, so the error and Retry show.
+     */
+    private suspend fun <T> browse(read: suspend () -> T): T? = withTimeoutOrNull(BROWSE_NOT_READY_BUDGET_MS) {
+        var result: T? = null
+        var settled = false
+        while (!settled) {
+            try {
+                result = read()
+                settled = true
+            } catch (_: BrowseNotReady) {
+                delay(BROWSE_NOT_READY_RETRY_MS)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                settled = true
+            }
+        }
+        result
     }
 
     /**
      * The only writer of [DetailUiState.allEpisodes], [DetailUiState.allEpisodesSettled] and
-     * [allEpisodesResolved]: a [seq] older than the newest published is dropped whole (no settle, no resume pick), the winner
-     * then re-derives the selection. Deduped: a repeated id is a mirror data error.
+     * [allEpisodesResolved]: a [seq] older than the newest published is dropped whole (no settle, no resume pick, no outcome), the winner
+     * then re-derives the selection. Deduped: a repeated id is a mirror data error. [failed] records the read as failed.
      */
-    private fun publishAllEpisodes(seq: Int, list: List<Card>) {
+    private fun publishAllEpisodes(seq: Int, list: List<Card>, failed: Boolean = false) {
         if (seq <= publishedAllSeq) return
         publishedAllSeq = seq
+        recordRead(ReadSource.ALL_EPISODES, seq, ok = !failed)
         _state.update { it.copy(allEpisodes = DetailFormatting.dedupeById(list) { e -> e.id }, allEpisodesSettled = true) }
         allEpisodesResolved = true
         syncSelection(resyncEpisodes = true)
@@ -470,24 +516,35 @@ class DetailViewModel(
     private suspend fun loadSeasons(seriesId: String) {
         val seq = ++seasonsSeq
         _state.update { it.copy(isLoadingSeasons = true) }
-        // Fails open so the page still settles and its focus seed can fall back to the door.
-        val seasons = runCatchingCancellable {
+        // A failed read settles the page (so its focus seed can fall back to the door) and says so.
+        val seasons = browse {
             gateway.children(seriesId, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE)
                 .let { DetailFormatting.dedupeById(it) { season -> season.id } }
                 .sortedWith(compareBy(nullsLast()) { it.indexNumber })
-        }.getOrNull()
+        }
         publishSeasons(seq, seasons, initial = true)
+    }
+
+    /** Retry on the lists' error block: re-reads what a failed series read left empty; the error stays until a read lands. */
+    fun retryLists() {
+        viewModelScope.launch { loadSeasons(card.id) }
+        viewModelScope.launch { loadAllEpisodes(card.id) }
     }
 
     /**
      * The only writer of [DetailUiState.seasons], [DetailUiState.isLoadingSeasons] and
      * [DetailUiState.seasonsSettled]: a null [seasons] (failed read) or one older than the newest
      * published leaves the list alone, and every exit re-derives the selection. Only the [initial]
-     * read settles the flags.
+     * read settles the flags and can record a failure; a failed quiet re-query keeps what is shown.
      */
     private fun publishSeasons(seq: Int, seasons: List<Card>?, initial: Boolean) {
         val take = seasons != null && seq > publishedSeasonsSeq
-        if (take) publishedSeasonsSeq = seq
+        if (take) {
+            publishedSeasonsSeq = seq
+            recordRead(ReadSource.SEASONS, seq, ok = true)
+        } else if (seasons == null && initial) {
+            recordRead(ReadSource.SEASONS, seq, ok = false)
+        }
         _state.update {
             val next = if (take) it.copy(seasons = seasons!!) else it
             if (initial) next.copy(isLoadingSeasons = false, seasonsSettled = true) else next
@@ -534,6 +591,8 @@ class DetailViewModel(
         if (!quiet && _state.value.selectedSeasonId == seasonId) return
         val gen = ++selectionGen
         val local = episodesFromMemory(seasonId)
+        // A season memory can answer is a good read of the episodes list.
+        if (local != null) recordRead(ReadSource.EPISODES, gen, ok = true)
         _state.update {
             when {
                 local != null -> it.copy(selectedSeasonId = seasonId, isLoadingEpisodes = false, episodes = local)
@@ -551,21 +610,23 @@ class DetailViewModel(
                 episodesFromMemory(seasonId)?.let { publishEpisodes(gen, it) }
                 return@launch
             }
-            val fetched = runCatchingCancellable {
+            val fetched = browse {
                 gateway.children(seasonId, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE)
                     .let { DetailFormatting.dedupeById(it) { episode -> episode.id } }
                     .sortedWith(compareBy(nullsLast()) { it.indexNumber })
-            }.getOrNull()
-            // Fails open to an empty shelf so the loading flag always clears (docs/11 §Loading state);
-            // a quiet re-serve keeps what is on screen instead.
+            }
+            // A failed read clears the loading flag (docs/11 §Loading state) and says so; a quiet
+            // re-serve keeps what is on screen instead.
             if (fetched == null && quiet && !_state.value.isLoadingEpisodes) return@launch
-            publishEpisodes(gen, fetched ?: emptyList())
+            publishEpisodes(gen, fetched ?: emptyList(), failed = fetched == null)
         }
     }
 
     /** The only writer of a network-served [DetailUiState.episodes]; a stale [gen] is dropped whole. */
-    private fun publishEpisodes(gen: Int, episodes: List<Card>) {
-        _state.update { if (gen == selectionGen) it.copy(isLoadingEpisodes = false, episodes = episodes) else it }
+    private fun publishEpisodes(gen: Int, episodes: List<Card>, failed: Boolean = false) {
+        if (gen != selectionGen) return
+        _state.update { it.copy(isLoadingEpisodes = false, episodes = episodes) }
+        recordRead(ReadSource.EPISODES, gen, ok = !failed)
     }
 
     // Detail action menu (docs/19-detail-action-menu.md §3.3)
@@ -766,12 +827,44 @@ class DetailViewModelFactory(
     private val gateway: CoreGateway,
     private val card: Card,
     private val strings: UiStrings,
-    /** See [DetailViewModel]'s own constructor param of the same name. */
-    private val stopEpoch: Flow<Long> = PlaybackReports.stopEpoch,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(DetailViewModel::class.java))
-        return DetailViewModel(gateway, card, strings, stopEpoch) as T
+        return DetailViewModel(gateway, card, strings) as T
     }
 }
+
+/** The series lists whose read outcome [DetailUiState.listError] follows (docs/07 §5). */
+internal enum class ReadSource { SEASONS, ALL_EPISODES, EPISODES }
+
+/**
+ * The newest recorded outcome of each [ReadSource], ordered by the read's own sequence: a result
+ * older than the newest recorded for its list is dropped, so a stale failure never raises the
+ * error over a newer success (docs/07 §5).
+ */
+internal class ListOutcomes {
+    private val newestSeq = mutableMapOf<ReadSource, Int>()
+    private val failed = mutableSetOf<ReadSource>()
+
+    val anyFailed: Boolean get() = failed.isNotEmpty()
+
+    fun record(source: ReadSource, seq: Int, ok: Boolean) {
+        if (seq < (newestSeq[source] ?: Int.MIN_VALUE)) return
+        newestSeq[source] = seq
+        if (ok) failed -= source else failed += source
+    }
+}
+
+/** What a mirror read of one card says about its item (docs/07 §5). */
+internal enum class CardPresence { Gone, Present, Failed }
+
+/** [read] as a [CardPresence]: `null` is Gone, any non-cancellation failure is Failed, never Gone. */
+internal suspend fun probeCardPresence(read: suspend () -> Card?): CardPresence =
+    try {
+        if (read() == null) CardPresence.Gone else CardPresence.Present
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        CardPresence.Failed
+    }

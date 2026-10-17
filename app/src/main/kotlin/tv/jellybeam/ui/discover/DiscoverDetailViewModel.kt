@@ -5,11 +5,14 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.SeerrActiveRequest
@@ -17,6 +20,7 @@ import uniffi.jellybeam_core.SeerrCard
 import uniffi.jellybeam_core.SeerrGenre
 import uniffi.jellybeam_core.SeerrMediaType
 import uniffi.jellybeam_core.SeerrPersonRef
+import uniffi.jellybeam_core.SeerrRequestDetail
 import uniffi.jellybeam_core.SeerrRequestInput
 import uniffi.jellybeam_core.SeerrRequestOptions
 import uniffi.jellybeam_core.SeerrSeasonStatus
@@ -27,6 +31,8 @@ enum class DiscoverDetailTransientEvent { REQUEST_SUBMITTED, REQUEST_CANCELLED }
 
 data class DiscoverDetailUiState(
     val isLoading: Boolean = true,
+    /** Bumped with [isLoading] by every page-replacing load (Retry): a fresh focus landing (docs/15 §2). */
+    val loadGeneration: Int = 0,
     val notConfigured: Boolean = false,
     val error: String? = null,
     val card: SeerrCard? = null,
@@ -51,22 +57,43 @@ data class DiscoverDetailUiState(
     val selectedServerId: Long? = null,
     val selectedProfileId: Long? = null,
     val selectedRootFolder: String? = null,
-    val isStartingRequest: Boolean = false,
-    val isSubmittingRequest: Boolean = false,
     val requestError: String? = null,
     // -- Cancel confirmation --
     val cancelDialogVisible: Boolean = false,
-    val isCancelling: Boolean = false,
+    /** A failed cancel's message, shown beside the card (docs/14). */
+    val cancelError: String? = null,
     // -- Post-mutation confirmation --
     val transientEvent: DiscoverDetailTransientEvent? = null,
+    /** One mutation (options fetch included) is in flight until its result is applied; every request, cancel and dismiss is a no-op meanwhile (docs/14). */
+    val busy: Boolean = false,
+)
+
+/** What [DiscoverDetailViewModel.mutate] is running. */
+private enum class MutationKind(val event: DiscoverDetailTransientEvent) {
+    Request(DiscoverDetailTransientEvent.REQUEST_SUBMITTED),
+    Cancel(DiscoverDetailTransientEvent.REQUEST_CANCELLED),
+}
+
+/** The fields [DiscoverDetailViewModel] takes from either a movie or a TV detail. */
+private class LoadedDetail(
+    val card: SeerrCard,
+    val runtimeMinutes: Int?,
+    val genres: List<SeerrGenre>,
+    val cast: List<SeerrPersonRef>,
+    val similar: List<SeerrCard>,
+    val recommendations: List<SeerrCard>,
+    val trailerUrl: String?,
+    val criticsScore: Int?,
+    val audienceScore: Int?,
+    val activeRequest: SeerrActiveRequest?,
+    val canRequest: Boolean,
+    val canRequest4k: Boolean,
+    val seasons: List<SeerrSeasonStatus>,
 )
 
 /**
- * Backs [DiscoverDetailScreen] (docs/14-seerr-discover.md): fetches `seerr_movie`/`seerr_tv` by
- * [mediaType] on init. Request flow (see [startRequest]): a movie with an empty/failed
- * `seerr_request_options` result submits immediately with defaults; a TV title always opens the
- * season-picker dialog. A successful submit or cancel re-fetches the whole detail and sets
- * [DiscoverDetailTransientEvent] for a one-shot confirmation.
+ * Backs [DiscoverDetailScreen] (docs/14): a submit or cancel runs through [mutate], which `busy` admits one at a
+ * time and merges into the detail on screen; a failure shows beside the card and re-reads the title. Main-confined.
  */
 class DiscoverDetailViewModel(
     private val gateway: CoreGateway,
@@ -78,60 +105,76 @@ class DiscoverDetailViewModel(
     val state: StateFlow<DiscoverDetailUiState> = _state.asStateFlow()
 
     init {
-        refresh(showLoading = true)
+        retry()
     }
 
-    private fun refresh(showLoading: Boolean) {
-        if (showLoading) _state.update { it.copy(isLoading = true, error = null, notConfigured = false) }
+    /** A page-replacing load (first open, the error page's Retry). */
+    fun retry() {
+        _state.update { it.copy(isLoading = true, loadGeneration = it.loadGeneration + 1, error = null, notConfigured = false) }
         viewModelScope.launch { loadDetail() }
     }
 
-    private suspend fun loadDetail() {
+    /** Reads the title and publishes it; false when the read failed and its error is published instead. */
+    private suspend fun loadDetail(): Boolean {
         try {
-            if (mediaType == SeerrMediaType.MOVIE) {
-                val detail = gateway.seerrMovie(tmdbId)
-                _state.update {
-                    it.copy(
-                        isLoading = false,
-                        error = null,
-                        card = detail.card,
-                        runtimeMinutes = detail.runtimeMinutes,
-                        genres = detail.genres,
-                        cast = detail.cast,
-                        similar = distinctSeerrCards(detail.similar),
-                        recommendations = distinctSeerrCards(detail.recommendations),
-                        trailerUrl = detail.trailerUrl,
-                        criticsScore = detail.criticsScore,
-                        audienceScore = detail.audienceScore,
-                        activeRequest = detail.activeRequest,
-                        canRequest = detail.canRequest,
-                        canRequest4k = detail.canRequest4k,
+            val detail = if (mediaType == SeerrMediaType.MOVIE) {
+                gateway.seerrMovie(tmdbId).let {
+                    LoadedDetail(
+                        card = it.card,
+                        runtimeMinutes = it.runtimeMinutes,
+                        genres = it.genres,
+                        cast = it.cast,
+                        similar = it.similar,
+                        recommendations = it.recommendations,
+                        trailerUrl = it.trailerUrl,
+                        criticsScore = it.criticsScore,
+                        audienceScore = it.audienceScore,
+                        activeRequest = it.activeRequest,
+                        canRequest = it.canRequest,
+                        canRequest4k = it.canRequest4k,
                         seasons = emptyList(),
                     )
                 }
             } else {
-                val detail = gateway.seerrTv(tmdbId)
-                _state.update {
-                    it.copy(
-                        isLoading = false,
-                        error = null,
-                        card = detail.card,
+                gateway.seerrTv(tmdbId).let {
+                    LoadedDetail(
+                        card = it.card,
                         runtimeMinutes = null,
-                        genres = detail.genres,
-                        cast = detail.cast,
-                        similar = distinctSeerrCards(detail.similar),
-                        recommendations = distinctSeerrCards(detail.recommendations),
-                        trailerUrl = detail.trailerUrl,
-                        criticsScore = detail.criticsScore,
-                        audienceScore = detail.audienceScore,
-                        activeRequest = detail.activeRequest,
-                        canRequest = detail.canRequest,
-                        canRequest4k = detail.canRequest4k,
-                        seasons = detail.seasons,
-                        seasonSelection = initialSeasonSelection(detail.seasons),
+                        genres = it.genres,
+                        cast = it.cast,
+                        similar = it.similar,
+                        recommendations = it.recommendations,
+                        trailerUrl = it.trailerUrl,
+                        criticsScore = it.criticsScore,
+                        audienceScore = it.audienceScore,
+                        activeRequest = it.activeRequest,
+                        canRequest = it.canRequest,
+                        canRequest4k = it.canRequest4k,
+                        seasons = it.seasons,
                     )
                 }
             }
+            _state.update {
+                it.copy(
+                    isLoading = false,
+                    error = null,
+                    card = detail.card,
+                    runtimeMinutes = detail.runtimeMinutes,
+                    genres = detail.genres,
+                    cast = detail.cast,
+                    similar = distinctSeerrCards(detail.similar),
+                    recommendations = distinctSeerrCards(detail.recommendations),
+                    trailerUrl = detail.trailerUrl,
+                    criticsScore = detail.criticsScore,
+                    audienceScore = detail.audienceScore,
+                    activeRequest = detail.activeRequest,
+                    canRequest = detail.canRequest,
+                    canRequest4k = detail.canRequest4k,
+                    seasons = detail.seasons,
+                    seasonSelection = seasonSelectionFor(it.seasons, detail.seasons, it.seasonSelection),
+                )
+            }
+            return true
         } catch (e: CoreException) {
             _state.update {
                 it.copy(
@@ -140,10 +183,53 @@ class DiscoverDetailViewModel(
                     error = e.displayMessage(strings),
                 )
             }
+            return false
         }
     }
 
-    fun retry() = refresh(showLoading = true)
+    /** Takes the single busy slot and clears every shown error, or returns false when a mutation is in flight. */
+    private fun claim(): Boolean {
+        val current = _state.value
+        if (current.busy) return false
+        _state.value = current.copy(busy = true, error = null, requestError = null, cancelError = null)
+        return true
+    }
+
+    /** The one mutation funnel (docs/14): claims busy, then runs [perform] off the main thread's call stack. */
+    private fun mutate(kind: MutationKind, op: suspend () -> SeerrRequestDetail) {
+        if (!claim()) return
+        viewModelScope.launch { perform(kind, op) }
+    }
+
+    /** Runs [op] under the held busy slot and releases busy last; a failure re-reads the title, else shows [DiscoverDetailUiState.error] (docs/14 Errors). */
+    private suspend fun perform(kind: MutationKind, op: suspend () -> SeerrRequestDetail) {
+        try {
+            val detail = op()
+            _state.update {
+                it.withMutation(detail).dialogsClosed().copy(transientEvent = kind.event)
+            }
+        } catch (e: CoreException.SeerrChangeUnconfirmed) {
+            _state.update { it.dialogsClosed() }
+            if (loadDetail()) {
+                _state.update { it.copy(transientEvent = kind.event) }
+            } else {
+                _state.update { it.copy(error = e.displayMessage(strings)) }
+            }
+        } catch (e: CoreException) {
+            val message = e.displayMessage(strings)
+            _state.update {
+                when (kind) {
+                    MutationKind.Request -> it.copy(requestError = message)
+                    // The card stays; the message renders beside it, not on the card-less error screen (docs/14).
+                    MutationKind.Cancel -> it.copy(cancelDialogVisible = false, cancelError = message)
+                }
+            }
+            loadDetail()
+        } finally {
+            // A cleared view model publishes nothing.
+            if (currentCoroutineContext().isActive) _state.update { it.copy(busy = false) }
+        }
+    }
 
     fun dismissTransientEvent() = _state.update { it.copy(transientEvent = null) }
 
@@ -154,14 +240,13 @@ class DiscoverDetailViewModel(
      * defaults (docs/14); a TV title always opens the season-picker dialog instead.
      */
     fun startRequest(is4k: Boolean) {
-        _state.update { it.copy(isStartingRequest = true, requestError = null) }
+        if (!claim()) return
         viewModelScope.launch {
-            val options = runCatching { gateway.seerrRequestOptions(mediaType, is4k) }.getOrNull()
-            _state.update { it.copy(isStartingRequest = false) }
+            val options = runCatchingCancellable { gateway.seerrRequestOptions(mediaType, is4k) }.getOrNull()
 
             if (mediaType != SeerrMediaType.TV && (options == null || options.servers.isEmpty())) {
-                // Movie only, empty/failed servers: submit immediately with defaults.
-                submitRequest(is4k = is4k, serverId = null, profileId = null, rootFolder = null, seasons = emptyList())
+                // Movie only, empty/failed servers: submit immediately with defaults, keeping the busy slot.
+                perform(MutationKind.Request, submitOp(is4k = is4k, serverId = null, profileId = null, rootFolder = null, seasons = emptyList()))
                 return@launch
             }
 
@@ -180,6 +265,7 @@ class DiscoverDetailViewModel(
                     selectedProfileId = defaultProfile?.id,
                     selectedRootFolder = defaultFolder?.path,
                     seasonSelection = initialSeasonSelection(it.seasons),
+                    busy = false,
                 )
             }
         }
@@ -202,67 +288,55 @@ class DiscoverDetailViewModel(
     fun toggleSelectAllSeasons() =
         _state.update { it.copy(seasonSelection = toggleSelectAllRequestableSeasons(it.seasons, it.seasonSelection)) }
 
+    /** Back is held while anything is in flight, so a submit's failure lands in the open dialog (docs/14). */
     fun dismissRequestDialog() = _state.update {
-        it.copy(requestDialogVisible = false, requestOptions = null, requestError = null)
+        if (!it.busy) it.copy(requestDialogVisible = false, requestOptions = null, requestError = null) else it
     }
 
     fun confirmRequestDialog() {
         val current = _state.value
         val seasons = if (mediaType == SeerrMediaType.TV) selectedRequestableSeasons(current.seasons, current.seasonSelection) else emptyList()
-        submitRequest(
-            is4k = current.requestIs4k,
-            serverId = current.selectedServerId,
-            profileId = current.selectedProfileId,
-            rootFolder = current.selectedRootFolder,
-            seasons = seasons,
+        mutate(
+            MutationKind.Request,
+            submitOp(
+                is4k = current.requestIs4k,
+                serverId = current.selectedServerId,
+                profileId = current.selectedProfileId,
+                rootFolder = current.selectedRootFolder,
+                seasons = seasons,
+            ),
         )
     }
 
-    private fun submitRequest(is4k: Boolean, serverId: Long?, profileId: Long?, rootFolder: String?, seasons: List<Int>) {
-        _state.update { it.copy(isSubmittingRequest = true, requestError = null) }
-        viewModelScope.launch {
-            try {
-                gateway.seerrSubmitRequest(
-                    SeerrRequestInput(
-                        mediaType = mediaType,
-                        tmdbId = tmdbId,
-                        is4k = is4k,
-                        seasons = seasons,
-                        serverId = serverId,
-                        profileId = profileId,
-                        rootFolder = rootFolder,
-                    ),
-                )
-                _state.update {
-                    it.copy(isSubmittingRequest = false, requestDialogVisible = false, requestOptions = null)
-                }
-                loadDetail()
-                _state.update { it.copy(transientEvent = DiscoverDetailTransientEvent.REQUEST_SUBMITTED) }
-            } catch (e: CoreException) {
-                _state.update { it.copy(isSubmittingRequest = false, requestError = e.displayMessage(strings)) }
-            }
-        }
+    private fun submitOp(
+        is4k: Boolean,
+        serverId: Long?,
+        profileId: Long?,
+        rootFolder: String?,
+        seasons: List<Int>,
+    ): suspend () -> SeerrRequestDetail = {
+        gateway.seerrSubmitRequestDetail(
+            SeerrRequestInput(
+                mediaType = mediaType,
+                tmdbId = tmdbId,
+                is4k = is4k,
+                seasons = seasons,
+                serverId = serverId,
+                profileId = profileId,
+                rootFolder = rootFolder,
+            ),
+        )
     }
 
     // -- Cancel flow ------------------------------------------------------
 
-    fun openCancelDialog() = _state.update { it.copy(cancelDialogVisible = true) }
+    fun openCancelDialog() = _state.update { if (!it.busy) it.copy(cancelDialogVisible = true) else it }
 
-    fun dismissCancelDialog() = _state.update { it.copy(cancelDialogVisible = false) }
+    fun dismissCancelDialog() = _state.update { if (!it.busy) it.copy(cancelDialogVisible = false) else it }
 
     fun confirmCancel() {
         val requestId = _state.value.activeRequest?.requestId ?: return
-        _state.update { it.copy(isCancelling = true) }
-        viewModelScope.launch {
-            try {
-                gateway.seerrCancelRequest(requestId)
-                _state.update { it.copy(isCancelling = false, cancelDialogVisible = false) }
-                loadDetail()
-                _state.update { it.copy(transientEvent = DiscoverDetailTransientEvent.REQUEST_CANCELLED) }
-            } catch (e: CoreException) {
-                _state.update { it.copy(isCancelling = false, cancelDialogVisible = false, error = e.displayMessage(strings)) }
-            }
-        }
+        mutate(MutationKind.Cancel) { gateway.seerrCancelRequestDetail(mediaType, tmdbId, requestId) }
     }
 }
 

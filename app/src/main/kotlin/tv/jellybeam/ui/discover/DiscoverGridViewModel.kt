@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -71,7 +72,7 @@ class DiscoverGridViewModel(
         if (kind.supportsSortAndFilter()) {
             viewModelScope.launch {
                 val mediaType = kind.toMediaType() ?: return@launch
-                val genres = runCatching { gateway.seerrGenres(mediaType) }.getOrDefault(emptyList())
+                val genres = runCatchingCancellable { gateway.seerrGenres(mediaType) }.getOrDefault(emptyList())
                 _state.update { it.copy(genres = genres) }
             }
         }
@@ -167,7 +168,7 @@ class DiscoverGridViewModel(
         val nextPage = current.page + 1
         _state.update { it.copy(isLoadingMore = true) }
         viewModelScope.launch {
-            val result = runCatching { gateway.seerrBrowse(kind, nextPage, filters()) }
+            val result = runCatchingCancellable { gateway.seerrBrowse(kind, nextPage, filters()) }
             if (generation != latestGeneration) return@launch
             result.onSuccess { page ->
                 val before = _state.value.cards.size

@@ -9,21 +9,26 @@ use std::sync::Mutex;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// Per-owner snapshot ordering; never hold the owner's state lock while saving.
+/// Tracks `(newest revision attempted, newest revision saved)`.
 #[derive(Default)]
-pub(crate) struct RevisionWriter(Mutex<u64>);
+pub(crate) struct RevisionWriter(Mutex<(u64, u64)>);
 
 impl RevisionWriter {
+    /// docs/09: a revision older than one already attempted is skipped, so a failed newer
+    /// write is never followed by an older snapshot; the same revision may be retried.
     pub(crate) fn save(
         &self,
         revision: u64,
         write: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
-        let mut saved = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if revision <= *saved {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let (attempted, saved) = *state;
+        if revision <= saved || revision < attempted {
             return Ok(());
         }
+        state.0 = revision;
         write()?;
-        *saved = revision;
+        state.1 = revision;
         Ok(())
     }
 }
@@ -61,6 +66,48 @@ fn replace_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) ->
         })
 }
 
+/// Test-only: a path made unusable by file mode until dropped, which restores it.
+#[cfg(all(test, unix))]
+pub(crate) struct ChmodGuard {
+    path: std::path::PathBuf,
+    restore: u32,
+}
+
+#[cfg(all(test, unix))]
+impl ChmodGuard {
+    fn set(path: &std::path::Path, mode: u32, restore: u32) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        Self {
+            path: path.to_path_buf(),
+            restore,
+        }
+    }
+
+    /// Makes `dir` read-only; `None` where writes still succeed (running as root).
+    pub(crate) fn read_only_dir(dir: &std::path::Path) -> Option<Self> {
+        let guard = Self::set(dir, 0o555, 0o755);
+        let probe = dir.join("write-probe");
+        let writable = std::fs::File::create(&probe).is_ok();
+        let _ = std::fs::remove_file(probe);
+        (!writable).then_some(guard)
+    }
+
+    /// Makes `file` unreadable; `None` where reads still succeed (running as root).
+    pub(crate) fn unreadable_file(file: &std::path::Path) -> Option<Self> {
+        let guard = Self::set(file, 0o000, 0o644);
+        std::fs::read(file).is_err().then_some(guard)
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for ChmodGuard {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.restore));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +140,26 @@ mod tests {
             })
             .expect("retry");
         assert!(retried);
+    }
+
+    /// docs/09: a snapshot older than one whose write was already attempted never reaches disk.
+    #[test]
+    fn older_revision_is_not_written_after_a_newer_revision_failed() {
+        let writer = RevisionWriter::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prefs.json");
+        save_json(&path, &"before").expect("seed");
+        assert!(writer
+            .save(2, || Err(io::Error::other("synthetic failure")))
+            .is_err());
+        writer
+            .save(1, || save_json(&path, &"older"))
+            .expect("older revision is skipped or written, never an error");
+        assert_ne!(
+            std::fs::read_to_string(&path).expect("read"),
+            "\"older\"",
+            "a revision older than one already attempted must not be written"
+        );
     }
 
     #[test]

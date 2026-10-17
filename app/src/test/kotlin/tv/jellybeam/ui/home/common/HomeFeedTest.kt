@@ -6,12 +6,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -19,7 +19,6 @@ import tv.jellybeam.MainDispatcherRule
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.LaunchWarmup
 import tv.jellybeam.i18n.ResourceUiStrings
-import tv.jellybeam.player.PlaybackReports
 import tv.jellybeam.ui.cards.testCard
 import tv.jellybeam.ui.home.FakeHomeGateway
 import tv.jellybeam.ui.home.classicSnapshot
@@ -35,14 +34,13 @@ import uniffi.jellybeam_core.SyncStatus
 /** A [HomeFeed] on its own main-thread scope, as a ViewModel would run it, holding the snapshot's
  * record as-is so these tests exercise only the feed.
  */
-private class TestFeed(gateway: CoreGateway, stopEpoch: Flow<Long>, launchWarmup: LaunchWarmup?) {
+private class TestFeed(gateway: CoreGateway, launchWarmup: LaunchWarmup?) {
     private val scope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
     private val feed = HomeFeed<ClassicHome, ClassicHome?>(
         scope = scope,
         gateway = gateway,
         layout = HomeLayout.CLASSIC,
         initialContent = null,
-        stopEpoch = stopEpoch,
         launchWarmup = launchWarmup,
         strings = ResourceUiStrings.default,
         extract = { (it as? HomeSnapshot.Classic)?.home },
@@ -54,8 +52,6 @@ private class TestFeed(gateway: CoreGateway, stopEpoch: Flow<Long>, launchWarmup
             ?.firstOrNull { it.source == ShelfSource.ContinueWatching }?.cards.orEmpty()
 
     fun setActive(active: Boolean) = feed.setActive(active)
-    fun refreshNow() = feed.refreshNow()
-    fun onHostResume() = feed.onHostResume()
 
     /** [HomeFeed.pollSyncing] loops forever; left alive it hangs `runTest`'s cleanup. */
     fun close() = scope.cancel()
@@ -69,14 +65,10 @@ class HomeFeedTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private fun newFeed(gateway: CoreGateway, launchWarmup: LaunchWarmup? = null) =
-        TestFeed(gateway, PlaybackReports.stopEpoch, launchWarmup)
+        TestFeed(gateway, launchWarmup)
 
-    private inline fun withFeed(
-        gateway: CoreGateway,
-        stopEpoch: Flow<Long> = PlaybackReports.stopEpoch,
-        block: (TestFeed) -> Unit,
-    ) {
-        val feed = TestFeed(gateway, stopEpoch, launchWarmup = null)
+    private inline fun withFeed(gateway: CoreGateway, block: (TestFeed) -> Unit) {
+        val feed = TestFeed(gateway, launchWarmup = null)
         try {
             block(feed)
         } finally {
@@ -84,8 +76,7 @@ class HomeFeedTest {
         }
     }
 
-    /** Must match [tv.jellybeam.ui.common.ChangeRefreshScheduler]'s default `visiblePeriodMs`, wired
-     * in unmodified. */
+    /** Must match [tv.jellybeam.ui.common.ChangeRefreshScheduler]'s default `restMs`, wired in unmodified. */
     private val testVisiblePeriodMs = 500L
 
     /** Must match [HomeFeed]'s private `SYNC_POLL_INTERVAL_MS`, which can't be referenced
@@ -96,10 +87,44 @@ class HomeFeedTest {
     private val testSyncStatusPollIntervalMs = 1_000L
 
     @Test
+    fun `an empty first snapshot during the first sync keeps loading until the sync lands`() = runTest {
+        // A first sign-in reads the mirror before its first sync writes anything: not an empty library.
+        val gateway = FakeHomeGateway(homeSnapshotResult = classicSnapshot(), isSyncingResult = true)
+        withFeed(gateway) { feed ->
+            feed.setActive(true)
+            runCurrent()
+            assertTrue("still loading while the first sync runs", feed.state.value.chrome.isLoading)
+
+            gateway.homeSnapshotResult = classicSnapshot(resume = listOf(testCard("a")))
+            gateway.isSyncingResult = false
+            gateway.events.emit(ChangeEvent.Refresh)
+            runCurrent()
+            assertFalse(feed.state.value.chrome.isLoading)
+            assertEquals(listOf("a"), feed.resume.map { it.id })
+        }
+    }
+
+    @Test
+    fun `a first sync that ends with nothing settles on the empty state`() = runTest {
+        val gateway = FakeHomeGateway(homeSnapshotResult = classicSnapshot(), isSyncingResult = true)
+        withFeed(gateway) { feed ->
+            feed.setActive(true)
+            runCurrent()
+            assertTrue(feed.state.value.chrome.isLoading)
+
+            gateway.isSyncingResult = false
+            advanceTimeBy(2_100)
+            runCurrent()
+            assertFalse("an idle sync ends the wait", feed.state.value.chrome.isLoading)
+        }
+    }
+
+    @Test
     fun `the first change event refreshes immediately, with no debounce wait`() = runTest {
         // changeRefreshScheduler's leading edge fires on the first event, not after a quiet window.
         val gateway = FakeHomeGateway()
-        withFeed(gateway) {
+        withFeed(gateway) { feed ->
+            feed.setActive(true)
             assertEquals("the initial load", 1, gateway.homeSnapshotCallCount)
 
             gateway.events.emit(ChangeEvent.Refresh)
@@ -132,23 +157,7 @@ class HomeFeedTest {
     }
 
     @Test
-    fun `initial host resume reuses init but later resumes refresh`() = runTest {
-        val gateway = FakeHomeGateway()
-        withFeed(gateway) { feed ->
-            feed.onHostResume()
-            runCurrent()
-            assertEquals(1, gateway.homeSnapshotCallCount)
-
-            gateway.homeSnapshotResult = classicSnapshot(resume = listOf(testCard(id = "updated")))
-            feed.onHostResume()
-            runCurrent()
-            assertEquals(2, gateway.homeSnapshotCallCount)
-            assertEquals("updated", feed.resume.single().id)
-        }
-    }
-
-    @Test
-    fun `initial resume does not queue a duplicate behind a slow initial load`() = runTest {
+    fun `a change during the initial load still queues one follow-up`() = runTest {
         val fake = FakeHomeGateway()
         val gate = CompletableDeferred<Unit>()
         val gateway = object : CoreGateway by fake {
@@ -158,28 +167,11 @@ class HomeFeedTest {
             }
         }
         withFeed(gateway) { feed ->
-            feed.onHostResume()
-            gate.complete(Unit)
-            runCurrent()
-            assertEquals(1, fake.homeSnapshotCallCount)
-        }
-    }
-
-    @Test
-    fun `real refresh during initial load still queues a follow-up`() = runTest {
-        val fake = FakeHomeGateway()
-        val gate = CompletableDeferred<Unit>()
-        val gateway = object : CoreGateway by fake {
-            override suspend fun homeSnapshot(layout: HomeLayout): HomeSnapshot {
-                gate.await()
-                return fake.homeSnapshot(layout)
-            }
-        }
-        withFeed(gateway) { feed ->
-            feed.onHostResume()
-            feed.refreshNow()
+            feed.setActive(true)
+            fake.events.emit(ChangeEvent.Refresh)
             runCurrent()
             gate.complete(Unit)
+            advanceTimeBy(testVisiblePeriodMs + 1)
             runCurrent()
             assertEquals(2, fake.homeSnapshotCallCount)
         }
@@ -209,7 +201,8 @@ class HomeFeedTest {
             assertEquals(resume, feed.resume)
             assertEquals(false, feed.state.value.chrome.isLoading)
 
-            feed.refreshNow()
+            feed.setActive(true)
+            gateway.events.emit(ChangeEvent.Refresh)
             runCurrent()
             assertEquals("later refreshes read the mirror again", 2, gateway.homeSnapshotCallCount)
         } finally {
@@ -229,32 +222,12 @@ class HomeFeedTest {
 
         val feed = newFeed(gateway, launchWarmup = warmup)
         try {
+            feed.setActive(true)
             runCurrent()
             assertEquals(2, gateway.homeSnapshotCallCount)
             assertEquals(fresh, feed.resume)
         } finally {
             feed.close()
-        }
-    }
-
-    @Test
-    fun `refreshNow re-fetches immediately without waiting for the change-event scheduler`() = runTest {
-        val gateway = FakeHomeGateway(
-            homeSnapshotResult = classicSnapshot(resume = listOf(testCard(id = "r1"))),
-        )
-        withFeed(gateway) { feed ->
-            assertEquals("the initial load", 1, gateway.homeSnapshotCallCount)
-
-            gateway.homeSnapshotResult = classicSnapshot(resume = listOf(testCard(id = "r2")))
-            feed.refreshNow()
-            runCurrent()
-
-            assertEquals(
-                "refreshNow must not sit behind changeRefreshScheduler's own sampling",
-                2,
-                gateway.homeSnapshotCallCount,
-            )
-            assertEquals(listOf("r2"), feed.resume.map { it.id })
         }
     }
 
@@ -436,19 +409,114 @@ class HomeFeedTest {
         }
     }
 
+    // ---- docs/16 §4.6: hidden Home only marks dirty; activation and active events refresh -------
+
+    private fun upserted(id: String) = ChangeEvent.Upserted(ids = listOf(id), libraryId = null)
+
+    private fun onHomeGateway() = FakeHomeGateway(homeSnapshotResult = classicSnapshot(resume = listOf(testCard(id = "on-home"))))
+
+    private fun TestScope.settle(ms: Long) {
+        advanceTimeBy(ms)
+        runCurrent()
+    }
+
     @Test
-    fun `a stop report epoch triggers a snapshot refresh`() = runTest {
-        // docs/17 §6: dismissing PiP has no resume/foreground callback; the stop-epoch bump is
-        // the only refresh signal.
-        val gateway = FakeHomeGateway()
-        val stopEpoch = MutableStateFlow(0L)
-        withFeed(gateway, stopEpoch) {
-            assertEquals("the initial load", 1, gateway.homeSnapshotCallCount)
+    fun `a hidden Home refreshes nothing, then exactly once with the new content when it becomes active`() = runTest {
+        val gateway = onHomeGateway()
+        withFeed(gateway) { feed ->
+            settle(4_000)
+            val before = gateway.homeSnapshotCallCount
 
-            stopEpoch.value = 1L
+            repeat(10) {
+                gateway.events.emit(upserted("on-home"))
+                settle(1_000)
+            }
+            assertEquals("events while hidden only mark Home dirty", before, gateway.homeSnapshotCallCount)
+
+            gateway.homeSnapshotResult = classicSnapshot(resume = listOf(testCard(id = "updated")))
+            feed.setActive(true)
             runCurrent()
+            assertEquals("activation refreshes at once", before + 1, gateway.homeSnapshotCallCount)
+            assertEquals("updated", feed.resume.single().id)
+            settle(4_000)
+            assertEquals("and only once", before + 1, gateway.homeSnapshotCallCount)
+        }
+    }
 
-            assertEquals("a landed stop report refreshes the snapshot", 2, gateway.homeSnapshotCallCount)
+    @Test
+    fun `becoming active with nothing changed refreshes nothing`() = runTest {
+        val gateway = onHomeGateway()
+        withFeed(gateway) { feed ->
+            settle(4_000)
+            val before = gateway.homeSnapshotCallCount
+            feed.setActive(true)
+            settle(4_000)
+            feed.setActive(false)
+            settle(100)
+            feed.setActive(true)
+            settle(4_000)
+            assertEquals(before, gateway.homeSnapshotCallCount)
+        }
+    }
+
+    @Test
+    fun `a stop's mirror writes cost one snapshot on return and at most one trailing`() = runTest {
+        // A stop writes the item (Upserted) before Home is back; the server's echo lands just after.
+        val gateway = onHomeGateway()
+        withFeed(gateway) { feed ->
+            settle(4_000)
+            val before = gateway.homeSnapshotCallCount
+
+            gateway.events.emit(upserted("on-home"))
+            settle(50)
+            feed.setActive(true)
+            settle(100)
+            gateway.events.emit(upserted("on-home"))
+            settle(4_000)
+
+            assertEquals(before + 2, gateway.homeSnapshotCallCount)
+        }
+    }
+
+    @Test
+    fun `a stop for an item not on Home still refreshes Home once`() = runTest {
+        // The stopped item may be about to enter Continue Watching, so any item change refreshes Home.
+        for (visible in listOf(true, false)) {
+            val gateway = onHomeGateway()
+            withFeed(gateway) { feed ->
+                feed.setActive(visible)
+                settle(4_000)
+                val before = gateway.homeSnapshotCallCount
+
+                gateway.events.emit(upserted("elsewhere"))
+                settle(4_000)
+                if (!visible) feed.setActive(true)
+                settle(4_000)
+
+                assertEquals("visible=$visible", before + 1, gateway.homeSnapshotCallCount)
+            }
+        }
+    }
+
+    // ---- docs/07 refresh/sync: the library list is read once, not once per refresh ---------
+
+    @Test
+    fun `only a views change re-reads the library list, never an item change`() = runTest {
+        val gateway = onHomeGateway()
+        withFeed(gateway) { feed ->
+            feed.setActive(true)
+            settle(4_000)
+            val before = gateway.viewsCallCount
+
+            repeat(5) {
+                gateway.events.emit(upserted("on-home"))
+                settle(600)
+            }
+            assertEquals("five item changes re-read the library list ${gateway.viewsCallCount - before} times", before, gateway.viewsCallCount)
+
+            gateway.events.emit(ChangeEvent.ViewsChanged)
+            settle(4_000)
+            assertTrue("one views change costs at most one read, got ${gateway.viewsCallCount - before}", gateway.viewsCallCount - before <= 1)
         }
     }
 }

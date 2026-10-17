@@ -14,6 +14,8 @@ why, not how a change came to be.
 ## Docs map
 
 - `01-architecture.md` — the Rust/Kotlin boundary and the shape of the app
+- `02-how-it-fits.md` — where each lifecycle signal enters, who owns each
+  piece of shared state, and the seam to extend for common changes
 - `05-conventions-and-servers.md` — brand and product rules, test servers,
   secrets and redaction, code-comment style
 - `06-build-container.md` — the Docker build container and `build.sh`
@@ -52,9 +54,10 @@ why, not how a change came to be.
 1. `README.md`
 2. `00-START-HERE.md` (this file)
 3. `01-architecture.md`
-4. `05-conventions-and-servers.md`
-5. `06-build-container.md`
-6. Whichever numbered spec covers the area you're about to touch
+4. `02-how-it-fits.md`
+5. `05-conventions-and-servers.md`
+6. `06-build-container.md`
+7. Whichever numbered spec covers the area you're about to touch
 
 ## Where to change things
 

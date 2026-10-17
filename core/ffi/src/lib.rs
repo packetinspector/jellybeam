@@ -33,7 +33,7 @@ pub use updates::{AppUpdater, InstalledUpdateFacts, UpdateSnapshot, VerifiedUpda
 
 pub use diag::{install_diag_sink, DiagLevel, DiagSink};
 pub use discovery::DiscoveredServer;
-pub use error::CoreError;
+pub use error::{CallbackError, CoreError};
 pub use glide::GlideDirection;
 pub use home::{ClassicHome, HomeLayout, HomeShelf, HomeSnapshot, ShelfSource};
 pub use object::{ChangeListener, JellybeamCore};
@@ -52,15 +52,15 @@ pub use settings::{
 };
 pub use still_watching::StillWatchingDecision;
 pub use types::{
-    AccountIdentity, AccountInfo, AudioSpatialKind, Card, ChangeEvent, ChapterInfoFfi, Decade,
-    DeviceCaps, EmbeddedSubtitleFfi, EpisodeNeighbors, ExternalSubtitleFfi, FailedTrackFfi,
+    AccountIdentity, AccountInfo, AudioSpatialKind, BrowseRead, Card, ChangeEvent, ChapterInfoFfi,
+    Decade, DeviceCaps, EmbeddedSubtitleFfi, EpisodeNeighbors, ExternalSubtitleFfi, FailedTrackFfi,
     GridCounts, GridFilters, GridGroup, GridSort, GridSortField, ImageKind, ImageUrlPrefix,
     ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MediaSegmentKind, MediaStreamInfo,
     MediaStreamKind, MirrorItemCounts, MirrorLibrary, MirrorStats, PersonInfo, PlayMethodFfi,
     PlaybackOsdDetail, PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails,
     ServerInfoSnapshot, SortOrder, StatusFilter, SubtitleActionFfi, TrackDecisionFfi, TrackInfo,
-    TrackKindFfi, TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId, ViewSnapshot,
-    WatchedFilter,
+    TrackKindFfi, TrackMemoryFfi, TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId,
+    ViewSnapshot, WatchedFilter,
 };
 
 /// docs/16 §2.7: the drawer's Favorites page as a library view; Kotlin recognises it by
@@ -121,7 +121,7 @@ pub fn outro_start_secs_from_segments(segments: Vec<MediaSegment>) -> Option<f64
 
 /// Delegate to `playback_policy::tracks::track_pref_key`: the persistence
 /// key a [`TrackInfo`] is remembered under (language if present, else
-/// title). Feeds [`JellybeamCore::remember_track_choice`]'s `track_key`
+/// title). Feeds [`JellybeamCore::remember_track_memory`]'s `Key`
 /// (docs/09 step 3b).
 #[uniffi::export]
 pub fn track_pref_key_of(track: TrackInfo) -> Option<String> {
@@ -264,9 +264,6 @@ pub fn mirror_smoke_test() -> String {
         std::sync::Arc::new(std::collections::HashSet::new),
     ));
 
-    // `mirror` must drop (closing the writer's mpsc channel) before `rt`:
-    // the writer thread parked on rt's blocking pool only exits once every
-    // `Sender` clone is dropped, else rt's shutdown deadlocks waiting on it.
     let status = match opened {
         Ok(mirror) => {
             let status = format!(
@@ -280,7 +277,6 @@ pub fn mirror_smoke_test() -> String {
         Err(e) => format!("mirror open failed: {e}"),
     };
 
-    // Safe to tear down now: no live Sender remains, so shutdown won't block.
     drop(rt);
 
     // Best-effort cleanup; a leftover temp dir is harmless clutter.

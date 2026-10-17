@@ -1,11 +1,13 @@
 package tv.jellybeam.player
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -53,13 +55,17 @@ internal val playbackActivityTracker = PlaybackActivityTracker()
  * [tv.jellybeam.data.RealCoreGateway]'s seam) to the retained MainActivity. A StateFlow, not a
  * fire-and-forget event, keeps the request pending until Main consumes it. A call that left with
  * the old token can still fail after the user re-authorized, so requests are dropped for
- * [QUIET_AFTER_REAUTHORIZATION_MS] after [noteReauthorized].
+ * [QUIET_AFTER_REAUTHORIZATION_MS] after [noteReauthorized] (docs/18 §2.1).
  */
 internal class AuthorizationRecoveryCoordinator(private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 }) {
-    private val pendingRequest = MutableStateFlow<AuthorizationRequest?>(null)
-    val requests = pendingRequest.asStateFlow()
-    private var nextId = 0L
+    private val pending = MutableStateFlow<AuthorizationRequest?>(null)
+
+    /** The one pending request; another account's 401 while it is held is dropped and comes back on its next call. */
+    val requests = pending.asStateFlow()
+
+    /** When the quiet window after the last re-authorization ends; guarded by `this`. */
     private var quietUntilMs = Long.MIN_VALUE
+    private var nextId = 0L
 
     /** A call's 401: [account] is the one whose token was rejected (docs/18 §2.1). */
     fun request(account: AccountIdentity?) = post(account, failedPlayback = false)
@@ -67,20 +73,26 @@ internal class AuthorizationRecoveryCoordinator(private val nowMs: () -> Long = 
     /** The player's own 401, sent after its teardown ended the playback on [account] (docs/18 §2.1). */
     fun requestForFailedPlayback(account: AccountIdentity?) = post(account, failedPlayback = true)
 
+    /** A request naming no account prompts nobody, so it is dropped; a repeat keeps the failed-playback flag of what it replaces (docs/18 §2.1). */
     @Synchronized
     private fun post(account: AccountIdentity?, failedPlayback: Boolean) {
-        if (nowMs() < quietUntilMs) return
-        pendingRequest.value = AuthorizationRequest(++nextId, account, failedPlayback)
+        if (account == null || nowMs() < quietUntilMs) return
+        val held = pending.value
+        if (held != null && held.account != account) return
+        pending.value = AuthorizationRequest(++nextId, account, failedPlayback || held?.failedPlayback == true)
     }
 
-    fun consume(id: Long) {
-        pendingRequest.update { it?.takeUnless { request -> request.id == id } }
-    }
-
+    /** Answers request [id] only. */
     @Synchronized
-    fun noteReauthorized() {
+    fun consume(id: Long) {
+        if (pending.value?.id == id) pending.value = null
+    }
+
+    /** [account] was just re-authorized: stragglers are dropped for the quiet window and its pending request is answered. */
+    @Synchronized
+    fun noteReauthorized(account: AccountIdentity) {
         quietUntilMs = nowMs() + QUIET_AFTER_REAUTHORIZATION_MS
-        pendingRequest.value = null
+        if (pending.value?.account == account) pending.value = null
     }
 
     companion object {
@@ -91,7 +103,7 @@ internal class AuthorizationRecoveryCoordinator(private val nowMs: () -> Long = 
 /** One pending [AuthorizationRecoveryCoordinator] request: the account whose token was rejected,
  * and whether the player's own failed playback sent it.
  */
-internal data class AuthorizationRequest(val id: Long, val account: AccountIdentity?, val failedPlayback: Boolean)
+internal data class AuthorizationRequest(val id: Long, val account: AccountIdentity, val failedPlayback: Boolean)
 
 internal val authorizationRecoveryCoordinator = AuthorizationRecoveryCoordinator()
 
@@ -115,7 +127,7 @@ class PlaybackActivity : ComponentActivity() {
     /**
      * Scoped to this Activity instance, not [AppGraph.playerHolder]'s process-wide lifetime.
      * Created via [ensureMediaSession] after the first rendered frame (system-integration chrome,
-     * not a playback prerequisite), released in [onStop] and nulled so [onDestroy]'s fallback can
+     * not a playback prerequisite), released by [onStop] unless it survives a PiP stop, and nulled so [onDestroy]'s fallback can
      * never double-release it.
      */
     private var mediaSessionHolder: MediaSessionHolder? = null
@@ -126,9 +138,6 @@ class PlaybackActivity : ComponentActivity() {
 
     /** Waits until ExoPlayer has already been invoked; see [installPlaybackUiAfterPlayerLoad]. */
     private var playbackUiInitJob: Job? = null
-
-    /** Handles negotiation failures while no Compose event collector exists yet. */
-    private var startupEventJob: Job? = null
 
     /** Re-requests the one real Compose focus target when this window regains focus, or D-pad
      * keys go dead until recreation. */
@@ -207,19 +216,12 @@ class PlaybackActivity : ComponentActivity() {
         AppGraph.playerHolder.addListener(videoSizeListener)
 
         installPlaybackUiAfterPlayerLoad()
-
-        // Waits for the first frame rather than posting, so a posted MediaSession constructor can't
-        // win the main-loop race against a fast server response and recreate the stall this removes
-        mediaSessionInitJob = lifecycleScope.launch {
-            viewModel.state.first { it.hasRenderedFirstFrame }
-            ensureMediaSession()
-        }
     }
 
     /**
-     * Creates [mediaSessionHolder] once the first frame has rendered; called from [onCreate]'s wait
-     * and again from [onStart], since [onStop] releases the session even for a transient stop like
-     * screen-off (docs/17 §3). No-op once a session exists, before the first frame, or once
+     * Creates [mediaSessionHolder] once the first frame has rendered; called from [onStart]'s wait
+     * and directly when the frame is already up, since [onStop] releases the session even for a
+     * transient stop like screen-off (docs/17 §3). No-op once a session exists, before the first frame, or once
      * finishing/destroyed. `setSessionActivity`'s [PendingIntent] carries [EXTRA_RESUME_SESSION] so
      * a system tap resumes this Activity in place rather than restarting the item (docs/17 §2).
      */
@@ -230,6 +232,15 @@ class PlaybackActivity : ComponentActivity() {
         mediaSessionHolder = MediaSessionHolder(
             context = this,
             player = AppGraph.playerHolder.mediaSessionPlayer,
+            router = MediaKeyRouter(
+                stop = viewModel::stopFromRemote,
+                seekBy = { viewModel.seek(it, resolveTrickplay = false) },
+                seekToMs = viewModel::seekToPositionMs,
+                skipForwardMs = { viewModel.state.value.skipForwardMs },
+                skipBackMs = { viewModel.state.value.skipBackMs },
+                playWhenReady = { viewModel.playWhenReady },
+                togglePlayPause = viewModel::togglePlayPause,
+            ),
             sessionActivity = PendingIntent.getActivity(
                 this,
                 0,
@@ -240,32 +251,40 @@ class PlaybackActivity : ComponentActivity() {
         PerfLog.markPlayback("mediaSession.ready")
     }
 
-    /** docs/17 §3: recreates the MediaSession [onStop] released, once STARTED again. */
+    /**
+     * docs/17 §3: (re)creates the MediaSession [onStop] released, now or at the first rendered frame;
+     * waits rather than posting, so the session constructor can't win the main-loop race against a
+     * fast server response.
+     */
     override fun onStart() {
         super.onStart()
-        if (viewModel.state.value.hasRenderedFirstFrame) ensureMediaSession()
+        if (viewModel.state.value.hasRenderedFirstFrame) return ensureMediaSession()
+        mediaSessionInitJob?.cancel()
+        mediaSessionInitJob = lifecycleScope.launch {
+            viewModel.state.first { it.hasRenderedFirstFrame }
+            ensureMediaSession()
+        }
     }
+
+    /** docs/12 §9, docs/17 §2: while no session exists, transport keys (DOWN and UP) must not reach another app's. */
+    @SuppressLint("RestrictedApi") // lint flags every ComponentActivity override of this framework method
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean =
+        MediaKeys.dispatchConsumed(event.keyCode, sessionLive = mediaSessionHolder != null) || super.dispatchKeyEvent(event)
 
     override fun onStop() {
         super.onStop()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         playbackUiInitJob?.cancel()
         playbackUiInitJob = null
-        startupEventJob?.cancel()
-        startupEventJob = null
         mediaSessionInitJob?.cancel()
         mediaSessionInitJob = null
-        // A session must never outlive this Activity in the foreground, PiP included. Nulled so
-        // onDestroy's fallback release is a no-op; onStart's ensureMediaSession recreates it.
+        // docs/17 §3: a PiP stop keeps playing, so its session stays for the remote keys and a dismissal tears down via
+        // onPictureInPictureModeChanged(false) or onDestroy; every other stop releases it (nulled so onDestroy's release is a no-op).
+        if (sessionShouldSurviveStop(inPip = inPip(), finishing = isFinishing)) return
         mediaSessionHolder?.release()
         mediaSessionHolder = null
-        // docs/17 §3: in PiP the window stays visible and playback must keep running, so a
-        // transient onStop must never stop it. A dismissal reaches teardown either way, via
-        // onPictureInPictureModeChanged(false) or inPip() already being false here.
-        if (inPip() && !isFinishing) return
-        // Otherwise end the session and finish if merely backgrounded with mini player off --
-        // a session left running past onStop outside PiP is the leaked-player/ghost-task class
-        // of bug. The exactly-once guard makes a duplicate call a no-op.
+        // Any other stop ends playback (a session left running past it is the ghost-task class); the exactly-once guard
+        // makes a duplicate call a no-op.
         viewModel.stopPlaybackOnce()
         if (!isFinishing) {
             finishAndRemoveTask()
@@ -277,69 +296,58 @@ class PlaybackActivity : ComponentActivity() {
      * `ExoPlayer.prepare()`: [PlaybackUiState.phase] reaches READY only after [PlaybackPlayer.load]
      * calls through, so the theme-provided black window is the loading surface until then, letting
      * decoder/network startup overlap [PlaybackScreen]'s first composition instead of queuing
-     * behind it. The separate event waiter owns terminal startup outcomes while no Compose
-     * collector exists yet, and is cancelled before the real screen installs.
+     * behind it. Terminal events (those that close the player) are collected here for the whole
+     * Activity lifetime, so one emitted before the screen installs is never lost and none is handled
+     * twice; [PlaybackScreen] handles only the rest.
      */
     private fun installPlaybackUiAfterPlayerLoad() {
-        startupEventJob = lifecycleScope.launch {
-            when (
-                val event = viewModel.events.first {
-                    it is PlaybackEvent.Finish ||
-                        it is PlaybackEvent.ReauthorizationRequired ||
-                        it is PlaybackEvent.FinishWithMessage
+        lifecycleScope.launch {
+            viewModel.events.collect { event ->
+                when (event) {
+                    PlaybackEvent.Finish -> closePlayer()
+                    is PlaybackEvent.FinishToDetail -> finishToDetail(event.itemId)
+                    is PlaybackEvent.ReauthorizationRequired -> {
+                        authorizationRecoveryCoordinator.requestForFailedPlayback(event.account)
+                        closePlayer()
+                    }
+                    is PlaybackEvent.FinishWithMessage -> {
+                        Toast.makeText(this@PlaybackActivity, event.message, Toast.LENGTH_LONG).show()
+                        closePlayer()
+                    }
+                    is PlaybackEvent.AutoSkipped, PlaybackEvent.SeekUnavailable, PlaybackEvent.SubtitleUnavailable -> Unit // PlaybackScreen's
                 }
-            ) {
-                PlaybackEvent.Finish -> closePlayer()
-                is PlaybackEvent.ReauthorizationRequired -> {
-                    authorizationRecoveryCoordinator.requestForFailedPlayback(event.account)
-                    closePlayer()
-                }
-                is PlaybackEvent.FinishWithMessage -> {
-                    Toast.makeText(this@PlaybackActivity, event.message, Toast.LENGTH_LONG).show()
-                    closePlayer()
-                }
-                is PlaybackEvent.AutoSkipped, PlaybackEvent.SeekUnavailable, PlaybackEvent.SubtitleUnavailable -> Unit // excluded by the predicate above
-                is PlaybackEvent.FinishToDetail -> Unit // excluded above; PlaybackScreen-owned once running
             }
         }
 
         playbackUiInitJob = lifecycleScope.launch {
             viewModel.state.first { it.phase == PlaybackUiState.Phase.READY }
-            startupEventJob?.cancel()
-            startupEventJob = null
             if (isFinishing || isDestroyed) return@launch
             PerfLog.markPlayback("ui.install")
             setContent {
                 PlaybackScreen(
                     viewModel = viewModel,
-                    onFinish = ::closePlayer,
-                    onReauthorizationRequired = { account ->
-                        authorizationRecoveryCoordinator.requestForFailedPlayback(account)
-                        closePlayer()
-                    },
                     focusRestoreEpoch = windowFocusEpoch,
-                    onFinishToDetail = { nextItemId ->
-                        // "Still watching?" Stop/timeout: route to the next episode's detail page,
-                        // unless already in PiP (docs/17 §3), with no browsing UI to route into.
-                        if (inPip()) {
-                            finishAndRemoveTask()
-                        } else {
-                            leavingForDetail = true
-                            // NO_USER_ACTION: a synthetic routing Intent, not a user action.
-                            startActivity(
-                                Intent(this@PlaybackActivity, MainActivity::class.java)
-                                    .setAction(ExternalPlaybackContract.ACTION_OPEN_DETAIL)
-                                    .putExtra(ExternalPlaybackContract.EXTRA_ITEM_ID, nextItemId)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NO_USER_ACTION),
-                            )
-                            finish()
-                        }
-                    },
                     inPictureInPicture = inPictureInPicture,
                     onExitRequested = { if (!tryEnterPip()) finish() },
                 )
             }
         }
+    }
+
+    /** docs/12 §13: "Still watching?" Stop/timeout routes to the next episode's detail page, unless in
+     * PiP (docs/17 §3), which has no browsing UI to route into.
+     */
+    private fun finishToDetail(nextItemId: String) {
+        if (inPip()) return finishAndRemoveTask()
+        leavingForDetail = true
+        // NO_USER_ACTION: a synthetic routing Intent, not a user action.
+        startActivity(
+            Intent(this, MainActivity::class.java)
+                .setAction(ExternalPlaybackContract.ACTION_OPEN_DETAIL)
+                .putExtra(ExternalPlaybackContract.EXTRA_ITEM_ID, nextItemId)
+                .addFlags(Intent.FLAG_ACTIVITY_NO_USER_ACTION),
+        )
+        finish()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

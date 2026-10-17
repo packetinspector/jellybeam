@@ -7,10 +7,22 @@ package tv.jellybeam.nav
  * - [push]: Home -> Library, card Enter -> Detail, Series/Season -> episode.
  * - [replace]: sibling-episode switch swaps the top entry so Back skips visited siblings.
  * - [pop]: remote/system Back.
+ *
+ * Each entry carries an [ids] value from a counter that only grows, so a surviving entry keeps its
+ * composition key through a push, eviction or pop and a fresh entry never reuses a popped one's.
+ * Equality is the [entries] alone: the ids are identity, not content.
  */
-data class NavBackStack(val entries: List<Screen>) {
+class NavBackStack private constructor(
+    val entries: List<Screen>,
+    /** Parallel to [entries]; assigned at push (docs/07 §5), kept by [replace] and eviction. */
+    val ids: List<Int>,
+    private val nextId: Int,
+) {
+    constructor(entries: List<Screen>) : this(entries, entries.indices.toList(), entries.size)
+
     init {
         require(entries.isNotEmpty()) { "NavBackStack must have at least one entry" }
+        require(entries.size == ids.size) { "one id per entry" }
     }
 
     val current: Screen get() = entries.last()
@@ -18,19 +30,34 @@ data class NavBackStack(val entries: List<Screen>) {
 
     fun push(screen: Screen): NavBackStack {
         val appended = entries + screen
-        if (appended.size <= MAX_RETAINED_ENTRIES) return NavBackStack(appended)
+        val appendedIds = ids + nextId
+        if (appended.size <= MAX_RETAINED_ENTRIES) return NavBackStack(appended, appendedIds, nextId + 1)
         // Root is the escape hatch; drop the oldest intermediate entry rather than retain another
         // full layer.
-        return NavBackStack(listOf(appended.first()) + appended.drop(1).takeLast(MAX_RETAINED_ENTRIES - 1))
+        val keep = MAX_RETAINED_ENTRIES - 1
+        return NavBackStack(
+            listOf(appended.first()) + appended.drop(1).takeLast(keep),
+            listOf(appendedIds.first()) + appendedIds.drop(1).takeLast(keep),
+            nextId + 1,
+        )
     }
 
-    fun replace(screen: Screen): NavBackStack = NavBackStack(entries.dropLast(1) + screen)
+    fun replace(screen: Screen): NavBackStack = NavBackStack(entries.dropLast(1) + screen, ids, nextId)
 
     /** A no-op (returns `this`) at the stack root -- callers gate on [canGoBack] first anyway. */
-    fun pop(): NavBackStack = if (canGoBack) NavBackStack(entries.dropLast(1)) else this
+    fun pop(): NavBackStack = if (canGoBack) NavBackStack(entries.dropLast(1), ids.dropLast(1), nextId) else this
+
+    /** Pops only when the entry with [id] is the top; a screen that left or sits under another is left alone (docs/07 §5). */
+    fun popIfTop(id: Int): NavBackStack = if (ids.last() == id) pop() else this
 
     /** Clears the whole history down to a single fresh entry (sign-in success, sign-out). */
-    fun reset(screen: Screen): NavBackStack = NavBackStack(listOf(screen))
+    fun reset(screen: Screen): NavBackStack = NavBackStack(listOf(screen), listOf(nextId), nextId + 1)
+
+    override fun equals(other: Any?): Boolean = other is NavBackStack && other.entries == entries
+
+    override fun hashCode(): Int = entries.hashCode()
+
+    override fun toString(): String = "NavBackStack(entries=$entries)"
 
     companion object {
         const val MAX_RETAINED_ENTRIES = 8
@@ -74,17 +101,18 @@ fun Screen.entryIdentity(): String = when (this) {
 
 /**
  * The `key()` `MainActivity`'s `JellybeamRoot` wraps each retained per-entry layer in:
- * `"$index:${entryIdentity()}"`.
+ * `"$id:${entryIdentity()}"`.
  *
- * - INDEX makes [push]/[pop] cheap: existing keys never change, so nothing below the
- *   pushed/popped entry recomposes or disposes.
- * - IDENTITY makes [replace] correct: same index, different [Screen] produces a different
+ * - The ID (from [NavBackStack.ids]) makes [NavBackStack.push]/[NavBackStack.pop] cheap and
+ *   eviction safe: a surviving entry's key never changes, so nothing below it recomposes or
+ *   disposes.
+ * - IDENTITY makes [NavBackStack.replace] correct: same id, different [Screen] produces a different
  *   key, so Compose disposes the old subtree (ViewModel included) and mounts a fresh one.
  */
-fun NavBackStack.entryKeys(): List<String> = entries.mapIndexed { index, screen -> screen.entryKey(index) }
+fun NavBackStack.entryKeys(): List<String> = entries.mapIndexed { index, screen -> screen.entryKey(ids[index]) }
 
-/** One entry's [entryKeys] key, given its stack [index]. */
-fun Screen.entryKey(index: Int): String = "$index:${entryIdentity()}"
+/** One entry's [entryKeys] key, given its stack entry [id]. */
+fun Screen.entryKey(id: Int): String = "$id:${entryIdentity()}"
 
 /**
  * A drawer pick's stack: Home resets to the root; anything else pushes one level above Home, or

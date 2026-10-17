@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -81,7 +80,6 @@ fun ChannelFolderList(
     viewModel: LibraryViewModel,
     onOpenDetail: (Card) -> Unit,
     isTop: Boolean,
-    focusGate: MutableState<Boolean>,
 ) {
     var focusedIndex by remember { mutableStateOf<Int?>(null) }
     val initialFocusRequester = remember { FocusRequester() }
@@ -119,7 +117,6 @@ fun ChannelFolderList(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = state.items.isNotEmpty(),
         fallback = {
             if (memory.seeded) {

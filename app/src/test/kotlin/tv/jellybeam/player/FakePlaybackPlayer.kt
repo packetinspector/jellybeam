@@ -126,7 +126,11 @@ class FakePlaybackPlayer : PlaybackPlayer {
         playWhenReady = true // as PlayerHolder.load
     }
 
+    /** Runs on every [addListener], which is where the real holder first builds its lazy ExoPlayer. */
+    var onListenerAdded: (() -> Unit)? = null
+
     override fun addListener(listener: Player.Listener) {
+        onListenerAdded?.invoke()
         listeners.add(listener)
     }
 

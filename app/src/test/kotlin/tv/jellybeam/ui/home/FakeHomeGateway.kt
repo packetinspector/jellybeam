@@ -65,7 +65,14 @@ class FakeHomeGateway(
         return syncStatusResult
     }
 
-    override suspend fun views(): List<ViewSnapshot> = viewsResult
+    /** [views] calls, so a test can count who re-reads the library list per event. */
+    var viewsCallCount = 0
+        private set
+
+    override suspend fun views(): List<ViewSnapshot> {
+        viewsCallCount++
+        return viewsResult
+    }
 
     override suspend fun getSettings(): Settings = settingsResult
 

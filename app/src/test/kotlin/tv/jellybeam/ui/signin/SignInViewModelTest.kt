@@ -1,7 +1,10 @@
 package tv.jellybeam.ui.signin
 
 import androidx.lifecycle.ViewModelStore
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceTimeBy
@@ -9,6 +12,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -79,7 +83,7 @@ class SignInViewModelTest {
     }
 
     @Test
-    fun `disabled quick connect stops before initiation and can be retried`() = runTest(dispatcher) {
+    fun `disabled quick connect reports the disabled error from the single initiation call and can be retried`() = runTest(dispatcher) {
         val gateway = QuickConnectGateway(enabled = false)
         withViewModel(gateway) { viewModel ->
             viewModel.toggleQuickConnect()
@@ -88,7 +92,8 @@ class SignInViewModelTest {
             assertTrue(viewModel.state.value.quickConnectActive)
             assertFalse(viewModel.state.value.isQuickConnecting)
             assertEquals("Quick Connect is disabled on this server.", viewModel.state.value.error)
-            assertEquals(0, gateway.initiateCalls)
+            assertEquals(1, gateway.initiateCalls)
+            assertEquals(0, gateway.pollCalls)
         }
     }
 
@@ -293,6 +298,37 @@ class SignInViewModelTest {
     }
 
     @Test
+    fun `searching again while a search is pending never shows discovery as finished`() = runTest(dispatcher) {
+        val first = CompletableDeferred<List<DiscoveredServer>>()
+        val second = CompletableDeferred<List<DiscoveredServer>>()
+        val fake = FakeCoreGateway()
+        fake.discoverServersGates.addAll(listOf(first, second))
+        val found = DiscoveredServer(address = "http://192.0.2.20:8096", id = "server-1", name = "Loft", alreadySaved = true)
+        withViewModel(QuickConnectGateway(fake = fake)) { viewModel ->
+            runCurrent()
+            assertEquals("the first search is parked", 1, fake.discoverServersCalls)
+            val seen = mutableListOf<SignInUiState>()
+            backgroundScope.launch(UnconfinedTestDispatcher(scheduler)) { viewModel.state.collect { seen += it } }
+
+            viewModel.retryDiscovery()
+            runCurrent()
+
+            assertEquals("the second search is parked", 2, fake.discoverServersCalls)
+            assertTrue("a search is pending", viewModel.state.value.isDiscovering)
+            assertTrue(
+                "no state after the retry reports discovery finished while the new search is pending",
+                seen.drop(1).none { !it.isDiscovering },
+            )
+
+            second.complete(listOf(found))
+            runCurrent()
+
+            assertEquals(listOf(found), viewModel.state.value.discoveredServers)
+            assertFalse(viewModel.state.value.isDiscovering)
+        }
+    }
+
+    @Test
     fun `gateway throwing during discovery yields an empty list without surfacing an error`() = runTest(dispatcher) {
         val throwing = object : CoreGateway by FakeCoreGateway() {
             override suspend fun discoverServers(): List<DiscoveredServer> = throw RuntimeException("network unreachable")
@@ -332,6 +368,123 @@ class SignInViewModelTest {
         assertEquals(unsaved, singleUnsavedServerToPrefill(listOf(saved, unsaved), touched = false))
     }
 
+    // -- Quick Connect lifetime and surface teardown (docs/18 §2.1) ------------
+
+    private fun pendingQuickConnectFake() = FakeCoreGateway().apply {
+        initiateQuickConnectResult = QuickConnectSession(code = "654321", secret = "opaque-secret")
+        pollQuickConnectResult = false
+    }
+
+    @Test
+    fun `quick connect stops polling and reports an error once the server code lifetime has passed`() = runTest(dispatcher) {
+        val fake = pendingQuickConnectFake()
+        withViewModel(fake) { viewModel ->
+            viewModel.toggleQuickConnect()
+            runCurrent()
+
+            advanceTimeBy(10 * 60_000L + 1_000L)
+            runCurrent()
+            val pollsAtExpiry = fake.pollQuickConnectCallCount
+
+            advanceTimeBy(60_000L)
+            runCurrent()
+
+            assertEquals("no poll after the 10-minute code lifetime", pollsAtExpiry, fake.pollQuickConnectCallCount)
+            assertFalse(viewModel.state.value.isQuickConnecting)
+            assertNotNull("an expired code surfaces an error", viewModel.state.value.error)
+        }
+    }
+
+    @Test
+    fun `quick connect starts no poll once the deadline passed during the poll delay`() = runTest(dispatcher) {
+        val fake = pendingQuickConnectFake()
+        withViewModel(fake) { viewModel ->
+            viewModel.toggleQuickConnect()
+            runCurrent()
+
+            advanceTimeBy(10 * 60_000L - 1L)
+            runCurrent()
+            val pollsBeforeDeadline = fake.pollQuickConnectCallCount
+            assertTrue("polling ran until the deadline", pollsBeforeDeadline > 0)
+
+            advanceTimeBy(1L)
+            runCurrent()
+
+            assertEquals("the delay that ends at the deadline starts no poll", pollsBeforeDeadline, fake.pollQuickConnectCallCount)
+            assertNotNull(viewModel.state.value.error)
+        }
+    }
+
+    @Test
+    fun `a poll in flight at the code deadline that comes back approved still completes sign-in`() = runTest(dispatcher) {
+        val fake = pendingQuickConnectFake().apply {
+            pollQuickConnectResult = true
+            pollQuickConnectGate = CompletableDeferred()
+        }
+        var completes = 0
+        val gateway = object : CoreGateway by fake {
+            override suspend fun completeQuickConnect(serverUrl: String, secret: String): AccountInfo {
+                completes++
+                return AccountInfo(serverUrl = serverUrl, userId = "u1", userName = "viewer")
+            }
+        }
+        withViewModel(gateway) { viewModel ->
+            viewModel.toggleQuickConnect()
+            runCurrent()
+            advanceTimeBy(2_000L)
+            runCurrent()
+            assertEquals("the first poll is in flight", 1, fake.pollQuickConnectCallCount)
+
+            advanceTimeBy(10 * 60_000L + 1_000L)
+            runCurrent()
+            fake.pollQuickConnectGate!!.complete(Unit)
+            runCurrent()
+
+            assertEquals("the late approval completes", 1, completes)
+            assertTrue(viewModel.state.value.signedIn)
+            assertNull("no expired error over an approval", viewModel.state.value.error)
+        }
+    }
+
+    @Test
+    fun `clearing the view model during quick connect stops further polls`() = runTest(dispatcher) {
+        val fake = pendingQuickConnectFake()
+        val viewModel = SignInViewModel(fake, ResourceUiStrings.default, null)
+        viewModel.toggleQuickConnect()
+        runCurrent()
+        advanceTimeBy(2_000L)
+        runCurrent()
+        assertEquals(1, fake.pollQuickConnectCallCount)
+
+        ViewModelStore().apply { put("sign-in", viewModel) }.clear()
+        advanceTimeBy(60_000L)
+        runCurrent()
+
+        assertEquals("no poll after the surface is gone", 1, fake.pollQuickConnectCallCount)
+    }
+
+    @Test
+    fun `clearing the view model while sign-in is in flight publishes no state afterwards`() = runTest(dispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        val fake = FakeCoreGateway(signInError = CoreException.InvalidCredentials()).apply { signInGate = gate }
+        val viewModel = SignInViewModel(fake, ResourceUiStrings.default, null)
+        runCurrent()
+        viewModel.signIn()
+        runCurrent()
+        assertEquals(1, fake.signInCallCount)
+        val seen = mutableListOf<SignInUiState>()
+        backgroundScope.launch(UnconfinedTestDispatcher(scheduler)) { viewModel.state.collect { seen += it } }
+        val publishedBeforeClear = seen.size
+
+        ViewModelStore().apply { put("sign-in", viewModel) }.clear()
+        gate.complete(Unit)
+        runCurrent()
+
+        assertEquals("no state published after the surface is gone", publishedBeforeClear, seen.size)
+        assertTrue(viewModel.state.value.isSigningIn)
+        assertNull(viewModel.state.value.error)
+    }
+
     private inline fun withViewModel(
         gateway: CoreGateway,
         target: ReauthorizationTarget? = null,
@@ -368,10 +521,9 @@ class SignInViewModelTest {
             return AccountInfo(serverUrl = "http://saved.test", userId = "user-id", userName = username)
         }
 
-        override suspend fun quickConnectEnabled(serverUrl: String): Boolean = enabled
-
         override suspend fun initiateQuickConnect(serverUrl: String): QuickConnectSession {
             initiateCalls++
+            if (!enabled) throw CoreException.QuickConnectDisabled("media.example.test")
             return QuickConnectSession(code = "654321", secret = "opaque-secret")
         }
 

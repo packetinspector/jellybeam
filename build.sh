@@ -87,6 +87,8 @@ case "${1:-shell}" in
         run_cmd ./gradlew testReleaseUnitTest
         ;;
     check)
+        # Host-side (docs/05): no container needed, and it fails fast before the Gradle run.
+        bash tools/check-cancellation.sh
         # One unit-test variant: debug and release run the same sources, so the second run
         # only doubled the gate's cost.
         echo "Pre-commit gate: Kotlin unit tests (release variant) + lint (no APK -- use 'release' for an installable build)..."

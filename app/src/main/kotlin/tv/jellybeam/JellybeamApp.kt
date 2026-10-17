@@ -27,6 +27,8 @@ import coil.transition.Transition
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.LaunchWarmup
 import tv.jellybeam.data.RealCoreGateway
+import tv.jellybeam.data.SettingsStore
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.diag.CrashCapture
 import tv.jellybeam.diag.DiagLog
 import tv.jellybeam.diag.DiagSinkBridge
@@ -80,6 +82,9 @@ object AppGraph {
     /** Cold-start head start; `null` until [init], so code built without it runs the plain path. */
     var launchWarmup: LaunchWarmup? = null
         private set
+
+    /** docs/09: the one holder and writer of the settings record. */
+    val settingsStore: SettingsStore by lazy { SettingsStore(gateway, processScope) }
 
     /** docs/21 §2.2: created before [gateway] so every early diag call, including tests that
      * never call [init], has somewhere to record into; [DiagLog.event] is a no-op while disabled.
@@ -188,10 +193,10 @@ object AppGraph {
         // time Home's content frame uses them. Both are touched here instead, off-main, fired
         // after core construction above rather than gating or preceding it.
         processScope.launch(Dispatchers.IO) {
-            runCatching {
+            runCatchingCancellable {
                 Coil.imageLoader(appContext).diskCache?.openSnapshot("warm")?.close()
             }
-            JellybeamTheme.fontResourceIds.forEach { id -> runCatching { ResourcesCompat.getFont(appContext, id) } }
+            JellybeamTheme.fontResourceIds.forEach { id -> runCatchingCancellable { ResourcesCompat.getFont(appContext, id) } }
         }
 
         // docs/21 §2.1/§2.2: once the core exists, wire the Rust WARN/ERROR forwarder and apply
@@ -200,7 +205,7 @@ object AppGraph {
         processScope.launch(Dispatchers.IO) {
             coreDeferred.await()
             installDiagSink(DiagSinkBridge(diag))
-            runCatching { gateway.getSettings() }.getOrNull()?.let { settings ->
+            runCatchingCancellable { gateway.getSettings() }.getOrNull()?.let { settings ->
                 diag.setEnabled(settings.diagnosticLoggingEnabled)
                 crash.enabled = settings.crashReportsEnabled
             }
@@ -213,7 +218,7 @@ object AppGraph {
         processScope.launch(Dispatchers.Default) {
             try {
                 withTimeoutOrNull(FIRST_FRAME_WAIT_MS) { firstFrameSignal.await() }
-                PerfLog.timed("deviceCaps.probe") { runCatching { pushDeviceCaps(gateway) } }
+                PerfLog.timed("deviceCaps.probe") { runCatchingCancellable { pushDeviceCaps(gateway) } }
             } finally {
                 // First playback waits for this decision to be final rather than racing the probe.
                 deviceCapsReady.complete(Unit)

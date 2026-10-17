@@ -78,7 +78,6 @@ struct PlaybackState {
 
 enum Cmd {
     Pause(bool),
-    TrackChange(Option<i32>, Option<i32>),
     /// Processed by the reporting actor, not directly by `ReportingSession::stop`, so a slow Start
     /// can never land after Stopped.
     Stop {
@@ -549,10 +548,6 @@ impl ReportingSession {
         let _ = self.cmd_tx.send(Cmd::Pause(paused));
     }
 
-    pub fn on_track_change(&mut self, audio: Option<i32>, subtitle: Option<i32>) {
-        let _ = self.cmd_tx.send(Cmd::TrackChange(audio, subtitle));
-    }
-
     /// Discards a session superseded before playback became active. Deliberately doesn't emit
     /// `Stopped(0)` (could overwrite a newer session's resume point); logs the trade-off since
     /// `stopped = true` suppresses the `Drop` warning.
@@ -793,12 +788,6 @@ async fn run(
                             send_retrying(&sink, report_for(&ctx, &state, PlaybackReportKind::Progress)).await;
                             ticker.reset();
                         }
-                    }
-                    Some(Cmd::TrackChange(audio, subtitle)) => {
-                        state.audio_stream_index = audio;
-                        state.subtitle_stream_index = subtitle;
-                        send_retrying(&sink, report_for(&ctx, &state, PlaybackReportKind::Progress)).await;
-                        ticker.reset();
                     }
                     Some(Cmd::Stop { ticks, completion, delivered }) => {
                         if !claim_final(&final_owner, FINAL_BY_ACTOR) {
@@ -1359,23 +1348,6 @@ mod tests {
         );
 
         session.stop(999 * 10_000_000).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn track_change_sends_immediate_edge_report() {
-        let sink = FakeSink::new(0);
-        let mut session = ReportingSession::start_with_sink(sink.clone(), ctx());
-        tokio::task::yield_now().await;
-
-        session.on_track_change(Some(2), Some(3));
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-        let calls = sink.calls();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[1].audio_stream_index, Some(2));
-        assert_eq!(calls[1].subtitle_stream_index, Some(3));
-
-        session.stop(0).await;
     }
 
     #[tokio::test(start_paused = true)]

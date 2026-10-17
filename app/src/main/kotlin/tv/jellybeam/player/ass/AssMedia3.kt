@@ -369,6 +369,7 @@ class AssTextRenderer(
     /** One render pass's samples, sent to Rust in one call. */
     private val batch = ArrayList<AssSample>()
     private var trackKey: String? = null
+    private var item = 0uL
     private var sentUs = Long.MIN_VALUE
     private var sentPlaying = false
     private var latestUs = 0L
@@ -396,8 +397,10 @@ class AssTextRenderer(
         val key = assTrackKey(format)
         trackKey = key
         overlay()?.let {
-            it.addTrack(key, assHeader(format.initializationData))
-            it.select(key)
+            // Taken once per bound track: everything this stream feeds names it (docs/18 §3.2).
+            item = it.item()
+            it.addTrackFor(key, assHeader(format.initializationData), item)
+            it.selectFor(key, item)
         }
     }
 
@@ -411,7 +414,7 @@ class AssTextRenderer(
 
     override fun onDisabled() {
         // Only its own track: a sidecar picked meanwhile may already be selected (docs/18 §3.2).
-        trackKey?.let { key -> overlay()?.unselect(key) }
+        trackKey?.let { key -> overlay()?.unselectFor(key, item) }
         trackKey = null
         sentUs = Long.MIN_VALUE
         samples.reset()
@@ -438,7 +441,7 @@ class AssTextRenderer(
     private fun send(sink: AssOverlay) {
         if (batch.isEmpty()) return
         try {
-            trackKey?.let { sink.addSamples(it, batch) }
+            trackKey?.let { sink.addSamplesFor(it, batch, item) }
         } finally {
             batch.clear()
         }

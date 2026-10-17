@@ -14,7 +14,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -56,8 +55,6 @@ fun DiscoverPersonScreen(
     personId: Long,
     onOpenDetail: (mediaType: SeerrMediaType, tmdbId: Long) -> Unit,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate for this entry (see [tv.jellybeam.ui.library.LibraryScreen]). */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: DiscoverPersonViewModel = viewModel(factory = DiscoverPersonViewModelFactory(AppGraph.gateway, AppGraph.strings, personId)),
 ) {
     val state by viewModel.state.collectAsState()
@@ -77,7 +74,6 @@ fun DiscoverPersonScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = state.credits.isNotEmpty(),
         fallback = {
             if (memory.seeded) {

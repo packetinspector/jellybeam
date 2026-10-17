@@ -355,7 +355,11 @@ entered from (scrolling back to it).
 ### 4.5 Empty result
 
 The strip stays open; the grid area shows one line, Archivo 16sp `Grigio`:
-`No titles match`. Chips are never pre-dimmed.
+`No titles match`. Chips are never pre-dimmed. A loaded grid with no posters
+under any active filter (Type included) opens the strip itself and focuses
+the active sort chip (`librarySeed`), since a grid with no cell holds no
+focus; with the grid empty, Back leaves the screen rather than closing the
+strip.
 
 ### 4.6 Paging
 
@@ -367,13 +371,26 @@ or skip a row; the change event's refresh re-reads the whole prefix and
 heals it. Counts and groups are re-queried with every
 sort/filter change and on mirror change events, alongside the items.
 
+Every items read, a refresh or a sort/filter requery, takes a number from
+one sequence as it starts, and only the newest number publishes, so the grid
+ends on the last-started read under the current sort whichever lands first.
+A sort/filter change persists its prefs beside the requery, never ahead of it,
+written from an app-lifetime scope that keeps only the latest record (each is the
+whole record), so leaving the screen right after a change still saves it. Genres
+(and the Favorites Type options) load once any read settles while not yet loaded,
+and again after a `Refresh` event, so a superseded first read never leaves them empty.
+
 Mirror change events reach this re-query through
-`tv.jellybeam.ui.common.ChangeRefreshScheduler` (shared with Home and Detail;
-see also docs/17 §6): a leading refresh on
-the first relevant event, then bounded periodic sampling — 500ms while this
-screen is top of the back stack and the Activity is resumed, 3s while it is
-retained-but-hidden — with a guaranteed trailing refresh and an immediate
-catch-up the moment the screen becomes top again with a pending change.
+`tv.jellybeam.ui.common.ChangeRefreshScheduler` (shared with Home, Detail and
+Person; see also docs/17 §6), one rule for every screen:
+
+- A screen that is not active (top of the back stack with the Activity
+  resumed, and composed: a stack replaced by sign-in or server management
+  is not) never refreshes; a relevant event only marks it dirty.
+- Becoming active refreshes once, if dirty.
+- While active, a relevant event refreshes at once (leading edge), then the
+  screen rests 500ms; events inside the rest cost one trailing refresh.
+
 This replaced a resetting `debounce(500)` that never fired while the mirror
 kept delivering changes roughly every 250ms during a sync burst (Rust's own
 `recv_changes` window), leaving the grid frozen on stale data for the whole
@@ -492,10 +509,11 @@ the disk write at all, since they only ever read the in-memory map.
   focus moves do not, Reset, rail jump loads the prefix, counts/groups
   refresh on change events, stale refresh and stale page discarded after an
   intent, rail prefix load waits for an in-flight page), and
-  `ChangeRefreshSchedulerTest` (leading refresh on the first event, bounded
-  periodic sampling during a sustained burst rather than one refresh at the
-  end, hidden work bounded to about one refresh per hidden period, and an
-  immediate catch-up refresh on becoming active with a pending change).
+  `ChangeRefreshSchedulerTest` (leading refresh on the first event, a burst
+  costs the leading refresh plus one trailing, progress during a sustained
+  burst, no refresh while hidden, exactly one on becoming active with a
+  pending change and none without, a failing refresh keeps the loop, and
+  cancellation ends it).
 - On device (Movies and TV Shows): summary at rest, Up opens the strip on
   the active sort chip, each sort and direction, each chip, Genre and
   Years panels, Reset, empty result, rail jump under each sort, Back paths,

@@ -7,7 +7,9 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
+import android.annotation.SuppressLint
 import android.view.FrameMetrics
+import android.view.KeyEvent
 import android.view.ViewTreeObserver
 import android.view.Window
 import android.widget.Toast
@@ -34,15 +36,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -51,6 +53,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -59,7 +62,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.zIndex
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
@@ -67,6 +69,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.profileinstaller.ProfileVerifier
+import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.nav.ExitConfirmationGate
 import tv.jellybeam.nav.NavBackStack
 import tv.jellybeam.nav.Screen
@@ -96,6 +99,12 @@ import tv.jellybeam.ui.discover.DiscoverRequestsScreen
 import tv.jellybeam.ui.discover.DiscoverScreen
 import tv.jellybeam.ui.discover.DiscoverSearchScreen
 import tv.jellybeam.ui.discover.resolveLibraryCard
+import tv.jellybeam.ui.focus.FocusSeat
+import tv.jellybeam.ui.focus.LocalFocusGate
+import tv.jellybeam.ui.focus.LocalFocusSeat
+import tv.jellybeam.ui.focus.RootFocus
+import tv.jellybeam.ui.focus.gateEnter
+import tv.jellybeam.ui.focus.tryRequestFocus
 import tv.jellybeam.ui.home.HomeHost
 import tv.jellybeam.ui.home.HomeHostArgs
 import tv.jellybeam.ui.launch.LaunchScreen
@@ -117,15 +126,14 @@ import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.SeerrBrowseKind
 import uniffi.jellybeam_core.SeerrMediaType
-import uniffi.jellybeam_core.ViewSnapshot
 import uniffi.jellybeam_core.favoritesView
 
 class MainActivity : ComponentActivity() {
@@ -154,17 +162,18 @@ class MainActivity : ComponentActivity() {
     private var pendingExternalPlayback by mutableStateOf<ExternalPlaybackRequest?>(null)
     private var nextExternalPlaybackRequestId = 0L
 
-    /**
-     * Compose-visible lifecycle edge for retained-screen focus recovery. The navigation stack
-     * doesn't change when PlaybackActivity covers this Activity, so a screen keyed only on "is
-     * top of stack" would never observe the false -> true transition when playback finishes.
-     */
-    private var activityResumed by mutableStateOf(false)
-
     /** [SystemClock.elapsedRealtime] at first frame, `null` until then -- lets [JellybeamRoot] gate
      * the cold-start `validateSession` call until slightly after the startup window instead of
      * racing it (docs/10-perf-logging.md). Set from [markFirstFrame], unconditionally. */
     private var firstFrameElapsedMs by mutableStateOf<Long?>(null)
+
+    /** docs/15 §4: the top layer's re-entry seat and whether anything holds focus, filled by [JellybeamRoot]. */
+    private val rootFocus = RootFocus()
+
+    /** docs/15 §4: a D-pad key while nothing is focused re-enters the top layer instead of a framework search. */
+    @SuppressLint("RestrictedApi") // lint flags every ComponentActivity override of this framework method
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean =
+        rootFocus.dispatch(event) || super.dispatchKeyEvent(event)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // System splash (docs/brand.md §6.3): no keep-on-screen condition, so this hands
@@ -182,12 +191,13 @@ class MainActivity : ComponentActivity() {
             JellybeamRoot(
                 onExitApp = ::finish,
                 externalPlaybackRequest = pendingExternalPlayback,
+                currentExternalPlayback = { pendingExternalPlayback },
                 onExternalPlaybackConsumed = { consumed ->
-                    if (pendingExternalPlayback == consumed) pendingExternalPlayback = null
+                    pendingExternalPlayback = pendingAfterConsume(pendingExternalPlayback, consumed)
                 },
-                activityResumed = activityResumed,
                 launchedForExternalPlayback = launchedForExternalPlayback,
                 firstFrameAtMs = firstFrameElapsedMs,
+                rootFocus = rootFocus,
             )
         }
         markFirstFrame(createStartElapsedMs)
@@ -214,7 +224,6 @@ class MainActivity : ComponentActivity() {
      */
     override fun onResume() {
         super.onResume()
-        activityResumed = true
         AppGraph.updateOwnerIfStarted()?.resume(this)
         externalIntentAwaitingResume?.let(::acceptExternalPlaybackIntent)
         externalIntentAwaitingResume = null
@@ -281,7 +290,6 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         AppGraph.updateOwnerIfStarted()?.pause()
         AppForeground.browsing.value = false
-        activityResumed = false
         stopFrameMetrics()
         super.onPause()
     }
@@ -367,14 +375,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class ExternalPlaybackRequest(val requestId: Long, val itemId: String, val kind: ExternalPlaybackRequestKind)
+internal data class ExternalPlaybackRequest(val requestId: Long, val itemId: String, val kind: ExternalPlaybackRequestKind)
 
 /**
  * [ExternalPlaybackRequest.kind]: [PLAY] is the "start PlaybackActivity" request (external PLAY
  * intent / `jellybeam://play` deep link); [OPEN_DETAIL] is Feature A's "still watching? -> Stop"
  * routing (docs/feature-dev/spec-still-watching-and-lan-discovery.md), never exported/deep-linked.
  */
-private enum class ExternalPlaybackRequestKind { PLAY, OPEN_DETAIL }
+internal enum class ExternalPlaybackRequestKind { PLAY, OPEN_DETAIL }
+
+/** What stays pending after [consumed] is handled: null clears all; a stale id keeps the newer request (docs/18 §2.1). */
+internal fun pendingAfterConsume(pending: ExternalPlaybackRequest?, consumed: ExternalPlaybackRequest?): ExternalPlaybackRequest? =
+    if (consumed == null || pending == consumed) null else pending
 
 /** [MainActivity.startFrameMetrics]'s periodic-summary tick -- never per-frame. */
 private const val FRAME_SUMMARY_INTERVAL_MS = 10_000L
@@ -417,6 +429,62 @@ private class FrameMetricsReporter(private val handler: Handler) : Window.OnFram
     }
 }
 
+/**
+ * The OPEN_DETAIL branch of the external-request effect: consuming clears the effect key and
+ * cancels this coroutine, so [consume] runs last on every path that completes normally.
+ * [stillPending] says whether [request] survived the card lookup; an account change that dropped it
+ * while the lookup ran must neither navigate nor consume (docs/18 §2.1).
+ */
+internal suspend fun handleOpenDetail(
+    request: ExternalPlaybackRequest,
+    readyStack: NavBackStack,
+    gateway: CoreGateway,
+    stillPending: () -> ExternalPlaybackRequest?,
+    consume: () -> Unit,
+    navigate: (NavBackStack) -> Unit,
+) {
+    if (readyStack.isHomeRooted) {
+        val card = resolveLibraryCard(gateway, request.itemId)
+        if (stillPending() != request) return
+        if (card != null) {
+            val current = readyStack.current
+            val newStack = if (current is Screen.Detail && current.card.itemType == EPISODE_ITEM_TYPE) {
+                readyStack.replaceDetail(card)
+            } else {
+                readyStack.pushDetail(card)
+            }
+            navigate(newStack)
+        }
+    }
+    consume()
+}
+
+/**
+ * The PLAY branch of the external-request effect: [consume] runs after the launch, because consuming
+ * clears the effect key and cancels this coroutine; a signed-out launch is consumed with [signInRequired]
+ * feedback instead. [stillPending] says whether [request] survived the wait for [awaitIdle].
+ */
+internal suspend fun handleExternalPlay(
+    request: ExternalPlaybackRequest,
+    readyStackHomeRooted: Boolean,
+    awaitIdle: suspend () -> Unit,
+    stillPending: () -> ExternalPlaybackRequest?,
+    launch: (String) -> Unit,
+    consume: () -> Unit,
+    signInRequired: () -> Unit,
+) {
+    if (readyStackHomeRooted) {
+        awaitIdle()
+        // An account change consumed the request while waiting; launching it now would play on the next account.
+        if (stillPending() != request) return
+        launch(request.itemId)
+        consume()
+    } else {
+        consume()
+        signInRequired()
+    }
+}
+
 private const val EPISODE_ITEM_TYPE = "Episode"
 
 /** docs/07 Watch state: one ON_START with an account runs the session check and the core's
@@ -452,6 +520,17 @@ private class ScreenViewModelStoreOwner : ViewModelStoreOwner {
 }
 
 /**
+ * A sign-in surface owns its ViewModelStore, so leaving it (Back, or the account-change reset) cancels its
+ * work such as Quick Connect polling (docs/18 §2.1); the account-tree reset never touches this store.
+ */
+@Composable
+private fun SignInSurface(content: @Composable () -> Unit) {
+    val owner = remember { ScreenViewModelStoreOwner() }
+    DisposableEffect(owner) { onDispose { owner.viewModelStore.clear() } }
+    CompositionLocalProvider(LocalViewModelStoreOwner provides owner, content = content)
+}
+
+/**
  * [Screen.Detail]'s fresh-entry perf mark (docs/10-perf-logging.md `detail.push`): every push or
  * sibling-replace that lands a NEW Detail screen. Never call these from a Back pop -- popping
  * reveals a Detail entry already on the stack, not a fresh one, and goes through
@@ -469,16 +548,16 @@ private fun NavBackStack.replaceDetail(card: Card): NavBackStack {
 
 /**
  * The identity a [ScreenViewModelStoreOwner] is tracked under -- `null` for screens that don't
- * need per-entry scoping. Home/SignIn/Search/Settings are singletons on this stack, so they
- * keep the ordinary Activity-level store; Library/Detail get one retained ViewModel per entry.
- * Keyed like [entryKeys] (stack position plus identity): the same title reached twice (Detail,
+ * need per-entry scoping. Home/Search/Settings are singletons on this stack, so they
+ * keep the ordinary Activity-level store, and SignIn has its own in [SignInSurface]; Library/Detail get one retained ViewModel per entry.
+ * Keyed like [entryKeys] (the entry's id plus identity): the same title reached twice (Detail,
  * Person, the same Detail) is two retained layers, and a shared ViewModel would fire its one-shot
  * navigation and playback in both.
  */
-private fun Screen.viewModelStoreKey(index: Int): String? = when (this) {
-    is Screen.Library, is Screen.Detail, is Screen.Person -> entryKey(index)
+private fun Screen.viewModelStoreKey(id: Int): String? = when (this) {
+    is Screen.Library, is Screen.Detail, is Screen.Person -> entryKey(id)
     // docs/14-seerr-discover.md: same per-entry reasoning as Library/Detail above.
-    is Screen.DiscoverGrid, is Screen.DiscoverDetail, is Screen.DiscoverPerson -> entryKey(index)
+    is Screen.DiscoverGrid, is Screen.DiscoverDetail, is Screen.DiscoverPerson -> entryKey(id)
     Screen.SignIn, Screen.Home, Screen.Search, Screen.Settings,
     Screen.Discover, Screen.DiscoverRequests, Screen.DiscoverSearch, Screen.Report -> null
 }
@@ -492,7 +571,7 @@ private fun Screen.viewModelStoreKey(index: Int): String? = when (this) {
  * after the old screen's nodes are already disposed, the earliest point this is provably safe.
  */
 private fun pruneViewModelStores(owners: MutableMap<String, ScreenViewModelStoreOwner>, keep: NavBackStack) {
-    val keepKeys = keep.entries.mapIndexedNotNull { index, screen -> screen.viewModelStoreKey(index) }.toSet()
+    val keepKeys = keep.entries.mapIndexedNotNull { index, screen -> screen.viewModelStoreKey(keep.ids[index]) }.toSet()
     val iterator = owners.entries.iterator()
     while (iterator.hasNext()) {
         val entry = iterator.next()
@@ -504,89 +583,76 @@ private fun pruneViewModelStores(owners: MutableMap<String, ScreenViewModelStore
 }
 
 /**
- * The wrapper every retained per-entry layer on a Home-rooted [NavBackStack] is composed
- * inside. [index] drives `zIndex` (belt-and-suspenders; declaration order already paints later
- * entries over earlier ones); [isShown] decides draw-skip, [isTop] the focus gate.
- *
- * Every hidden-but-retained layer needs:
- * - Its draw skipped while hidden (`drawWithContent`; free GPU savings on the target 2GB box).
- * - To be unreachable by D-pad focus search while hidden -- otherwise a search could reach a
- *   card still sitting invisibly in a layer underneath.
- *
- * [focusGate] is a GATE, not a plain `isTop` fence: with `enter` keyed on `isTop` alone, a pop's
- * framework default-focus grab could land on the newly-top layer before that screen's own
- * becoming-top restore effect placed focus correctly (a scroll-position yo-yo). A permanent
- * `Cancel` doesn't work either -- it denies even a direct [FocusRequester.requestFocus] at a
- * descendant, so an initial focus seed could never land. The gate is closed (via [SideEffect])
- * whenever an entry isn't top, and opened by the screen itself immediately before each of its
- * own explicit focus placements (see [tv.jellybeam.ui.home.HomeScreen]'s `focusGate` param doc).
+ * docs/15 §4: one retained back-stack entry. Hidden layers skip their draw and deny focus; the
+ * top layer admits focus only around its screen's own placements ([LocalFocusGate], so a pop's
+ * default-focus grab can't beat the restore) and, while top, is the root's re-entry [FocusSeat].
  */
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun RetainedScreenLayer(
-    index: Int,
     isTop: Boolean,
     isShown: Boolean,
-    focusGate: MutableState<Boolean>,
+    rootFocus: RootFocus,
     content: @Composable () -> Unit,
 ) {
+    val focusGate = remember { mutableStateOf(false) }
     if (!isTop) {
         SideEffect { focusGate.value = false }
+    }
+    val layerRequester = remember { FocusRequester() }
+    val seat = remember { FocusSeat() }
+    // The layer's last resort for the root's re-entry: one explicit placement under its own gate.
+    seat.fallback = {
+        focusGate.value = true
+        val placed = tryRequestFocus { layerRequester.requestFocus() }
+        focusGate.value = false
+        placed
+    }
+    DisposableEffect(isTop) {
+        if (isTop) rootFocus.seat = seat
+        onDispose { if (rootFocus.seat === seat) rootFocus.seat = null }
     }
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .zIndex(index.toFloat())
             .drawWithContent { if (isShown) drawContent() }
-            .focusProperties {
-                enter = { if (focusGate.value) FocusRequester.Default else FocusRequester.Cancel }
-            }
+            .focusRequester(layerRequester)
+            .focusProperties { enter = { if (gateEnter(isTop, focusGate.value)) FocusRequester.Default else FocusRequester.Cancel } }
             .focusGroup(),
     ) {
-        content()
+        CompositionLocalProvider(LocalFocusSeat provides seat, LocalFocusGate provides focusGate, content = content)
     }
 }
 
 /**
- * Decides where to land on launch: `restoreSession` succeeds -> reopen the mirror and go
- * straight to Home; otherwise Sign In. `null` while that decision is in flight.
- *
- * Navigation (GOAL item 1, docs/07 §5): one [NavBackStack] in plain Compose state, no
- * navigation library. Enter opens Detail, never plays directly; Back pops one entry via
- * [BackHandler]; a sibling-episode switch replaces the top entry so Back skips visited siblings.
- *
- * While [NavBackStack.isHomeRooted], every entry in [NavBackStack.entries] is composed
- * bottom-to-top as its own retained layer, keyed on [NavBackStack.entryKeys]'s index+identity
- * scheme: a push/pop leaves every surviving key unchanged (Compose keeps the composition),
- * while a `replace` changes the key at that slot (Compose disposes the old subtree/ViewModel
- * and mounts fresh) -- so a pop just reveals whatever's already live underneath, zero rebuild,
- * zero flash. When the stack is SignIn-rooted, none of this applies.
- *
- * Each retained-but-hidden layer ([RetainedScreenLayer], plus each screen's own `isTop`-driven
- * restore logic) must be unreachable by D-pad focus search while hidden, and skip its draw.
- *
- * Memory: a deep stack is rare in practice; this assumes it stays cheap enough for the target
- * 2GB box without eviction/depth-cap logic -- revisit with a real memory profile if that changes.
+ * Launch decision (`restoreSession` -> Home, else Sign In; `null` while in flight) and navigation (docs/07 §5):
+ * one [NavBackStack] in Compose state. docs/15 §3: a Home-rooted stack composes every entry as a
+ * [RetainedScreenLayer], so a pop reveals a live layer.
  */
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun JellybeamRoot(
     onExitApp: () -> Unit,
     externalPlaybackRequest: ExternalPlaybackRequest?,
-    onExternalPlaybackConsumed: (ExternalPlaybackRequest) -> Unit,
-    activityResumed: Boolean,
+    /** Reads the pending request live, so a coroutine sees a reset's drop before the next recomposition. */
+    currentExternalPlayback: () -> ExternalPlaybackRequest?,
+    /** Consumes that request; null drops whichever one is pending. */
+    onExternalPlaybackConsumed: (ExternalPlaybackRequest?) -> Unit,
     /** docs/21 §1.3: this Activity's own launch intent, not the live (soon-consumed)
      * [externalPlaybackRequest] state -- see [MainActivity.isExternalPlaybackIntent]. */
     launchedForExternalPlayback: Boolean = false,
     /** [MainActivity.firstFrameElapsedMs] -- `null` until first frame, then gates the cold-start
      * `validateSession` call below (docs/10). */
     firstFrameAtMs: Long? = null,
+    /** docs/15 §4: [MainActivity]'s key funnel; the top layer fills its seat, this its focus flag. */
+    rootFocus: RootFocus = remember { RootFocus() },
 ) {
     val focusManager = LocalFocusManager.current
     val context = LocalContext.current
     val gateway = AppGraph.gateway
     var backStack by remember { mutableStateOf<NavBackStack?>(null) }
-    var libraryViews by remember { mutableStateOf<List<ViewSnapshot>>(emptyList()) }
+    // docs/07 §5: the app's one shared library list, moved only by a views change.
+    val libraryViews by gateway.viewsState.collectAsState()
     // docs/07 §5: the drawer's Favorites entry sits first among the views, only while any exist.
     var hasFavorites by remember { mutableStateOf(false) }
     // docs/25 §6.1: the session's committed Home layout, seeded once per session from settings.
@@ -610,19 +676,15 @@ private fun JellybeamRoot(
     var activeAccountIndex by remember { mutableStateOf<UInt?>(null) }
 
     // docs/14-seerr-discover.md: whether the drawer's "Discover" entry shows at all -- a
-    // local-file-only read, re-checked whenever [seerrEpoch] bumps or the session changes.
+    // local-file-only read, re-checked whenever the gateway's `seerrRevision` moves or the session changes.
+    // Hidden until the current account's read lands; an account reset returns it there.
     var discoverConfigured by remember { mutableStateOf(false) }
-    var seerrEpoch by remember { mutableIntStateOf(0) }
-
-    // Full in-app session reset (switching/adding a server): bumping this re-keys the startup
-    // LaunchedEffect below to rerun restoreSession -> openMirror -> views. Plain Int, not a
-    // Boolean, so a second switch requested before the first finishes is still a new key.
-    var sessionEpoch by remember { mutableIntStateOf(0) }
 
     // The ambient (Activity-level) ViewModelStore, resolved before any per-entry
-    // CompositionLocalProvider could shadow it -- where Home/Search/Settings/SignIn
-    // ViewModels actually live, since viewModelStoreKey resolves null for those four.
-    // resetSessionState clears it alongside screenStoreOwners for that reason.
+    // CompositionLocalProvider could shadow it -- where Home/Search/Settings
+    // ViewModels actually live, since viewModelStoreKey resolves null for those.
+    // resetSessionState clears it alongside screenStoreOwners for that reason; a sign-in
+    // surface owns its own store ([SignInSurface]).
     val activityViewModelStoreOwner = LocalViewModelStoreOwner.current
     val composableScope = rememberCoroutineScope()
     val exitConfirmationGate = remember { ExitConfirmationGate() }
@@ -631,6 +693,8 @@ private fun JellybeamRoot(
     // Per-entry ViewModelStore bookkeeping: a plain mutable map, not Compose state, since
     // mutating it is a side effect of navigating, not something that should recompose.
     val screenStoreOwners = remember { mutableMapOf<String, ScreenViewModelStoreOwner>() }
+    // docs/15 §3: each entry's saveable UI state, kept while an overlay replaces the stack.
+    val entryStates = rememberSaveableStateHolder()
 
     // JellybeamRoot leaving composition (Activity finishing) is the one transition navigate()'s
     // per-navigation pruning never sees; without this every still-on-stack ViewModel would
@@ -651,99 +715,109 @@ private fun JellybeamRoot(
         // top's restore runs.
         focusManager.clearFocus(force = true)
         exitConfirmationGate.reset()
+        backStack?.let { old -> (old.entryKeys() - newStack.entryKeys().toSet()).forEach(entryStates::removeState) }
         backStack = newStack
         // docs/21 §2.1: one line per navigation, screen name only.
         AppGraph.diag.event("nav.screen") { tag("screen", newStack.current.diagName()) }
     }
 
-    /**
-     * The shared half of the Servers-section full-reset flow -- [switchServer] and the
-     * "Add server" screen's `onSignedIn` both call this, then bump [sessionEpoch] themselves.
-     * Blanking [backStack] first shows [tv.jellybeam.ui.launch.LaunchScreen] immediately, which is the point
-     * here (a warm restart): there's deliberately nothing left on screen to race a cleared
-     * ViewModel's `onCleared()`.
-     */
+    // Servers-section "Add server": the credentials form replaces the stack (docs/15 §3) without
+    // touching [backStack], so Back just flips this to `false`.
+    var addServerActive by remember { mutableStateOf(false) }
+
+    /** docs/18 §2.1: the account tree's one reset per account change; blanks [backStack] first so nothing on screen races a cleared ViewModel. */
     fun resetSessionState() {
+        // An account change drops a pending external request, even one not yet composed, so it never runs against the next account (docs/18 §2.1).
+        onExternalPlaybackConsumed(null)
         focusManager.clearFocus(force = true)
         exitConfirmationGate.reset()
+        backStack?.entryKeys()?.forEach(entryStates::removeState)
         backStack = null
-        // Cleared rather than left stale: the sessionEpoch bump below re-runs the LaunchedEffect
+        // The add-server form belongs to the account the reset leaves (docs/18 §2.1).
+        addServerActive = false
+        // Cleared rather than left stale: the epoch bump below re-runs the LaunchedEffect
         // that recomputes both, but not before this recomposition briefly shows the launch screen.
         launchHost = null
         launchUnreachable = false
+        // The previous account's Discover answer never shows for the next one (docs/14).
+        discoverConfigured = false
         AppGraph.launchWarmup?.discard()
         screenStoreOwners.values.forEach { it.viewModelStore.clear() }
         screenStoreOwners.clear()
         activityViewModelStoreOwner?.viewModelStore?.clear()
     }
 
-    /**
-     * Servers-section "switch to this account": the full reset above, then
-     * [CoreGateway.switchSession], then [sessionEpoch] bumps regardless of outcome -- a failure
-     * is not special-cased, since `switch_session` only throws before touching the persisted
-     * active index, so a failed switch restores the same account that was active before,
-     * landing back on Home rather than stranded on [tv.jellybeam.ui.launch.LaunchScreen].
-     */
-    fun switchServer(index: UInt) {
-        resetSessionState()
-        composableScope.launch {
-            runCatching { gateway.switchSession(index) }
-            sessionEpoch++
-        }
+    // docs/18 §2.1: the owner calls the latest [resetSessionState], never a stale closure.
+    val currentReset by rememberUpdatedState(::resetSessionState)
+    val accountTree = remember(gateway) { AccountTreeOwner(gateway.accountEpochs) { currentReset() } }
+
+    // docs/18 §2.1: every account change resets the tree here, derived from the core epoch once restore completed.
+    LaunchedEffect(gateway) {
+        accountTree.follow { gateway.awaitAccountRestored() }
     }
 
-    // Servers-section "Add server": true while the credentials form stands in for the whole
-    // Home-rooted tree, not modeled as a NavBackStack push of Screen.SignIn since that screen
-    // doesn't participate in the retained-layer isTop/focusGate scheme. A plain flag sidesteps
-    // that: [backStack] stays untouched underneath, so Back just flips this to `false`.
-    var addServerActive by remember { mutableStateOf(false) }
+    /** docs/18 §2.1: a landed switch moves the core epoch and the follower resets the tree; a failed one changes nothing. */
+    fun switchServer(index: UInt) {
+        composableScope.launch { runCatchingCancellable { gateway.switchSession(index) } }
+    }
+
     var manageServersActive by remember { mutableStateOf(false) }
     var reauthorizationTarget by remember { mutableStateOf<ReauthorizationTarget?>(null) }
     var crashPromptVisible by remember { mutableStateOf(false) }
     var removingServerIndex by remember { mutableStateOf<UInt?>(null) }
     var serverManagementError by remember { mutableStateOf<String?>(null) }
 
-    // A 401 from any core call resolves the rejected account here ([reauthorizationIndex],
-    // docs/18 §2.1) and replaces the whole retained browse tree with the same reauthorization
-    // surface the server manager uses. The coordinator retains the request until this block
-    // consumes it, so the Activity transition cannot drop the event.
+    fun showReauthorization(target: ReauthorizationTarget) {
+        focusManager.clearFocus(force = true)
+        addServerActive = false
+        manageServersActive = false
+        serverManagementError = null
+        reauthorizationTarget = target
+    }
+
+    fun closeReauthorization() {
+        reauthorizationTarget = null
+    }
+
+    // docs/18 §2.1: a 401 shows the sign-in surface for the account the core named; the coordinator keeps the request until it is consumed here.
     LaunchedEffect(gateway) {
         authorizationRecoveryCoordinator.requests.filterNotNull().collect { request ->
+            fun decision() = reauthorizationDecision(
+                requestAccount = request.account,
+                currentRequestId = authorizationRecoveryCoordinator.requests.value?.id,
+                requestId = request.id,
+                showing = reauthorizationTarget,
+            )
+            if (decision() == ReauthorizationDecision.Drop) {
+                authorizationRecoveryCoordinator.consume(request.id)
+                return@collect
+            }
+            // One surface at a time (docs/18 §2.1): another account's request waits, unconsumed, for the crash prompt and the sign-in surface to close, one opened during the lookups included.
+            val surfaceBlocks = { crashPromptVisible || decision() == ReauthorizationDecision.Wait }
             resolveReauthorization(
-                promptVisible = { crashPromptVisible },
-                awaitPromptClosed = { snapshotFlow { crashPromptVisible }.first { !it } },
+                promptVisible = surfaceBlocks,
+                awaitPromptClosed = { snapshotFlow(surfaceBlocks).first { !it } },
                 lookUp = {
                     val refreshedAccounts = runCatchingCancellable { gateway.listAccounts() }.getOrElse { accounts }
                     val refreshedActiveIndex = runCatchingCancellable { gateway.activeAccountIndex() }
                         .getOrElse { activeAccountIndex }
-                    // Every routed 401 names its account (docs/18 §2.1): Seerr's are filtered out by
-                    // section and a sign-in's map to InvalidCredentials, so one naming nobody prompts nobody.
-                    val target = request.account?.let { rejected ->
-                        runCatchingCancellable { gateway.reauthorizationAccount(rejected, request.failedPlayback) }.getOrNull()
-                    }
+                    val target = runCatchingCancellable { gateway.reauthorizationAccount(request.account, request.failedPlayback) }.getOrNull()
                     ReauthorizationLookup(refreshedAccounts, refreshedActiveIndex, reauthorizationIndex(refreshedAccounts, target))
                 },
                 apply = apply@{ lookup ->
                     val targetIndex = lookup.targetIndex ?: return@apply
+                    if (decision() != ReauthorizationDecision.Show) return@apply
                     val account = lookup.accounts[targetIndex.toInt()]
-                    // Every failing call re-requests; one already on screen must keep its focus and text.
-                    val alreadyShowing = reauthorizationTarget?.let {
-                        it.serverUrl == account.serverUrl && it.userId == account.userId
-                    } == true
-                    if (!alreadyShowing) {
-                        focusManager.clearFocus(force = true)
-                        accounts = lookup.accounts
-                        activeAccountIndex = lookup.activeIndex
-                        addServerActive = false
-                        manageServersActive = false
-                        serverManagementError = null
-                        reauthorizationTarget = ReauthorizationTarget(
+                    accounts = lookup.accounts
+                    activeAccountIndex = lookup.activeIndex
+                    showReauthorization(
+                        ReauthorizationTarget(
                             index = targetIndex,
                             serverUrl = account.serverUrl,
                             userId = account.userId,
                             userName = account.userName,
-                        )
-                    }
+                        ),
+                    )
                 },
             )
             authorizationRecoveryCoordinator.consume(request.id)
@@ -757,14 +831,13 @@ private fun JellybeamRoot(
 
     fun reauthorizeServer(index: UInt) {
         val account = accounts.getOrNull(index.toInt()) ?: return
-        focusManager.clearFocus(force = true)
-        manageServersActive = false
-        serverManagementError = null
-        reauthorizationTarget = ReauthorizationTarget(
-            index = index,
-            serverUrl = account.serverUrl,
-            userId = account.userId,
-            userName = account.userName,
+        showReauthorization(
+            ReauthorizationTarget(
+                index = index,
+                serverUrl = account.serverUrl,
+                userId = account.userId,
+                userName = account.userName,
+            ),
         )
     }
 
@@ -776,10 +849,9 @@ private fun JellybeamRoot(
             try {
                 val removedActive = gateway.removeSession(index)
                 if (removedActive) {
+                    // The core epoch moved: the account tree resets from it (docs/18 §2.1).
                     manageServersActive = false
                     removingServerIndex = null
-                    resetSessionState()
-                    sessionEpoch++
                 } else {
                     accounts = gateway.listAccounts()
                     activeAccountIndex = gateway.activeAccountIndex()
@@ -793,7 +865,7 @@ private fun JellybeamRoot(
     }
 
     // Home renders from the mirror, so a revoked token would otherwise wait for the first Play.
-    // Launch, account switch and re-authorization check at once ([sessionEpoch]); a return to the
+    // Launch, account switch and re-authorization check at once ([AccountTreeOwner.epoch]); a return to the
     // foreground checks at most once a minute. A 401 reaches re-authorization through the
     // gateway's seam; every other outcome fails open.
     var sessionCheckedAtMs by remember { mutableLongStateOf(Long.MIN_VALUE) }
@@ -801,29 +873,10 @@ private fun JellybeamRoot(
         val now = SystemClock.elapsedRealtime()
         if (!force && now - sessionCheckedAtMs < SESSION_CHECK_MIN_INTERVAL_MS) return
         sessionCheckedAtMs = now
-        composableScope.launch { runCatching { gateway.validateSession() } }
+        composableScope.launch { runCatchingCancellable { gateway.validateSession() } }
     }
 
-    // docs/10: the forced cold-start check below used to fire the instant restoreSession
-    // succeeded, racing core init/first frame/Home composition for a network call whose only
-    // effect is 401 -> reauthorization routing (authorizationRecoveryCoordinator) -- Home already
-    // renders from the mirror and fails open until it lands, so nothing else waits on its timing.
-    // A later sessionEpoch (server switch/add) runs well after first frame, so the window is
-    // already open and this fires immediately for those, same as before.
-    var sessionCheckWindowOpen by remember { mutableStateOf(false) }
-    LaunchedEffect(firstFrameAtMs) {
-        val atMs = firstFrameAtMs ?: return@LaunchedEffect
-        val remainingMs = atMs + SESSION_CHECK_STARTUP_DELAY_MS - SystemClock.elapsedRealtime()
-        if (remainingMs > 0) delay(remainingMs)
-        sessionCheckWindowOpen = true
-    }
-    var pendingInitialSessionCheck by remember { mutableStateOf(false) }
-    LaunchedEffect(pendingInitialSessionCheck, sessionCheckWindowOpen) {
-        if (pendingInitialSessionCheck && sessionCheckWindowOpen) {
-            pendingInitialSessionCheck = false
-            checkSession(force = true)
-        }
-    }
+    val latestFirstFrameAtMs by rememberUpdatedState(firstFrameAtMs)
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -832,14 +885,14 @@ private fun JellybeamRoot(
                 event,
                 hasAccounts = accounts.isNotEmpty(),
                 checkSession = { checkSession(force = false) },
-                foreground = { composableScope.launch { runCatching { gateway.onForeground() } } },
+                foreground = { composableScope.launch { runCatchingCancellable { gateway.onForeground() } } },
             )
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(sessionEpoch) {
+    LaunchedEffect(accountTree.epoch) {
         // Cold start: restore and openMirror have been running since process start (LaunchWarmup).
         // Every later epoch, and an Activity recreated in a live process, runs them here.
         launchUnreachable = false
@@ -848,17 +901,23 @@ private fun JellybeamRoot(
         // Local-only (no network round trip): known the instant restoreSession resolves, so the
         // launch screen can name the host well before openMirror's sync reaches the server.
         launchHost = serverHostLabel(restored?.serverUrl)
-        if (restored != null) pendingInitialSessionCheck = true
+        // docs/10: the forced check waits until SESSION_CHECK_STARTUP_DELAY_MS past the first frame so it
+        // doesn't compete with startup; a later epoch is past that window and checks at once.
+        if (restored != null) launch {
+            val atMs = snapshotFlow { latestFirstFrameAtMs }.filterNotNull().first()
+            delay(atMs + SESSION_CHECK_STARTUP_DELAY_MS - SystemClock.elapsedRealtime())
+            checkSession(force = true)
+        }
         backStack = if (restored != null) {
             coroutineScope {
                 // getSettings reads only in-memory JellybeamCore state -- no
                 // dependency on the mirror being open -- so it runs
                 // concurrently with openMirror instead of queuing a third
-                // sequential IO-dispatch hop behind it. views() DOES need
-                // the mirror, so it stays after the openMirror await.
+                // sequential IO-dispatch hop behind it. The library list needs the
+                // mirror: openMirror publishes it to viewsState.
                 // A cold start already read it with the prefetch.
                 val settingsDeferred = async {
-                    warm?.settings?.let { Result.success(it) } ?: runCatching { gateway.getSettings() }
+                    warm?.settings?.let { Result.success(it) } ?: runCatchingCancellable { gateway.getSettings() }
                 }
 
                 // Fail open (docs/05): a stale/revoked token only surfaces once
@@ -871,8 +930,7 @@ private fun JellybeamRoot(
                 // background attempt (the `warm != null` cold-start case)
                 // isn't observable here, same fail-open shape either way.
                 if (warm == null) {
-                    launchUnreachable = runCatching { gateway.openMirror() }
-                        .onFailure { if (it is CancellationException) throw it }
+                    launchUnreachable = runCatchingCancellable { gateway.openMirror() }
                         .isFailure
                 }
 
@@ -887,9 +945,9 @@ private fun JellybeamRoot(
                 // resolved. Any failure fetching settings/views (e.g. the
                 // mirror never opened) falls back to Home-only, same fail-open
                 // shape as the openMirror call above.
-                val startupView = runCatching {
+                val startupView = runCatchingCancellable {
                     val settings = settingsDeferred.await().getOrThrow()
-                    val views = warm?.views ?: gateway.views()
+                    val views = warm?.views ?: gateway.viewsState.value
                     resolveStartupView(settings.startupScreenViewId, views)
                 }.getOrNull()
 
@@ -913,38 +971,29 @@ private fun JellybeamRoot(
         val request = externalPlaybackRequest ?: return@LaunchedEffect
         val readyStack = stack ?: return@LaunchedEffect
         when (request.kind) {
-            ExternalPlaybackRequestKind.PLAY -> {
-                if (readyStack.isHomeRooted) {
-                    // docs/17 §3: a PiP'd player never reaches idle, so startActivity below
-                    // must instead be delivered straight to it via onNewIntent.
-                    if (!pipController.isInPip.value) playbackActivityTracker.awaitIdle()
-                    PlaybackActivity.launch(context, request.itemId)
-                    // Keep the request as this effect's key while awaitIdle is suspended;
-                    // consuming it earlier would cancel the coroutine before it can launch.
-                    onExternalPlaybackConsumed(request)
-                } else {
-                    onExternalPlaybackConsumed(request)
-                    Toast.makeText(context, R.string.external_playback_sign_in_required, Toast.LENGTH_LONG).show()
-                }
-            }
-            ExternalPlaybackRequestKind.OPEN_DETAIL -> {
-                // Feature A "still watching? -> Stop" routing (docs/feature-dev/
-                // spec-still-watching-and-lan-discovery.md). Fail-open (silently do nothing)
-                // rather than a toast, since there's no sign-in gesture to prompt here.
-                onExternalPlaybackConsumed(request)
-                if (readyStack.isHomeRooted) {
-                    val card = resolveLibraryCard(gateway, request.itemId)
-                    if (card != null) {
-                        val current = readyStack.current
-                        val newStack = if (current is Screen.Detail && current.card.itemType == EPISODE_ITEM_TYPE) {
-                            readyStack.replaceDetail(card)
-                        } else {
-                            readyStack.pushDetail(card)
-                        }
-                        navigate(newStack)
-                    }
-                }
-            }
+            ExternalPlaybackRequestKind.PLAY ->
+                handleExternalPlay(
+                    request = request,
+                    readyStackHomeRooted = readyStack.isHomeRooted,
+                    // docs/17 §3: a PiP'd player never reaches idle, so the launch must instead be
+                    // delivered straight to it via onNewIntent.
+                    awaitIdle = { if (!pipController.isInPip.value) playbackActivityTracker.awaitIdle() },
+                    stillPending = currentExternalPlayback,
+                    launch = { PlaybackActivity.launch(context, it) },
+                    consume = { onExternalPlaybackConsumed(request) },
+                    signInRequired = {
+                        Toast.makeText(context, R.string.external_playback_sign_in_required, Toast.LENGTH_LONG).show()
+                    },
+                )
+            ExternalPlaybackRequestKind.OPEN_DETAIL ->
+                handleOpenDetail(
+                    request = request,
+                    readyStack = readyStack,
+                    gateway = gateway,
+                    stillPending = currentExternalPlayback,
+                    consume = { onExternalPlaybackConsumed(request) },
+                    navigate = { navigate(it) },
+                )
         }
     }
 
@@ -984,41 +1033,29 @@ private fun JellybeamRoot(
         }
     }
 
-    // Composed later -> registered later on the OnBackPressedDispatcher -> called first (LIFO):
-    // Back cancels out of the form instead of popping whatever's underneath on [stack].
-    BackHandler(enabled = addServerActive) { addServerActive = false }
-    BackHandler(enabled = reauthorizationTarget != null) { reauthorizationTarget = null }
-    BackHandler(enabled = manageServersActive && removingServerIndex == null) {
-        manageServersActive = false
-        serverManagementError = null
-    }
 
-    // Side-drawer's library list and the Servers-section's account list share one fetch/refresh
-    // loop, its own rather than reusing Home's feed state (which would construct
-    // Home's ViewModel and fire its expensive homeSnapshot() call prematurely). Gated on
-    // `stack != null` so the first fetch can't race openMirror() above; keyed on [sessionEpoch]
-    // too, so a server switch doesn't leave this showing the old server's data.
-    suspend fun refreshDrawerViews() {
-        val views = gateway.views()
-        // Its own fallback, so a failed probe never discards a good library list.
-        val favorites = runCatching { gateway.hasFavorites() }.getOrDefault(hasFavorites)
-        libraryViews = views
-        hasFavorites = favorites
+    // Side-drawer's Favorites entry and the Servers-section's account list share one fetch/refresh
+    // loop, its own rather than reusing Home's feed state (which would construct Home's ViewModel
+    // and fire its expensive homeSnapshot() call prematurely). The library list itself is
+    // [CoreGateway.viewsState]. Gated on `stack != null` so the first fetch can't race
+    // openMirror() above; keyed on [AccountTreeOwner.epoch] too, so a server switch doesn't leave
+    // this showing the old server's data.
+    suspend fun refreshDrawerFavorites() {
+        hasFavorites = gateway.hasFavorites()
     }
     if (stack != null) {
-        LaunchedEffect(gateway, sessionEpoch) {
-            // One write pair, so the drawer recomposes once, not twice, during Home's first frames.
-            launch { runCatching { refreshDrawerViews() } }
-            launch { runCatching { accounts = gateway.listAccounts() } }
-            launch { activeAccountIndex = runCatching { gateway.activeAccountIndex() }.getOrNull() }
+        LaunchedEffect(gateway, accountTree.epoch) {
+            launch { runCatchingCancellable { refreshDrawerFavorites() } }
+            launch { runCatchingCancellable { accounts = gateway.listAccounts() } }
+            launch { activeAccountIndex = runCatchingCancellable { gateway.activeAccountIndex() }.getOrNull() }
             // conflate() + collect gives leading-edge refresh, collapsed bursts, and a
             // guaranteed trailing refresh -- a plain debounce would never fire during a sync
             // burst (events keep arriving under 500ms apart). ChangeRefreshScheduler
             // (docs/16 §4.6, docs/17 §6) offers the same shape but needs machinery this tiny
-            // drawer list doesn't warrant.
+            // probe doesn't warrant.
             launch {
                 gateway.changeEvents().conflate().collect {
-                    runCatching { refreshDrawerViews() }
+                    runCatchingCancellable { refreshDrawerFavorites() }
                     delay(500L)
                 }
             }
@@ -1026,63 +1063,71 @@ private fun JellybeamRoot(
 
         // docs/14-seerr-discover.md drawer section: its own effect so a Discover connect/
         // disconnect never re-subscribes the collector above. seerrStatus is zero-network.
-        LaunchedEffect(gateway, sessionEpoch, seerrEpoch) {
-            discoverConfigured = runCatching { gateway.seerrStatus().configured }.getOrDefault(false)
+        LaunchedEffect(gateway, accountTree.epoch) {
+            gateway.seerrRevision.collect {
+                discoverConfigured = runCatchingCancellable { gateway.seerrStatus() }.getOrNull()?.configured == true
+            }
         }
     }
 
+    val crashPromptShown = crashPromptVisible && stack != null
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(JellybeamTheme.Notte),
+            .background(JellybeamTheme.Notte)
+            .onFocusChanged { rootFocus.hasFocus = it.hasFocus },
     ) {
         // `stack`, a stable local `val`, gives every branch below a smart-cast, non-null
         // instance -- `null` only during the first frame and during a Servers-section
         // switch/add (resetSessionState sets it back to `null` on purpose).
         when {
-            reauthorizationTarget != null -> SignInScreen(
-                reauthorizationTarget = reauthorizationTarget,
-                onSignedIn = {
-                    authorizationRecoveryCoordinator.noteReauthorized()
-                    reauthorizationTarget = null
-                    resetSessionState()
-                    sessionEpoch++
-                },
-            )
+            // docs/15 §3: these replace the stack; each entry keeps its saveable state for the
+            // return, and each surface's Back handler, composed after the root's, wins.
+            reauthorizationTarget != null -> key(reauthorizationTarget?.index, reauthorizationTarget?.userId) {
+                BackHandler(onBack = ::closeReauthorization)
+                SignInSurface {
+                    SignInScreen(
+                        reauthorizationTarget = reauthorizationTarget,
+                        onSignedIn = {
+                            // The gateway opened the quiet window; the core epoch move resets the account tree (docs/18 §2.1).
+                            closeReauthorization()
+                        },
+                    )
+                }
+            }
 
-            manageServersActive -> ServerManagementScreen(
-                accounts = accounts,
-                activeAccountIndex = activeAccountIndex,
-                removingIndex = removingServerIndex,
-                error = serverManagementError,
-                onReauthorize = ::reauthorizeServer,
-                onRemove = ::removeServer,
-                onClose = {
-                    if (removingServerIndex == null) {
-                        manageServersActive = false
-                        serverManagementError = null
-                    }
-                },
-            )
+            manageServersActive -> {
+                BackHandler(enabled = removingServerIndex == null) {
+                    manageServersActive = false
+                    serverManagementError = null
+                }
+                ServerManagementScreen(
+                    accounts = accounts,
+                    activeAccountIndex = activeAccountIndex,
+                    removingIndex = removingServerIndex,
+                    error = serverManagementError,
+                    onReauthorize = ::reauthorizeServer,
+                    onRemove = ::removeServer,
+                    onClose = {
+                        if (removingServerIndex == null) {
+                            manageServersActive = false
+                            serverManagementError = null
+                        }
+                    },
+                )
+            }
 
-            // Servers-section "Add server": replaces the entire tree, `stack` included, so
-            // SignInScreen needs none of the isTop/focusGate machinery. `onSignedIn` reuses
-            // resetSessionState (sign_in already made this account active and called
-            // openMirror()) then bumps [sessionEpoch] directly -- no coroutine needed.
-            addServerActive -> SignInScreen(
-                onSignedIn = {
-                    addServerActive = false
-                    resetSessionState()
-                    sessionEpoch++
-                },
-            )
+            // Servers-section "Add server". `onSignedIn` only closes the surface: the core epoch
+            // move (sign_in made this account active) resets the tree.
+            addServerActive -> {
+                BackHandler { addServerActive = false }
+                SignInSurface {
+                    SignInScreen(onSignedIn = { addServerActive = false })
+                }
+            }
 
             stack == null -> {
-                // Launch screen (docs/brand.md §6.3): without this the first frame(s) show
-                // nothing but a bare Notte background, indistinguishable from a hang. Also shown
-                // for the whole duration of a Servers-section switch (resetSessionState's
-                // `backStack = null`) -- a warm re-run of the same cold-start sequence, reused
-                // deliberately.
+                // docs/brand.md §6.3: the launch screen, also shown while a Servers-section switch resets the stack.
                 LaunchScreen(
                     host = launchHost,
                     unreachable = launchUnreachable,
@@ -1135,30 +1180,22 @@ private fun JellybeamRoot(
                 val topIndex = entries.lastIndex
                 val entryKeys = stack.entryKeys()
 
-                // Every entry on the stack, bottom-to-top, as a retained layer (see JellybeamRoot's
-                // doc). `key(...)` on entryKeys tells Compose push/pop (reuse) from replace
-                // (dispose+remount) for each slot.
+                // Every entry, bottom-to-top: `key(...)` on entryKeys tells push/pop (reuse) from
+                // replace (dispose+remount) for each slot.
                 entries.forEachIndexed { index, entry ->
-                    // A retained screen must also become non-top while a different Activity
-                    // owns the window; restoring on resume re-runs its becoming-top focus
-                    // placement.
-                    val isShown = retainedLayerIsActive(index, topIndex, activityResumed)
-                    // docs/21 §1.3: while the crash prompt is up it owns focus -- the top layer
-                    // stays drawn under the scrim but is non-top for focus and lifecycle, as when
-                    // another Activity owns the window, so dismissal re-runs its own placement.
-                    val isTop = isShown && !crashPromptVisible
+                    val isShown = retainedLayerIsActive(index, topIndex, AppForeground.browsing.value)
+                    // docs/21 §1.3: under the crash prompt the top layer stays drawn but non-top,
+                    // so dismissal re-runs its placement.
+                    val isTop = isShown && !crashPromptShown
                     key(entryKeys[index]) {
-                        // One gate per entry, living exactly as long as this entry's composition.
-                        val focusGate = remember { mutableStateOf(false) }
-
-                        RetainedScreenLayer(index = index, isTop = isTop, isShown = isShown, focusGate = focusGate) {
+                        entryStates.SaveableStateProvider(entryKeys[index]) {
+                        RetainedScreenLayer(isTop = isTop, isShown = isShown, rootFocus = rootFocus) {
                             when (entry) {
                                 Screen.Home -> NavDrawerHost(
                                     currentScreen = Screen.Home,
                                     libraries = drawerViews,
                                     onNavigate = navigateFromDrawer,
                                     isTop = isTop,
-                                    focusGate = focusGate,
                                     accounts = accounts,
                                     activeAccountIndex = activeAccountIndex,
                                     onSwitchServer = ::switchServer,
@@ -1172,20 +1209,18 @@ private fun JellybeamRoot(
                                         args = HomeHostArgs(
                                             onOpenDetail = openDetail,
                                             isTop = isTop,
-                                            focusGate = focusGate,
                                         ),
                                     )
                                 }
 
                                 is Screen.Library -> CompositionLocalProvider(
-                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(index)!!) { ScreenViewModelStoreOwner() },
+                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
                                         onNavigate = navigateFromDrawer,
                                         isTop = isTop,
-                                        focusGate = focusGate,
                                         accounts = accounts,
                                         activeAccountIndex = activeAccountIndex,
                                         onSwitchServer = ::switchServer,
@@ -1205,7 +1240,6 @@ private fun JellybeamRoot(
                                                 go { it.push(screen) }
                                             },
                                             isTop = isTop,
-                                            focusGate = focusGate,
                                         )
                                     }
                                 }
@@ -1217,7 +1251,6 @@ private fun JellybeamRoot(
                                     },
                                     discoverConfigured = discoverConfigured,
                                     isTop = isTop,
-                                    focusGate = focusGate,
                                 )
 
                                 // Settings/Detail get the drawer too, same shape as Home/Library
@@ -1227,7 +1260,6 @@ private fun JellybeamRoot(
                                     libraries = drawerViews,
                                     onNavigate = navigateFromDrawer,
                                     isTop = isTop,
-                                    focusGate = focusGate,
                                     accounts = accounts,
                                     activeAccountIndex = activeAccountIndex,
                                     onSwitchServer = ::switchServer,
@@ -1238,21 +1270,18 @@ private fun JellybeamRoot(
                                 ) {
                                     SettingsScreen(
                                         isTop = isTop,
-                                        focusGate = focusGate,
-                                        onSeerrConfigChanged = { seerrEpoch++ },
                                         onReportProblem = { go { it.push(Screen.Report) } },
                                     )
                                 }
 
                                 is Screen.Detail -> CompositionLocalProvider(
-                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(index)!!) { ScreenViewModelStoreOwner() },
+                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
                                         onNavigate = navigateFromDrawer,
                                         isTop = isTop,
-                                        focusGate = focusGate,
                                         accounts = accounts,
                                         activeAccountIndex = activeAccountIndex,
                                         onSwitchServer = ::switchServer,
@@ -1264,7 +1293,8 @@ private fun JellybeamRoot(
                                         DetailScreen(
                                             card = entry.card,
                                             isTop = isTop,
-                                            focusGate = focusGate,
+                                            // docs/07 §5: the mirror dropped this title; pops only this entry, and only while it is the top.
+                                            onRemoved = { go { it.popIfTop(stack.ids[index]) } },
                                             onOpenDetail = { card ->
                                                 // docs/07 §5: a sibling-episode switch replaces the
                                                 // top entry so Back skips visited
@@ -1285,14 +1315,13 @@ private fun JellybeamRoot(
 
                                 // docs/11 §Person page: a cast member's library titles, reached from a Detail cast row.
                                 is Screen.Person -> CompositionLocalProvider(
-                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(index)!!) { ScreenViewModelStoreOwner() },
+                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
                                         onNavigate = navigateFromDrawer,
                                         isTop = isTop,
-                                        focusGate = focusGate,
                                         accounts = accounts,
                                         activeAccountIndex = activeAccountIndex,
                                         onSwitchServer = ::switchServer,
@@ -1305,7 +1334,6 @@ private fun JellybeamRoot(
                                             personId = entry.personId,
                                             personName = entry.name,
                                             isTop = isTop,
-                                            focusGate = focusGate,
                                             onOpenDetail = openDetail,
                                             onOpenDiscoverDetail = { mediaType, tmdbId ->
                                                 go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
@@ -1321,7 +1349,6 @@ private fun JellybeamRoot(
                                     libraries = drawerViews,
                                     onNavigate = navigateFromDrawer,
                                     isTop = isTop,
-                                    focusGate = focusGate,
                                     accounts = accounts,
                                     activeAccountIndex = activeAccountIndex,
                                     onSwitchServer = ::switchServer,
@@ -1332,7 +1359,6 @@ private fun JellybeamRoot(
                                 ) {
                                     DiscoverScreen(
                                         isTop = isTop,
-                                        focusGate = focusGate,
                                         onOpenGrid = { kind, title, genreId, genreName ->
                                             go { it.push(Screen.DiscoverGrid(kind, title, genreId, genreName)) }
                                         },
@@ -1345,14 +1371,13 @@ private fun JellybeamRoot(
                                 }
 
                                 is Screen.DiscoverGrid -> CompositionLocalProvider(
-                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(index)!!) { ScreenViewModelStoreOwner() },
+                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
                                         onNavigate = navigateFromDrawer,
                                         isTop = isTop,
-                                        focusGate = focusGate,
                                         accounts = accounts,
                                         activeAccountIndex = activeAccountIndex,
                                         onSwitchServer = ::switchServer,
@@ -1367,7 +1392,6 @@ private fun JellybeamRoot(
                                             genreId = entry.genreId,
                                             genreName = entry.genreName,
                                             isTop = isTop,
-                                            focusGate = focusGate,
                                             onOpenDetail = { mediaType, tmdbId ->
                                                 go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                             },
@@ -1376,14 +1400,13 @@ private fun JellybeamRoot(
                                 }
 
                                 is Screen.DiscoverDetail -> CompositionLocalProvider(
-                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(index)!!) { ScreenViewModelStoreOwner() },
+                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
                                         onNavigate = navigateFromDrawer,
                                         isTop = isTop,
-                                        focusGate = focusGate,
                                         accounts = accounts,
                                         activeAccountIndex = activeAccountIndex,
                                         onSwitchServer = ::switchServer,
@@ -1396,7 +1419,6 @@ private fun JellybeamRoot(
                                             mediaType = entry.mediaType,
                                             tmdbId = entry.tmdbId,
                                             isTop = isTop,
-                                            focusGate = focusGate,
                                             onOpenDetail = { mediaType, tmdbId ->
                                                 go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                             },
@@ -1407,14 +1429,13 @@ private fun JellybeamRoot(
                                 }
 
                                 is Screen.DiscoverPerson -> CompositionLocalProvider(
-                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(index)!!) { ScreenViewModelStoreOwner() },
+                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                 ) {
                                     NavDrawerHost(
                                         currentScreen = entry,
                                         libraries = drawerViews,
                                         onNavigate = navigateFromDrawer,
                                         isTop = isTop,
-                                        focusGate = focusGate,
                                         accounts = accounts,
                                         activeAccountIndex = activeAccountIndex,
                                         onSwitchServer = ::switchServer,
@@ -1426,7 +1447,6 @@ private fun JellybeamRoot(
                                         DiscoverPersonScreen(
                                             personId = entry.personId,
                                             isTop = isTop,
-                                            focusGate = focusGate,
                                             onOpenDetail = { mediaType, tmdbId ->
                                                 go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                             },
@@ -1439,7 +1459,6 @@ private fun JellybeamRoot(
                                     libraries = drawerViews,
                                     onNavigate = navigateFromDrawer,
                                     isTop = isTop,
-                                    focusGate = focusGate,
                                     accounts = accounts,
                                     activeAccountIndex = activeAccountIndex,
                                     onSwitchServer = ::switchServer,
@@ -1450,7 +1469,6 @@ private fun JellybeamRoot(
                                 ) {
                                     DiscoverRequestsScreen(
                                         isTop = isTop,
-                                        focusGate = focusGate,
                                         onOpenDetail = { mediaType, tmdbId ->
                                             go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                         },
@@ -1460,7 +1478,6 @@ private fun JellybeamRoot(
                                 // Drawer-less, like Screen.Search: its query field owns D-pad Left.
                                 Screen.DiscoverSearch -> DiscoverSearchScreen(
                                     isTop = isTop,
-                                    focusGate = focusGate,
                                     onOpenDetail = { mediaType, tmdbId ->
                                         go { it.push(Screen.DiscoverDetail(mediaType, tmdbId)) }
                                     },
@@ -1469,24 +1486,22 @@ private fun JellybeamRoot(
                                 // docs/21 §1.2: drawer-less like Search/DiscoverSearch (Back
                                 // pops, no library rail); pushed from Settings › Troubleshooting
                                 // or the post-crash dialog.
-                                Screen.Report -> ReportScreen(onExit = { go { it.pop() } }, isTop = isTop, focusGate = focusGate)
+                                Screen.Report -> ReportScreen(onExit = { go { it.pop() } }, isTop = isTop)
 
                                 // Unreachable: SignIn never appears on a Home-rooted stack.
                                 Screen.SignIn -> Unit
                             }
                         }
+                        }
                     }
                 }
             } else {
-                // SignIn-rooted stack: a successful sign-in takes the same epoch reset as "Add
-                // server", since the drawer's account/library fetch already ran signed out.
+                // SignIn-rooted stack: a successful sign-in moves the core epoch, which takes the same
+                // reset as "Add server", since the drawer's account/library fetch already ran signed out.
                 when (current) {
-                    Screen.SignIn -> SignInScreen(
-                        onSignedIn = {
-                            resetSessionState()
-                            sessionEpoch++
-                        },
-                    )
+                    Screen.SignIn -> SignInSurface {
+                        SignInScreen(onSignedIn = {})
+                    }
                     else -> Unit // unreachable: see NavBackStack's own construction sites
                 }
             }
@@ -1505,9 +1520,8 @@ private fun JellybeamRoot(
             }
         }
 
-        // docs/21 §1.3: drawn above every retained layer, outside the RetainedScreenLayer/
-        // focusGate scheme -- this is the only thing on screen worth focusing while it's up.
-        if (crashPromptVisible && stack != null) {
+        // docs/21 §1.3: drawn above every retained layer, which denies focus while it's up.
+        if (crashPromptShown && stack != null) {
             CrashPromptDialog(
                 onReportNow = {
                     AppGraph.crash.markShown()
@@ -1597,7 +1611,7 @@ private fun CrashPromptButton(label: String, onClick: () -> Unit, modifier: Modi
     }
 }
 
-/** Pure seam for the retained-layer lifecycle/focus contract. */
+/** Pure seam for whether a retained layer draws: only the top one, while this Activity is resumed. */
 internal fun retainedLayerIsActive(index: Int, topIndex: Int, activityResumed: Boolean): Boolean =
     activityResumed && index == topIndex
 
@@ -1607,12 +1621,28 @@ internal fun retainedLayerIsActive(index: Int, topIndex: Int, activityResumed: B
 internal fun reauthorizationIndex(accounts: List<AccountInfo>, target: AccountInfo?): UInt? =
     target?.let(accounts::indexOfAccount)?.takeIf { it >= 0 }?.toUInt()
 
+/** What the 401 collector does with a request: put it on screen, hold it until the surface closes, or answer and let it go. */
+internal enum class ReauthorizationDecision { Show, Wait, Drop }
+
+/** docs/18 §2.1: one surface at a time. A request already answered ([currentRequestId] no longer [requestId]) or for the account already [showing] is dropped; another's waits, unconsumed, for the surface to close. */
+internal fun reauthorizationDecision(
+    requestAccount: AccountIdentity,
+    currentRequestId: Long?,
+    requestId: Long,
+    showing: ReauthorizationTarget?,
+): ReauthorizationDecision = when {
+    currentRequestId != requestId -> ReauthorizationDecision.Drop
+    showing == null -> ReauthorizationDecision.Show
+    showing.serverUrl == requestAccount.serverUrl && showing.userId == requestAccount.userId -> ReauthorizationDecision.Drop
+    else -> ReauthorizationDecision.Wait
+}
+
 /** What a 401's lookups found: the saved accounts and active index then, and the target's index. */
 internal data class ReauthorizationLookup(val accounts: List<AccountInfo>, val activeIndex: UInt?, val targetIndex: UInt?)
 
 /** docs/18 §2.1, docs/21 §1.3: looks a 401's account up and hands the result to [apply] only while
- * the modal crash prompt is closed. A prompt that opened during the lookups sends it back to wait
- * and look up again; nothing suspends between that last check and [apply].
+ * no modal surface (the crash prompt, another account's sign-in) is open. One that opened during
+ * the lookups sends it back to wait and look up again; nothing suspends between that last check and [apply].
  */
 internal suspend fun resolveReauthorization(
     promptVisible: () -> Boolean,

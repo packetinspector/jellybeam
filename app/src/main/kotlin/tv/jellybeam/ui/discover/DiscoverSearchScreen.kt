@@ -22,7 +22,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -77,10 +76,6 @@ private const val CONTENT_TYPE_POSTER = "poster"
 fun DiscoverSearchScreen(
     onOpenDetail: (mediaType: SeerrMediaType, tmdbId: Long) -> Unit,
     isTop: Boolean = true,
-    /** JellybeamRoot's focus gate for this entry -- see [tv.jellybeam.ui.search.SearchScreen]'s own param
-     * doc.
-     */
-    focusGate: MutableState<Boolean> = remember { mutableStateOf(true) },
     viewModel: DiscoverSearchViewModel = viewModel(factory = DiscoverSearchViewModelFactory(AppGraph.gateway)),
 ) {
     val state by viewModel.state.collectAsState()
@@ -104,7 +99,6 @@ fun DiscoverSearchScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        focusGate = focusGate,
         ready = true,
         fallback = { fieldFocusRequester.asFocusTarget() },
         tag = "discover-search",
@@ -133,6 +127,7 @@ fun DiscoverSearchScreen(
 
             when {
                 state.query.isBlank() -> DiscoverSearchHint(stringResource(R.string.discover_search_empty_hint))
+                state.unavailable -> DiscoverSearchHint(stringResource(R.string.discover_search_unavailable))
                 !state.isSearching && state.results.isEmpty() -> DiscoverSearchHint(stringResource(R.string.discover_search_no_results))
                 else -> LazyVerticalGrid(
                     state = gridState,

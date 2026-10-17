@@ -439,12 +439,16 @@ class PlayerHolder(
 
     private var assOverlayView: AssOverlayView? = null
 
-    /** Guards the item generation bump with the writes that depend on it; declared before [assFonts], which captures it. */
+    /** Orders the item change with the extractor writes into this class's per-item fields; the overlay guards its own feed by item. */
     private val assItemLock = Any()
+
+    /** The overlay's live item, set where an item begins: its feeds carry it, and it is the generation an extractor's findings must match ([ItemScopedFontSink]). */
+    @Volatile
+    private var assItem: ULong = 0uL
 
     /** Delivers an extractor's findings only into the item whose media source it came from ([ItemScopedFontSink]). */
     private val assFonts = ItemScopedFontSink(
-        generation = { assItemGeneration.get() },
+        generation = { assItem.toLong() },
         lock = assItemLock,
         wants = { fullAssStyling && assOverlay != null },
         onAttachments = { block ->
@@ -502,20 +506,22 @@ class PlayerHolder(
     }
 
     /**
-     * Bumps the item generation and resets the overlay under [assItemLock], which the font fetch
-     * also holds across its check-then-send, so an old item's font can't be queued after the reset.
-     * Every per-item ASS field resets here, after the bump, and extractor sinks bound at an earlier setMediaItem drop writes from before it ([ItemScopedFontSink]), so no stale thread can refill one.
+     * Begins the overlay's next item and takes its id under [assItemLock]; every feed carries that id,
+     * so the overlay drops an old item's font or line (docs/18 §3.2). Every per-item ASS field resets
+     * here, and extractor sinks bound at an earlier setMediaItem drop writes from before it ([ItemScopedFontSink]).
      */
     private fun beginAssItem() {
         // Main thread: the item's sidecar script goes with it, so nothing feeds it a clock.
         assSidecar = null
         seekTimeoutHandler.removeCallbacks(assSidecarClock)
         synchronized(assItemLock) {
-            assItemGeneration.incrementAndGet()
             assFontCall?.cancel()
             assLinesRequest.incrementAndGet()
             assLinesCall?.cancel()
-            assOverlay?.beginItem()
+            assOverlay?.let {
+                it.beginItem()
+                assItem = it.item()
+            }
         }
         synchronized(assAttachments) { assAttachments.clear() }
         assFontsFetched.clear()
@@ -537,8 +543,7 @@ class PlayerHolder(
     @Volatile
     private var assLinesCall: okhttp3.Call? = null
 
-    /** [load]'s generation and URL, for a font fetch that must not land on a later item. */
-    private val assItemGeneration = AtomicLong(0L)
+    /** [load]'s URL, for a font fetch that must not land on a later item. */
     @Volatile
     private var assItemUrl: String? = null
 
@@ -922,11 +927,11 @@ class PlayerHolder(
         // A target from an earlier item names a script the overlay already freed.
         val next = target?.takeIf { it.overlay === overlay && it.item == overlay.item() }
         if (next == assSidecar) return
-        assSidecar?.let { overlay.unselect(it.key) }
+        assSidecar?.let { overlay.unselectFor(it.key, it.item) }
         assSidecar = next
         seekTimeoutHandler.removeCallbacks(assSidecarClock)
         if (next != null) {
-            overlay.select(next.key)
+            overlay.selectFor(next.key, next.item)
             assSidecarSentUs = Long.MIN_VALUE
             assSidecarClock.run()
         }
@@ -992,9 +997,9 @@ class PlayerHolder(
         }
         setAssFontFetch(transition.next)
         if (!transition.startThread || url == null) return
-        val generation = assItemGeneration.get()
+        val item = assItem
         val request = assFontsRequest.incrementAndGet()
-        val current = { assItemGeneration.get() == generation && assFontsRequest.get() == request }
+        val current = { assItem == item && assFontsRequest.get() == request }
         kotlin.concurrent.thread(name = "ass-font-fetch", isDaemon = true) {
             try {
                 val limits = overlay.fontLimits()
@@ -1014,12 +1019,9 @@ class PlayerHolder(
                         Log.w(SEEK_LOG_TAG, "ASS font fetch failed for ${location.name}")
                         continue
                     }
-                    synchronized(assItemLock) {
-                        if (current() && location.offset !in assFontsFetched) {
-                            overlay.addFont(location.name, bytes)
-                            assFontsFetched += location.offset
-                        }
-                    }
+                    // Under the lock so a stale thread can't mark an offset in the next item's set.
+                    val first = synchronized(assItemLock) { current() && assFontsFetched.add(location.offset) }
+                    if (first) overlay.addFontFor(location.name, bytes, item)
                 }
             } catch (t: Throwable) {
                 // Class only: a message can carry the server's URL.
@@ -1096,10 +1098,10 @@ class PlayerHolder(
         val url = assItemUrl ?: return
         val track = key.toIntOrNull() ?: return
         assLinesWanted = null
-        val generation = assItemGeneration.get()
+        val item = assItem
         val request = assLinesRequest.incrementAndGet()
         assLinesCall?.cancel()
-        val current = { assItemGeneration.get() == generation && assLinesRequest.get() == request }
+        val current = { assItem == item && assLinesRequest.get() == request }
         kotlin.concurrent.thread(name = "ass-lines-fetch", isDaemon = true) {
             // The scan walks every cue, up to MAX_SUBTITLE_CUES, so it stays off the main thread.
             val wanted = cues.spanning(track, mediaUs)
@@ -1107,9 +1109,7 @@ class PlayerHolder(
                 fetchRange(url, offset, length, exact = false, { assLinesCall = it }, current)
             }
             val samples = spanningSamples(wanted, scaleNs, reader, current)
-            synchronized(assItemLock) {
-                if (current()) overlay.addSamples(key, samples.map { (timeUs, bytes) -> AssSample(timeUs, bytes) })
-            }
+            if (current()) overlay.addSamplesFor(key, samples.map { (timeUs, bytes) -> AssSample(timeUs, bytes) }, item)
         }
     }
 

@@ -34,7 +34,6 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -74,6 +73,7 @@ import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.focusRing
+import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
@@ -161,7 +161,6 @@ internal fun DetailActionPanel(
     memberOfCollections: Set<String>,
     confirm: BulkMarkConfirm?,
     offsetX: Dp,
-    focusGate: MutableState<Boolean>,
     isTop: Boolean,
     onRunAction: (MenuAction) -> Unit,
     onEnterCollections: () -> Unit,
@@ -172,6 +171,7 @@ internal fun DetailActionPanel(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val focusGate = LocalFocusGate.current
     val level = menu.level
     val firstLevelRows = remember(menu.model) { menu.model.groups.flatMap { it.rows } }
     val collectionRows = remember(collections, memberOfCollections) { buildCollectionRows(collections, memberOfCollections) }

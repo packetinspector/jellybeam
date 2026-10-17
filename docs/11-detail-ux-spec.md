@@ -210,8 +210,8 @@ mirrored.
   first, capped at 200), as `PosterCard`s; Select opens the title's Detail
   page. Empty: one muted line, no row. The shown cards are re-read from the
   mirror by id (`cards_by_ids`) on return and on every mirror change to one
-  of them (`ChangeRefreshScheduler`, as Detail; the return read goes through
-  the same loop, so reads never publish out of order), even while the Seerr
+  of them (`ChangeRefreshScheduler`, as Detail; the return read marks the
+  same loop dirty, so reads never publish out of order), even while the Seerr
   row is still loading, so a title played meanwhile shows its new badge
   whenever the mirror commits it; which cards are shown never changes there,
   so the restored focus can't vanish.

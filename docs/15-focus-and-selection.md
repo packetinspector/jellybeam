@@ -36,12 +36,11 @@ all *survive* a push. Nothing is lost by disposal. Focus is lost by being
 Surfaces that already do it right (stable-ID memory + fallback): Home,
 Library, Discover ×5. Surfaces that reset to a fixed control: Search,
 Discover Search, Detail ×3, Settings. Surfaces outside the retained-layer
-scheme (Sign In, Server Management) replace the whole tree and have no
-return path, so no restore is expected there.
+scheme (Sign In, Server Management) replace the stack while up (§3).
 
 Storage class today: every memory object is plain `remember`, so none
 survives a configuration change or process death. `NavBackStack.reset()`
-has no callers; sign-out sets the stack to null, which disposes every
+has no callers; an account change sets the stack to null, which disposes every
 layer and every memory (`MainActivity.resetSessionState`, ~702).
 
 ### 0.2 Season drift — actual cause
@@ -151,6 +150,8 @@ surface, in this order. The first rule whose target exists wins.
    primary action to settle so a faster chip row cannot win); Settings → the active rail row; Search → the
    field; OSD reveal → Play/Pause.
 
+**Left from the first chip of a Settings chip row goes to the active rail row** (a leaf `left` override): the pane's spatial search would otherwise pick a control sitting left of it, such as Discover's Connect chip.
+
 **Rule 2 also governs entering a group.** A D-pad move *into* a group of
 options (the season chip row, a Settings chip row, a picker) lands on the
 group's selected item, never on whichever member is spatially nearest
@@ -180,10 +181,11 @@ entry lands on the named primary.
 | Push forward, then Back (pop) | **kept** and restored (rule 1) |
 | Forward navigation *to* a screen already on the stack (e.g. a second push of the same Detail) | a new entry, no history: rule 2 then 3. The older entry keeps its own. |
 | Returning from PlaybackActivity (Activity resume, stack unchanged) | **kept**; treated exactly as a pop (the existing `activityResumed` edge) |
-| Content / library refresh while on or under the screen | **kept** if the key still resolves; otherwise rule 2, then 3. Never index. Implemented on Home, Library and Detail as a *refresh guard*: one frame after the screen's content values change, if the screen is top, resumed, seeded and holds no focus, an owned restore job runs the same `restoreNow` as a return (remembered key, then rule 2, then rule 3, then the screen's fallback). Ownership: one `RefreshRestoreOwner` per screen (Home, Library, Detail x3 bodies) cancels the job, and invalidates any trigger still waiting on its own one-frame settle, when the screen loses top, on pause, when the drawer opens (Home, Library, Detail) or the action panel opens (Detail); a freeze left by a cancelled *refresh* job does not block its replacement, while a navigation or drawer freeze still does (`refreshGuardEligible`), and `restoreNow`'s cancellation contract is unchanged. Library and Detail also read the drawer coordinator -- they gate eligibility on a plain `drawerOpen` flag rather than freezing their own memory, so `NavDrawerHost`'s generic close-time restore keeps placing focus for them as before. An in-place close (drawer closed without navigating on Library/Detail, action panel closed on Detail) releases a freeze that a refresh restore cancelled by the matching open left behind (`releaseCancelledFreezeInPlace`) -- otherwise nothing on that path would ever unfreeze the memory and later focus changes would go unrecorded. The release happens only while the screen still owns focus: a navigating-away drawer close, and a panel dropped for a navigation (Go to series, playback) or landing after the page lost top, keep the navigation freeze. |
+| Content / library refresh while on or under the screen | **kept** if the key still resolves; otherwise rule 2, then 3. Never index. Implemented on Home, Library and Detail as a *refresh guard*. On Home, a card still focused but moved out of its row by the refresh (Continue Watching putting the played item first) is only scrolled back into view. Otherwise: one frame after the screen's content values change, if the screen is top, resumed, seeded and holds no focus, an owned restore job runs the same `restoreNow` as a return (remembered key, then rule 2, then rule 3, then the screen's fallback). Ownership: one `RefreshRestoreOwner` per screen (Home, Library, Detail x3 bodies) cancels the job when the screen loses top, on pause, when the drawer opens (Home, Library, Detail) or the action panel opens (Detail); a refresh supersedes its own running restore but never another placer's token (`refreshGuardEligible` over `frozenBesides`); a cancelled job releases its token, so no close path has to release a freeze. A trigger still waiting on its one-frame settle is stopped by the same inputs, which its eligibility check re-reads after the frame. Library and Detail also read the drawer coordinator -- they gate eligibility on a plain `drawerOpen` flag, so `NavDrawerHost`'s generic close-time restore keeps placing focus for them. |
 | Configuration change | **kept** (memory is `rememberSaveable`) |
 | Process death | **kept** for the top entry if the stack itself is restored; memory is saveable, so whatever survives with the stack restores with it. Nothing is persisted to disk for this. |
-| Sign-out / switch server / `NavBackStack` cleared | **discarded** with the layers. Home re-enters cold (rule 3). |
+| Remove active server / switch server / `NavBackStack` cleared | **discarded** with the layers. Home re-enters cold (rule 3). |
+| Sign-in, reauthorization or server management opened from the stack | **kept**: these surfaces replace the stack while up; each entry's saveable state (focus memory, list scroll) is held by a `SaveableStateHolder` keyed by its entry key, and its view models stay in their stores. Closing the surface recomposes the stack and is a return (rule 1). The surface seeds its declared control on open (§4.1). |
 | Section switch inside Settings | per-section memory: returning to a section lands on its last focused row (rule 1), first row of the section otherwise. |
 | OSD hide → reveal | **deliberate exception**: rule 3 (Play/Pause). See §4. |
 
@@ -209,7 +211,54 @@ file keeps it. Everything the OSD opens (Speed, Chapters, track picker,
 Library info, Stats) is a nested surface and follows this section.
 
 Dialogs that trap focus (`focusProperties { exit = Cancel }`) still seed
-their own first control on open; only their *close* is governed here.
+their own first control on open (inside a retained page: while the page is top
+with its drawer closed, §4.1); only their *close* is governed here.
+
+**A busy control keeps its focus.** While an action is in flight, its
+control and its siblings turn *inert* (focusable, Select ignored, muted),
+never disabled: a focused node that becomes unfocusable drops focus (Sign in
+and Quick Connect while signing in, Remove/Cancel while a server is removed,
+Discover's request pills).
+Disable only what is unavailable before the viewer reaches it (a Submit
+with nothing picked). The invoker captured on open is the element **focused
+at that moment** (`captureInvoker` reads the live focused key, falling back
+to the last-focused one), because a seeded or restored first focus is
+placed while the memory is frozen and never writes the last-focused key; a
+control may also record its own key explicitly. Focus is re-placed on close
+only when the page holds none.
+
+**A Retry that replaces the page is a fresh landing.** Retry on a page-level
+load error (Discover detail) bumps the page's load generation, which is
+`FocusRestorer`'s `reloadKey`: once the page is back, the §2 order runs
+again, so the gone Retry key falls through to the first action. A Retry
+chip inside a page (Detail's season lists) has its own key; when a good
+read removes it, the refresh guard (§3) lands on the selected season chip.
+
+### 4.1 Retained layers, the gate and re-entry
+
+The stack's entries are retained layers (`MainActivity.RetainedScreenLayer`); only the top one is
+`isTop`, and only while `MainActivity` is resumed and the crash prompt is closed. Sign-in,
+reauthorization, server management and Add server replace the stack instead (§3), so nothing
+hidden competes with them for focus or Back.
+
+- **Focus gate.** A layer admits focus only while top *and* while its gate (`LocalFocusGate`) is
+  held open around one of its screen's own explicit placements (`gateEnter`), so a pop's default
+  focus grab cannot beat the restore. The gate is never left open as a fallback.
+- **Re-entry.** A D-pad press while nothing in the window holds focus (a touch tap, a focused node
+  that disappeared) never reaches a framework search: `MainActivity.dispatchKeyEvent` hands it to
+  the top layer's seat (`RootFocus`, `FocusSeat`) and swallows its release. The seat runs the
+  screen's `FocusRestorer` order (remembered key, selected item, declared fallback); a screen not
+  ready to place, or a total miss, falls to the layer's own gated entry, and Left then opens the
+  drawer when the page has nothing focusable at all. With no top layer (a sign-in surface, the
+  crash prompt) the key goes to the framework, where only that surface can take it.
+- **Seeds.** Sign-in surfaces open on Quick Connect, never a text field (it would raise the IME);
+  a discovered server that lands later takes focus while the address is untouched. Server
+  management opens on its sub-page's first action; the crash prompt on Report now.
+- **Back.** In-page `BackHandler`s (drawer, panels, dialogs) are enabled only while their layer is
+  top, so a hidden layer's handler never beats the top page's or the crash prompt's Back.
+- **Dialogs inside a page.** A dialog that is part of a retained page (Discover's request options
+  and confirm) seeds only while its page is top with the drawer closed, and is the page's `modal`
+  placement target: becoming top again, re-entry, or an in-place drawer close lands on the dialog.
 
 ---
 
@@ -220,19 +269,30 @@ by the Discover screens' existing helpers folded into it. No per-screen
 restore code remains outside it.
 
 - `rememberFocusMemory(entryKey)`: a saveable holder of `lastKey:
-  String?`, `invokerKey: String?`, and a `frozen` flag (writes are ignored
-  while the screen is not top, so a pop transition's focus churn cannot
-  clobber the memory). Backed by `rememberSaveable`.
+  String?` and `invokerKey: String?`. Backed by `rememberSaveable`.
+  `frozen` is derived, never written: true while any placer holds a
+  `PlacementToken` (`restoreNow`, re-entry, the open Home drawer, a dialog's
+  invoker placement) or the screen is `offTop` (lost top, until its next
+  completed placement). While frozen, focus events do not write `lastKey`, so
+  a pop's churn or an in-flight placement cannot clobber the memory, and the
+  root's re-entry is swallowed (that placement lands it). A token is released
+  however its placer ends, cancellation included, so no freeze outlives its
+  placer; a refresh restore discounts only its own running token
+  (`frozenBesides`).
 - `Modifier.focusKey(memory, key)`: registers a `FocusRequester` for `key`
   in the memory's live registry for as long as the element is composed,
   and records `key` as `lastKey` on focus gained. A `LazyRow`/`LazyColumn`
   item that scrolls out unregisters; a restore to a missing key first asks
   the owning list to scroll to it (`memory.scrollTo: suspend (key) ->
   Boolean`, supplied by the screen for its lazy lists), then retries.
-- `FocusRestorer(memory, isTop, focusGate, selectedKey: () -> String?,
+- `FocusRestorer(memory, isTop, selectedKey: () -> String?,
   fallback: () -> FocusRequester?)`: the single becoming-top effect. Runs
-  §2 in order with `requestFocusUntilSuccess(focusGate)`. Screens delete
-  their own `LaunchedEffect(isTop)` blocks and call this instead.
+  §2 in order with `requestFocusUntilSuccess` under the layer's
+  `LocalFocusGate`. Screens delete
+  their own `LaunchedEffect(isTop)` blocks and call this instead. It also
+  registers the screen's answer to the root's re-entry (§4.1), and takes an
+  optional `modal` (a dialog open inside the page) that both paths place
+  instead.
 - `memory.captureInvoker()` / `memory.restoreInvoker()` for §4.
 - The OSD keeps its `focusedButton` identity model (it has one key
   handler by design) but applies the same contract with a `ControlButton`
@@ -246,7 +306,10 @@ viewer changes it.
 
 Ring overpaint: `focusRing` raises the focused element's `zIndex` so it
 paints after its siblings. Geometry is unchanged; every stacked use of the
-ring is fixed at once.
+ring is fixed at once. A scrolling column whose rows reach the viewport
+edge (the nav drawer) brings a focused row into view with the ring's
+extent as margin (`ringClearBringIntoViewSpec`), so the ring is never cut
+at the screen edge.
 
 ---
 
@@ -297,13 +360,14 @@ visible on hardware for the first time:
 | Settings | active rail row (rule 2 `rail:<section>`) | `<section>/<row>[/<chip>]`; per-section pane entry | n/a (no nested surfaces) | pass | pass: full ring on a middle stacked row; description under the label; leaving a section and re-entering it lands on the same row; entering a chip row lands on its selected chip; chip-row description on its own full-width line |
 | Discover home | Search chip | `chip:*`, `shelf:<row>/card:<key>` | n/a | pass | not exercised |
 | Discover grid / person / requests | first cell | `card:<key>`; stale → first visible | n/a | pass | not exercised |
-| Discover detail | first action | `action:*`, `person:*`, `shelf:similar|recommended/card:*` | request dialogs → invoking action | pass | not exercised |
+| Discover detail | first action | `action:*`, `person:*`, `shelf:similar|recommended/card:*` | pills stay focusable (inert) while a request/cancel is in flight, one node per row slot, so a Request that becomes Cancel request keeps focus; when a dialog closes or the focused pill vanishes and the page holds no focus → invoking action, else the request-family pill that replaced it, else the first pill (`actionFocusKeys`) | pass | pass (tv28 emulator, fake Seerr): movie Request with no prior move → Cancel request focused, Down/Up move; Cancel + confirm → Request focused; TV season dialog Back → Request focused; TV submit (partial) → Request focused, (all remaining) → Cancel request focused; Down during an in-flight request stays on the cast row; Seerr down → Request fails → Retry, Seerr back → Retry lands on the first action (Request) |
 | Player OSD | Play/Pause on reveal (§4 exception) | hide/reveal: exception, not a return | Speed, Chapters, track picker, Library info, Stats → invoker | pass | pass: Tracks → picker (check on current tracks) → Back lands on Tracks; reveal from hidden lands on Play/Pause |
 
 Checked and deliberately left alone:
 
-- **Sign In, Server Management**: replace the whole tree (no retained
-  layer, no return path); one-shot seeds stay. Nothing to restore.
+- **Sign In, Server Management**: not retained layers; they replace the stack
+  while up (§3, §4.1) and seed their declared control. Closing one recomposes the
+  stack, whose entries restore their saveable state and focus by key.
 - **Nav drawer panel**: Compose's own `focusRestorer()` inside the panel
   is correct for a surface that is never disposed; only its content
   hand-off goes through the shared path (Home's coordinator).

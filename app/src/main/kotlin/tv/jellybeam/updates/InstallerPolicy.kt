@@ -23,6 +23,34 @@ internal enum class PlaybackGate { Launch, AbandonCommittedThenLaunch }
 internal fun playbackGate(committed: Boolean, resumed: Boolean): PlaybackGate =
     if (committed && resumed) PlaybackGate.AbandonCommittedThenLaunch else PlaybackGate.Launch
 
+/** docs/26 §1: what the coordinator's one in-flight work job is doing; Play may cancel only [Prepare] and [Stage]. */
+internal enum class WorkKind { Verify, Prepare, Stage }
+
+internal enum class PlayLaunchPlan { LaunchNow, LaunchThenAbandonStaging }
+/** docs/26 §1: Play starts at once; only uncommitted staging (a session, or the core preparing one) is abandoned, after the launch, and a download or verification continues. */
+internal fun playLaunchPlan(stagingExists: Boolean, phase: String, work: WorkKind? = null): PlayLaunchPlan =
+    if (stagingExists || phase == "Preparing" || phase == "Staging" || work.isInstallPreparation()) PlayLaunchPlan.LaunchThenAbandonStaging else PlayLaunchPlan.LaunchNow
+
+private fun WorkKind?.isInstallPreparation() = this == WorkKind.Prepare || this == WorkKind.Stage
+
+internal data class PlayPlan(val launch: PlayLaunchPlan, val cancelCore: Boolean, val cancelWork: Boolean)
+/** docs/26 §1: Play, whichever way it arrives, cancels install preparation only (the running job by its [work] kind, the core by its phase); a download, verification or check is never its to cancel. */
+internal fun playPlan(stagingExists: Boolean, phase: String, work: WorkKind?): PlayPlan {
+    val cancelWork = work.isInstallPreparation()
+    val preparing = phase == "Preparing" || phase == "Staging"
+    return PlayPlan(playLaunchPlan(stagingExists, phase, work), cancelCore = cancelWork || preparing, cancelWork = cancelWork)
+}
+
+/** docs/26 §4: what an interrupted Stage tells the core -- "canceled" for any cancellation, "failed" otherwise, nothing once a session is committed. */
+internal fun stageOutcome(cancellation: Boolean, jobActive: Boolean, committed: Boolean): String? =
+    if (cancellation || !jobActive) "canceled".takeUnless { committed } else "failed"
+
+/** docs/26 §4: the installer session that is staged but not committed, from memory or else the journal. */
+internal fun uncommittedSessionId(stagingId: Int?, journalSession: Int, committed: Boolean): Int? =
+    if (committed) null else stagingId ?: journalSession.takeIf { it >= 0 }
+/** docs/26 §4: an abandoned session leaves the journal, so a restart does not find staging that no longer exists. */
+internal fun journalSessionAfterAbandon(journalSession: Int, abandoned: Int): Int = if (journalSession == abandoned) -1 else journalSession
+
 internal data class PausePlan(val dropAuthorization: Boolean, val cancelInstallPreparation: Boolean)
 /** docs/26 §1: leaving the page drops authorization and pre-commit staging only; transfers and verification continue. */
 internal fun pausePlan(permissionReturn: Boolean, committed: Boolean, phase: String): PausePlan =

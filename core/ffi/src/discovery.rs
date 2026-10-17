@@ -64,17 +64,19 @@ pub(crate) fn normalize_server_url(url: &str) -> String {
 /// one, in candidate order, replaces it. Fail-open: nothing reachable leaves the address as
 /// advertised.
 async fn resolve_reachable_addresses(
+    http: &jellyfin_api::HttpClient,
     found: Vec<jellyfin_api::discovery::DiscoveredServer>,
 ) -> Vec<jellyfin_api::discovery::DiscoveredServer> {
     let mut resolved = Vec::with_capacity(found.len());
     for mut server in found {
-        if probe(&server.address).await {
+        if probe(http, &server.address).await {
             resolved.push(server);
             continue;
         }
         let candidates =
             jellyfin_api::discovery::fallback_candidates(&server.address, server.responder_ip);
-        let results = futures_util::future::join_all(candidates.iter().map(|c| probe(c))).await;
+        let results =
+            futures_util::future::join_all(candidates.iter().map(|c| probe(http, c))).await;
         if let Some(address) = first_reachable(&candidates, &results) {
             server.address = address.to_string();
         }
@@ -95,12 +97,12 @@ fn first_reachable<'a>(candidates: &'a [String], reachable: &[bool]) -> Option<&
 /// list for reqwest's full request timeout.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
 
-async fn probe(base_url: &str) -> bool {
+async fn probe(http: &jellyfin_api::HttpClient, base_url: &str) -> bool {
     let identity = JellybeamCore::identity_with(String::new());
     matches!(
         tokio::time::timeout(
             PROBE_TIMEOUT,
-            jellyfin_api::JellyfinClient::public_system_info(base_url, &identity)
+            jellyfin_api::JellyfinClient::public_system_info(http, base_url, &identity)
         )
         .await,
         Ok(Ok(_))
@@ -138,7 +140,7 @@ impl JellybeamCore {
     pub fn discover_servers(&self) -> Vec<DiscoveredServer> {
         let found = self.runtime().block_on(async {
             let found = jellyfin_api::discovery::discover_local_servers(1500, 15).await;
-            resolve_reachable_addresses(found).await
+            resolve_reachable_addresses(self.pre_auth_http(), found).await
         });
         let saved_urls: Vec<String> = crate::session::load_list(self.data_dir())
             .sessions

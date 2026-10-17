@@ -2,6 +2,8 @@ package tv.jellybeam.data
 
 import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
+import uniffi.jellybeam_core.BrowseRead
+import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SeerrRefusal
@@ -37,6 +39,8 @@ fun CoreException.displayMessage(strings: UiStrings): String = when (this) {
     is CoreException.InvalidServerAddress -> strings.get(R.string.error_invalid_server_address)
     is CoreException.ServerUnreachable -> strings.get(R.string.error_server_unreachable, host, unreachableReason(strings, reason, detail))
     is CoreException.HttpsNotOffered -> strings.get(R.string.error_https_not_offered, host)
+    is CoreException.CertificateRejected -> strings.get(R.string.error_certificate_rejected, host)
+    is CoreException.QuickConnectDisabled -> strings.get(R.string.signin_error_quick_connect_disabled)
     is CoreException.NotJellyfinServer -> strings.get(R.string.error_not_jellyfin_server, host, status.toInt())
     is CoreException.InvalidCredentials -> strings.get(R.string.error_invalid_credentials)
     // docs/14-seerr-discover.md: the Seerr server was reached and refused the sign-in; a Seerr
@@ -46,14 +50,18 @@ fun CoreException.displayMessage(strings: UiStrings): String = when (this) {
         SeerrAuthMethod.JELLYFIN -> strings.get(R.string.error_invalid_credentials)
         SeerrAuthMethod.API_KEY -> strings.get(R.string.error_seerr_api_key_rejected)
     }
-    // docs/14-seerr-discover.md "Auth": Seerr answered with its own error, so the address is
-    // right and the fix is on the Seerr side; say which.
+    // docs/14: Seerr refused a session it had accepted; reconnect Seerr in Settings, never Jellyfin reauth.
+    is CoreException.SeerrSessionExpired -> strings.get(R.string.error_seerr_session_expired)
+    // docs/14 "Errors": the request/cancel went through but the title could not be read back.
+    is CoreException.SeerrChangeUnconfirmed -> strings.get(R.string.error_seerr_change_unconfirmed)
     // docs/14-seerr-discover.md: Seerr never answered; name why when known, never the URL or
     // transport text.
     is CoreException.SeerrUnreachable -> when (reason) {
         UnreachableReason.OTHER -> strings.get(R.string.error_seerr_unreachable)
         else -> strings.get(R.string.error_seerr_unreachable_reason, unreachableReason(strings, reason, ""))
     }
+    // docs/14-seerr-discover.md "Auth": Seerr answered with its own error, so the address is
+    // right and the fix is on the Seerr side; say which.
     is CoreException.SeerrSignInRefused -> when (reason) {
         SeerrRefusal.MEDIA_SERVER_SIGN_IN -> strings.get(R.string.error_seerr_media_server_sign_in)
         SeerrRefusal.NEW_USERS_BLOCKED -> strings.get(R.string.error_seerr_new_users_blocked)
@@ -90,19 +98,40 @@ fun CoreException.diagLabel(): String = when (this) {
     is CoreException.InvalidServerAddress -> "invalid_server_address"
     is CoreException.ServerUnreachable -> "server_unreachable"
     is CoreException.HttpsNotOffered -> "https_not_offered"
+    is CoreException.CertificateRejected -> "certificate_rejected"
+    is CoreException.QuickConnectDisabled -> "quick_connect_disabled"
     is CoreException.NotJellyfinServer -> "not_jellyfin_server"
     is CoreException.InvalidCredentials -> "invalid_credentials"
     is CoreException.SeerrInvalidCredentials -> "seerr_invalid_credentials"
     is CoreException.SeerrSignInRefused -> "seerr_sign_in_refused"
+    is CoreException.SeerrSessionExpired -> "seerr_session_expired"
+    is CoreException.SeerrChangeUnconfirmed -> "seerr_change_unconfirmed"
     is CoreException.SeerrUnreachable -> "seerr_unreachable"
 }
 
 /**
  * Whether a failed core call means the active account's saved token is dead, so the app should
  * open re-authorization (as playback does) instead of failing open on a stale mirror. Seerr's own
- * 401 and the sign-in flows share the variant but aren't the Jellyfin session.
+ * 401 is [CoreException.SeerrSessionExpired], never [CoreException.Unauthorized]; the QuickConnect
+ * flows share the variant but aren't the Jellyfin session.
  */
 internal fun routesToReauthorization(section: String, error: CoreException): Boolean =
     error is CoreException.Unauthorized &&
-        !section.startsWith("ffi.seerr") &&
         !section.contains("QuickConnect", ignoreCase = true)
+
+/**
+ * docs/07 §5: a mirror browse read that produced no rows. [BrowseNotReady] means the mirror is not
+ * open yet (retry once it is); [BrowseFailed] means the query failed. An empty list is a result,
+ * never one of these, so a screen never settles on a failure as "nothing here".
+ */
+class BrowseNotReady : Exception("mirror not open")
+
+/** See [BrowseNotReady]. */
+class BrowseFailed : Exception("browse query failed")
+
+/** The rows of a [BrowseRead.Items]; the other two outcomes throw their typed exception. */
+internal fun BrowseRead.rowsOrThrow(): List<Card> = when (this) {
+    is BrowseRead.Items -> cards
+    BrowseRead.NotReady -> throw BrowseNotReady()
+    BrowseRead.Failed -> throw BrowseFailed()
+}
