@@ -11,6 +11,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.jellybeam_core.AudioSpatialKind
+import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.ImageKind
 import uniffi.jellybeam_core.ItemDetail
@@ -778,7 +779,7 @@ class DetailFormattingTest {
 
     @Test
     fun `dedupeById on an empty list is empty, not a crash`() {
-        assertTrue(DetailFormatting.dedupeById(emptyList<uniffi.jellybeam_core.Card>()) { it.id }.isEmpty())
+        assertTrue(DetailFormatting.dedupeById(emptyList<Card>()) { it.id }.isEmpty())
     }
 
     // -- containerLabel (bug 7: spec strip CONTAINER cell) --------------------
@@ -1173,6 +1174,13 @@ class DetailFormattingTest {
     }
 
     @Test
+    fun `only a playable primary pill takes focus, so a missing item seeds the door`() {
+        assertTrue(DetailFormatting.primaryTakesFocus(DetailFormatting.PrimaryAction.Playable("Play", "item-1", hasProgress = false)))
+        assertFalse(DetailFormatting.primaryTakesFocus(DetailFormatting.PrimaryAction.Unavailable("Missing")))
+        assertFalse(DetailFormatting.primaryTakesFocus(DetailFormatting.PrimaryAction.None))
+    }
+
+    @Test
     fun `resolveFocusSeedTarget prefers the primary target when both are available`() {
         assertEquals(DetailFormatting.FocusSeedTarget.PRIMARY, DetailFormatting.resolveFocusSeedTarget(hasPrimary = true, hasSecondary = true))
     }
@@ -1337,6 +1345,97 @@ class DetailFormattingTest {
         assertEquals(null, DetailFormatting.episodesOfSeason(numbered, listOf(ep, orphan), true))
     }
 
+    // -- seasonAvailability (docs/11 §12 season chip fill bar) ----
+
+    private val availabilityNow = Instant.parse("2026-01-01T00:00:00Z")
+    private val availabilitySeason = testCard(id = "s2", itemType = "Season", indexNumber = 2)
+
+    private fun realEp(id: String) = testCard(id = id, itemType = "Episode", parentIndexNumber = 2, indexNumber = 1)
+
+    private fun virtualEp(id: String, premiereDate: String?) =
+        testCard(id = id, itemType = "Episode", parentIndexNumber = 2, indexNumber = 2, isVirtual = true, premiereDate = premiereDate)
+
+    private val pastAir = "2025-06-01T00:00:00Z"
+    private val futureAir = "2026-06-01T00:00:00Z"
+
+    private fun availability(season: Card, episodes: List<Card>) =
+        DetailFormatting.seasonAvailability(season, episodes, availabilityNow)
+
+    @Test
+    fun `seasonAvailability is All when every episode is real`() {
+        val a = availability(availabilitySeason, listOf(realEp("a"), realEp("b")))
+        assertEquals(SeasonAvailability(have = 2, total = 2), a)
+        assertEquals(SeasonFill.All, a?.fill)
+    }
+
+    @Test
+    fun `seasonAvailability is Some with real and missing episodes`() {
+        val a = availability(availabilitySeason, listOf(realEp("a"), virtualEp("m", pastAir)))
+        assertEquals(SeasonAvailability(have = 1, total = 2), a)
+        assertEquals(SeasonFill.Some, a?.fill)
+        assertEquals(0.5f, a?.tankFraction)
+    }
+
+    @Test
+    fun `seasonAvailability is None when only missing episodes exist`() {
+        val a = availability(availabilitySeason, listOf(virtualEp("m1", pastAir), virtualEp("m2", pastAir)))
+        assertEquals(SeasonAvailability(have = 0, total = 2), a)
+        assertEquals(SeasonFill.None, a?.fill)
+    }
+
+    @Test
+    fun `seasonAvailability has no value when only unaired episodes exist`() {
+        assertNull(availability(availabilitySeason, listOf(virtualEp("u", futureAir))))
+    }
+
+    @Test
+    fun `seasonAvailability is None for missing plus unaired with no real episode`() {
+        val a = availability(availabilitySeason, listOf(virtualEp("m", pastAir), virtualEp("u", futureAir)))
+        assertEquals(SeasonAvailability(have = 0, total = 1), a)
+        assertEquals(SeasonFill.None, a?.fill)
+    }
+
+    @Test
+    fun `seasonAvailability is All for real plus unaired episodes`() {
+        val a = availability(availabilitySeason, listOf(realEp("a"), virtualEp("u", futureAir)))
+        assertEquals(SeasonAvailability(have = 1, total = 1), a)
+        assertEquals(SeasonFill.All, a?.fill)
+    }
+
+    @Test
+    fun `seasonAvailability tank fraction is have over total and counts only aired missing`() {
+        val eps = listOf(realEp("a"), realEp("b"), realEp("c"), virtualEp("m", pastAir), virtualEp("u", futureAir))
+        assertEquals(0.75f, availability(availabilitySeason, eps)?.tankFraction)
+    }
+
+    @Test
+    fun `seasonAvailability has no value for Specials by name or by index zero`() {
+        val byName = testCard(id = "sp", itemType = "Season", name = "Specials", indexNumber = 2)
+        val byIndex = testCard(id = "s0", itemType = "Season", name = "Extras", indexNumber = 0)
+        val eps = listOf(realEp("a"), testCard(id = "z", itemType = "Episode", parentIndexNumber = 0, indexNumber = 1))
+        assertNull(availability(byName, eps))
+        assertNull(availability(byIndex, eps))
+    }
+
+    @Test
+    fun `seasonAvailability has no value without episodes or a season number`() {
+        val unnumbered = testCard(id = "sx", itemType = "Season")
+        assertNull(availability(availabilitySeason, emptyList()))
+        assertNull(availability(unnumbered, listOf(realEp("a"))))
+    }
+
+    @Test
+    fun `seasonAvailability has no value for a season none of the episodes belong to`() {
+        val other = testCard(id = "s3", itemType = "Season", indexNumber = 3)
+        assertNull(availability(other, listOf(realEp("a"))))
+    }
+
+    @Test
+    fun `seasonAvailability counts an undated or unparseable virtual episode as missing`() {
+        assertEquals(SeasonAvailability(have = 0, total = 1), availability(availabilitySeason, listOf(virtualEp("n", null))))
+        assertEquals(SeasonAvailability(have = 1, total = 2), availability(availabilitySeason, listOf(realEp("a"), virtualEp("g", "not-a-date"))))
+    }
+
     private fun change(event: ChangeEvent, isSeries: Boolean = true, known: Set<String> = setOf("known")) =
         DetailFormatting.collectionChange(event, "series-1", isSeries, known)
 
@@ -1430,5 +1529,13 @@ class DetailFormattingTest {
         assertNull(DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s2), emptyList(), settled = false))
         assertEquals("s1", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s2), emptyList(), settled = true))
         assertEquals("gone", DetailFormatting.reconcileSelectedSeason("gone", emptyList(), emptyList(), settled = false))
+    }
+
+    @Test
+    fun `the tank fill is clamped so a sliver still reads as some and a near-complete season never as all`() {
+        assertEquals(0.15f, SeasonAvailability(have = 1, total = 24).tankFraction)
+        assertEquals(0.85f, SeasonAvailability(have = 23, total = 24).tankFraction)
+        assertEquals(0.52f, SeasonAvailability(have = 12, total = 23).tankFraction)
+        assertEquals(0.75f, SeasonAvailability(have = 18, total = 24).tankFraction)
     }
 }

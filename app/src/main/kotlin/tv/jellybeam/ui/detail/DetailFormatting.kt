@@ -21,9 +21,24 @@ import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.ImageKind
 import uniffi.jellybeam_core.ItemDetail
+import kotlin.math.roundToInt
 import uniffi.jellybeam_core.MediaStreamInfo
 import uniffi.jellybeam_core.MediaStreamKind
 import uniffi.jellybeam_core.PersonInfo
+
+/** docs/11 §12: how a season chip reads: [All] plain, [Some] a part-filled tank, [None] a dashed outline. */
+enum class SeasonFill { All, Some, None }
+
+/** docs/11 §12: [have] of [total] aired episodes are on the server; [total] is never 0. */
+data class SeasonAvailability(val have: Int, val total: Int) {
+    val fill: SeasonFill get() = when {
+        have >= total -> SeasonFill.All
+        have == 0 -> SeasonFill.None
+        else -> SeasonFill.Some
+    }
+    /** The tank's filled share, clamped to 15-85% so 1 of 24 still reads as some and 23 of 24 never as all. */
+    val tankFraction: Float get() = (have * 100f / total).roundToInt().coerceIn(15, 85) / 100f
+}
 
 /** Pure Kotlin, Detail-screen-only formatting/resolution rules for `docs/11-detail-ux-spec.md`,
  * free of any Compose/Android dependency, same discipline as [CardFormatting].
@@ -166,6 +181,9 @@ object DetailFormatting {
         data object None : PrimaryAction
     }
 
+    /** docs/15 §2 rule 3: only a Playable pill can seed focus; an Unavailable one is disabled, so seeding it focuses nothing. */
+    fun primaryTakesFocus(action: PrimaryAction): Boolean = action is PrimaryAction.Playable
+
     /**
      * Spec item 11's resume semantics, a pure function (JVM-testable, no ViewModel/Compose).
      *
@@ -260,7 +278,7 @@ object DetailFormatting {
         else -> FocusSeedTarget.NONE
     }
 
-    private fun isSpecialSeason(season: Card): Boolean = season.name == SPECIALS_SEASON_NAME || season.indexNumber == 0
+    internal fun isSpecialSeason(season: Card): Boolean = season.name == SPECIALS_SEASON_NAME || season.indexNumber == 0
 
     /** Spec item 3: prefers the first season that's neither named "Specials" nor indexed 0, falling
      * back to the literal first season only if every one fails that check.
@@ -285,6 +303,19 @@ object DetailFormatting {
         return allEpisodes
             .filter { it.parentIndexNumber == number && (showVirtualEpisodes || !it.isVirtual) }
             .sortedWith(compareBy(nullsLast()) { it.indexNumber })
+    }
+
+    /**
+     * docs/11 §12: a season chip's availability from the whole-series list, per docs/24 (an unaired
+     * virtual counts for nothing). `null` for Specials, a season [episodesOfSeason] can't match, or
+     * one with no real and no missing episodes.
+     */
+    fun seasonAvailability(season: Card, allEpisodes: List<Card>, now: Instant): SeasonAvailability? {
+        if (isSpecialSeason(season)) return null
+        val episodes = episodesOfSeason(season, allEpisodes, showVirtualEpisodes = true) ?: return null
+        val have = episodes.count { !it.isVirtual }
+        val missing = episodes.count { it.isVirtual && CardFormatting.isMissing(it.premiereDate, now) }
+        return if (have + missing == 0) null else SeasonAvailability(have, have + missing)
     }
 
     /**

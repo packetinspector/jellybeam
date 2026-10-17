@@ -52,7 +52,7 @@ the grid live by letter, month/year, decade, or duration band; everything
 is answered from the local mirror (genres and series status are now
 mirrored) and sticks per library across restarts; series/season/episode pages
 (duplicate-Season resilient, virtual/unaired episodes shown as non-playable
-rows with airing status, junk Folder-as-season-child filtered); movie,
+rows with airing status, junk Folder-as-season-child filtered; with Show missing episodes on, season chips part-fill for partly missing seasons and a dashed outline for seasons with nothing on the server, unaired episodes not counted); movie,
 series and episode detail pages laid out as one flow (poster, two-line
 title, metadata, actions, a four-line synopsis with a focusable MORE ↓ stop
 that opens the full text as a panel, a one-line directed-by / written-by /

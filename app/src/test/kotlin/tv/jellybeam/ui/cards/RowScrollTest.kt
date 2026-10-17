@@ -63,4 +63,20 @@ class RowScrollTest {
     fun `an unmeasured header defers to the default rule`() {
         assertEquals(null, headerPageScrollToTopDistance(offset = -840f, size = 71f, containerSize = 1080f, scrolled = 900f, headerBottomPx = Float.NaN))
     }
+
+    @Test
+    fun `a chip left of the viewport scrolls back until its ring clears the leading edge`() {
+        assertEquals(-106f, edgeMarginScrollDistance(offset = -100f, size = 80f, containerSize = 1000f, marginPx = 6f), 0f)
+    }
+
+    @Test
+    fun `a chip past the trailing edge scrolls only until its ring clears that edge`() {
+        assertEquals(46f, edgeMarginScrollDistance(offset = 960f, size = 80f, containerSize = 1000f, marginPx = 6f), 0f)
+    }
+
+    @Test
+    fun `a chip already inside both margins does not scroll`() {
+        assertEquals(0f, edgeMarginScrollDistance(offset = 6f, size = 80f, containerSize = 1000f, marginPx = 6f), 0f)
+        assertEquals(0f, edgeMarginScrollDistance(offset = 914f, size = 80f, containerSize = 1000f, marginPx = 6f), 0f)
+    }
 }

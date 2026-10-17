@@ -103,6 +103,17 @@ it, ranked by contribution to "feels like Jellybeam".
     The underline animates with a real sliding indicator, not a crossfade.
     Focus ring on tabs = the shared 2px ring. Left/Right changes season;
     Enter on a tab does nothing.
+    With Settings › Show missing episodes on, a numbered season chip shows
+    how much is on the server: all present, plain chip; some missing, the
+    chip itself fills left to right with a hard split at have/total,
+    clamped to 15-85% (#5C5248 on SURFACE with a #5C5248 border;
+    PISTACCHIO on #E4EDD0 with a PISTACCHIO border when selected); none
+    present, a transparent chip with a 1dp dashed #5A5046 outline and a
+    #7A7166 Medium label (selected: PISTACCHIO 22% fill, dashed PISTACCHIO
+    outline,
+    PANNA label). Markers are drawn, never laid out, so chip size never
+    changes. Unaired placeholders count for nothing (docs/24); Specials and
+    seasons with nothing aired get no marker. Off, the chips are unchanged.
 13. **Similar Titles row** — 2:3 posters at 160px, from a live GetSimilar
     (limit 16) alongside the instant mirror paint. Empty and not-yet-loaded
     both render NOTHING. Skipped on episode pages.

@@ -68,3 +68,26 @@ internal fun headerPageScrollToTopDistance(offset: Float, size: Float, container
     val fitsFirstScreen = contentTop + size <= containerSize
     return if (scrolled > 0f && contentTop < headerBottomPx && fitsFirstScreen) -scrolled else null
 }
+
+/**
+ * A horizontal chip row's own spec, so it never inherits its page's vertical one: scrolls only as
+ * far as keeps the focused item [edgeMargin] inside either viewport edge, room for its focus ring.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun rememberEdgeMarginBringIntoViewSpec(edgeMargin: Dp): BringIntoViewSpec {
+    val marginPx = with(LocalDensity.current) { edgeMargin.toPx() }
+    return remember(marginPx) {
+        object : BringIntoViewSpec {
+            override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float =
+                edgeMarginScrollDistance(offset, size, containerSize, marginPx)
+        }
+    }
+}
+
+/** Pure arithmetic behind [rememberEdgeMarginBringIntoViewSpec]; the scroll container clamps the result at both content ends. */
+internal fun edgeMarginScrollDistance(offset: Float, size: Float, containerSize: Float, marginPx: Float): Float = when {
+    offset < marginPx -> offset - marginPx
+    offset + size > containerSize - marginPx -> offset + size - (containerSize - marginPx)
+    else -> 0f
+}

@@ -3,9 +3,11 @@ package tv.jellybeam.ui.detail
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import tv.jellybeam.AppGraph
 import tv.jellybeam.R
 import tv.jellybeam.data.BrowseNotReady
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.data.SettingsStore
 import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.ui.common.ChangeRefreshScheduler
@@ -21,9 +23,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -92,6 +97,12 @@ data class DetailUiState(
      * pill" can be told apart from "primary pill not resolved yet" (docs/15 §2 rule 3).
      */
     val allEpisodesSettled: Boolean = false,
+    /**
+     * docs/09 `Settings::show_virtual_episodes`, derived from [SettingsStore.settings], so a season
+     * switch can apply the core's `children()` virtual filter in memory and the season chips can show
+     * availability markers (docs/11 §12); `null` means not loaded yet -> fall back to [CoreGateway.children].
+     */
+    val showVirtualEpisodes: Boolean? = null,
     /**
      * Spec strip/cast row/details footer data source (docs/11 tier 1 item 1, tier 2 items 8-9);
      * `null` until [CoreGateway.getItemDetail] resolves, or forever on failure.
@@ -179,6 +190,8 @@ class DetailViewModel(
     private val strings: UiStrings,
     /** docs/19 §3.3's "Play something random" -- injected so tests are deterministic. */
     private val random: Random = Random.Default,
+    /** docs/09: the settings owner [DetailUiState.showVirtualEpisodes] is derived from. */
+    private val settingsStore: SettingsStore = AppGraph.settingsStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(DetailUiState(card = card))
@@ -207,22 +220,11 @@ class DetailViewModel(
      */
     private var allEpisodesResolved = false
 
-    /**
-     * `Settings::show_virtual_episodes` as of the last [allEpisodes] fetch, so a season switch can
-     * apply the core's `children()` virtual filter in memory; `null` (unread) -> fall back to
-     * [CoreGateway.children].
-     */
-    private var showVirtualEpisodes: Boolean? = null
-
     /** Bumped by each [DetailUiState.allEpisodes] read, so an older read never lands over a newer one. */
     private var allEpisodesSeq = 0
 
     /** The newest recorded outcome of each series list; [DetailUiState.listError] is "any failed". Main-thread only. */
     private val listOutcomes = ListOutcomes()
-
-    private suspend fun refreshShowVirtualEpisodes() {
-        showVirtualEpisodes = runCatchingCancellable { gateway.getSettings().showVirtualEpisodes }.getOrNull()
-    }
 
     /**
      * The season's episodes derived from [DetailUiState.allEpisodes] ([DetailFormatting.episodesOfSeason]),
@@ -232,7 +234,7 @@ class DetailViewModel(
         val state = _state.value
         if (!state.allEpisodesSettled) return null
         val season = state.seasons.firstOrNull { it.id == seasonId } ?: return null
-        val showVirtual = showVirtualEpisodes ?: return null
+        val showVirtual = state.showVirtualEpisodes ?: return null
         return DetailFormatting.episodesOfSeason(season, state.allEpisodes, showVirtual)
     }
 
@@ -276,6 +278,16 @@ class DetailViewModel(
         }
         if (card.itemType == BOXSET_ITEM_TYPE) loadCollection()
         if (card.itemType == SERIES_ITEM_TYPE) {
+            // docs/09: the flag follows its owner, so a page on the stack re-serves its season when Settings flips it;
+            // a later flip also re-reads the lists on return, since the core's season list filters all-missing seasons.
+            viewModelScope.launch {
+                settingsStore.settings.filterNotNull().map { it.showVirtualEpisodes }.distinctUntilChanged().collect { shown ->
+                    val previous = _state.value.showVirtualEpisodes
+                    _state.update { it.copy(showVirtualEpisodes = shown) }
+                    syncSelection(resyncEpisodes = true)
+                    if (previous != null) changeRefreshScheduler.markDirty()
+                }
+            }
             viewModelScope.launch { loadSeasons(card.id) }
             // docs/11 item 11's cross-season fix, independent of loadSeasons/selectSeason.
             viewModelScope.launch { loadAllEpisodes(card.id) }
@@ -385,7 +397,6 @@ class DetailViewModel(
     private suspend fun loadAllEpisodes(seriesId: String) {
         val seq = ++allEpisodesSeq
         val allEpisodes = browse { gateway.seriesEpisodes(seriesId) }
-        refreshShowVirtualEpisodes()
         publishAllEpisodes(seq, allEpisodes.orEmpty(), failed = allEpisodes == null)
     }
 
@@ -509,7 +520,6 @@ class DetailViewModel(
             // Keep what is on screen; an unsettled page still has its initial read in flight, which fails open itself.
             return
         }
-        refreshShowVirtualEpisodes()
         publishAllEpisodes(seq, allEpisodes)
     }
 
@@ -522,6 +532,8 @@ class DetailViewModel(
                 .let { DetailFormatting.dedupeById(it) { season -> season.id } }
                 .sortedWith(compareBy(nullsLast()) { it.indexNumber })
         }
+        // Chips paint their markers from first paint (docs/11 §12): the store publishes before it releases load().
+        runCatchingCancellable { settingsStore.load() }
         publishSeasons(seq, seasons, initial = true)
     }
 
@@ -601,15 +613,7 @@ class DetailViewModel(
             }
         }
         viewModelScope.launch {
-            if (local != null) {
-                // The cached virtual-episodes flag can predate a Settings change made while this page sat
-                // on the stack; re-read it and re-derive once if it moved.
-                val cached = showVirtualEpisodes
-                refreshShowVirtualEpisodes()
-                if (showVirtualEpisodes == cached) return@launch
-                episodesFromMemory(seasonId)?.let { publishEpisodes(gen, it) }
-                return@launch
-            }
+            if (local != null) return@launch
             val fetched = browse {
                 gateway.children(seasonId, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE)
                     .let { DetailFormatting.dedupeById(it) { episode -> episode.id } }

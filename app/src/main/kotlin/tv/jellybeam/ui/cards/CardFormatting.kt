@@ -61,6 +61,14 @@ object CardFormatting {
         return strings.get(R.string.card_time_left, formatRuntime(strings, remaining))
     }
 
+    private fun futureAirDate(premiereDate: String?, now: Instant): OffsetDateTime? =
+        premiereDate
+            ?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }
+            ?.takeIf { it.toInstant().isAfter(now) }
+
+    /** docs/24: a virtual episode is "missing" unless it has a parseable, future RFC3339 `premiereDate`. */
+    fun isMissing(premiereDate: String?, now: Instant = Instant.now()): Boolean = futureAirDate(premiereDate, now) == null
+
     /** "Airs {abbrev date}" for a parseable, future `premiereDate` (RFC3339); "Missing" otherwise
      * (absent, unparseable, or past).
      */
@@ -70,9 +78,7 @@ object CardFormatting {
         now: Instant = Instant.now(),
         locale: Locale = AppLocale.format,
     ): String {
-        val airsInFuture = premiereDate
-            ?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }
-            ?.takeIf { it.toInstant().isAfter(now) }
+        val airsInFuture = futureAirDate(premiereDate, now)
         return if (airsInFuture != null) {
             strings.get(R.string.card_airs, DateTimeFormatter.ofPattern("MMM d", locale).format(airsInFuture))
         } else {

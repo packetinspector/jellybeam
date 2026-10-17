@@ -64,14 +64,20 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.foundation.focusGroup
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -97,9 +103,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.memory.MemoryCache
+import java.time.Instant
 import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.ui.cards.rememberEdgeMarginBringIntoViewSpec
 import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.i18n.rememberUiStrings
@@ -154,7 +162,6 @@ import uniffi.jellybeam_core.PersonInfo
 
 private const val SERIES_ITEM_TYPE = "Series"
 private const val EPISODE_ITEM_TYPE = "Episode"
-private const val SPECIALS_SEASON_NAME = "Specials"
 
 /** §0's shared safe area, matching Home's own updated `PAGE_MARGIN`. */
 internal val PAGE_MARGIN = 40.dp
@@ -489,7 +496,7 @@ private fun EpisodeDetailScreen(
     // gate, so [seedTarget] is stable from the first composition. The door renders unconditionally
     // (docs/19), so `hasSecondary` is always true and [DetailFormatting.FocusSeedTarget.NONE] can't
     // happen here; [resolveFocusSeedTarget] stays in place so wiring matches Series/Movie's shape.
-    val hasPrimaryAction = primaryAction != DetailFormatting.PrimaryAction.None
+    val hasPrimaryAction = DetailFormatting.primaryTakesFocus(primaryAction)
     val seedTarget = remember(card.id, hasPrimaryAction) {
         DetailFormatting.resolveFocusSeedTarget(hasPrimaryAction, hasSecondary = true)
     }
@@ -917,7 +924,7 @@ private fun SeriesDetailScreen(
     val selectedSeason = remember(seasons, state.selectedSeasonId) { seasons.firstOrNull { it.id == state.selectedSeasonId } }
     val strings = rememberUiStrings()
     val primaryAction = remember(card.id, state.allEpisodes) { DetailFormatting.resolvePrimaryAction(strings, card, state.allEpisodes) }
-    val hasPrimaryButton = primaryAction != DetailFormatting.PrimaryAction.None
+    val hasPrimaryButton = DetailFormatting.primaryTakesFocus(primaryAction)
     val hasChips = seasons.size > 1
     val castMembers = remember(detail) { DetailFormatting.castMembers(detail?.people.orEmpty()) }
 
@@ -1194,6 +1201,8 @@ private fun SeriesDetailScreen(
                             selectedSeasonId = state.selectedSeasonId,
                             selectedSeason = selectedSeason,
                             episodes = state.episodes,
+                            allEpisodes = state.allEpisodes,
+                            showVirtualEpisodes = state.showVirtualEpisodes == true,
                             onSelect = viewModel::selectSeason,
                             memory = memory,
                             selectedChipFocusRequester = selectedChipFocusRequester,
@@ -1378,6 +1387,8 @@ private fun SeasonSelectorSection(
     selectedSeasonId: String?,
     selectedSeason: Card?,
     episodes: List<Card>,
+    allEpisodes: List<Card>,
+    showVirtualEpisodes: Boolean,
     onSelect: (String) -> Unit,
     memory: FocusMemory,
     selectedChipFocusRequester: FocusRequester,
@@ -1387,6 +1398,15 @@ private fun SeasonSelectorSection(
     val strings = rememberUiStrings()
     val summaryItems = selectedSeason?.let { DetailFormatting.seasonSummaryItems(strings, it.name, episodes) }.orEmpty()
     val showLabel = DetailFormatting.showSeasonsLabel(seasons.size)
+    // docs/11 §12: markers only while "Show missing episodes" is on; off, no chip changes.
+    val availabilities = remember(seasons, allEpisodes, showVirtualEpisodes) {
+        if (!showVirtualEpisodes) {
+            emptyMap()
+        } else {
+            val now = Instant.now()
+            seasons.associate { it.id to DetailFormatting.seasonAvailability(it, allEpisodes, now) }
+        }
+    }
 
     Row(
         modifier = modifier.padding(start = PAGE_MARGIN, end = PAGE_MARGIN),
@@ -1399,6 +1419,8 @@ private fun SeasonSelectorSection(
                 style = CAST_HEADER_STYLE,
             )
         }
+        // Its own spec: the page's vertical one reads the page's scroll, so Left onto an off-screen chip never scrolled.
+        CompositionLocalProvider(LocalBringIntoViewSpec provides rememberEdgeMarginBringIntoViewSpec(SEASON_CHIP_RING_ROOM)) {
         Row(
             // docs/15 §2 applies to entering a group, not only a screen: D-pad entry into this row
             // (Down from the pills, Up from the shelf) lands on the selected chip, never whichever
@@ -1419,10 +1441,11 @@ private fun SeasonSelectorSection(
             horizontalArrangement = Arrangement.spacedBy(SEASON_CHIP_GAP),
         ) {
             seasons.forEach { season ->
-                val isSpecial = season.name == SPECIALS_SEASON_NAME || season.indexNumber == 0
+                val isSpecial = DetailFormatting.isSpecialSeason(season)
                 SeasonChip(
                     label = if (isSpecial) stringResource(R.string.detail_season_specials_chip) else season.indexNumber?.toString() ?: season.name,
                     dimmed = isSpecial,
+                    availability = availabilities[season.id],
                     isSelected = season.id == selectedSeasonId,
                     onSelect = { onSelect(season.id) },
                     memory = memory,
@@ -1431,6 +1454,7 @@ private fun SeasonSelectorSection(
                     bringIntoViewRequester = if (season.id == selectedSeasonId) selectedChipBringIntoViewRequester else null,
                 )
             }
+        }
         }
         if (summaryItems.isNotEmpty()) {
             Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
@@ -1457,6 +1481,7 @@ private val SEASON_CHIP_RING_ROOM = 6.dp
 private fun SeasonChip(
     label: String,
     dimmed: Boolean,
+    availability: SeasonAvailability?,
     isSelected: Boolean,
     onSelect: () -> Unit,
     memory: FocusMemory,
@@ -1466,12 +1491,32 @@ private fun SeasonChip(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    val fill = if (isSelected) JellybeamTheme.Pistacchio else JellybeamTheme.Surface
+    // docs/11 §12: All and unknown (flag off, Specials) are the plain chip.
+    val fill = availability?.fill ?: SeasonFill.All
+    val isNone = fill == SeasonFill.None
+    val isSome = fill == SeasonFill.Some
+    val background = when {
+        isNone -> if (isSelected) JellybeamTheme.Pistacchio.copy(alpha = SEASON_NONE_SELECTED_ALPHA) else Color.Transparent
+        isSome && isSelected -> JellybeamTheme.SeasonSomeSelectedEmpty
+        isSelected -> JellybeamTheme.Pistacchio
+        else -> JellybeamTheme.Surface
+    }
     val textColor = when {
+        isNone -> if (isSelected) JellybeamTheme.Panna else JellybeamTheme.SeasonNoneLabel
         isSelected -> JellybeamTheme.Notte
         dimmed -> JellybeamTheme.Grigio
         else -> JellybeamTheme.Panna
     }
+    val textStyle = SEASON_CHIP_STYLE.copy(
+        color = textColor,
+        fontWeight = if (isNone && !isSelected) FontWeight.Medium else SEASON_CHIP_STYLE.fontWeight,
+    )
+    val tankColor = if (isSelected) JellybeamTheme.Pistacchio else JellybeamTheme.SeasonSomeFilled
+    val borderColor = when {
+        isSome -> tankColor
+        else -> JellybeamTheme.Hairline
+    }
+    val dashColor = if (isSelected) JellybeamTheme.Pistacchio else JellybeamTheme.SeasonNoneDash
 
     // docs/15 §1.2 / docs/12 §0.4: a ring on a Pistacchio fill must be Sheen, or it vanishes into
     // the fill.
@@ -1482,17 +1527,39 @@ private fun SeasonChip(
                 .focusKey(memory, key)
                 .widthIn(min = SEASON_CHIP_MIN_WIDTH)
                 .clip(RoundedCornerShape(50))
-                .background(fill)
-                .border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(50))
+                .background(background)
+                // The marker is drawn, never laid out, so chip size is the same in every state.
+                .drawBehind {
+                    when (fill) {
+                        SeasonFill.All -> Unit
+                        // A hard split at the tank fraction; the pill clip above rounds its ends.
+                        SeasonFill.Some -> drawRect(tankColor, size = Size(size.width * (availability?.tankFraction ?: 0f), size.height))
+                        SeasonFill.None -> {
+                            val stroke = 1.dp.toPx()
+                            val dash = SEASON_DASH.toPx()
+                            drawRoundRect(
+                                color = dashColor,
+                                topLeft = Offset(stroke / 2, stroke / 2),
+                                size = Size(size.width - stroke, size.height - stroke),
+                                cornerRadius = CornerRadius((size.height - stroke) / 2),
+                                style = Stroke(width = stroke, pathEffect = PathEffect.dashPathEffect(floatArrayOf(dash, dash))),
+                            )
+                        }
+                    }
+                }
+                .let { if (isNone) it else it.border(1.dp, borderColor, RoundedCornerShape(50)) }
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .let { if (bringIntoViewRequester != null) it.bringIntoViewRequester(bringIntoViewRequester) else it }
                 .clickable(interactionSource = interactionSource, indication = null, onClick = onSelect)
                 .padding(horizontal = 10.dp, vertical = SEASON_CHIP_VPAD),
         ) {
-            BasicText(text = label, style = SEASON_CHIP_STYLE.copy(color = textColor))
+            BasicText(text = label, style = textStyle)
         }
     }
 }
+
+private val SEASON_DASH = 3.dp
+private const val SEASON_NONE_SELECTED_ALPHA = 0.22f
 
 // docs/19 §1.5 FIX D: "slice before render", not clipping -- while the panel is open, a below-fold
 // LazyRow must show only whole cards. [CardWindow] is the sliced view a shelf renders;
@@ -1644,7 +1711,7 @@ private fun MovieDetailScreen(
     val strings = rememberUiStrings()
     // Computed inline, not remembered, so a refreshed Card recomputes instead of staying stale.
     val primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList())
-    val hasPrimaryButton = primaryAction != DetailFormatting.PrimaryAction.None
+    val hasPrimaryButton = DetailFormatting.primaryTakesFocus(primaryAction)
     val castMembers = remember(detail) { DetailFormatting.castMembers(detail?.people.orEmpty()) }
     val specFields = remember(strings, detail) {
         DetailFormatting.specCapsuleFields(

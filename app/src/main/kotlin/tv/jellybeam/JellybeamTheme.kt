@@ -56,6 +56,18 @@ object JellybeamTheme {
     /** [Panna2] at 60% opacity -- a resume card's series-name line. */
     val SeriesNameDim = Panna2.copy(alpha = 0.6f)
 
+    /** Season chip tank fill and border for a partly-present season, unselected (docs/11 §12). */
+    val SeasonSomeFilled = Color(0xFF5C5248)
+
+    /** Season chip's unfilled tank portion when that partly-present season is selected (docs/11 §12). */
+    val SeasonSomeSelectedEmpty = Color(0xFFE4EDD0)
+
+    /** Season chip's dashed outline with no episode on the server, unselected (docs/11 §12). */
+    val SeasonNoneDash = Color(0xFF5A5046)
+
+    /** Season chip label with no episode on the server (docs/11 §12). */
+    val SeasonNoneLabel = Color(0xFF7A7166)
+
     /** Lighter-than-[Hairline] border; the hero secondary button's outline. */
     val HairlineStrong = Color(0xFF4A3E33)
 

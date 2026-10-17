@@ -3,6 +3,7 @@ package tv.jellybeam.ui.cards
 import java.time.Instant
 import java.util.Locale
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -155,6 +156,15 @@ class CardFormattingTest {
     @Test
     fun `virtual status label is missing for an unparseable date`() {
         assertEquals("Missing", CardFormatting.virtualStatusLabel(strings, "not-a-date"))
+    }
+
+    @Test
+    fun `isMissing is true for past, null and unparseable dates and false for a future one`() {
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        assertTrue(CardFormatting.isMissing("2025-01-01T00:00:00Z", now))
+        assertTrue(CardFormatting.isMissing(null, now))
+        assertTrue(CardFormatting.isMissing("not-a-date", now))
+        assertFalse(CardFormatting.isMissing("2026-01-31T00:00:00Z", now))
     }
 
     @Test
