@@ -76,11 +76,11 @@ object LibraryInfoFormat {
         }
     }
 
-    /** docs/12 §17 fields grid, in order: Director, Writers, Watched, Added. */
+    /** docs/12 §17 fields grid, in order: Director, Writers, Play count, Added. */
     private fun sheetFields(strings: UiStrings, detail: ItemDetail): List<LibraryInfoFact> = buildList {
         DetailFormatting.peopleLine(detail.directors)?.let { add(LibraryInfoFact(strings.get(R.string.player_library_field_director), it)) }
         writersValue(strings, detail.writers)?.let { add(LibraryInfoFact(strings.get(R.string.player_library_field_writers), it)) }
-        add(LibraryInfoFact(strings.get(R.string.player_library_field_watched), watchedValue(strings, detail.playCount, detail.lastPlayedDate)))
+        add(LibraryInfoFact(strings.get(R.string.player_library_field_play_count), playCountValue(strings, detail.playCount, detail.lastPlayedDate)))
         DetailFormatting.shortDate(detail.dateCreated)?.let { add(LibraryInfoFact(strings.get(R.string.player_library_field_added), it)) }
     }
 
@@ -93,11 +93,13 @@ object LibraryInfoFormat {
         return if (extra > 0) strings.get(R.string.player_library_writers_more, firstTwo, extra) else firstTwo
     }
 
-    /** Watched fact: `"N times · last {date}"` (`"1 time"` for one) or `"Never"`; never dropped. */
-    private fun watchedValue(strings: UiStrings, playCount: Int, lastPlayedDate: String?): String {
-        if (playCount <= 0) return strings.get(R.string.player_library_watched_never)
-        val timesLabel = strings.plural(R.plurals.player_library_watched_times, playCount, playCount)
+    /**
+     * Play count fact: `"N · last played {date}"`, or the bare count; never dropped. Jellyfin's
+     * PlayCount counts playback starts, not viewings, so it is labelled as a count, never "watched".
+     */
+    private fun playCountValue(strings: UiStrings, playCount: Int, lastPlayedDate: String?): String {
+        val count = playCount.coerceAtLeast(0).toString()
         val lastDate = DetailFormatting.shortDate(lastPlayedDate)
-        return if (lastDate != null) strings.get(R.string.player_library_watched_last, timesLabel, lastDate) else timesLabel
+        return if (lastDate != null) strings.get(R.string.player_library_play_count_last, count, lastDate) else count
     }
 }

@@ -12743,6 +12743,7 @@ mod tests {
             is_virtual: false,
             library_id: None,
             is_favorite: false,
+            date_created: None,
         }
     }
 

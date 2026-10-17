@@ -308,6 +308,16 @@ the repo). Applies to Movie, Series and Episode alike.
   STUDIO` (labels Martian Mono 8.5sp GRIGIO, names Archivo 11sp PANNA, studio
   Martian Mono uppercase). Each segment shrinks and ellipsizes; a four-name
   writer list never reflows its neighbours. `ADDED` lives in the eyebrow.
+- **Movie eyebrow.** `LIBRARY │ ENDS 11:24 PM │ ADDED …` on one Martian
+  Mono 11sp line: library name in PISTACCHIO (verbatim, ellipsizes first),
+  `│` in HAIRLINE with 7dp either side, ENDS/ADDED in PANNA2. ENDS is now +
+  (runtime − resume position) in the device's 12h/24h format, `+N` when it
+  lands on a later day, recomputed each wall-clock minute; omitted with no
+  runtime. Status text, never focusable. Movie only; the Series and Episode
+  eyebrows keep ` · `.
+- **Resume row.** A Movie with a saved position shows the Episode page's
+  resume row between the meta line and the buttons: 4dp PISTACCHIO bar
+  (220dp) and a Martian Mono `{n} left` label.
 - **Spec capsule.** Outlined only (1px HAIRLINE, full radius, 12dp/5dp
   padding, Martian Mono 9sp); the §1 emphasis tiers still colour the
   values. It is the visual break between the reading half and the browsing

@@ -264,6 +264,23 @@ Under the title, one Martian Mono 13sp line, always present:
 
 Pure formatter: `GridSummaryFormat.line(...)` (unit-tested).
 
+### 4.1a Focus readout
+
+The header's empty upper-right shows the Movie poster focus has rested on
+for 150ms: title (Archivo 16sp bold) with `year · runtime`, then three
+end-aligned columns — `ENDS AT` (now + remaining, sub `if started now` or
+`1h 4m left`), `LAST PLAYED` (when playback last started, same relative
+ladder as ADDED, `Never` without one; sub `watched` / `in progress`; no
+count, because Jellyfin's PlayCount counts starts, not viewings), `ADDED`
+(today / yesterday / days 2–13 / weeks to 62 days / months under 2 years /
+years; sub the absolute date). Every value comes from the grid's own `Card`
+(mirror `date_created`, `last_played_date`): no request on focus. It shows
+only where it fits beside the library's title and summary. It overlays the header without
+sizing it, starting at the title's top and ending at the grid's last
+column, so nothing below moves. A focus step's blur never clears it; it
+swaps with an 80ms crossfade and hides while the grid is empty or loading,
+or when the rested item is not a Movie. Pure rules: `LibraryReadoutFormat`.
+
 ### 4.2 Strip
 
 Up from the top row of posters opens it; it pushes the grid down (animated,

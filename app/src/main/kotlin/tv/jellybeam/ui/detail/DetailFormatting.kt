@@ -26,6 +26,11 @@ import uniffi.jellybeam_core.MediaStreamInfo
 import uniffi.jellybeam_core.MediaStreamKind
 import uniffi.jellybeam_core.PersonInfo
 
+/** docs/11 §4 item 3: [LIBRARY] is the server's name (Pistacchio, verbatim); [STATUS] is generated text (Panna2). */
+enum class EyebrowKind { LIBRARY, STATUS }
+
+data class EyebrowPart(val kind: EyebrowKind, val text: String)
+
 /** docs/11 §12: how a season chip reads: [All] plain, [Some] a part-filled tank, [None] a dashed outline. */
 enum class SeasonFill { All, Some, None }
 
@@ -750,21 +755,22 @@ object DetailFormatting {
         }
     }
 
-    /** §4 item 3's Movie eyebrow: `"{libraryName} · ADDED {clause}"`, uppercasing only the
-     * generated clause -- [libraryName] stays exactly as given (never prettified).
+    /** docs/11 §4 item 3's Movie eyebrow parts, in order: library, `ENDS {endsAt}`, `ADDED {clause}`;
+     * a missing part drops out. Only the generated text is uppercased -- [libraryName] stays verbatim.
      */
     fun movieEyebrow(
         strings: UiStrings,
         libraryName: String?,
+        endsAt: String?,
         dateCreated: String?,
         now: Instant = Instant.now(),
         locale: Locale = AppLocale.format,
-    ): String? {
-        val libraryPart = libraryName?.takeIf { it.isNotBlank() }
-        val addedPart = relativeAddedClause(strings, dateCreated, now, locale)
-            ?.let { strings.get(R.string.detail_added_clause, it.uppercaseUi()) }
-        return join(libraryPart, addedPart, THIN_SEPARATOR)
-    }
+    ): List<EyebrowPart> = listOfNotNull(
+        libraryName?.takeIf { it.isNotBlank() }?.let { EyebrowPart(EyebrowKind.LIBRARY, it) },
+        endsAt?.let { EyebrowPart(EyebrowKind.STATUS, strings.get(R.string.detail_ends_clause, it.uppercaseUi())) },
+        relativeAddedClause(strings, dateCreated, now, locale)
+            ?.let { EyebrowPart(EyebrowKind.STATUS, strings.get(R.string.detail_added_clause, it.uppercaseUi())) },
+    )
 
     /** §D.5: past this many seasons, the "SEASONS" label drops so the chip row keeps its one-row
      * layout instead of wrapping. A season-count heuristic, not a measured fit check.

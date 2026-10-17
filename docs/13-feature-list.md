@@ -42,6 +42,10 @@ same column -- library grids only, never Home, detail pages, or a plugin
 channel's live folder-listing); Movies and TV Shows libraries sort and
 filter in place (docs/16): a permanent summary line under the title names
 the count, the active sort with its direction, and every active filter;
+resting on a movie poster shows, in the header's empty corner, when it
+would end if started now, when it was last played, and when it was
+added, all from the mirror with no request; a movie's detail page shows
+`ENDS 11:24 PM` beside its library name, following the 12h/24h setting;
 Up from the top row opens a strip that pushes the grid down (sort by Name
 using the server's sort name, so leading articles are ignored and numbered
 titles run in natural order, Date added, Year, Runtime, Select flips direction; filter by a Watched chip

@@ -76,7 +76,7 @@ class LibraryInfoFormatTest {
         assertEquals("A plot worth cataloging.", sheet.synopsis)
         assertEquals("Dina Director", sheet.fields.single { it.label == "Director" }.value)
         assertEquals("Will Writer", sheet.fields.single { it.label == "Writers" }.value)
-        assertEquals("3 times · last Apr 7, 2025", sheet.fields.single { it.label == "Watched" }.value)
+        assertEquals("3 · last played Apr 7, 2025", sheet.fields.single { it.label == "Play count" }.value)
         assertEquals("Mar 8, 2024", sheet.fields.single { it.label == "Added" }.value)
     }
 
@@ -127,7 +127,7 @@ class LibraryInfoFormatTest {
         assertTrue(sheet.fields.none { it.label == "Director" })
         assertTrue(sheet.fields.none { it.label == "Writers" })
         assertTrue(sheet.fields.none { it.label == "Added" })
-        assertEquals("Never", sheet.fields.single { it.label == "Watched" }.value)
+        assertEquals("0", sheet.fields.single { it.label == "Play count" }.value)
     }
 
     @Test
@@ -145,11 +145,11 @@ class LibraryInfoFormatTest {
     }
 
     @Test
-    fun `buildSheet Watched reads Never for zero and singular for exactly one`() {
-        val never = LibraryInfoFormat.buildSheet(strings, detail().copy(playCount = 0))
-        assertEquals("Never", never.fields.single { it.label == "Watched" }.value)
+    fun `buildSheet Play count is the bare server count, never phrased as viewings`() {
+        val zero = LibraryInfoFormat.buildSheet(strings, detail().copy(playCount = 0, lastPlayedDate = null))
+        assertEquals("0", zero.fields.single { it.label == "Play count" }.value)
 
-        val once = LibraryInfoFormat.buildSheet(strings, detail().copy(playCount = 1))
-        assertEquals("1 time · last Apr 7, 2025", once.fields.single { it.label == "Watched" }.value)
+        val one = LibraryInfoFormat.buildSheet(strings, detail().copy(playCount = 1))
+        assertEquals("1 · last played Apr 7, 2025", one.fields.single { it.label == "Play count" }.value)
     }
 }

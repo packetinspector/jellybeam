@@ -54,10 +54,13 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.time.LocalDate
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
@@ -102,6 +105,9 @@ private val CELL_GAP = 12.dp
 private const val GRID_COLUMNS = 8
 private val CELL_WIDTH_MIN = 100.dp
 private val CELL_WIDTH_MAX = 220.dp
+
+/** docs/16 §4: how long focus must rest on a poster before the header readout follows it. */
+private const val READOUT_REST_MS = 150L
 
 /** The grid is homogeneous, so one fixed contentType covers every cell. */
 private const val CONTENT_TYPE_POSTER = "poster"
@@ -177,6 +183,20 @@ fun LibraryScreen(
     }
 
     var focusedIndex by remember { mutableStateOf<Int?>(null) }
+    // docs/16 §4: the readout follows the poster focus has rested on for [READOUT_REST_MS]; a step
+    // passes through a null blur, which never clears it, and it latches by id, never index.
+    var restedId by remember { mutableStateOf<String?>(null) }
+    // Written by the cell itself: an insert ahead of focus shifts indices without a focus event.
+    var focusedId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        // A blur (focus left the grid) cancels a pending latch but never clears the readout.
+        snapshotFlow { focusedId }.collectLatest { id ->
+            if (id != null) {
+                delay(READOUT_REST_MS)
+                restedId = id
+            }
+        }
+    }
     val initialFocusRequester = remember { FocusRequester() }
     val gridState = remember { LazyGridState() }
 
@@ -464,6 +484,7 @@ fun LibraryScreen(
         // docs/16 §4.4: the rail's top padding, so its labels stay level with the grid's first
         // row regardless of strip state; must live outside the strip-bearing Column.
         var headerHeight by remember { mutableStateOf(0.dp) }
+        var headerTextWidth by remember { mutableStateOf(0.dp) }
 
         // docs/16 §4/§4.5: identical cell contents/behavior with or without sort/filter chrome,
         // so the Row-plus-rail and plain-grid layouts share one body.
@@ -490,12 +511,16 @@ fun LibraryScreen(
                         .onFocusChanged { focusState ->
                             if (focusState.isFocused) {
                                 focusedIndex = index
+                                focusedId = card.id
                                 // docs/18 preload: a grid cell dwells like a shelf card (docs/13);
                                 // Rust no-ops for a non-playable item type.
                                 PreloadOnDwell.default.onCardFocused(card.id, card.itemType)
                             } else {
                                 if (focusedIndex == index) {
                                     focusedIndex = null
+                                }
+                                if (focusedId == card.id) {
+                                    focusedId = null
                                 }
                                 PreloadOnDwell.default.onCardUnfocused(card.id)
                             }
@@ -545,18 +570,35 @@ fun LibraryScreen(
             // its labels level with the grid's first row on every strip state.
             Row(modifier = Modifier.fillMaxSize()) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Column(modifier = Modifier.onSizeChanged { size -> headerHeight = with(density) { size.height.toDp() } }) {
-                        BasicText(
-                            text = view.name,
-                            modifier = Modifier.padding(start = PAGE_MARGIN, end = PAGE_MARGIN, top = TITLE_TOP_PADDING_COMPACT),
-                            style = titleStyle,
-                        )
-                        LibrarySummaryLine(
-                            counts = state.counts,
-                            sort = state.sort,
-                            filters = state.filters,
-                            noun = view.gridNoun,
-                            modifier = Modifier.padding(start = PAGE_MARGIN, end = PAGE_MARGIN, top = SUMMARY_TOP_PADDING, bottom = SUMMARY_BOTTOM_PADDING),
+                    // docs/16 §4: the readout overlays the header and never sizes it (zIndex keeps its
+                    // overdraw above the strip and grid), so nothing below moves.
+                    Box(modifier = Modifier.fillMaxWidth().zIndex(1f)) {
+                        Column(
+                            modifier = Modifier.onSizeChanged { size ->
+                                headerHeight = with(density) { size.height.toDp() }
+                                headerTextWidth = with(density) { size.width.toDp() }
+                            },
+                        ) {
+                            BasicText(
+                                text = view.name,
+                                modifier = Modifier.padding(start = PAGE_MARGIN, end = PAGE_MARGIN, top = TITLE_TOP_PADDING_COMPACT),
+                                style = titleStyle,
+                            )
+                            LibrarySummaryLine(
+                                counts = state.counts,
+                                sort = state.sort,
+                                filters = state.filters,
+                                noun = view.gridNoun,
+                                modifier = Modifier.padding(start = PAGE_MARGIN, end = PAGE_MARGIN, top = SUMMARY_TOP_PADDING, bottom = SUMMARY_BOTTOM_PADDING),
+                            )
+                        }
+                        // Remembered so a focus step's recomposition doesn't rescan the grid.
+                        val readout = remember(restedId, state.items, state.isLoading) { readoutCard(restedId, state.items, state.isLoading) }
+                        LibraryReadout(
+                            card = readout,
+                            // The title/summary Column wraps its text, so its width is where the readout may start.
+                            startInset = headerTextWidth,
+                            modifier = Modifier.matchParentSize(),
                         )
                     }
 

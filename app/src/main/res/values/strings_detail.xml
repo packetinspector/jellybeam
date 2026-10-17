@@ -41,6 +41,8 @@
         <item quantity="one">%d day ago</item>
         <item quantity="other">%d days ago</item>
     </plurals>
+    <!-- docs/11 §4 item 3: the Movie eyebrow's finish-time clause; %1$s is a locale time like "11:24 PM". -->
+    <string name="detail_ends_clause">ENDS %1$s</string>
     <string name="detail_added_clause">ADDED %1$s</string>
 
     <!-- STUDIO row: %1$s is the first studio verbatim, %2$d the rest. -->

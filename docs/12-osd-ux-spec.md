@@ -602,8 +602,8 @@ Library info, kicker `IN YOUR LIBRARY`, Archivo values:
   rating figure Pistacchio bold (the sheet's one accent).
 - Synopsis 15sp / 21.75 line height Panna, max 4 lines.
 - Fields, label column 95dp (13sp Grigio) and value (14sp Panna), 7dp
-  row gap: Director, Writers (first two + N), Watched (`3 times · last
-  Aug 31, 2026`, or `Never`), Added. Missing fields drop out; no
+  row gap: Director, Writers (first two + N), Play count (`3 · last played
+  Aug 31, 2026`, or `0`; Jellyfin counts playback starts, so never "watched"), Added. Missing fields drop out; no
   placeholders, no footer pointer.
 - Fetched on open only (`Loading…`, then content or `Library info
   unavailable`), never on the time-to-play path.

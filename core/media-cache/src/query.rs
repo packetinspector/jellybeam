@@ -21,7 +21,7 @@ const CARD_COLUMNS: &str = "id, item_type, name, primary_tag, primary_blurhash, 
      index_number, parent_index_number, series_id, series_primary_tag, \
      parent_backdrop_item_id, parent_backdrop_tag, last_played_date, overview, \
      premiere_date, is_virtual, series_name, library_id, backdrop_tag, thumb_tag, \
-     is_favorite, parent_thumb_item_id, parent_thumb_tag";
+     is_favorite, parent_thumb_item_id, parent_thumb_tag, date_created";
 
 /// Watch state leaves the mirror already graced (docs/07 §1), so every browse surface agrees.
 fn row_to_card(row: &Row<'_>) -> rusqlite::Result<CardRow> {
@@ -61,6 +61,7 @@ fn row_to_card(row: &Row<'_>) -> rusqlite::Result<CardRow> {
         is_favorite: row.get(24)?,
         parent_thumb_item_id: row.get(25)?,
         parent_thumb_tag: row.get(26)?,
+        date_created: row.get(27)?,
     })
 }
 
@@ -1594,6 +1595,22 @@ mod tests {
             Some(uuid_n(8).as_str())
         );
         assert_eq!(rows[0].parent_thumb_tag.as_deref(), Some("parent-thumb"));
+    }
+
+    /// Grid cards carry `date_created` (docs/16 §4.1a's readout needs no network); `None` when unstored.
+    #[test]
+    fn library_grid_carries_date_created() {
+        let (_dir, mut conn) = open_test_db();
+        let parent = uuid_n(1);
+        let mut seen = item_dto(&uuid_n(2), "Seen", Some(&parent), BaseItemKind::Movie);
+        seen.date_created = Some("2024-03-05T10:20:30Z".parse().expect("datetime"));
+        let bare = item_dto(&uuid_n(3), "Bare", Some(&parent), BaseItemKind::Movie);
+        apply_upsert_items(&mut conn, &[seen, bare]).expect("insert");
+
+        let rows = library_grid(&conn, &parent, name_sort(), &no_filters(), 0, 10);
+        assert_eq!(names(&rows), ["Bare", "Seen"]);
+        assert_eq!(rows[0].date_created.as_deref(), None);
+        assert_eq!(rows[1].date_created.as_deref(), Some("2024-03-05T10:20:30+00:00"));
     }
 
     /// `CardRow::is_virtual`/`premiere_date` must round-trip: `LocationType == "Virtual"`

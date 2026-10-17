@@ -405,6 +405,8 @@ pub struct CardRow {
     /// docs/19-detail-action-menu.md §2.3: `UserData.IsFavorite`, exposed for the detail
     /// action menu's favorite toggle without a live-DTO fetch.
     pub is_favorite: bool,
+    /// `DateCreated` (RFC3339 as stored); when the server added the item, `None` if unknown.
+    pub date_created: Option<String>,
 }
 
 #[derive(Debug, Clone)]

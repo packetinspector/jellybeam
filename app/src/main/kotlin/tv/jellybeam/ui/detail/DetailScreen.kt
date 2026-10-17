@@ -104,6 +104,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.memory.MemoryCache
 import java.time.Instant
+import java.time.ZoneId
+import java.util.Date
 import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
@@ -115,6 +117,7 @@ import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.PlaybackActivity
 import tv.jellybeam.ui.common.ActiveWhileTop
+import tv.jellybeam.ui.common.rememberMinuteClock
 import tv.jellybeam.ui.discover.DISCOVER_PAGE_MARGIN
 import tv.jellybeam.ui.discover.DiscoverErrorMessage
 import tv.jellybeam.ui.cards.WIDE_ART_ASPECT
@@ -1877,13 +1880,12 @@ private fun MovieDetailScreen(
                                 modifier = Modifier.weight(1f, fill = false).widthIn(max = 510.dp),
                                 verticalArrangement = Arrangement.spacedBy(11.dp),
                             ) {
-                                val eyebrow = remember(strings, card.id, state.libraryName, detail?.dateCreated) {
-                                    DetailFormatting.movieEyebrow(strings, state.libraryName, detail?.dateCreated)
-                                }
-                                RegionReveal(
-                                    show = movieEyebrowShow(state.libraryNameLoaded, state.itemDetailLoaded, eyebrow != null),
-                                    skeleton = { EyebrowSkeleton() },
-                                    content = { eyebrow?.let { EyebrowText(it) } },
+                                MovieEyebrowRegion(
+                                    card = card,
+                                    libraryName = state.libraryName,
+                                    libraryNameLoaded = state.libraryNameLoaded,
+                                    dateCreated = detail?.dateCreated,
+                                    itemDetailLoaded = state.itemDetailLoaded,
                                 )
                                 BasicText(
                                     text = card.name,
@@ -1892,6 +1894,14 @@ private fun MovieDetailScreen(
                                     style = DETAIL_TITLE_STYLE,
                                 )
                                 MovieMetadataRow(card = card, detail = detail, detailLoaded = state.itemDetailLoaded)
+                                // Same resume row as the Episode page: a bar and "{n} left" once a position is saved.
+                                val resumeFraction = CardFormatting.watchProgress(card)
+                                if (primaryAction is DetailFormatting.PrimaryAction.Playable && primaryAction.hasProgress && resumeFraction != null) {
+                                    ResumeProgressRow(
+                                        fraction = resumeFraction,
+                                        remainingLabel = CardFormatting.remainingLabel(strings, card.runtimeTicks, card.positionTicks),
+                                    )
+                                }
                                 MovieActionRow(
                                     card = card,
                                     action = primaryAction,
@@ -2421,6 +2431,62 @@ private fun HeroPoster(card: Card, modifier: Modifier = Modifier) {
         }
     }
 }
+
+/**
+ * docs/11 §4 item 3: the Movie eyebrow, `LIBRARY │ ENDS 11:24 PM │ ADDED 2 DAYS AGO`. It owns the
+ * minute clock so only this region recomposes when the finish time moves.
+ */
+@Composable
+private fun MovieEyebrowRegion(
+    card: Card,
+    libraryName: String?,
+    libraryNameLoaded: Boolean,
+    dateCreated: String?,
+    itemDetailLoaded: Boolean,
+) {
+    val strings = rememberUiStrings()
+    val context = LocalContext.current
+    val nowMillis = rememberMinuteClock()
+    val timeFormat = remember(context) { android.text.format.DateFormat.getTimeFormat(context) }
+    val parts = remember(strings, card.id, libraryName, dateCreated, nowMillis, card.runtimeTicks, card.positionTicks, timeFormat) {
+        val endsAt = endsAtLabel(card.runtimeTicks, card.positionTicks, nowMillis, ZoneId.systemDefault()) { timeFormat.format(Date(it)) }
+        DetailFormatting.movieEyebrow(strings, libraryName, endsAt, dateCreated, Instant.ofEpochMilli(nowMillis))
+    }
+    RegionReveal(
+        show = movieEyebrowShow(libraryNameLoaded, itemDetailLoaded, parts.isNotEmpty()),
+        skeleton = { EyebrowSkeleton() },
+        content = { EyebrowParts(parts) },
+    )
+}
+
+/** One-line eyebrow: library name (shrinks and ellipsizes first), then each status part behind a Hairline `│` with 7dp each side. */
+@Composable
+private fun EyebrowParts(parts: List<EyebrowPart>) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        parts.forEachIndexed { index, part ->
+            if (index > 0) {
+                // A drawn rule, not a `│` glyph: the mono font lacks it and the fallback is taller.
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = EYEBROW_DIVIDER_GAP)
+                        .size(width = 1.dp, height = EYEBROW_DIVIDER_HEIGHT)
+                        .background(JellybeamTheme.Hairline),
+                )
+            }
+            val isLibrary = part.kind == EyebrowKind.LIBRARY
+            BasicText(
+                text = part.text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = if (isLibrary) Modifier.weight(1f, fill = false) else Modifier,
+                style = if (isLibrary) EYEBROW_STYLE else EYEBROW_STYLE.copy(color = JellybeamTheme.Panna2),
+            )
+        }
+    }
+}
+
+private val EYEBROW_DIVIDER_GAP = 7.dp
+private val EYEBROW_DIVIDER_HEIGHT = 12.dp
 
 @Composable
 internal fun EyebrowText(text: String, modifier: Modifier = Modifier) {

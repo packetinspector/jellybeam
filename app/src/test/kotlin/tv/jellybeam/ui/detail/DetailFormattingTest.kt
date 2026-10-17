@@ -1077,32 +1077,43 @@ class DetailFormattingTest {
         assertNull(DetailFormatting.relativeAddedClause(strings, "not a date", locale = Locale.US))
     }
 
+    private fun eyebrow(library: String?, endsAt: String?, created: String?): List<EyebrowPart> =
+        DetailFormatting.movieEyebrow(strings, library, endsAt, created, Instant.parse("2026-08-29T12:00:00Z"), Locale.US)
+
     @Test
-    fun `movieEyebrow joins the verbatim library name with the uppercased added clause`() {
-        val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("My Movies · ADDED 2 DAYS AGO", DetailFormatting.movieEyebrow(strings, "My Movies", "2026-08-27T12:00:00Z", now, locale = Locale.US))
+    fun `movieEyebrow orders library then ENDS then ADDED with only generated text uppercased`() {
+        assertEquals(
+            listOf(
+                EyebrowPart(EyebrowKind.LIBRARY, "My Movies"),
+                EyebrowPart(EyebrowKind.STATUS, "ENDS 11:24 PM +1"),
+                EyebrowPart(EyebrowKind.STATUS, "ADDED 2 DAYS AGO"),
+            ),
+            eyebrow("My Movies", "11:24 pm +1", "2026-08-27T12:00:00Z"),
+        )
     }
 
     @Test
-    fun `movieEyebrow never alters the library name's own casing`() {
-        val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("my movies · ADDED TODAY", DetailFormatting.movieEyebrow(strings, "my movies", "2026-08-29T00:00:00Z", now, locale = Locale.US))
+    fun `movieEyebrow keeps the library name verbatim`() {
+        assertEquals(
+            listOf(EyebrowPart(EyebrowKind.LIBRARY, "my Movies - 4k remux")),
+            eyebrow("my Movies - 4k remux", null, null),
+        )
     }
 
     @Test
-    fun `movieEyebrow drops a missing added clause`() {
-        assertEquals("My Movies", DetailFormatting.movieEyebrow(strings, "My Movies", null, locale = Locale.US))
+    fun `movieEyebrow drops whichever part is missing`() {
+        val added = EyebrowPart(EyebrowKind.STATUS, "ADDED TODAY")
+        val ends = EyebrowPart(EyebrowKind.STATUS, "ENDS 21:30")
+        val library = EyebrowPart(EyebrowKind.LIBRARY, "Films")
+        assertEquals(listOf(library, ends), eyebrow("Films", "21:30", null))
+        assertEquals(listOf(library, added), eyebrow("Films", null, "2026-08-29T00:00:00Z"))
+        assertEquals(listOf(ends, added), eyebrow(null, "21:30", "2026-08-29T00:00:00Z"))
+        assertEquals(listOf(ends), eyebrow("  ", "21:30", null))
     }
 
     @Test
-    fun `movieEyebrow drops a missing library name`() {
-        val now = Instant.parse("2026-08-29T12:00:00Z")
-        assertEquals("ADDED TODAY", DetailFormatting.movieEyebrow(strings, null, "2026-08-29T00:00:00Z", now, locale = Locale.US))
-    }
-
-    @Test
-    fun `movieEyebrow is null when both halves are absent`() {
-        assertNull(DetailFormatting.movieEyebrow(strings, null, null, locale = Locale.US))
+    fun `movieEyebrow is empty when every part is absent`() {
+        assertEquals(emptyList<EyebrowPart>(), eyebrow(null, null, null))
     }
 
     // -- creditsLines / specCapsuleFields (docs/11 §Loading state) --------------

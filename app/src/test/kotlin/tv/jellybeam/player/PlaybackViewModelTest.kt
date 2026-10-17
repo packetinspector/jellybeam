@@ -2962,7 +2962,7 @@ class PlaybackViewModelTest {
             viewModel.openLibraryInfoOverlay()
             assertEquals(listOf(plan.itemId), gateway.getItemDetailCalls)
             val content = viewModel.state.value.libraryInfoOverlay as LibraryInfoOverlayState.Content
-            assertEquals("4 times", content.value.fields.single { it.label == "Watched" }.value)
+            assertEquals("4", content.value.fields.single { it.label == "Play count" }.value)
 
             viewModel.closeSurface()
             assertNull(viewModel.state.value.libraryInfoOverlay)

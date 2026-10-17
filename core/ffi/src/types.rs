@@ -93,6 +93,9 @@ pub struct Card {
     pub parent_thumb_item_id: Option<String>,
     #[uniffi(default = None)]
     pub parent_thumb_tag: Option<String>,
+    /// `DateCreated` (RFC3339 as stored); when the server added the item, `None` if unknown.
+    #[uniffi(default = None)]
+    pub date_created: Option<String>,
 }
 
 #[cfg(test)]
@@ -127,6 +130,7 @@ impl Card {
             is_favorite: false,
             parent_thumb_item_id: None,
             parent_thumb_tag: None,
+            date_created: None,
         }
     }
 }
@@ -170,6 +174,7 @@ impl From<media_cache::CardRow> for Card {
             is_favorite: row.is_favorite,
             parent_thumb_item_id: row.parent_thumb_item_id,
             parent_thumb_tag: row.parent_thumb_tag,
+            date_created: row.date_created,
         }
     }
 }
@@ -235,6 +240,7 @@ impl TryFrom<&jellyfin_api::models::BaseItemDto> for Card {
             is_favorite: user_data.and_then(|u| u.is_favorite).unwrap_or(false),
             parent_thumb_item_id: dto.parent_thumb_item_id.map(|id| id.to_string()),
             parent_thumb_tag: dto.parent_thumb_image_tag.clone(),
+            date_created: dto.date_created.map(|d| d.to_rfc3339()),
         })
     }
 }
