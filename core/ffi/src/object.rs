@@ -173,7 +173,7 @@ impl Retiring {
 }
 
 /// The account a taken session belongs to, read under the lock that took it, so its final writes
-/// (mirror position, mark-played) never reach an account that replaced it.
+/// (mirror position) never reach an account that replaced it.
 #[derive(Clone)]
 struct SessionAccount {
     mirror: Option<media_cache::Mirror>,
@@ -2429,6 +2429,16 @@ impl JellybeamCore {
         }
     }
 
+    /// docs/07 Watch state: the app returned to the foreground; asks the current account's mirror
+    /// for a played-state refresh. Parked mirrors are not notified; never blocks or touches the
+    /// network inline (docs/01 §4).
+    pub fn on_foreground(&self) {
+        let mirror = self.lock_state().mirror.clone();
+        if let Some(mirror) = mirror {
+            mirror.request_user_state_refresh(media_cache::UserStateReason::Foreground);
+        }
+    }
+
     /// docs/18 §2.1: the epoch a [`PlaybackRequest`] must carry; Kotlin re-reads it after every
     /// account call.
     pub fn account_epoch(&self) -> u64 {
@@ -2669,6 +2679,9 @@ impl JellybeamCore {
             .ok_or(CoreError::NotSignedIn)?;
         let mirror = self.require_mirror()?;
 
+        // docs/07 Watch state, Ordering: this mark is the newest action on the item; a failed mark
+        // drops the guard, so the paused Stopped resumes.
+        let superseded = self.runtime.block_on(jellyfin_core::supersede(&[&item_id]));
         let data = self.runtime.block_on(async {
             if played {
                 client.mark_played(&item_id).await
@@ -2676,6 +2689,7 @@ impl JellybeamCore {
                 client.mark_unplayed(&item_id).await
             }
         })?;
+        superseded.commit();
         self.runtime
             .block_on(mirror.apply_user_data(vec![(item_id.clone(), data)]));
 
@@ -2704,14 +2718,6 @@ impl JellybeamCore {
             .ok_or(CoreError::NotSignedIn)?;
         let mirror = self.require_mirror()?;
 
-        self.runtime.block_on(async {
-            if played {
-                client.mark_played(&scope_id).await
-            } else {
-                client.mark_unplayed(&scope_id).await
-            }
-        })?;
-
         let scope_item = mirror.item(&scope_id);
         let is_series = scope_item
             .as_ref()
@@ -2720,18 +2726,27 @@ impl JellybeamCore {
             .as_deref()
             == Some("Series");
 
-        let episodes: Vec<media_cache::CardRow> = if is_series {
-            crate::next_episode::all_episodes_of_series(&mirror, &scope_id).unwrap_or_default()
+        let episode_ids = scope_episode_ids(if is_series {
+            crate::next_episode::all_episodes_of_series(&mirror, &scope_id)
         } else {
-            mirror
-                .children_checked(&scope_id, media_cache::Sort::IndexNumber, 0, u32::MAX)
-                .unwrap_or_default()
-        };
-        let episode_ids: Vec<String> = episodes
-            .into_iter()
-            .filter(|row| !row.is_virtual)
-            .map(|row| row.id)
+            mirror.children_checked(&scope_id, media_cache::Sort::IndexNumber, 0, u32::MAX)
+        })?;
+
+        // docs/07 Watch state, Ordering: this mark is the newest action on exactly the items it
+        // covers, so only their settling Stopped reports are superseded, and only a successful
+        // mark cancels them.
+        let covered: Vec<&str> = std::iter::once(scope_id.as_str())
+            .chain(episode_ids.iter().map(String::as_str))
             .collect();
+        let superseded = self.runtime.block_on(jellyfin_core::supersede(&covered));
+        self.runtime.block_on(async {
+            if played {
+                client.mark_played(&scope_id).await
+            } else {
+                client.mark_unplayed(&scope_id).await
+            }
+        })?;
+        superseded.commit();
 
         self.runtime.block_on(async {
             for id in &episode_ids {
@@ -3244,7 +3259,7 @@ impl JellybeamCore {
     }
 
     /// Outside the lock: aborts the preload and ends the outgoing sessions with the same final
-    /// writes as a stop (report, mirror, mark-played), to the outgoing account. The installed one
+    /// writes as a stop (report, mirror), to the outgoing account. The installed one
     /// ends at its last reported position (at most a second old); with none reported yet it is
     /// abandoned instead, since a Stopped at 0 would overwrite the resume point.
     fn dispose_account_reset(&self, reset: AccountReset) {
@@ -3528,7 +3543,7 @@ impl JellybeamCore {
         position_ticks: i64,
         account: SessionAccount,
     ) {
-        let SessionAccount { mirror, client, .. } = account;
+        let SessionAccount { mirror, .. } = account;
         let item_id = session.context().item_id.clone();
         // The server recounts an episode's season/series only once the
         // Stopped report lands, and its `UserDataChanged` event omits the
@@ -3537,29 +3552,22 @@ impl JellybeamCore {
             .as_ref()
             .map(|mirror| episode_scope_ids(mirror, &item_id))
             .unwrap_or_default();
-        let finished = mirror.as_ref().is_some_and(|mirror| {
-            stopped_in_end_grace(mirror.card_by_id(&item_id).as_ref(), position_ticks)
-        });
-        // docs/07 §1: stopping in the credits is a finished watch, so the
-        // server marks it played (after Stopped, which would otherwise keep
-        // the position) and Next Up moves on.
-        let mark_client = client.filter(|_| finished);
-        let stop = session.stop(position_ticks);
+        // docs/07 §1: stopping in the credits is a finished watch; reporting the runtime as the
+        // Stopped position makes the server mark it played, so no separate mark is sent.
+        let (report_ticks, finished) = final_report(
+            mirror
+                .as_ref()
+                .and_then(|mirror| mirror.card_by_id(&item_id))
+                .as_ref(),
+            position_ticks,
+        );
+        let stop = session.stop(report_ticks);
         let scope_mirror = mirror.clone();
-        let mark_id = item_id.clone();
         runtime.spawn(async move {
-            // Waits for the Stopped to land, retries included: one arriving later would restore
-            // the position mark-played cleared, and a recount before it reads the old counts.
-            stop.await.settled().await;
-            if let Some(client) = mark_client {
-                match client.mark_played(&mark_id).await {
-                    Ok(data) => {
-                        if let Some(mirror) = &scope_mirror {
-                            mirror.apply_user_data(vec![(mark_id, data)]).await;
-                        }
-                    }
-                    Err(e) => tracing::warn!(error = %e, "end-grace mark played failed"),
-                }
+            // Waits for the Stopped to land, retries included: a recount before it reads the old
+            // counts. A delivery cancelled by a newer action is recounted by that action instead.
+            if stop.await.settled().await {
+                return;
             }
             // An episode's scope is non-empty; its stop moves Next Up (docs/07 §1).
             if let Some(mirror) = scope_mirror.filter(|_| !scope_ids.is_empty()) {
@@ -4056,6 +4064,8 @@ impl JellybeamCore {
             client,
             bundle_rx,
             playback_active,
+            // docs/07 Watch state: read from the session registry, never the state lock.
+            Arc::new(jellyfin_core::pending_local_item_ids),
         )) {
             Ok(mirror) => {
                 let (handle, forwarder) = real_bus.unzip();
@@ -4480,6 +4490,19 @@ impl Drop for JellybeamCore {
     }
 }
 
+/// The non-virtual episode ids of a bulk-mark scope read; an unreadable scope (`None`) fails
+/// closed, so a mark never covers a partial episode set (docs/07 Watch state, Ordering).
+fn scope_episode_ids(rows: Option<Vec<media_cache::CardRow>>) -> Result<Vec<String>, CoreError> {
+    let rows = rows.ok_or_else(|| CoreError::Cache {
+        detail: "the scope's episodes could not be read from the mirror".to_string(),
+    })?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| !row.is_virtual)
+        .map(|row| row.id)
+        .collect())
+}
+
 /// The season and series ids of `item_id` when the mirror knows it as an
 /// Episode, else empty: the scope whose unplayed counts change with it.
 fn episode_scope_ids(mirror: &media_cache::Mirror, item_id: &str) -> Vec<String> {
@@ -4611,13 +4634,21 @@ fn filter_all_virtual_seasons(
         .collect()
 }
 
-/// docs/07 §1: whether a stop at `position_ticks` falls in the item's end
-/// grace window; an item the mirror doesn't know is never finished early.
-fn stopped_in_end_grace(row: Option<&media_cache::CardRow>, position_ticks: i64) -> bool {
-    row.is_some_and(|row| {
+/// docs/07 §1: the position to put in the final Stopped report and whether the stop finished the
+/// item; in the end grace the runtime is reported so the server marks it played itself, and an
+/// item the mirror doesn't know is never finished early.
+fn final_report(row: Option<&media_cache::CardRow>, position_ticks: i64) -> (i64, bool) {
+    let Some(row) = row else {
+        return (position_ticks, false);
+    };
+    let in_grace =
         media_cache::watch_grace::watch_state(&row.item_type, position_ticks, row.runtime_ticks)
-            == media_cache::watch_grace::WatchState::Watched
-    })
+            == media_cache::watch_grace::WatchState::Watched;
+    // `Watched` implies a known positive runtime.
+    match row.runtime_ticks {
+        Some(runtime) if in_grace => (runtime, true),
+        _ => (position_ticks, false),
+    }
 }
 
 /// The pure half of [`JellybeamCore::prepare_playback`]'s start-ticks decision
@@ -9790,6 +9821,8 @@ mod tests {
         /// A scripted arrival replies only once its gate is opened, so a test orders completions
         /// without timing.
         gates: Mutex<Vec<GatedReply>>,
+        /// (method, path substring, arrivals left to answer 500), see [`RouteMockServer::fail_first`].
+        failures: Mutex<Vec<(String, String, usize)>>,
         hits: Mutex<std::collections::HashMap<String, usize>>,
         /// Every request's ("METHOD path", parsed JSON body) in arrival
         /// order, for callers that need either an exact-path or a
@@ -9908,6 +9941,21 @@ mod tests {
             Gate(gate)
         }
 
+        /// Answers the first `count` `method` arrivals whose path contains `path_substring` with
+        /// 500, whatever else is routed for them.
+        fn fail_first(&self, method: &str, path_substring: &str, count: usize) {
+            unlock(&self.shared.failures).push((
+                method.to_string(),
+                path_substring.to_string(),
+                count,
+            ));
+        }
+
+        /// Every logged "METHOD target", in arrival order.
+        fn log_snapshot(&self) -> Vec<String> {
+            unlock(&self.shared.log).clone()
+        }
+
         /// Index of the first logged request whose target contains
         /// `needle`. `None` if it never arrived.
         fn first_request_containing(&self, needle: &str) -> Option<usize> {
@@ -9990,6 +10038,24 @@ mod tests {
                 .count()
         });
 
+        // Also before this arrival is logged: the gate whose hit index (counted over its own
+        // method + substring) this arrival is.
+        let gate = unlock(&shared.gates)
+            .iter()
+            .find(|(m, needle, index, _)| {
+                *m == method
+                    && path.contains(needle.as_str())
+                    && unlock(&shared.log)
+                        .iter()
+                        .filter(|entry| {
+                            entry.starts_with(&format!("{method} "))
+                                && entry.contains(needle.as_str())
+                        })
+                        .count()
+                        == *index
+            })
+            .map(|(.., gate)| gate.clone());
+
         *unlock(&shared.hits).entry(key.clone()).or_insert(0) += 1;
         unlock(&shared.log).push(format!("{method} {target}"));
         if let Some(raw_body) = request.split("\r\n\r\n").nth(1) {
@@ -10020,19 +10086,18 @@ mod tests {
                 tokio::time::sleep(*delay).await;
             }
         }
-        let gate = scripted_hit_index.and_then(|hit_index| {
-            unlock(&shared.gates)
-                .iter()
-                .find(|(m, needle, index, _)| {
-                    *m == method && path.contains(needle.as_str()) && *index == hit_index
-                })
-                .map(|(.., gate)| gate.clone())
-        });
         if let Some(gate) = gate {
             let _ = gate.acquire().await;
         }
+        let failing = unlock(&shared.failures)
+            .iter_mut()
+            .find(|(m, needle, left)| *m == method && path.contains(needle.as_str()) && *left > 0)
+            .map(|entry| entry.2 -= 1)
+            .is_some();
 
-        let configured = query_configured
+        let configured = failing
+            .then(|| (500, "{}".to_string()))
+            .or(query_configured)
             .or_else(|| scripted_configured.map(|(_, response)| response))
             .or_else(|| unlock(&shared.routes).get(&key).cloned());
         let (status, body) = configured.unwrap_or_else(|| {
@@ -10071,8 +10136,14 @@ mod tests {
     }
 
     /// Polls `f` until `true` or ~2s elapse; panics with `what` on timeout.
-    fn wait_until(mut f: impl FnMut() -> bool, what: &str) {
-        for _ in 0..400 {
+    fn wait_until(f: impl FnMut() -> bool, what: &str) {
+        wait_until_for(Duration::from_secs(2), f, what);
+    }
+
+    /// [`wait_until`] with a caller-chosen timeout, for waits on a real retry backoff.
+    fn wait_until_for(timeout: Duration, mut f: impl FnMut() -> bool, what: &str) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
             if f() {
                 return;
             }
@@ -10554,74 +10625,118 @@ mod tests {
         );
     }
 
-    /// docs/07 §1: stopping a movie in its last 10 minutes marks it played on
-    /// the server after the Stopped report; stopping mid-film doesn't.
-    #[test]
-    fn stopping_in_the_end_grace_marks_the_item_played_after_the_stopped_report() {
-        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
-        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000030";
+    /// A signed-in core with one unplayed 120-minute movie seeded into the mirror.
+    fn end_grace_movie_fixture(
+        view_id: &str,
+        movie_id: &str,
+    ) -> (tempfile::TempDir, Arc<JellybeamCore>, RouteMockServer) {
+        movie_fixture(view_id, movie_id, true)
+    }
 
-        let (_dir, core, mock) = core_signed_in_against_routes();
-        mock.route("GET", "/UserViews", 200, user_views_json(VIEW_ID, "movies"));
+    /// [`end_grace_movie_fixture`], with the server answering every Stopped report 500 when
+    /// `stopped_ok` is false.
+    fn movie_fixture(
+        view_id: &str,
+        movie_id: &str,
+        stopped_ok: bool,
+    ) -> (tempfile::TempDir, Arc<JellybeamCore>, RouteMockServer) {
+        let (dir, core, mock) = core_signed_in_against_routes();
+        mock.route("GET", "/UserViews", 200, user_views_json(view_id, "movies"));
         mock.route(
             "GET",
             "/Items",
             200,
             serde_json::json!({
                 "Items": [{
-                    "Id": MOVIE_ID, "Name": "Sample Movie", "Type": "Movie",
+                    "Id": movie_id, "Name": "Sample Movie", "Type": "Movie",
                     "RunTimeTicks": 120 * MIN,
                     "UserData": {"Key": "k", "Played": false}
                 }],
                 "TotalRecordCount": 1
             }),
         );
-        mock.route(
-            "POST",
-            &format!("/UserPlayedItems/{MOVIE_ID}"),
-            200,
-            user_item_data_json(Some(true), None),
+        // The final-Stopped flush queue dedups by session id process-wide, so each test needs its own.
+        let (_, playback_info_json) = playback_fixture(
+            "Test Movie",
+            "ms-1",
+            Some("mkv"),
+            true,
+            None,
+            None,
+            &format!("play-session-{movie_id}"),
         );
-        let (_, playback_info_json) = direct_play_fixture();
-        mock.route_script(
-            "POST",
-            "/PlaybackInfo",
-            vec![playback_info_json.clone(), playback_info_json],
-            vec![Duration::ZERO, Duration::ZERO],
-        );
-        let played_path = format!("/UserPlayedItems/{MOVIE_ID}");
-
+        mock.route_script("POST", "/PlaybackInfo", vec![playback_info_json], vec![]);
+        if stopped_ok {
+            mock.route_script(
+                "POST",
+                "/Sessions/Playing/Stopped",
+                vec![serde_json::json!({})],
+                vec![],
+            );
+        } else {
+            mock.route(
+                "POST",
+                "/Sessions/Playing/Stopped",
+                500,
+                serde_json::json!({}),
+            );
+        }
         core.open_mirror()
             .expect("open_mirror against a loopback server");
+        let id = movie_id.to_string();
         wait_until(
-            || {
-                core.card_by_id(MOVIE_ID.to_string())
-                    .ok()
-                    .flatten()
-                    .is_some()
-            },
+            || core.card_by_id(id.clone()).ok().flatten().is_some(),
             "initial sync to seed the movie",
         );
+        (dir, core, mock)
+    }
 
-        let plan = core
-            .prepare_playback_now(MOVIE_ID.to_string(), false)
-            .expect("Direct Play negotiation");
-        core.stop_playback(plan.play_session_id, 60 * MIN);
-        wait_until(
-            || mock.hit_count("POST", "/Sessions/Playing/Stopped") == 1,
-            "the mid-film Stopped report",
-        );
-        assert_eq!(mock.hit_count("POST", &played_path), 0);
+    /// The sweep's pending set holds canonical (undashed lowercase) ids.
+    fn item_is_pending(item_id: &str) -> bool {
+        jellyfin_core::pending_local_item_ids().contains(&item_id.replace('-', "").to_lowercase())
+    }
+
+    /// Covers the first retry backoff (up to 1.25 s) with room for a loaded test host.
+    const RETRY_WAIT: Duration = Duration::from_secs(10);
+
+    /// Stopped reports the server has received for `item_id`.
+    fn stopped_reports_for(mock: &RouteMockServer, item_id: &str) -> usize {
+        mock.request_bodies_containing("POST", "/Sessions/Playing/Stopped")
+            .iter()
+            .filter(|body| body["ItemId"].as_str() == Some(item_id))
+            .count()
+    }
+
+    fn routed_stopped_positions(mock: &RouteMockServer) -> Vec<i64> {
+        mock.request_bodies_containing("POST", "/Sessions/Playing/Stopped")
+            .iter()
+            .filter_map(|body| body["PositionTicks"].as_i64())
+            .collect()
+    }
+
+    /// docs/07 §1: a stop in the end grace reports the runtime as the Stopped position, which the
+    /// server turns into a finished watch, so no separate mark played is sent.
+    #[test]
+    fn end_grace_stop_reports_the_runtime_and_sends_no_mark_played() {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000030";
+        let (_dir, core, mock) = end_grace_movie_fixture(VIEW_ID, MOVIE_ID);
 
         let plan = core
             .prepare_playback_now(MOVIE_ID.to_string(), false)
             .expect("Direct Play negotiation");
         core.stop_playback(plan.play_session_id, 115 * MIN);
         wait_until(
-            || mock.hit_count("POST", &played_path) == 1,
-            "the end-grace mark played",
+            || !item_is_pending(MOVIE_ID),
+            "the Stopped report to settle",
         );
-        assert_eq!(mock.hit_count("POST", "/Sessions/Playing/Stopped"), 2);
+
+        assert_eq!(routed_stopped_positions(&mock), vec![120 * MIN]);
+        assert_eq!(
+            mock.hit_count_containing("POST", "/UserPlayedItems"),
+            0,
+            "the Stopped carries the finish; no separate mark"
+        );
         let card = core
             .card_by_id(MOVIE_ID.to_string())
             .expect("card_by_id")
@@ -10630,56 +10745,48 @@ mod tests {
         assert_eq!(card.position_ticks, 0);
     }
 
-    /// docs/07 §1: mark played waits for the Stopped to land, however slow, so a late Stopped
-    /// can't restore the position it cleared.
+    /// docs/07 §1: a stop before the end grace reports the real position and leaves the item
+    /// unfinished.
     #[test]
-    fn end_grace_mark_played_waits_for_a_slow_stopped_report() {
+    fn mid_film_stop_reports_the_real_position() {
         const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
-        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000030";
+        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000031";
+        let (_dir, core, mock) = end_grace_movie_fixture(VIEW_ID, MOVIE_ID);
 
-        let (_dir, core, mock) = core_signed_in_against_routes();
-        mock.route("GET", "/UserViews", 200, user_views_json(VIEW_ID, "movies"));
-        mock.route(
-            "GET",
-            "/Items",
-            200,
-            serde_json::json!({
-                "Items": [{
-                    "Id": MOVIE_ID, "Name": "Sample Movie", "Type": "Movie",
-                    "RunTimeTicks": 120 * MIN,
-                    "UserData": {"Key": "k", "Played": false}
-                }],
-                "TotalRecordCount": 1
-            }),
+        let plan = core
+            .prepare_playback_now(MOVIE_ID.to_string(), false)
+            .expect("Direct Play negotiation");
+        core.stop_playback(plan.play_session_id, 60 * MIN);
+        wait_until(
+            || !item_is_pending(MOVIE_ID),
+            "the Stopped report to settle",
         );
+
+        assert_eq!(routed_stopped_positions(&mock), vec![60 * MIN]);
+        assert_eq!(mock.hit_count_containing("POST", "/UserPlayedItems"), 0);
+        let card = core
+            .card_by_id(MOVIE_ID.to_string())
+            .expect("card_by_id")
+            .expect("movie row");
+        assert!(!card.played);
+        assert_eq!(card.position_ticks, 60 * MIN);
+    }
+
+    /// docs/07 Watch state: a Mark Unplayed issued while the end-grace Stopped is still in flight
+    /// is sent only after the Stopped settles, so the server applies them in order.
+    #[test]
+    fn mark_unplayed_waits_for_the_end_grace_stopped() {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000032";
+        let (_dir, core, mock) = end_grace_movie_fixture(VIEW_ID, MOVIE_ID);
         let played_path = format!("/UserPlayedItems/{MOVIE_ID}");
         mock.route(
-            "POST",
+            "DELETE",
             &played_path,
             200,
-            user_item_data_json(Some(true), None),
-        );
-        let (_, playback_info_json) = direct_play_fixture();
-        mock.route_script("POST", "/PlaybackInfo", vec![playback_info_json], vec![]);
-        mock.route_script(
-            "POST",
-            "/Sessions/Playing/Stopped",
-            vec![serde_json::json!({})],
-            vec![],
+            user_item_data_json(Some(false), None),
         );
         let stopped = mock.gate("POST", "/Sessions/Playing/Stopped", 0);
-
-        core.open_mirror()
-            .expect("open_mirror against a loopback server");
-        wait_until(
-            || {
-                core.card_by_id(MOVIE_ID.to_string())
-                    .ok()
-                    .flatten()
-                    .is_some()
-            },
-            "initial sync to seed the movie",
-        );
 
         let plan = core
             .prepare_playback_now(MOVIE_ID.to_string(), false)
@@ -10689,20 +10796,556 @@ mod tests {
             || mock.hit_count_containing("POST", "/Sessions/Playing/Stopped") == 1,
             "the Stopped report to arrive",
         );
-        // Well past the 100 ms stop-ack window.
+
+        let unmark = {
+            let core = core.clone();
+            std::thread::spawn(move || core.set_played(MOVIE_ID.to_string(), false))
+        };
         std::thread::sleep(Duration::from_millis(500));
-        assert_eq!(mock.hit_count("POST", &played_path), 0);
+        assert_eq!(
+            mock.hit_count_containing("DELETE", &played_path),
+            0,
+            "the mark waits while the Stopped is in flight"
+        );
 
         stopped.open();
+        unmark.join().expect("mark thread").expect("mark unplayed");
+        assert_eq!(mock.hit_count_containing("DELETE", &played_path), 1);
         wait_until(
-            || mock.hit_count("POST", &played_path) == 1,
-            "the end-grace mark played",
+            || {
+                core.card_by_id(MOVIE_ID.to_string())
+                    .ok()
+                    .flatten()
+                    .is_some_and(|card| !card.played)
+            },
+            "the Mark Unplayed to reach the mirror",
+        );
+    }
+
+    /// docs/07 Watch state, Ordering: a Mark Unplayed supersedes a Stopped that is failing and in
+    /// backoff: the DELETE goes out at once and that Stopped is never sent again.
+    #[test]
+    fn mark_unplayed_cancels_a_stopped_in_backoff() {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000033";
+        let (_dir, core, mock) = movie_fixture(VIEW_ID, MOVIE_ID, false);
+        let played_path = format!("/UserPlayedItems/{MOVIE_ID}");
+        mock.route(
+            "DELETE",
+            &played_path,
+            200,
+            user_item_data_json(Some(false), None),
+        );
+
+        let plan = core
+            .prepare_playback_now(MOVIE_ID.to_string(), false)
+            .expect("Direct Play negotiation");
+        core.stop_playback(plan.play_session_id, 115 * MIN);
+        wait_until_for(
+            RETRY_WAIT,
+            || stopped_reports_for(&mock, MOVIE_ID) >= 2,
+            "the Stopped to fail once and retry",
+        );
+
+        let started = Instant::now();
+        core.set_played(MOVIE_ID.to_string(), false)
+            .expect("mark unplayed");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the mark does not wait on a Stopped that is only in backoff"
+        );
+        assert_eq!(mock.hit_count_containing("DELETE", &played_path), 1);
+
+        let sent = stopped_reports_for(&mock, MOVIE_ID);
+        std::thread::sleep(Duration::from_millis(3500));
+        assert_eq!(
+            stopped_reports_for(&mock, MOVIE_ID),
+            sent,
+            "no Stopped attempt after the mark"
+        );
+        wait_until(
+            || !item_is_pending(MOVIE_ID),
+            "the cancelled hold to release",
+        );
+    }
+
+    /// docs/07 Watch state, Ordering: playing the item again cancels the older Stopped's retries.
+    #[test]
+    fn replaying_an_item_cancels_the_older_stopped_retries() {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+        const MOVIE_ID: &str = "00000000-0000-0000-0000-000000000034";
+        let (_dir, core, mock) = movie_fixture(VIEW_ID, MOVIE_ID, false);
+
+        let plan = core
+            .prepare_playback_now(MOVIE_ID.to_string(), false)
+            .expect("Direct Play negotiation");
+        core.stop_playback(plan.play_session_id, 60 * MIN);
+        wait_until_for(
+            RETRY_WAIT,
+            || stopped_reports_for(&mock, MOVIE_ID) >= 2,
+            "the Stopped to fail once and retry",
+        );
+
+        core.prepare_playback_now(MOVIE_ID.to_string(), false)
+            .expect("the replay's negotiation");
+        let sent = stopped_reports_for(&mock, MOVIE_ID);
+        std::thread::sleep(Duration::from_millis(3500));
+        assert_eq!(
+            stopped_reports_for(&mock, MOVIE_ID),
+            sent,
+            "the replay cancelled the older Stopped"
+        );
+    }
+
+    /// docs/07 Watch state, Ordering: a season mark supersedes only the Stopped reports of the
+    /// episodes it covers and never waits on an unrelated item's.
+    #[test]
+    fn season_mark_supersedes_only_the_stopped_reports_in_its_scope() {
+        const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
+        const SERIES_ID: &str = "00000000-0000-0000-0000-000000000050";
+        const SEASON_ID: &str = "00000000-0000-0000-0000-000000000051";
+        const EP1_ID: &str = "00000000-0000-0000-0000-000000000052";
+        const EP2_ID: &str = "00000000-0000-0000-0000-000000000053";
+        const EP3_VIRTUAL_ID: &str = "00000000-0000-0000-0000-000000000054";
+        const OTHER_SEASON_ID: &str = "00000000-0000-0000-0000-000000000056";
+        const OTHER_EP_ID: &str = "00000000-0000-0000-0000-000000000057";
+
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        mock.route(
+            "GET",
+            "/UserViews",
+            200,
+            user_views_json(VIEW_ID, "tvshows"),
+        );
+        let mut items =
+            series_with_three_episodes_json(SERIES_ID, SEASON_ID, EP1_ID, EP2_ID, EP3_VIRTUAL_ID);
+        items["Items"].as_array_mut().expect("items").extend([
+            serde_json::json!({
+                "Id": OTHER_SEASON_ID, "Name": "Season 2", "Type": "Season",
+                "SeriesId": SERIES_ID, "IndexNumber": 2
+            }),
+            serde_json::json!({
+                "Id": OTHER_EP_ID, "Name": "Episode 4", "Type": "Episode",
+                "SeriesId": SERIES_ID, "SeasonId": OTHER_SEASON_ID,
+                "ParentIndexNumber": 2, "IndexNumber": 1,
+                "UserData": {"Key": "k", "Played": false}
+            }),
+        ]);
+        items["TotalRecordCount"] = serde_json::json!(7);
+        mock.route("GET", "/Items", 200, items);
+        mock.route(
+            "POST",
+            &format!("/UserPlayedItems/{SEASON_ID}"),
+            200,
+            user_item_data_json(Some(true), None),
+        );
+        // One session id per stop: the final-Stopped flush queue dedups by it process-wide.
+        let session_ids = ["season-mark-session-a", "season-mark-session-b"];
+        let playback_infos = session_ids
+            .iter()
+            .map(|id| playback_fixture("Test Movie", "ms-1", Some("mkv"), true, None, None, id).1)
+            .collect();
+        mock.route_script("POST", "/PlaybackInfo", playback_infos, vec![]);
+        mock.route(
+            "POST",
+            "/Sessions/Playing/Stopped",
+            500,
+            serde_json::json!({}),
+        );
+        core.open_mirror()
+            .expect("open_mirror against a loopback server");
+        wait_until(
+            || {
+                core.card_by_id(EP2_ID.to_string()).ok().flatten().is_some()
+                    && core
+                        .card_by_id(OTHER_EP_ID.to_string())
+                        .ok()
+                        .flatten()
+                        .is_some()
+            },
+            "initial sync to seed the episodes",
+        );
+
+        for (item_id, ticks) in [(EP1_ID, 5_000_000), (OTHER_EP_ID, 5_000_000)] {
+            let plan = core
+                .prepare_playback_now(item_id.to_string(), false)
+                .expect("Direct Play negotiation");
+            core.stop_playback(plan.play_session_id, ticks);
+        }
+        wait_until_for(
+            RETRY_WAIT,
+            || {
+                stopped_reports_for(&mock, EP1_ID) >= 2
+                    && stopped_reports_for(&mock, OTHER_EP_ID) >= 2
+            },
+            "both Stopped reports to fail once and retry",
+        );
+
+        let started = Instant::now();
+        core.set_played_recursive(SEASON_ID.to_string(), true)
+            .expect("season mark");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the season mark does not wait on any Stopped"
+        );
+
+        let (episode_sent, other_sent) = (
+            stopped_reports_for(&mock, EP1_ID),
+            stopped_reports_for(&mock, OTHER_EP_ID),
+        );
+        std::thread::sleep(Duration::from_millis(3500));
+        assert_eq!(
+            stopped_reports_for(&mock, EP1_ID),
+            episode_sent,
+            "the in-scope episode's Stopped is cancelled"
+        );
+        assert!(
+            stopped_reports_for(&mock, OTHER_EP_ID) > other_sent,
+            "an episode outside the season's Stopped keeps retrying"
+        );
+        wait_until(|| !item_is_pending(EP1_ID), "the cancelled hold to release");
+        assert!(item_is_pending(OTHER_EP_ID));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum MarkEntry {
+        Played,
+        Unplayed,
+        SeasonRecursive,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum StoppedState {
+        InBackoff,
+        OnTheWire,
+        NotYetAttempted,
+    }
+
+    /// One cell of the Ordering table (docs/07 Watch state): a failing-then-landing end-grace
+    /// Stopped in `state`, then `entry` with the mark answering 200 or 500.
+    fn run_ordering_cell(cell: usize, entry: MarkEntry, state: StoppedState, mark_ok: bool) {
+        let id = |k: usize| format!("00000000-0000-0000-0000-{:012x}", 0xa000 + cell * 0x10 + k);
+        let (view, movie, series, season, episode) = (id(0), id(1), id(2), id(3), id(4));
+        let (stopped_item, runtime, stop_at, collection, mark_method, mark_path, played) =
+            match entry {
+                MarkEntry::Played | MarkEntry::Unplayed => (
+                    movie.clone(),
+                    120 * MIN,
+                    115 * MIN,
+                    "movies",
+                    if matches!(entry, MarkEntry::Played) {
+                        "POST"
+                    } else {
+                        "DELETE"
+                    },
+                    format!("/UserPlayedItems/{movie}"),
+                    matches!(entry, MarkEntry::Played),
+                ),
+                MarkEntry::SeasonRecursive => (
+                    episode.clone(),
+                    45 * MIN,
+                    44 * MIN,
+                    "tvshows",
+                    "POST",
+                    format!("/UserPlayedItems/{season}"),
+                    true,
+                ),
+            };
+        let items = match entry {
+            MarkEntry::Played | MarkEntry::Unplayed => serde_json::json!({
+                "Items": [{
+                    "Id": movie, "Name": "Sample Movie", "Type": "Movie",
+                    "RunTimeTicks": runtime, "UserData": {"Key": "k", "Played": !played}
+                }],
+                "TotalRecordCount": 1
+            }),
+            MarkEntry::SeasonRecursive => serde_json::json!({
+                "Items": [
+                    {"Id": series, "Name": "Sample Series", "Type": "Series"},
+                    {"Id": season, "Name": "Season 1", "Type": "Season",
+                     "SeriesId": series, "IndexNumber": 1},
+                    {"Id": episode, "Name": "Episode 1", "Type": "Episode",
+                     "SeriesId": series, "SeasonId": season, "ParentIndexNumber": 1,
+                     "IndexNumber": 1, "RunTimeTicks": runtime,
+                     "UserData": {"Key": "k", "Played": false}}
+                ],
+                "TotalRecordCount": 3
+            }),
+        };
+
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        mock.route("GET", "/UserViews", 200, user_views_json(&view, collection));
+        mock.route("GET", "/Items", 200, items);
+        mock.route(
+            mark_method,
+            &mark_path,
+            if mark_ok { 200 } else { 500 },
+            user_item_data_json(Some(played), None),
+        );
+        let (_, playback_info) = playback_fixture(
+            "Test Movie",
+            "ms-1",
+            Some("mkv"),
+            true,
+            None,
+            None,
+            &format!("ordering-session-{cell}"),
+        );
+        mock.route_script("POST", "/PlaybackInfo", vec![playback_info], vec![]);
+        // The actor's inline attempt and the flush's first attempt both fail before a backoff.
+        let failures = if matches!(state, StoppedState::InBackoff) {
+            2
+        } else {
+            1
+        };
+        mock.fail_first("POST", "/Sessions/Playing/Stopped", failures);
+        let mark_gate = mock.gate(mark_method, &mark_path, 0);
+        let stopped_gate = matches!(state, StoppedState::OnTheWire)
+            .then(|| mock.gate("POST", "/Sessions/Playing/Stopped", 0));
+        let start_gates = matches!(state, StoppedState::NotYetAttempted).then(|| {
+            // The actor is stuck in the first Start; the Start-repair is the final delivery's own.
+            (
+                mock.gate("POST", "/Sessions/Playing", 0),
+                mock.gate("POST", "/Sessions/Playing", 1),
+            )
+        });
+        core.open_mirror().expect("open_mirror");
+        wait_until(
+            || {
+                core.card_by_id(stopped_item.clone())
+                    .ok()
+                    .flatten()
+                    .is_some()
+            },
+            "initial sync to seed the item",
+        );
+
+        let plan = core
+            .prepare_playback_now(stopped_item.clone(), false)
+            .expect("Direct Play negotiation");
+        wait_until(
+            || mock.hit_count_containing("POST", "/Sessions/Playing") >= 1,
+            "the session's Start",
+        );
+        core.stop_playback(plan.play_session_id, stop_at);
+        match state {
+            StoppedState::InBackoff => wait_until_for(
+                RETRY_WAIT,
+                || stopped_reports_for(&mock, &stopped_item) >= 2,
+                "the Stopped to fail into its backoff",
+            ),
+            StoppedState::OnTheWire => wait_until(
+                || stopped_reports_for(&mock, &stopped_item) >= 1,
+                "the Stopped to reach the wire",
+            ),
+            StoppedState::NotYetAttempted => wait_until(
+                || mock.hit_count_containing("POST", "/Sessions/Playing") >= 2,
+                "the Start-repair to reach the wire",
+            ),
+        }
+
+        let mark = {
+            let core = core.clone();
+            let (movie, season) = (movie.clone(), season.clone());
+            std::thread::spawn(move || match entry {
+                MarkEntry::Played => core.set_played(movie, true),
+                MarkEntry::Unplayed => core.set_played(movie, false),
+                MarkEntry::SeasonRecursive => core.set_played_recursive(season, true),
+            })
+        };
+        if !matches!(state, StoppedState::InBackoff) {
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(
+                mock.hit_count_containing(mark_method, &mark_path),
+                0,
+                "the mark waits for the request on the wire"
+            );
+            if let Some(gate) = &stopped_gate {
+                gate.open();
+            }
+            if let Some((_, repair)) = &start_gates {
+                repair.open();
+            }
+        }
+        wait_until(
+            || mock.hit_count_containing(mark_method, &mark_path) == 1,
+            "the mark to reach the server",
+        );
+        // The mark is in flight: the Stopped is held, not sent, and not released, even across its
+        // backoff.
+        let sent = mock.hit_count_containing("POST", "/Sessions/Playing");
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(
+            mock.hit_count_containing("POST", "/Sessions/Playing"),
+            sent,
+            "nothing is sent while the mark is in flight"
+        );
+        assert!(item_is_pending(&stopped_item));
+        mark_gate.open();
+        let result = mark.join().expect("mark thread");
+        assert_eq!(result.is_ok(), mark_ok, "mark result {result:?}");
+        let mark_at = mock
+            .first_request_containing(&mark_path)
+            .expect("the mark reached the server");
+
+        if mark_ok {
+            std::thread::sleep(Duration::from_millis(3500));
+            let after_mark = mock.log_snapshot().split_off(mark_at + 1);
+            assert!(
+                after_mark
+                    .iter()
+                    .all(|entry| !entry.starts_with("POST /Sessions/Playing")),
+                "no Start or Stopped after the mark: {after_mark:?}"
+            );
+            wait_until(
+                || !item_is_pending(&stopped_item),
+                "the cancelled hold to release",
+            );
+            if matches!(entry, MarkEntry::SeasonRecursive) {
+                // The mark refreshes its own scope; the cancelled Stopped adds no second recount.
+                let scope_fetches = after_mark
+                    .iter()
+                    .filter(|entry| entry.starts_with("GET ") && entry.contains(&season))
+                    .count();
+                assert_eq!(scope_fetches, 1, "{after_mark:?}");
+            }
+        } else {
+            wait_until_for(
+                RETRY_WAIT,
+                || !item_is_pending(&stopped_item),
+                "the resumed Stopped to land",
+            );
+            let positions: Vec<i64> = mock
+                .request_bodies_containing("POST", "/Sessions/Playing/Stopped")
+                .iter()
+                .filter(|body| body["ItemId"].as_str() == Some(stopped_item.as_str()))
+                .filter_map(|body| body["PositionTicks"].as_i64())
+                .collect();
+            assert!(positions.len() >= 2, "a failure, then the landing");
+            assert!(positions.iter().all(|ticks| *ticks == runtime));
+        }
+    }
+
+    /// docs/07 Watch state, Ordering: a mark pauses the item's Stopped (in backoff, on the wire or
+    /// not yet attempted) and cancels it only once the mark succeeds; a failed mark lets it land.
+    #[test]
+    fn a_mark_cancels_the_stopped_only_when_it_succeeds() {
+        let mut cells = Vec::new();
+        for entry in [
+            MarkEntry::Played,
+            MarkEntry::Unplayed,
+            MarkEntry::SeasonRecursive,
+        ] {
+            for mark_ok in [true, false] {
+                for state in [
+                    StoppedState::InBackoff,
+                    StoppedState::OnTheWire,
+                    StoppedState::NotYetAttempted,
+                ] {
+                    cells.push((entry, mark_ok, state));
+                }
+            }
+        }
+        let handles: Vec<_> = cells
+            .into_iter()
+            .enumerate()
+            .map(|(cell, (entry, mark_ok, state))| {
+                let label = format!("{entry:?} mark_ok={mark_ok} {state:?}");
+                let handle = std::thread::spawn(move || {
+                    run_ordering_cell(cell, entry, state, mark_ok);
+                });
+                (label, handle)
+            })
+            .collect();
+        let failed: Vec<String> = handles
+            .into_iter()
+            .filter_map(|(label, handle)| handle.join().err().map(|_| label))
+            .collect();
+        assert!(failed.is_empty(), "failing cells: {failed:#?}");
+    }
+
+    /// A mirror row for [`final_report`]: an item of `item_type` with the given runtime.
+    fn grace_row(item_type: &str, runtime_ticks: Option<i64>) -> media_cache::CardRow {
+        media_cache::CardRow {
+            id: "00000000-0000-0000-0000-0000000000f1".to_string(),
+            item_type: item_type.to_string(),
+            name: "Sample".to_string(),
+            primary_tag: None,
+            backdrop_tag: None,
+            thumb_tag: None,
+            blurhash: None,
+            played: false,
+            position_ticks: 0,
+            runtime_ticks,
+            unplayed_count: None,
+            production_year: None,
+            index_number: None,
+            premiere_date: None,
+            parent_index_number: None,
+            series_id: None,
+            series_primary_tag: None,
+            parent_backdrop_item_id: None,
+            parent_backdrop_tag: None,
+            parent_thumb_item_id: None,
+            parent_thumb_tag: None,
+            series_name: None,
+            last_played_date: None,
+            overview: None,
+            is_virtual: false,
+            library_id: None,
+            is_favorite: false,
+        }
+    }
+
+    #[test]
+    fn scope_episode_ids_fails_closed_on_an_unreadable_scope_and_skips_virtual() {
+        let real = grace_row("Episode", Some(45 * MIN));
+        let virtual_row = media_cache::CardRow {
+            id: "synthetic-virtual".to_string(),
+            is_virtual: true,
+            ..grace_row("Episode", None)
+        };
+        assert!(matches!(
+            scope_episode_ids(None),
+            Err(CoreError::Cache { .. })
+        ));
+        assert_eq!(
+            scope_episode_ids(Some(vec![real.clone(), virtual_row])).expect("readable"),
+            vec![real.id]
+        );
+        assert_eq!(
+            scope_episode_ids(Some(Vec::new())).expect("empty"),
+            Vec::<String>::new()
         );
     }
 
     #[test]
-    fn an_item_the_mirror_does_not_know_is_never_finished_early() {
-        assert!(!stopped_in_end_grace(None, i64::MAX));
+    fn final_report_substitutes_the_runtime_for_a_movie_in_the_end_grace() {
+        let row = grace_row("Movie", Some(120 * MIN));
+        assert_eq!(final_report(Some(&row), 115 * MIN), (120 * MIN, true));
+    }
+
+    #[test]
+    fn final_report_substitutes_the_runtime_for_an_episode_in_the_end_grace() {
+        let row = grace_row("Episode", Some(45 * MIN));
+        assert_eq!(final_report(Some(&row), 44 * MIN), (45 * MIN, true));
+    }
+
+    #[test]
+    fn final_report_keeps_the_position_mid_film() {
+        let row = grace_row("Movie", Some(120 * MIN));
+        assert_eq!(final_report(Some(&row), 60 * MIN), (60 * MIN, false));
+    }
+
+    #[test]
+    fn final_report_keeps_the_position_when_the_runtime_is_unknown() {
+        let row = grace_row("Movie", None);
+        assert_eq!(final_report(Some(&row), 115 * MIN), (115 * MIN, false));
+    }
+
+    #[test]
+    fn final_report_keeps_the_position_for_an_item_the_mirror_does_not_know() {
+        assert_eq!(final_report(None, i64::MAX), (i64::MAX, false));
     }
 
     /// docs/19 §2.3: `set_played_recursive` marks every non-virtual episode
@@ -10710,11 +11353,11 @@ mod tests {
     #[test]
     fn set_played_recursive_marks_every_non_virtual_episode_and_skips_virtual() {
         const VIEW_ID: &str = "00000000-0000-0000-0000-000000000010";
-        const SERIES_ID: &str = "00000000-0000-0000-0000-000000000020";
-        const SEASON_ID: &str = "00000000-0000-0000-0000-000000000021";
-        const EP1_ID: &str = "00000000-0000-0000-0000-000000000022";
-        const EP2_ID: &str = "00000000-0000-0000-0000-000000000023";
-        const EP3_VIRTUAL_ID: &str = "00000000-0000-0000-0000-000000000024";
+        const SERIES_ID: &str = "00000000-0000-0000-0000-000000000060";
+        const SEASON_ID: &str = "00000000-0000-0000-0000-000000000061";
+        const EP1_ID: &str = "00000000-0000-0000-0000-000000000062";
+        const EP2_ID: &str = "00000000-0000-0000-0000-000000000063";
+        const EP3_VIRTUAL_ID: &str = "00000000-0000-0000-0000-000000000064";
 
         let (_dir, core, mock) = core_signed_in_against_routes();
         mock.route(

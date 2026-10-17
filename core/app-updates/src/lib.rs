@@ -497,6 +497,8 @@ impl Engine {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         let builder = Client::builder()
+            // Feature unification enables gzip workspace-wide; release assets must stay byte-exact.
+            .no_gzip()
             .user_agent("Jellybeam-TV-Updater")
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))

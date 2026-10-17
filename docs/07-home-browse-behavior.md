@@ -171,3 +171,46 @@ inconsistent totals, failed fetches, and page-limit exhaustion abort completion.
 Previously fetched metadata may update, but incomplete walks do not prune old
 membership or advance the delta cursor. Breadth/delta/reconcile are bounded at
 2,000 pages; collection walks retain their 100-page bound.
+
+## Watch state from other clients
+
+Played, unplayed, finished and partly watched changes made on another client
+reach the mirror without a library edit, so delta sync can't see them and the
+WebSocket only reports them while connected. One refresher per account mirror
+closes that gap:
+
+- **Triggers**: the warm startup pass (requested after Home's data is ready,
+  never awaited), every WebSocket reconnect, the 5-minute reconcile timer, and
+  the app returning to the foreground. Triggers coalesce, and the refresher
+  runs one pass at a time, so a trigger during a pass costs exactly one rerun.
+  A foreground or timer trigger within 30 s of the last pass is skipped;
+  startup runs unless a pass already ran, and reconnect always runs. A parked account isn't
+  refreshed on foreground.
+- **Pass**: Continue Watching (`/UserItems/Resume`), then an id-only walk of
+  every played Movie, Episode, Video and Music Video under the snapshot rule
+  above. The pass then compares the server's played and resume sets with the
+  mirror's played and in-progress rows, re-fetches only the rows that differ
+  (plus their season and series, so unplayed counts follow) and writes them in
+  one transaction. Items the mirror doesn't have are left to breadth and
+  reconcile.
+- **Guards**: Continue Watching rows (the launch's own refresh included) and
+  re-fetched rows go through one guarded write. A failed or incomplete walk
+  writes no re-fetched rows. A row changed after the pass started is kept. An item stays protected from the moment its
+  playback session opens until the server has its final Stopped report; if the
+  stop retries give up or the app is killed first, the server's state wins on
+  the next pass. The pass waits for initial sync and yields to playback
+  (docs/18 §2.1). A changed episode asks Next Up to refresh.
+- **Finished watches**: a stop inside the end window (§1 grace windows) is
+  reported as a Stopped at the item's runtime, so the server marks it played
+  in that one request; there is no follow-up mark played.
+- **Ordering**: the newest action on an item wins. Mark watched/unwatched
+  pauses the item's pending Stopped, waits for one already on the wire, and
+  cancels it once the mark succeeds; a failed mark lets the Stopped resume
+  retrying. Playing the item again cancels its older Stopped retries (the new
+  session's start resets the server's played flag anyway). A cancelled session
+  may linger in the server's "now playing" list until the server's own idle
+  cleanup.
+- **Dead sockets**: the WebSocket closes itself after 2 × the server's
+  `ForceKeepAlive` interval + 10 s without a text frame (130 s at the default
+  60 s), so a session the server dropped silently reconnects and triggers a
+  pass.

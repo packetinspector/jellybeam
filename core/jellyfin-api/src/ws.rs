@@ -21,6 +21,26 @@ use crate::{auth_header, ApiError, ClientIdentity, ServerEvent};
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
+/// `ForceKeepAlive` interval assumed until the server advertises one (docs/07 Watch state).
+const DEFAULT_KEEPALIVE_SECS: u64 = 60;
+
+/// Upper bound on the read deadline so an absurd advertised value can't disable dead-socket detection.
+const MAX_READ_DEADLINE_SECS: u64 = 600;
+
+/// Silence budget: twice the advertised `ForceKeepAlive` interval plus 10 s, because a dead 12.0
+/// session goes silent without a close (docs/07 Watch state).
+pub(crate) fn read_deadline(advertised_secs: Option<u64>) -> Duration {
+    let base = match advertised_secs {
+        Some(n) if n > 0 => n,
+        _ => DEFAULT_KEEPALIVE_SECS,
+    };
+    Duration::from_secs(
+        base.saturating_mul(2)
+            .saturating_add(10)
+            .min(MAX_READ_DEADLINE_SECS),
+    )
+}
+
 /// Timeout for establishing the WebSocket connection: without one, a stalled TCP/TLS/HTTP-upgrade
 /// handshake against an unreachable server hangs `connect_ws` forever. Bounds only the handshake,
 /// not the connection's lifetime.
@@ -71,6 +91,10 @@ pub(crate) async fn connect(
     let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
     tokio::spawn(async move {
+        let mut advertised: Option<u64> = None;
+        let mut budget = read_deadline(advertised);
+        let deadline = tokio::time::sleep(budget);
+        tokio::pin!(deadline);
         loop {
             // Race the next server frame against the receiver being dropped, rather than only
             // checking after `tx.send()`: otherwise a dropped receiver on an idle connection isn't
@@ -80,6 +104,13 @@ pub(crate) async fn connect(
                 _ = tx.closed() => {
                     tracing::debug!("jellyfin websocket receiver dropped; closing");
                     let _ = write.send(Message::Close(None)).await;
+                    break;
+                }
+                _ = &mut deadline => {
+                    tracing::info!(
+                        deadline_secs = budget.as_secs(),
+                        "jellyfin websocket silent past its read deadline; closing"
+                    );
                     break;
                 }
                 next = read.next() => {
@@ -99,9 +130,15 @@ pub(crate) async fn connect(
                         }
                     };
 
-                    let Some(event) = decode_message(&text) else {
+                    let Some((event, keep_alive)) = decode_frame(&text) else {
+                        // Undecodable text is still liveness.
+                        budget = read_deadline(advertised);
+                        deadline.as_mut().reset(tokio::time::Instant::now() + budget);
                         continue;
                     };
+                    if keep_alive.is_some() {
+                        advertised = keep_alive;
+                    }
 
                     // ForceKeepAlive means "reply or I'll drop you"; ack immediately in addition to
                     // surfacing the event.
@@ -119,6 +156,11 @@ pub(crate) async fn connect(
                         let _ = write.send(Message::Close(None)).await;
                         break;
                     }
+
+                    // Reset only after the awaits above: a blocked consumer must not eat the budget
+                    // of a healthy socket. Only text frames count; ping/pong can outlive a dead session.
+                    budget = read_deadline(advertised);
+                    deadline.as_mut().reset(tokio::time::Instant::now() + budget);
                 }
             }
         }
@@ -142,10 +184,17 @@ fn map_connect_error(e: tokio_tungstenite::tungstenite::Error) -> ApiError {
 /// Decode one raw WebSocket text frame into a [`ServerEvent`].
 /// Returns `None` only when the frame isn't valid JSON. A recognized `MessageType` whose `Data`
 /// fails to decode still yields `Some` (falls back to `Ignored`) rather than dropping the frame.
+#[cfg(any(test, fuzzing))]
 pub(crate) fn decode_message(text: &str) -> Option<ServerEvent> {
+    decode_frame(text).map(|(event, _)| event)
+}
+
+/// [`decode_message`] plus the `ForceKeepAlive` `Data` seconds, parsed in the same pass.
+fn decode_frame(text: &str) -> Option<(ServerEvent, Option<u64>)> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let message_type = value.get("MessageType").and_then(|v| v.as_str())?;
 
+    let mut keep_alive = None;
     let event = match message_type {
         "LibraryChanged" => {
             let data = value
@@ -184,18 +233,21 @@ pub(crate) fn decode_message(text: &str) -> Option<ServerEvent> {
                 }
             }
         }
-        "ForceKeepAlive" => ServerEvent::ForceKeepAlive,
+        "ForceKeepAlive" => {
+            keep_alive = value.get("Data").and_then(|d| d.as_u64());
+            ServerEvent::ForceKeepAlive
+        }
         other => ServerEvent::Ignored(other.to_string()),
     };
 
-    Some(event)
+    Some((event, keep_alive))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Pins: a 401 during the WS upgrade maps to `ApiError::Unauthorized`, not a generic
+    /// A 401 during the WS upgrade maps to `ApiError::Unauthorized`, not a generic
     /// `Transport` error.
     #[test]
     fn map_connect_error_translates_401_to_unauthorized() {
@@ -268,6 +320,33 @@ mod tests {
     }
 
     #[test]
+    fn read_deadline_is_twice_the_interval_plus_ten() {
+        assert_eq!(read_deadline(Some(60)), Duration::from_secs(130));
+        assert_eq!(read_deadline(Some(1)), Duration::from_secs(12));
+        assert_eq!(read_deadline(None), Duration::from_secs(130));
+    }
+
+    #[test]
+    fn read_deadline_clamps_absurd_values() {
+        assert_eq!(read_deadline(Some(0)), Duration::from_secs(130));
+        assert_eq!(read_deadline(Some(100_000)), Duration::from_secs(600));
+        assert_eq!(read_deadline(Some(u64::MAX)), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn decode_frame_carries_keep_alive_data_only_for_force_keep_alive() {
+        let secs = |t: &str| decode_frame(t).and_then(|(_, k)| k);
+        assert_eq!(
+            secs(r#"{"MessageType":"ForceKeepAlive","Data":60}"#),
+            Some(60)
+        );
+        assert_eq!(secs(r#"{"MessageType":"ForceKeepAlive"}"#), None);
+        assert_eq!(secs(r#"{"MessageType":"ForceKeepAlive","Data":"x"}"#), None);
+        assert_eq!(secs(r#"{"MessageType":"LibraryChanged","Data":5}"#), None);
+        assert_eq!(secs("not json"), None);
+    }
+
+    #[test]
     fn unknown_message_types_are_ignored_by_name() {
         let raw = r#"{"MessageType":"SomeFutureMessageType","Data":{}}"#;
         match decode_message(raw) {
@@ -302,7 +381,7 @@ mod tests {
         );
     }
 
-    /// Pins: against a real WS server that sends nothing, dropping the receiver is noticed promptly
+    /// Against a real WS server that sends nothing, dropping the receiver is noticed promptly
     /// and a `Close` frame is sent without needing a server message first.
     #[tokio::test]
     async fn drops_receiver_promptly_without_waiting_for_a_server_message() {
@@ -352,5 +431,108 @@ mod tests {
             saw_close,
             "client should send a Close frame once its receiver is dropped"
         );
+    }
+
+    /// A server that sends one `ForceKeepAlive` (Data=1) then goes silent ends the read loop at 12 s.
+    #[tokio::test(flavor = "current_thread")]
+    async fn silent_server_ends_the_read_loop_at_the_deadline() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept tcp connection");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete ws handshake");
+            ws.send(Message::Text(
+                r#"{"MessageType":"ForceKeepAlive","Data":1}"#.to_string(),
+            ))
+            .await
+            .expect("send keepalive");
+            // Silent but open; pongs would not count either.
+            futures_util::future::pending::<()>().await;
+        });
+
+        let identity = ClientIdentity {
+            client: "Test".to_string(),
+            device: "test".to_string(),
+            device_id: "test-device".to_string(),
+            version: "0.0.0".to_string(),
+        };
+        let mut rx = connect(&format!("http://{addr}"), &identity, "test-token")
+            .await
+            .expect("connect to mock server");
+
+        // Receive the advertised interval in real time; pause only for the silent wait.
+        assert!(matches!(rx.recv().await, Some(ServerEvent::ForceKeepAlive)));
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let end = tokio::time::timeout(Duration::from_secs(300), rx.recv())
+            .await
+            .expect("loop must end by its own deadline");
+        assert!(end.is_none());
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(12) && elapsed < Duration::from_secs(20),
+            "{elapsed:?}"
+        );
+        server.abort();
+    }
+
+    /// A consumer that stalls past the deadline must not get a healthy socket closed on unblock.
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_consumer_does_not_trip_the_deadline() {
+        use tokio::net::TcpListener;
+
+        const EXTRA: usize = EVENT_CHANNEL_CAPACITY + 50;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept tcp connection");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete ws handshake");
+            ws.send(Message::Text(
+                r#"{"MessageType":"ForceKeepAlive","Data":1}"#.to_string(),
+            ))
+            .await
+            .expect("send keepalive");
+            for _ in 0..EXTRA {
+                ws.send(Message::Text(r#"{"MessageType":"Other"}"#.to_string()))
+                    .await
+                    .expect("send frame");
+            }
+            futures_util::future::pending::<()>().await;
+        });
+
+        let identity = ClientIdentity {
+            client: "Test".to_string(),
+            device: "test".to_string(),
+            device_id: "test-device".to_string(),
+            version: "0.0.0".to_string(),
+        };
+        let mut rx = connect(&format!("http://{addr}"), &identity, "test-token")
+            .await
+            .expect("connect to mock server");
+
+        assert!(matches!(rx.recv().await, Some(ServerEvent::ForceKeepAlive)));
+        // Real time until the task is blocked in `send` on a full channel; only then jump the
+        // clock well past the 12 s deadline, so paused time never races socket reads.
+        while rx.len() < EVENT_CHANNEL_CAPACITY {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::time::resume();
+        for i in 0..EXTRA {
+            let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+            assert!(matches!(ev, Ok(Some(_))), "loop ended after {i} of {EXTRA}");
+        }
+        server.abort();
     }
 }

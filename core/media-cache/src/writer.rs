@@ -2,7 +2,7 @@
 //! broadcasts the change-feed in commit order (ordering rule -- every mutation
 //! flows through here, so there's no interleaving hazard).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -95,6 +95,15 @@ pub(crate) enum WriteCmd {
     SetFavoriteIds {
         ids: Vec<String>,
         since: i64,
+    },
+    /// docs/07 Watch state: one guarded transaction for a sweep; only `resume` rows may insert,
+    /// and a row is written only if `updated_at` < `since_ms` and its id is outside `skip`.
+    ApplyUserState {
+        dtos: Vec<BaseItemDto>,
+        resume: Vec<BaseItemDto>,
+        since_ms: i64,
+        skip: HashSet<String>,
+        reply: oneshot::Sender<Option<Vec<String>>>,
     },
     /// Builds one deferred [`crate::schema::IndexGroup`]; replies whether it succeeded.
     BuildIndexGroup(crate::schema::IndexGroup, oneshot::Sender<bool>),
@@ -239,6 +248,29 @@ impl WriterHandle {
     /// See [`WriteCmd::SetNextUpIds`].
     pub(crate) async fn set_next_up_ids(&self, ids: Vec<String>) {
         self.send(WriteCmd::SetNextUpIds(ids)).await;
+    }
+
+    /// See [`WriteCmd::ApplyUserState`]; the changed ids, or `None` if the transaction failed.
+    pub(crate) async fn apply_user_state(
+        &self,
+        dtos: Vec<BaseItemDto>,
+        resume: Vec<BaseItemDto>,
+        since_ms: i64,
+        skip: HashSet<String>,
+    ) -> Option<Vec<String>> {
+        if dtos.is_empty() && resume.is_empty() {
+            return Some(Vec::new());
+        }
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::ApplyUserState {
+            dtos,
+            resume,
+            since_ms,
+            skip,
+            reply: tx,
+        })
+        .await;
+        rx.await.ok().flatten()
     }
 
     /// See [`WriteCmd::BuildIndexGroup`].
@@ -460,6 +492,25 @@ pub(crate) fn run(
                     apply_set_favorite_ids(&mut conn, &ids, since),
                     |e| tracing::error!(error = %e, "failed to write favorite ids"),
                 ) {
+                    let _ = changes.send(MirrorChange::Upserted {
+                        ids,
+                        library_id: None,
+                    });
+                }
+            }
+            WriteCmd::ApplyUserState {
+                dtos,
+                resume,
+                since_ms,
+                skip,
+                reply,
+            } => {
+                let result = apply_user_state(&mut conn, &dtos, &resume, since_ms, &skip);
+                let _ = reply.send(result.as_ref().ok().cloned());
+                let ids = changed_ids(&mut writer_healthy, result, |e| {
+                    tracing::error!(error = %e, "failed to apply user state sweep");
+                });
+                if let Some(ids) = ids {
                     let _ = changes.send(MirrorChange::Upserted {
                         ids,
                         library_id: None,
@@ -706,8 +757,21 @@ pub(crate) fn apply_upsert_items_scoped(
     library_id: Option<&str>,
 ) -> rusqlite::Result<Vec<String>> {
     let tx = conn.transaction()?;
-    let views = view_ids(&tx)?;
-    let mut upserted = Vec::with_capacity(items.len());
+    let upserted = upsert_items_in_tx(&tx, items, library_id)?;
+    tx.commit()?;
+    Ok(upserted)
+}
+
+/// The body of [`apply_upsert_items_scoped`] on a caller-owned transaction, so
+/// [`apply_user_state`] shares the exact column path instead of forking it.
+fn upsert_items_in_tx<'a>(
+    tx: &rusqlite::Transaction<'_>,
+    items: impl IntoIterator<Item = &'a BaseItemDto>,
+    library_id: Option<&str>,
+) -> rusqlite::Result<Vec<String>> {
+    let views = view_ids(tx)?;
+    let items = items.into_iter();
+    let mut upserted = Vec::with_capacity(items.size_hint().0);
     for item in items {
         let Some(cols) = extract_columns(item) else {
             tracing::warn!("skipping item with no id");
@@ -820,10 +884,10 @@ pub(crate) fn apply_upsert_items_scoped(
                 "upsert must preserve rowid for stable FTS mapping"
             );
             if let Ok(old_item) = serde_json::from_slice::<BaseItemDto>(&old_blob) {
-                fts_delete(&tx, rowid, &search_text(&old_item))?;
+                fts_delete(tx, rowid, &search_text(&old_item))?;
             }
         }
-        fts_insert(&tx, rowid, &search_text(item))?;
+        fts_insert(tx, rowid, &search_text(item))?;
 
         // docs/16-library-sort-filter.md §1.2: `Genres` always replaces this item's genre set
         // outright, including when empty -- safe because every persisting fetch through this
@@ -842,8 +906,93 @@ pub(crate) fn apply_upsert_items_scoped(
 
         upserted.push(cols.id);
     }
-    tx.commit()?;
     Ok(upserted)
+}
+
+/// What [`apply_user_state`] diffs: the columns another client's watch activity moves.
+#[derive(Debug, PartialEq)]
+struct UserDataCols {
+    played: bool,
+    position_ticks: i64,
+    favorite: bool,
+    unplayed_count: Option<i64>,
+    play_count: i64,
+    last_played_date: Option<String>,
+}
+
+/// A row's `updated_at` and [`UserDataCols`], or `None` if the mirror lacks it.
+fn read_user_data(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+) -> rusqlite::Result<Option<(i64, UserDataCols)>> {
+    tx.prepare_cached(
+        "SELECT updated_at, played, playback_position_ticks, is_favorite, unplayed_item_count, \
+         play_count, last_played_date FROM items WHERE id = ?1",
+    )?
+    .query_row([id], |r| {
+        let cols = UserDataCols {
+            played: r.get(1)?,
+            position_ticks: r.get(2)?,
+            favorite: r.get(3)?,
+            unplayed_count: r.get(4)?,
+            play_count: r.get(5)?,
+            last_played_date: r.get(6)?,
+        };
+        Ok((r.get(0)?, cols))
+    })
+    .optional()
+}
+
+/// [`WriteCmd::ApplyUserState`]; returns the ids whose [`UserDataCols`] moved or that `resume` inserted.
+pub(crate) fn apply_user_state(
+    conn: &mut Connection,
+    dtos: &[BaseItemDto],
+    resume: &[BaseItemDto],
+    since_ms: i64,
+    skip: &HashSet<String>,
+) -> rusqlite::Result<Vec<String>> {
+    let tx = conn.transaction()?;
+    let mut before: HashMap<String, UserDataCols> = HashMap::new();
+    let mut inserts: HashSet<String> = HashSet::new();
+    let mut accepted: Vec<&BaseItemDto> = Vec::new();
+    // `dtos` first: it is the later fetch, so it wins over `resume` for a shared id.
+    let candidates = dtos
+        .iter()
+        .map(|d| (d, false))
+        .chain(resume.iter().map(|d| (d, true)));
+    for (dto, may_insert) in candidates {
+        let Some(id) = dto.id.map(|u| u.to_string()) else {
+            continue;
+        };
+        if skip.contains(&id) || before.contains_key(&id) || inserts.contains(&id) {
+            continue;
+        }
+        match read_user_data(&tx, &id)? {
+            Some((updated, _)) if updated >= since_ms => continue,
+            Some((_, cols)) => {
+                before.insert(id, cols);
+            }
+            // A row gone since the plan (pruned, account cleared) stays gone unless `resume`
+            // brings it: new items are otherwise breadth's job.
+            None if may_insert => {
+                inserts.insert(id);
+            }
+            None => continue,
+        }
+        accepted.push(dto);
+    }
+    let mut changed = Vec::new();
+    for id in upsert_items_in_tx(&tx, accepted, None)? {
+        let moved = match before.get(&id) {
+            Some(old) => read_user_data(&tx, &id)?.is_some_and(|(_, new)| new != *old),
+            None => true,
+        };
+        if moved {
+            changed.push(id);
+        }
+    }
+    tx.commit()?;
+    Ok(changed)
 }
 
 fn fts_insert(
@@ -1371,6 +1520,339 @@ mod tests {
             type_: Some(BaseItemKind::Movie),
             ..Default::default()
         }
+    }
+
+    const SINCE: i64 = 1_000;
+
+    fn uid(n: u32) -> String {
+        format!("e2f5a5f1-1a0b-4b3a-9c2e-{n:012}")
+    }
+
+    fn with_state(
+        id: &str,
+        kind: BaseItemKind,
+        played: bool,
+        ticks: i64,
+        favorite: bool,
+    ) -> BaseItemDto {
+        let mut dto = item(id, "Synthetic");
+        dto.type_ = Some(kind);
+        dto.user_data = Some(UserItemDataDto {
+            played: Some(played),
+            playback_position_ticks: Some(ticks),
+            is_favorite: Some(favorite),
+            ..Default::default()
+        });
+        dto
+    }
+
+    /// Seeds `dtos`, then pins every row's `updated_at` (the upsert stamps the wall clock).
+    fn seed(conn: &mut Connection, dtos: &[BaseItemDto], updated_at: i64) {
+        apply_upsert_items(conn, dtos).expect("seed");
+        conn.execute("UPDATE items SET updated_at = ?1", [updated_at])
+            .expect("pin updated_at");
+    }
+
+    fn played_of(conn: &Connection, id: &str) -> bool {
+        conn.query_row("SELECT played FROM items WHERE id = ?1", [id], |r| r.get(0))
+            .expect("row")
+    }
+
+    /// docs/07 Watch state: a row written at or after `since` is newer than the sweep's
+    /// snapshot and keeps its value; an older row takes the fetched one.
+    #[test]
+    fn apply_user_state_since_guard() {
+        let (_dir, mut conn) = open_test_db();
+        let (old, new) = (uid(1), uid(2));
+        seed(
+            &mut conn,
+            &[
+                with_state(&old, BaseItemKind::Movie, false, 0, false),
+                with_state(&new, BaseItemKind::Movie, false, 0, false),
+            ],
+            SINCE - 1,
+        );
+        conn.execute(
+            "UPDATE items SET updated_at = ?1 WHERE id = ?2",
+            params![SINCE, new],
+        )
+        .expect("test op");
+        let fetched = [
+            with_state(&old, BaseItemKind::Movie, true, 0, false),
+            with_state(&new, BaseItemKind::Movie, true, 0, false),
+        ];
+        let changed =
+            apply_user_state(&mut conn, &fetched, &[], SINCE, &HashSet::new()).expect("test op");
+        assert_eq!(changed, vec![old.clone()]);
+        assert!(played_of(&conn, &old));
+        assert!(
+            !played_of(&conn, &new),
+            "row written at `since` is untouched"
+        );
+    }
+
+    #[test]
+    fn apply_user_state_skip_guard() {
+        let (_dir, mut conn) = open_test_db();
+        let (a, b) = (uid(1), uid(2));
+        seed(
+            &mut conn,
+            &[
+                with_state(&a, BaseItemKind::Movie, false, 0, false),
+                with_state(&b, BaseItemKind::Movie, false, 0, false),
+            ],
+            0,
+        );
+        let fetched = [
+            with_state(&a, BaseItemKind::Movie, true, 0, false),
+            with_state(&b, BaseItemKind::Movie, true, 0, false),
+        ];
+        let skip: HashSet<String> = [a.clone()].into();
+        let changed = apply_user_state(&mut conn, &fetched, &[], SINCE, &skip).expect("test op");
+        assert_eq!(changed, vec![b.clone()]);
+        assert!(
+            !played_of(&conn, &a),
+            "a pending local write is not reverted"
+        );
+        assert!(played_of(&conn, &b));
+    }
+
+    #[test]
+    fn apply_user_state_never_inserts_a_row_the_mirror_lacks() {
+        let (_dir, mut conn) = open_test_db();
+        let gone = uid(3);
+        let fetched = [with_state(&gone, BaseItemKind::Movie, true, 0, false)];
+        let changed =
+            apply_user_state(&mut conn, &fetched, &[], SINCE, &HashSet::new()).expect("test op");
+        assert!(changed.is_empty());
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items WHERE id = ?1", [&gone], |r| {
+                r.get(0)
+            })
+            .expect("test op");
+        assert_eq!(rows, 0, "a row pruned mid-sweep stays pruned");
+    }
+
+    /// An identical fetch and a metadata-only difference report nothing; played, position
+    /// and favorite flips each report their id.
+    #[test]
+    fn apply_user_state_reports_only_real_user_data_changes() {
+        let (_dir, mut conn) = open_test_db();
+        let ids: Vec<String> = (1..=5).map(uid).collect();
+        let base = |i: usize| with_state(&ids[i], BaseItemKind::Movie, false, 0, false);
+        seed(&mut conn, &(0..5).map(base).collect::<Vec<_>>(), 0);
+
+        let mut renamed = base(1);
+        renamed.name = Some("Renamed".into());
+        let fetched = [
+            base(0),                                                       // identical
+            renamed,                                                       // metadata only
+            with_state(&ids[2], BaseItemKind::Movie, true, 0, false),      // played
+            with_state(&ids[3], BaseItemKind::Movie, false, 4_200, false), // position
+            with_state(&ids[4], BaseItemKind::Movie, false, 0, true),      // favorite
+        ];
+        let mut changed =
+            apply_user_state(&mut conn, &fetched, &[], SINCE, &HashSet::new()).expect("test op");
+        changed.sort();
+        assert_eq!(changed, ids[2..].to_vec());
+        let name: String = conn
+            .query_row("SELECT name FROM items WHERE id = ?1", [&ids[1]], |r| {
+                r.get(0)
+            })
+            .expect("test op");
+        assert_eq!(name, "Renamed", "the row is still upserted whole");
+    }
+
+    /// The upsert doesn't recompute counts, so the re-fetched parent DTO carries them; a
+    /// changed count is itself a reported change.
+    #[test]
+    fn apply_user_state_updates_parent_unplayed_count() {
+        let (_dir, mut conn) = open_test_db();
+        let (series, episode) = (uid(1), uid(2));
+        let mut parent = with_state(&series, BaseItemKind::Series, false, 0, false);
+        parent
+            .user_data
+            .as_mut()
+            .expect("test op")
+            .unplayed_item_count = Some(3);
+        let mut ep = with_state(&episode, BaseItemKind::Episode, false, 0, false);
+        ep.series_id = Some(uuid::Uuid::parse_str(&series).expect("test op"));
+        seed(&mut conn, &[parent.clone(), ep.clone()], 0);
+
+        parent
+            .user_data
+            .as_mut()
+            .expect("test op")
+            .unplayed_item_count = Some(2);
+        ep.user_data.as_mut().expect("test op").played = Some(true);
+        let mut changed = apply_user_state(&mut conn, &[parent, ep], &[], SINCE, &HashSet::new())
+            .expect("test op");
+        changed.sort();
+        assert_eq!(changed, vec![series.clone(), episode]);
+        let count: Option<i64> = conn
+            .query_row(
+                "SELECT unplayed_item_count FROM items WHERE id = ?1",
+                [&series],
+                |r| r.get(0),
+            )
+            .expect("test op");
+        assert_eq!(count, Some(2));
+    }
+
+    /// A refetched DTO carries `IsFavorite`, which lands as a side effect; an item not
+    /// refetched keeps its flag.
+    #[test]
+    fn apply_user_state_favorite_rides_along_on_a_refetched_row() {
+        let (_dir, mut conn) = open_test_db();
+        let (refetched, untouched) = (uid(1), uid(2));
+        seed(
+            &mut conn,
+            &[
+                with_state(&refetched, BaseItemKind::Movie, false, 0, false),
+                with_state(&untouched, BaseItemKind::Movie, false, 0, false),
+            ],
+            0,
+        );
+        let fetched = [with_state(&refetched, BaseItemKind::Movie, true, 0, true)];
+        let changed =
+            apply_user_state(&mut conn, &fetched, &[], SINCE, &HashSet::new()).expect("test op");
+        assert_eq!(changed, vec![refetched.clone()]);
+        let fav = |id: &str| -> bool {
+            conn.query_row("SELECT is_favorite FROM items WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .expect("test op")
+        };
+        assert!(fav(&refetched));
+        assert!(!fav(&untouched));
+    }
+
+    /// A rewatch elsewhere leaves played/position/favorite as they were; the play count and
+    /// last-played date still report it.
+    #[test]
+    fn apply_user_state_reports_a_rewatch_by_play_count_and_date() {
+        let (_dir, mut conn) = open_test_db();
+        let (counted, dated, same) = (uid(1), uid(2), uid(3));
+        let watched = |id: &str, count: i32, date: &str| {
+            let mut dto = with_state(id, BaseItemKind::Movie, true, 0, false);
+            let data = dto.user_data.as_mut().expect("user data");
+            data.play_count = Some(count);
+            data.last_played_date = Some(date.parse().expect("date"));
+            dto
+        };
+        let day = |d: u32| format!("2026-01-{d:02}T00:00:00Z");
+        seed(
+            &mut conn,
+            &[
+                watched(&counted, 1, &day(1)),
+                watched(&dated, 1, &day(1)),
+                watched(&same, 1, &day(1)),
+            ],
+            0,
+        );
+        let fetched = [
+            watched(&counted, 2, &day(1)),
+            watched(&dated, 1, &day(2)),
+            watched(&same, 1, &day(1)),
+        ];
+        let mut changed =
+            apply_user_state(&mut conn, &fetched, &[], SINCE, &HashSet::new()).expect("test op");
+        changed.sort();
+        assert_eq!(changed, vec![counted, dated]);
+    }
+
+    /// Only `resume` rows may insert, and the same guards still apply to them.
+    #[test]
+    fn apply_user_state_resume_inserts_and_guards_existing_rows() {
+        let (_dir, mut conn) = open_test_db();
+        let (fresh, old, newer, pending, refetched_only) = (uid(1), uid(2), uid(3), uid(4), uid(5));
+        seed(
+            &mut conn,
+            &[
+                with_state(&old, BaseItemKind::Movie, false, 0, false),
+                with_state(&newer, BaseItemKind::Movie, false, 0, false),
+                with_state(&pending, BaseItemKind::Movie, false, 0, false),
+            ],
+            SINCE - 1,
+        );
+        conn.execute(
+            "UPDATE items SET updated_at = ?1 WHERE id = ?2",
+            params![SINCE, newer],
+        )
+        .expect("test op");
+        let partway = |id: &str| with_state(id, BaseItemKind::Movie, false, 4_200, false);
+        let resume = [
+            partway(&fresh),
+            partway(&old),
+            partway(&newer),
+            partway(&pending),
+        ];
+        let skip: HashSet<String> = [pending.clone()].into();
+        let mut changed = apply_user_state(
+            &mut conn,
+            &[partway(&refetched_only)],
+            &resume,
+            SINCE,
+            &skip,
+        )
+        .expect("test op");
+        changed.sort();
+        assert_eq!(changed, vec![fresh.clone(), old.clone()]);
+        let ticks = |id: &str| -> Option<i64> {
+            conn.query_row(
+                "SELECT playback_position_ticks FROM items WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("test op")
+        };
+        assert_eq!(
+            ticks(&fresh),
+            Some(4_200),
+            "resume inserts a new in-progress row"
+        );
+        assert_eq!(ticks(&old), Some(4_200));
+        assert_eq!(ticks(&newer), Some(0), "a row written at `since` is kept");
+        assert_eq!(ticks(&pending), Some(0), "a pending row is kept");
+        assert_eq!(
+            ticks(&refetched_only),
+            None,
+            "a re-fetched row never inserts"
+        );
+    }
+
+    /// Through the writer task: the reply lists changed ids and the change feed carries them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_user_state_command_replies_and_broadcasts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (conn, _) = open_and_prepare(&dir.path().join("mirror.db")).expect("open");
+        let (tx, rx) = mpsc::channel(64);
+        let (changes, mut changes_rx) = broadcast::channel(64);
+        let writer = tokio::task::spawn_blocking(move || run(conn, rx, changes));
+        let handle = WriterHandle::new(tx);
+        let id = uid(1);
+        handle
+            .upsert_items(vec![with_state(&id, BaseItemKind::Movie, false, 0, false)])
+            .await;
+        let _ = changes_rx.recv().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let since = now_millis();
+        let moved = handle
+            .apply_user_state(
+                vec![with_state(&id, BaseItemKind::Movie, true, 0, false)],
+                Vec::new(),
+                since,
+                HashSet::new(),
+            )
+            .await;
+        assert_eq!(moved, Some(vec![id.clone()]));
+        assert!(matches!(
+            changes_rx.recv().await,
+            Ok(MirrorChange::Upserted { ids, .. }) if ids == vec![id]
+        ));
+        drop(handle);
+        let _ = writer.await;
     }
 
     /// A byte-identical `/UserViews` snapshot -- same ids, names, types and order -- must

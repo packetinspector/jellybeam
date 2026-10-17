@@ -400,6 +400,9 @@ pub struct ItemQuery {
     /// `isFavorite` query param: the requesting user's favorites only (favorites are per user).
     /// `None` omits it.
     pub is_favorite: Option<bool>,
+    /// `isPlayed` query param: the requesting user's played (`true`) or unplayed (`false`) items
+    /// only (docs/07 Watch state). `None` omits it.
+    pub is_played: Option<bool>,
     /// `personIds` query param: items crediting any of these person ids. Empty omits it.
     pub person_ids: Vec<String>,
 }
@@ -776,6 +779,9 @@ impl JellyfinClient {
         }
         if let Some(is_favorite) = q.is_favorite {
             query.push(("isFavorite", is_favorite.to_string()));
+        }
+        if let Some(is_played) = q.is_played {
+            query.push(("isPlayed", is_played.to_string()));
         }
         if !q.person_ids.is_empty() {
             query.push(("personIds", q.person_ids.join(",")));
@@ -1350,6 +1356,8 @@ impl JellyfinClient {
             .http
             .get(&url)
             .header("Range", format!("bytes=0-{}", max_bytes.saturating_sub(1)))
+            // Ranged media bytes must stay byte-exact; never let a proxy gzip them.
+            .header("Accept-Encoding", "identity")
             .send()
             .await
             .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
@@ -2661,6 +2669,160 @@ mod tests {
             !request_line.contains("enableUserData"),
             "request line should omit enableUserData when None: {request_line}"
         );
+    }
+
+    #[tokio::test]
+    async fn get_items_sends_is_played_when_set_and_omits_it_when_unset() {
+        for (value, expected) in [
+            (Some(true), "isPlayed=true"),
+            (Some(false), "isPlayed=false"),
+        ] {
+            let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+            let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+            let query = ItemQuery {
+                is_played: value,
+                ..ItemQuery::new()
+            };
+            client.get_items(&query).await.expect("get_items");
+            let request = rx.await.expect("captured request");
+            let line = request.lines().next().unwrap_or_default();
+            assert!(line.contains(expected), "{line}");
+        }
+        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        client
+            .get_items(&ItemQuery::new())
+            .await
+            .expect("get_items");
+        let request = rx.await.expect("captured request");
+        let line = request.lines().next().unwrap_or_default();
+        assert!(!line.contains("isPlayed"), "{line}");
+    }
+
+    /// The id-only sweep's shape: empty `fields` sends no `fields` param at all.
+    #[tokio::test]
+    async fn get_items_id_only_sweep_query_omits_fields() {
+        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        let query = ItemQuery {
+            enable_images: Some(false),
+            enable_user_data: Some(false),
+            ..ItemQuery::new()
+        };
+        client.get_items(&query).await.expect("get_items");
+        let request = rx.await.expect("captured request");
+        let line = request.lines().next().unwrap_or_default();
+        assert!(!line.contains("fields="), "{line}");
+        assert!(line.contains("enableImages=false"), "{line}");
+        assert!(line.contains("enableUserData=false"), "{line}");
+    }
+
+    // --- Content-Encoding: gzip on API responses, identity on media bytes
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(bytes).expect("gzip write");
+        enc.finish().expect("gzip finish")
+    }
+
+    /// Like `capturing_json_server` but serves `body` with `Content-Encoding: gzip`.
+    async fn capturing_gzip_server(
+        body: Vec<u8>,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&buf).to_string());
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    #[tokio::test]
+    async fn api_request_advertises_gzip_and_decodes_a_gzip_response() {
+        let (base_url, rx) =
+            capturing_gzip_server(gzip(br#"{"Items":[],"TotalRecordCount":0}"#)).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        let result = client
+            .get_items(&ItemQuery::new())
+            .await
+            .expect("gzip body decodes");
+        assert!(result.items.is_empty());
+        let request = rx.await.expect("captured request").to_ascii_lowercase();
+        let line = request
+            .lines()
+            .find(|l| l.starts_with("accept-encoding:"))
+            .expect("accept-encoding header present");
+        assert!(line.contains("gzip"), "{line}");
+    }
+
+    /// The cap bounds decoded bytes: a small gzip body that inflates past it is refused.
+    #[tokio::test]
+    async fn read_capped_body_caps_decoded_bytes_not_compressed_bytes() {
+        let decoded = vec![b'x'; 256 * 1024];
+        let compressed = gzip(&decoded);
+        assert!(
+            compressed.len() < 1024,
+            "fixture must compress under the cap"
+        );
+        let (base_url, _rx) = capturing_gzip_server(compressed).await;
+        let resp = reqwest::Client::new()
+            .get(&base_url)
+            .send()
+            .await
+            .expect("request");
+        let err = read_capped_body(resp, 1024, "/test")
+            .await
+            .expect_err("decoded size exceeds the cap");
+        assert!(
+            matches!(&err, ApiError::Decode(msg) if msg.contains("exceeded")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_stream_head_requests_identity_encoding() {
+        let (base_url, rx) = capturing_json_server("x".repeat(16)).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        client
+            .warm_stream_head("item-1", 16)
+            .await
+            .expect("warm_stream_head");
+        let request = rx.await.expect("captured request").to_ascii_lowercase();
+        assert!(
+            request
+                .lines()
+                .any(|l| l.trim() == "accept-encoding: identity"),
+            "{request}"
+        );
+        assert!(!request.contains("gzip"), "{request}");
     }
 
     // --- Incremental delta sync: ItemQuery.min_date_last_saved ------------

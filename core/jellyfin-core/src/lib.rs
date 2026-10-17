@@ -13,7 +13,9 @@ pub use device_profile::{
     VideoCodec, VideoCodecCaps, VideoProfileLevel,
 };
 pub use event_bus::{EventBus, EventBusHandle};
-pub use reporting::{FinalDelivery, ReportingSession};
+pub use reporting::{
+    pending_local_item_ids, supersede, FinalDelivery, ReportingSession, Superseded,
+};
 
 use jellyfin_api::models::{MediaSourceInfo, PlaybackInfoResponse};
 #[cfg(test)]

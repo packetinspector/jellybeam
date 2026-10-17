@@ -9,7 +9,7 @@
 //! them owns the Stopped report, so the server never sees it twice. None of this survives process
 //! exit.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -88,22 +88,395 @@ enum Cmd {
     },
 }
 
-/// Held by whichever side owns the final Stopped report and dropped once it has landed or its
-/// retries gave up, which settles the matching [`FinalDelivery`].
-type DeliverySlot = Arc<Mutex<Option<oneshot::Sender<()>>>>;
+/// Held by whichever side owns the final Stopped report; dropping it on any path (landed, retries
+/// gave up, superseded, dedup, abort) releases the item's [`PendingHold`] and then settles the
+/// matching [`FinalDelivery`] (docs/07 Watch state).
+struct Delivery {
+    // Declared first so the item is released before the waiter wakes.
+    hold: PendingHold,
+    _settled: oneshot::Sender<()>,
+}
 
-fn take_delivery(slot: &DeliverySlot) -> Option<oneshot::Sender<()>> {
+impl Delivery {
+    /// Resolves once a newer action cancelled this delivery (docs/07 Watch state, Ordering).
+    async fn wait_cancelled(&self) {
+        match self.hold.cancel() {
+            Some(cancel) => {
+                cancel
+                    .wait_for(|state| state == CancelState::Cancelled)
+                    .await
+            }
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Resolves once the delivery is no longer paused by a pending mark.
+    async fn wait_unpaused(&self) {
+        if let Some(cancel) = self.hold.cancel() {
+            cancel.wait_for(|state| state != CancelState::Paused).await;
+        }
+    }
+}
+
+/// Sleeps `delay`; returns false, without finishing it, if the delivery is cancelled meanwhile.
+async fn sleep_unless_cancelled(delay: Duration, delivery: Option<&Delivery>) -> bool {
+    let Some(delivery) = delivery else {
+        tokio::time::sleep(delay).await;
+        return true;
+    };
+    tokio::select! {
+        () = tokio::time::sleep(delay) => true,
+        () = delivery.wait_cancelled() => false,
+    }
+}
+
+/// What became of one request a final delivery tried to send.
+enum Sent {
+    Done(Result<(), ApiError>),
+    /// A mark is pending on the item: nothing was sent, and the delivery may resume.
+    Paused,
+    /// A newer action cancelled the delivery: nothing was sent, and nothing will be.
+    Cancelled,
+}
+
+/// One request of a final delivery (the Start-repair and the Stopped alike), counted on the wire
+/// for [`supersede`] to wait on; nothing is sent while the delivery is paused or cancelled.
+async fn send_final_request(
+    sink: &Arc<dyn ReportSink>,
+    delivery: Option<&Delivery>,
+    report: PlaybackReport,
+) -> Sent {
+    let _attempt = match delivery.map(|delivery| delivery.hold.begin_attempt()) {
+        Some(Begin::Go(attempt)) => Some(attempt),
+        Some(Begin::Paused) => return Sent::Paused,
+        Some(Begin::Cancelled) => return Sent::Cancelled,
+        None => None,
+    };
+    Sent::Done(sink.report(report).await)
+}
+
+/// [`send_final_request`] for the flush loop: waits out a pause, so `None` means cancelled.
+async fn send_final_request_waiting(
+    sink: &Arc<dyn ReportSink>,
+    delivery: Option<&Delivery>,
+    report: &PlaybackReport,
+) -> Option<Result<(), ApiError>> {
+    loop {
+        match send_final_request(sink, delivery, report.clone()).await {
+            Sent::Done(result) => return Some(result),
+            Sent::Cancelled => return None,
+            Sent::Paused => delivery?.wait_unpaused().await,
+        }
+    }
+}
+
+type DeliverySlot = Arc<Mutex<Option<Delivery>>>;
+
+fn take_delivery(slot: &DeliverySlot) -> Option<Delivery> {
     slot.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
-/// Settles once the server has the final Stopped report, or its bounded retries gave up; work
-/// that the server must see after Stopped (mark played, recounts) waits on this, not on `stop()`.
-pub struct FinalDelivery(oneshot::Receiver<()>);
+/// Settles once the server has the final Stopped report, its bounded retries gave up, or a newer
+/// action cancelled it; work that the server must see after Stopped (mark played, recounts)
+/// waits on this, not on `stop()`.
+pub struct FinalDelivery {
+    settled: oneshot::Receiver<()>,
+    cancel: Arc<Cancel>,
+}
 
 impl FinalDelivery {
-    pub async fn settled(self) {
+    /// Returns whether a newer action cancelled the delivery (docs/07 Watch state, Ordering).
+    pub async fn settled(self) -> bool {
         // The sender only ever drops, so an error is the settle signal.
-        let _ = self.0.await;
+        let _ = self.settled.await;
+        self.cancel.state() == CancelState::Cancelled
+    }
+}
+
+/// Whether a settling delivery may send: a pending mark pauses it, a newer action cancels it for good.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CancelState {
+    Active,
+    Paused,
+    Cancelled,
+}
+
+/// The inputs of a [`CancelState`], so overlapping pauses and a cancel can never disagree.
+#[derive(Default)]
+struct CancelInputs {
+    pauses: usize,
+    cancelled: bool,
+}
+
+impl CancelInputs {
+    fn state(&self) -> CancelState {
+        if self.cancelled {
+            CancelState::Cancelled
+        } else if self.pauses > 0 {
+            CancelState::Paused
+        } else {
+            CancelState::Active
+        }
+    }
+}
+
+/// A settling delivery's state (docs/07 Watch state, Ordering); every change wakes its waiters.
+struct Cancel {
+    inputs: watch::Sender<CancelInputs>,
+    /// Whether a final request has begun, so any further one is a retry.
+    attempted: AtomicBool,
+}
+
+impl Cancel {
+    fn new() -> Self {
+        Self {
+            inputs: watch::channel(CancelInputs::default()).0,
+            attempted: AtomicBool::new(false),
+        }
+    }
+
+    fn state(&self) -> CancelState {
+        self.inputs.borrow().state()
+    }
+
+    fn pause(&self) {
+        self.inputs.send_modify(|inputs| inputs.pauses += 1);
+    }
+
+    fn resume(&self) {
+        self.inputs
+            .send_modify(|inputs| inputs.pauses = inputs.pauses.saturating_sub(1));
+    }
+
+    fn cancel(&self) {
+        self.inputs.send_modify(|inputs| inputs.cancelled = true);
+    }
+
+    /// Resolves once the state satisfies `wanted`.
+    async fn wait_for(&self, wanted: impl Fn(CancelState) -> bool) {
+        let mut inputs = self.inputs.subscribe();
+        // The sender lives in `self`, so the channel cannot close under this wait.
+        let _ = inputs.wait_for(|inputs| wanted(inputs.state())).await;
+    }
+}
+
+/// docs/07 Watch state, docs/18 §2.1: per canonical item id, the sessions still playing, the
+/// stopped ones whose final Stopped is unsettled, and the final Stopped attempts on the wire;
+/// refcounted so two holds release independently.
+#[derive(Default)]
+struct HoldCounts {
+    live: usize,
+    settling: Vec<Arc<Cancel>>,
+    attempts: usize,
+}
+
+impl HoldCounts {
+    /// Cancels the deliveries that already attempted: their next attempt is a retry.
+    fn cancel_retries(&self) {
+        self.settling
+            .iter()
+            .filter(|cancel| cancel.attempted.load(Ordering::Acquire))
+            .for_each(|cancel| cancel.cancel());
+    }
+
+    fn is_empty(&self) -> bool {
+        self.live == 0 && self.settling.is_empty() && self.attempts == 0
+    }
+}
+
+fn pending_registry() -> &'static Mutex<HashMap<String, HoldCounts>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, HoldCounts>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<String, HoldCounts>> {
+    pending_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The one place held counts are released: mutates the item's counts and removes the entry once
+/// nothing holds it, so no path can leave an emptied item pending.
+fn release(item_id: &str, change: impl FnOnce(&mut HoldCounts)) {
+    let mut registry = lock_registry();
+    if let Some(counts) = registry.get_mut(item_id) {
+        change(counts);
+        if counts.is_empty() {
+            registry.remove(item_id);
+        }
+    }
+}
+
+/// The registry key for an item id: lowercase, dashes stripped, so every spelling of one id matches.
+fn canonical_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| *c != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Wakes [`supersede`] whenever an item's final Stopped attempts on the wire reach zero.
+fn attempts_notify() -> &'static tokio::sync::Notify {
+    static NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    NOTIFY.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Keeps one item id in [`pending_local_item_ids`] from construction until drop.
+struct PendingHold {
+    item_id: String,
+    /// Set once the session has stopped and its final Stopped is unsettled.
+    settling: Option<Arc<Cancel>>,
+}
+
+impl PendingHold {
+    /// A new live hold on an item cancels the retries of that item's older settling deliveries:
+    /// the newest action wins (docs/07 Watch state, Ordering).
+    fn new(item_id: &str) -> Self {
+        let item_id = canonical_id(item_id);
+        {
+            let mut registry = lock_registry();
+            let counts = registry.entry(item_id.clone()).or_default();
+            counts.cancel_retries();
+            counts.live += 1;
+        }
+        Self {
+            item_id,
+            settling: None,
+        }
+    }
+
+    /// The session has stopped: from here the hold is a cancellable settling delivery.
+    fn begin_settling(&mut self) -> Arc<Cancel> {
+        if let Some(cancel) = &self.settling {
+            return cancel.clone();
+        }
+        let cancel = Arc::new(Cancel::new());
+        if let Some(counts) = lock_registry().get_mut(&self.item_id) {
+            counts.live -= 1;
+            counts.settling.push(cancel.clone());
+        }
+        self.settling = Some(cancel.clone());
+        cancel
+    }
+
+    fn cancel(&self) -> Option<&Arc<Cancel>> {
+        self.settling.as_ref()
+    }
+
+    /// Counts a final request on the wire unless the delivery is paused or cancelled; checked
+    /// under the registry lock so [`supersede`] never misses an attempt that then starts.
+    fn begin_attempt(&self) -> Begin {
+        let Some(cancel) = self.settling.as_ref() else {
+            return Begin::Cancelled;
+        };
+        let mut registry = lock_registry();
+        match cancel.state() {
+            CancelState::Cancelled => return Begin::Cancelled,
+            CancelState::Paused => return Begin::Paused,
+            CancelState::Active => {}
+        }
+        let Some(counts) = registry.get_mut(&self.item_id) else {
+            return Begin::Cancelled;
+        };
+        counts.attempts += 1;
+        cancel.attempted.store(true, Ordering::Release);
+        Begin::Go(Attempt {
+            item_id: self.item_id.clone(),
+        })
+    }
+}
+
+impl Drop for PendingHold {
+    fn drop(&mut self) {
+        release(&self.item_id, |counts| match &self.settling {
+            Some(cancel) => counts.settling.retain(|c| !Arc::ptr_eq(c, cancel)),
+            None => counts.live -= 1,
+        });
+    }
+}
+
+/// Whether a final request may go out now (see [`PendingHold::begin_attempt`]).
+enum Begin {
+    Go(Attempt),
+    Paused,
+    Cancelled,
+}
+
+/// A final request on the wire.
+struct Attempt {
+    item_id: String,
+}
+
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        release(&self.item_id, |counts| counts.attempts -= 1);
+        attempts_notify().notify_waiters();
+    }
+}
+
+/// docs/07 Watch state: canonical (lowercase, undashed) ids held by a live session or an unsettled
+/// final delivery, so a played-state sweep never reverts a local outcome the server hasn't seen.
+pub fn pending_local_item_ids() -> HashSet<String> {
+    lock_registry().keys().cloned().collect()
+}
+
+/// A pause on the settling deliveries of some items, held by the action that supersedes them.
+#[must_use = "dropping the guard resumes the paused deliveries; commit it once the action succeeded"]
+pub struct Superseded {
+    paused: Vec<Arc<Cancel>>,
+}
+
+impl Superseded {
+    /// The superseding action succeeded: the paused deliveries are cancelled for good.
+    pub fn commit(mut self) {
+        for cancel in std::mem::take(&mut self.paused) {
+            cancel.cancel();
+        }
+    }
+}
+
+impl Drop for Superseded {
+    /// Dropped uncommitted, the action failed: the paused deliveries resume.
+    fn drop(&mut self) {
+        for cancel in &self.paused {
+            cancel.resume();
+        }
+    }
+}
+
+/// docs/07 Watch state, Ordering: pauses every settling final delivery of `item_ids` now, so none
+/// starts another request, and resolves to a [`Superseded`] guard once none is on the wire; the
+/// action that supersedes them then reaches the server after them, and commits the guard on
+/// success. Live sessions are never affected, and a request on the wire is bounded by the HTTP
+/// client's request timeout.
+pub fn supersede(item_ids: &[&str]) -> impl Future<Output = Superseded> {
+    let ids: Vec<String> = item_ids.iter().map(|id| canonical_id(id)).collect();
+    let guard = {
+        let registry = lock_registry();
+        let paused: Vec<Arc<Cancel>> = ids
+            .iter()
+            .filter_map(|id| registry.get(id))
+            .flat_map(|counts| counts.settling.iter().cloned())
+            .collect();
+        paused.iter().for_each(|cancel| cancel.pause());
+        Superseded { paused }
+    };
+    async move {
+        loop {
+            let notified = attempts_notify().notified();
+            tokio::pin!(notified);
+            // Enabled before the check so a decrement between check and await still wakes us.
+            notified.as_mut().enable();
+            let on_the_wire = {
+                let registry = lock_registry();
+                ids.iter()
+                    .any(|id| registry.get(id).is_some_and(|counts| counts.attempts > 0))
+            };
+            if !on_the_wire {
+                return guard;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -132,6 +505,8 @@ pub struct ReportingSession {
     start_acked: Arc<AtomicBool>,
     /// Final Stopped delivery owner, shared with `run()` (see [`FINAL_UNCLAIMED`]).
     final_owner: Arc<AtomicU8>,
+    /// Held for the session's lifetime; `stop()` moves it into the final [`Delivery`].
+    hold: Option<PendingHold>,
 }
 
 impl ReportingSession {
@@ -144,6 +519,7 @@ impl ReportingSession {
         let (position_tx, position_rx) = watch::channel(0i64);
         let start_acked = Arc::new(AtomicBool::new(false));
         let final_owner = Arc::new(AtomicU8::new(FINAL_UNCLAIMED));
+        let hold = PendingHold::new(&ctx.item_id);
         let task = tokio::spawn(run(
             sink.clone(),
             ctx.clone(),
@@ -161,6 +537,7 @@ impl ReportingSession {
             stopped: false,
             start_acked,
             final_owner,
+            hold: Some(hold),
         }
     }
 
@@ -202,50 +579,65 @@ impl ReportingSession {
         &self.ctx
     }
 
-    /// Final position report; consumes the session. The actor delivers it, or, if the actor
-    /// hasn't begun within [`STOP_ACK_TIMEOUT`], it's aborted and the report goes to the shared
-    /// [`FlushQueue`] (which re-establishes Start first if never acked). Doesn't survive process
-    /// exit. Returns once delivery is handed off; the returned [`FinalDelivery`] settles when it
-    /// lands.
-    pub async fn stop(mut self, ticks: i64) -> FinalDelivery {
+    /// Final position report; consumes the session. The item becomes a settling delivery, and the
+    /// actor is handed the report, when this is called, not when the future is first polled
+    /// (docs/07 Watch state, Ordering). The actor delivers it, or, if it hasn't begun within
+    /// [`STOP_ACK_TIMEOUT`], it's aborted and the report goes to the shared [`FlushQueue`] (which
+    /// re-establishes Start first if never acked). Doesn't survive process exit. The future
+    /// resolves once delivery is handed off; the [`FinalDelivery`] settles when it lands.
+    pub fn stop(mut self, ticks: i64) -> impl Future<Output = FinalDelivery> {
         self.stopped = true;
         let (completion_tx, completion_rx) = oneshot::channel();
         let (delivered_tx, delivered_rx) = oneshot::channel();
-        let delivered: DeliverySlot = Arc::new(Mutex::new(Some(delivered_tx)));
-        let finished = FinalDelivery(delivered_rx);
-        if let Ok(()) = self.cmd_tx.send(Cmd::Stop {
-            ticks,
-            completion: completion_tx,
-            delivered: delivered.clone(),
-        }) {
-            if let Ok(Ok(())) = tokio::time::timeout(STOP_ACK_TIMEOUT, completion_rx).await {
-                return finished;
+        let mut hold = self.hold.take().expect("hold set until stop");
+        let cancel = hold.begin_settling();
+        let delivered: DeliverySlot = Arc::new(Mutex::new(Some(Delivery {
+            hold,
+            _settled: delivered_tx,
+        })));
+        let finished = FinalDelivery {
+            settled: delivered_rx,
+            cancel,
+        };
+        let sent = self
+            .cmd_tx
+            .send(Cmd::Stop {
+                ticks,
+                completion: completion_tx,
+                delivered: delivered.clone(),
+            })
+            .is_ok();
+        async move {
+            if sent {
+                if let Ok(Ok(())) = tokio::time::timeout(STOP_ACK_TIMEOUT, completion_rx).await {
+                    return finished;
+                }
+                // The actor already sending the Stopped finishes it (and queues its own retry).
+                if !claim_final(&self.final_owner, FINAL_BY_CALLER) {
+                    return finished;
+                }
+                // Abort so a later Start/Progress retry can't land after the final report.
+                self.task.abort();
             }
-            // The actor already sending the Stopped finishes it (and queues its own retry).
-            if !claim_final(&self.final_owner, FINAL_BY_CALLER) {
-                return finished;
-            }
-            // Abort so a later Start/Progress retry can't land after the final report.
-            self.task.abort();
+            // Bounded background retry, never inline (would hold `stop()` for a full request
+            // timeout); also repairs a never-acked Start (see `flush_with_cap`).
+            let report = build_report(
+                &self.ctx,
+                PlaybackReportKind::Stopped,
+                ticks,
+                DEFAULT_VOLUME,
+                None,
+                None,
+            );
+            flush_queue().enqueue(
+                self.sink.clone(),
+                self.ctx.clone(),
+                self.start_acked.load(Ordering::Relaxed),
+                report,
+                take_delivery(&delivered),
+            );
+            finished
         }
-        // Bounded background retry, never inline (would hold `stop()` for a full request timeout);
-        // also repairs a never-acked Start (see `flush_with_cap`).
-        let report = build_report(
-            &self.ctx,
-            PlaybackReportKind::Stopped,
-            ticks,
-            DEFAULT_VOLUME,
-            None,
-            None,
-        );
-        flush_queue().enqueue(
-            self.sink.clone(),
-            self.ctx.clone(),
-            self.start_acked.load(Ordering::Relaxed),
-            report,
-            take_delivery(&delivered),
-        );
-        finished
     }
 }
 
@@ -257,7 +649,7 @@ async fn send_final_stopped(
     ctx: &ReportContext,
     start_acked: bool,
     ticks: i64,
-    delivered: Option<oneshot::Sender<()>>,
+    delivered: Option<Delivery>,
 ) {
     let report = build_report(
         ctx,
@@ -276,19 +668,28 @@ async fn send_final_stopped(
             None,
             None,
         );
-        if (sink.report(start_report).await).is_err() {
-            tracing::warn!(
-                "start-repair before final stopped failed inline; queuing \
-                 ordered pair for bounded background retry"
-            );
-            flush_queue().enqueue(sink.clone(), ctx.clone(), false, report, delivered);
-            return;
+        match send_final_request(sink, delivered.as_ref(), start_report).await {
+            Sent::Done(Ok(())) => {}
+            Sent::Cancelled => return,
+            Sent::Paused | Sent::Done(Err(_)) => {
+                tracing::warn!(
+                    "start-repair before final stopped did not land inline; queuing \
+                     ordered pair for bounded background retry"
+                );
+                flush_queue().enqueue(sink.clone(), ctx.clone(), false, report, delivered);
+                return;
+            }
         }
     }
-    if (sink.report(report.clone()).await).is_err() {
-        tracing::warn!("stopped report failed inline; queuing for bounded background retry");
-        // Start is established by this point, so the flush only needs to deliver the Stopped.
-        flush_queue().enqueue(sink.clone(), ctx.clone(), true, report, delivered);
+    match send_final_request(sink, delivered.as_ref(), report.clone()).await {
+        Sent::Done(Ok(())) | Sent::Cancelled => {}
+        Sent::Paused | Sent::Done(Err(_)) => {
+            tracing::warn!(
+                "stopped report did not land inline; queuing for bounded background retry"
+            );
+            // Start is established by this point, so the flush only needs to deliver the Stopped.
+            flush_queue().enqueue(sink.clone(), ctx.clone(), true, report, delivered);
+        }
     }
 }
 
@@ -489,6 +890,7 @@ async fn send_retrying(sink: &Arc<dyn ReportSink>, report: PlaybackReport) -> bo
 /// `play_session_id`. A lazily-initialized process-wide singleton (see [`flush_queue`]) since
 /// `ReportingSession` has no shared owner.
 struct FlushQueue {
+    /// `play_session_id`s whose Stopped report is being flushed.
     in_flight: Mutex<HashSet<String>>,
 }
 
@@ -508,7 +910,7 @@ impl FlushQueue {
         ctx: ReportContext,
         start_acked: bool,
         report: PlaybackReport,
-        delivered: Option<oneshot::Sender<()>>,
+        delivered: Option<Delivery>,
     ) {
         let session_id = report.play_session_id.clone();
         let already_in_flight = {
@@ -525,7 +927,7 @@ impl FlushQueue {
         }
 
         tokio::spawn(async move {
-            flush_with_cap(&sink, &ctx, start_acked, &report).await;
+            flush_with_cap(&sink, &ctx, start_acked, &report, delivered.as_ref()).await;
             self.in_flight
                 .lock()
                 .expect("flush queue lock")
@@ -543,12 +945,14 @@ fn flush_queue() -> &'static FlushQueue {
 /// Capped-backoff retry loop backing [`FlushQueue`]: retries until success or
 /// [`FLUSH_MAX_DURATION`] elapses, then gives up loudly. When `start_acked == false`, `Start` is
 /// resent first (Jellyfin ignores a `Stopped` for a `play_session_id` it never saw a `Start` for),
-/// under the same deadline.
+/// under the same deadline. A paused `delivery` (docs/07 Watch state, Ordering) waits to resume; a
+/// cancelled one ends the loop before its next attempt, mid-backoff included.
 async fn flush_with_cap(
     sink: &Arc<dyn ReportSink>,
     ctx: &ReportContext,
     start_acked: bool,
     report: &PlaybackReport,
+    delivery: Option<&Delivery>,
 ) {
     let mut backoff = Backoff::new(RETRY_BASE, RETRY_CAP);
     let deadline = tokio::time::Instant::now() + FLUSH_MAX_DURATION;
@@ -563,9 +967,10 @@ async fn flush_with_cap(
             report.audio_stream_index,
             report.subtitle_stream_index,
         );
-        match sink.report(start_report).await {
-            Ok(()) => start_delivered = true,
-            Err(err) => {
+        match send_final_request_waiting(sink, delivery, &start_report).await {
+            None => return,
+            Some(Ok(())) => start_delivered = true,
+            Some(Err(err)) => {
                 let now = tokio::time::Instant::now();
                 if now >= deadline {
                     tracing::error!(
@@ -580,15 +985,17 @@ async fn flush_with_cap(
                     return;
                 }
                 let delay = backoff.next_delay().min(deadline - now);
-                tokio::time::sleep(delay).await;
+                if !sleep_unless_cancelled(delay, delivery).await {
+                    return;
+                }
             }
         }
     }
 
     loop {
-        match sink.report(report.clone()).await {
-            Ok(()) => return,
-            Err(err) => {
+        match send_final_request_waiting(sink, delivery, report).await {
+            None | Some(Ok(())) => return,
+            Some(Err(err)) => {
                 let now = tokio::time::Instant::now();
                 if now >= deadline {
                     tracing::error!(
@@ -602,7 +1009,9 @@ async fn flush_with_cap(
                     return;
                 }
                 let delay = backoff.next_delay().min(deadline - now);
-                tokio::time::sleep(delay).await;
+                if !sleep_unless_cancelled(delay, delivery).await {
+                    return;
+                }
             }
         }
     }
@@ -715,9 +1124,15 @@ mod tests {
         }
     }
 
+    /// A fresh item id per call: the hold registry is process-wide, so tests must not share items.
+    fn unique_item() -> String {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        format!("item-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
     fn ctx() -> ReportContext {
         ReportContext {
-            item_id: "item".into(),
+            item_id: unique_item(),
             media_source_id: "source".into(),
             play_session_id: "session".into(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
@@ -728,7 +1143,7 @@ mod tests {
     /// [`FlushQueue`] singleton don't collide.
     fn ctx_with_session(play_session_id: &str) -> ReportContext {
         ReportContext {
-            item_id: "item".into(),
+            item_id: unique_item(),
             media_source_id: "source".into(),
             play_session_id: play_session_id.into(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
@@ -1195,6 +1610,634 @@ mod tests {
         }
     }
 
+    // --- pending_local_item_ids (docs/07 Watch state, docs/18 §2.1) -----
+
+    const STOPPED_OK: u8 = 0;
+    const STOPPED_FAILS: u8 = 1;
+    const STOPPED_GATED: u8 = 2;
+
+    /// Start always lands (the very first request hangs when `first_hangs`); Stopped follows
+    /// `stopped_mode`.
+    struct PendingSink {
+        stopped_mode: std::sync::atomic::AtomicU8,
+        first_hangs: bool,
+        requests: std::sync::atomic::AtomicUsize,
+        stopped_seen: std::sync::atomic::AtomicUsize,
+        gate: Notify,
+    }
+
+    impl PendingSink {
+        fn new(stopped_mode: u8, first_hangs: bool) -> Arc<Self> {
+            Arc::new(Self {
+                stopped_mode: std::sync::atomic::AtomicU8::new(stopped_mode),
+                first_hangs,
+                requests: std::sync::atomic::AtomicUsize::new(0),
+                stopped_seen: std::sync::atomic::AtomicUsize::new(0),
+                gate: Notify::new(),
+            })
+        }
+    }
+
+    impl ReportSink for PendingSink {
+        fn report(&self, report: PlaybackReport) -> BoxFuture<'_, Result<(), ApiError>> {
+            Box::pin(async move {
+                if self.requests.fetch_add(1, Ordering::AcqRel) == 0 && self.first_hangs {
+                    std::future::pending::<()>().await;
+                }
+                if !matches!(report.kind, PlaybackReportKind::Stopped) {
+                    return Ok(());
+                }
+                self.stopped_seen.fetch_add(1, Ordering::AcqRel);
+                match self.stopped_mode.load(Ordering::Acquire) {
+                    STOPPED_FAILS => Err(ApiError::Transport("simulated failure".into())),
+                    STOPPED_GATED => {
+                        self.gate.notified().await;
+                        if self.stopped_mode.load(Ordering::Acquire) == STOPPED_FAILS {
+                            return Err(ApiError::Transport("simulated failure".into()));
+                        }
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                }
+            })
+        }
+    }
+
+    /// The first `failing_starts` Starts fail, or the first hangs when that is 0; later ones wait on
+    /// `gate`, everything else lands; records each kind.
+    #[derive(Default)]
+    struct StartGateSink {
+        failing_starts: usize,
+        reports: Mutex<Vec<&'static str>>,
+        starts: std::sync::atomic::AtomicUsize,
+        gate: Notify,
+    }
+
+    impl StartGateSink {
+        fn kinds(&self) -> Vec<&'static str> {
+            self.reports.lock().expect("lock").clone()
+        }
+    }
+
+    impl ReportSink for StartGateSink {
+        fn report(&self, report: PlaybackReport) -> BoxFuture<'_, Result<(), ApiError>> {
+            Box::pin(async move {
+                if matches!(report.kind, PlaybackReportKind::Start) {
+                    self.reports.lock().expect("lock").push("Start");
+                    let nth = self.starts.fetch_add(1, Ordering::AcqRel);
+                    if self.failing_starts == 0 && nth == 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    if nth < self.failing_starts {
+                        return Err(ApiError::Transport("simulated failure".into()));
+                    }
+                    self.gate.notified().await;
+                } else {
+                    let kind = match report.kind {
+                        PlaybackReportKind::Stopped => "Stopped",
+                        _ => "Progress",
+                    };
+                    self.reports.lock().expect("lock").push(kind);
+                }
+                Ok(())
+            })
+        }
+    }
+
+    fn pending_ctx(item_id: &str, play_session_id: &str) -> ReportContext {
+        let mut ctx = ctx_with_session(play_session_id);
+        ctx.item_id = item_id.into();
+        ctx
+    }
+
+    fn is_pending(item_id: &str) -> bool {
+        pending_local_item_ids().contains(&canonical_id(item_id))
+    }
+
+    async fn let_tasks_run() {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn item_is_pending_for_the_session_then_its_actor_inline_final_delivery_then_the_hold() {
+        let item = "pending-actor-inline";
+        let sink = PendingSink::new(STOPPED_GATED, false);
+        let session =
+            ReportingSession::start_with_sink(sink.clone(), pending_ctx(item, "pending-actor-s"));
+        let_tasks_run().await;
+        assert!(
+            is_pending(item),
+            "before stop: the live session holds the item"
+        );
+
+        let delivery = session.stop(1).await;
+        assert!(is_pending(item), "stop sent, not acked");
+
+        sink.gate.notify_one();
+        delivery.settled().await;
+        assert!(!is_pending(item), "settled: the hold is released");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn item_stays_pending_through_a_caller_claimed_final_delivery() {
+        let item = "pending-caller-claimed";
+        let sink = PendingSink::new(STOPPED_GATED, true);
+        let session =
+            ReportingSession::start_with_sink(sink.clone(), pending_ctx(item, "pending-caller-s"));
+        let_tasks_run().await;
+        assert!(is_pending(item));
+
+        // The actor is stuck in Start, so stop() times out and enqueues the flush itself.
+        let delivery = session.stop(1).await;
+        let_tasks_run().await;
+        assert!(is_pending(item), "stop sent, not acked");
+
+        sink.gate.notify_one();
+        delivery.settled().await;
+        assert!(!is_pending(item), "settled: the hold is released");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn item_stays_pending_through_flush_queue_retries_and_after_they_land() {
+        let item = "pending-flush-retry";
+        let sink = PendingSink::new(STOPPED_FAILS, false);
+        let session =
+            ReportingSession::start_with_sink(sink.clone(), pending_ctx(item, "pending-retry-s"));
+        let_tasks_run().await;
+
+        let delivery = session.stop(1).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(is_pending(item), "stop sent, retrying, not acked");
+
+        sink.stopped_mode.store(STOPPED_OK, Ordering::Release);
+        delivery.settled().await;
+        assert!(!is_pending(item), "acked: the hold is released");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn item_is_released_with_the_hold_after_the_flush_gives_up() {
+        let item = "pending-gave-up";
+        let sink = PendingSink::new(STOPPED_FAILS, false);
+        let session =
+            ReportingSession::start_with_sink(sink.clone(), pending_ctx(item, "pending-giveup-s"));
+        let_tasks_run().await;
+
+        let delivery = session.stop(1).await;
+        assert!(is_pending(item));
+        delivery.settled().await;
+        assert!(!is_pending(item), "gave up: the hold is released");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registry_keys_are_canonical_across_spellings() {
+        assert_eq!(
+            canonical_id("0A1B2C3D-0000-0000-0000-000000000001"),
+            "0a1b2c3d000000000000000000000001"
+        );
+        let session = ReportingSession::start_with_sink(
+            PendingSink::new(STOPPED_OK, false),
+            pending_ctx("0A1B2C3D-0000-0000-0000-0000000000C2", "pending-canon-s"),
+        );
+        assert!(pending_local_item_ids().contains("0a1b2c3d0000000000000000000000c2"));
+        session.abandon();
+    }
+
+    /// How many Stopped reports `sink` has seen.
+    fn stopped_count(sink: &PendingSink) -> usize {
+        sink.stopped_seen.load(Ordering::Acquire)
+    }
+
+    fn registry_holds(item_id: &str) -> bool {
+        lock_registry().contains_key(&canonical_id(item_id))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_makes_the_item_settling_before_the_future_is_polled() {
+        let item = "settle-eager";
+        let sink = PendingSink::new(STOPPED_GATED, false);
+        let session =
+            ReportingSession::start_with_sink(sink.clone(), pending_ctx(item, "settle-eager-s"));
+        let_tasks_run().await;
+        assert_eq!(lock_registry()[&canonical_id(item)].live, 1);
+
+        let stop = session.stop(1);
+        {
+            let registry = lock_registry();
+            let counts = &registry[&canonical_id(item)];
+            assert_eq!((counts.live, counts.settling.len()), (0, 1));
+        }
+        sink.gate.notify_one();
+        stop.await.settled().await;
+        assert!(!registry_holds(item));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supersede_cancels_a_stopped_in_backoff_and_returns_at_once() {
+        let item = "supersede-backoff";
+        let sink = PendingSink::new(STOPPED_FAILS, false);
+        let session = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "supersede-backoff-s"),
+        );
+        let_tasks_run().await;
+        let delivery = session.stop(1).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let attempts = stopped_count(&sink);
+        assert!(attempts >= 2, "the Stopped is retrying");
+
+        let start = tokio::time::Instant::now();
+        supersede(&[item]).await.commit();
+        assert_eq!(start.elapsed(), Duration::ZERO);
+
+        let_tasks_run().await;
+        assert!(
+            !registry_holds(item),
+            "released without waiting out the backoff"
+        );
+        delivery.settled().await;
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(
+            stopped_count(&sink),
+            attempts,
+            "no attempt after the supersede"
+        );
+        assert!(!is_pending(item));
+        assert!(!registry_holds(item));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supersede_waits_only_for_a_stopped_on_the_wire() {
+        let item = "supersede-wire";
+        let sink = PendingSink::new(STOPPED_GATED, false);
+        let session =
+            ReportingSession::start_with_sink(sink.clone(), pending_ctx(item, "supersede-wire-s"));
+        let_tasks_run().await;
+        let delivery = session.stop(1).await;
+        let_tasks_run().await;
+        assert_eq!(stopped_count(&sink), 1);
+
+        let mut waiting = Box::pin(supersede(&[item]));
+        tokio::select! {
+            _ = &mut waiting => panic!("supersede returned while the Stopped is on the wire"),
+            () = tokio::time::sleep(Duration::from_secs(600)) => {}
+        }
+        sink.gate.notify_one();
+        waiting.await.commit();
+        delivery.settled().await;
+        assert!(!registry_holds(item));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replay_does_not_cancel_a_stopped_that_has_not_been_attempted() {
+        let item = "supersede-replay-unsent";
+        let sink = PendingSink::new(STOPPED_OK, false);
+        let first = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "replay-unsent-first-s"),
+        );
+        let_tasks_run().await;
+
+        let stop = first.stop(1);
+        let second = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "replay-unsent-second-s"),
+        );
+        stop.await.settled().await;
+        assert_eq!(stopped_count(&sink), 1, "the first attempt still goes out");
+        second.abandon();
+        assert!(!registry_holds(item));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_on_the_wire_that_fails_after_the_supersede_is_not_retried() {
+        let item = "supersede-wire-fails";
+        let sink = PendingSink::new(STOPPED_GATED, false);
+        let session = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "supersede-wire-fails-s"),
+        );
+        let_tasks_run().await;
+        let delivery = session.stop(1).await;
+        let_tasks_run().await;
+
+        let waiting = supersede(&[item]);
+        sink.stopped_mode.store(STOPPED_FAILS, Ordering::Release);
+        sink.gate.notify_one();
+        waiting.await.commit();
+        delivery.settled().await;
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(stopped_count(&sink), 1);
+        assert!(!registry_holds(item));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_superseded_before_its_first_attempt_is_never_sent() {
+        let item = "supersede-unsent";
+        let sink = PendingSink::new(STOPPED_OK, false);
+        let session = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "supersede-unsent-s"),
+        );
+        let_tasks_run().await;
+
+        let stop = session.stop(1);
+        supersede(&[item]).await.commit();
+        let delivery = stop.await;
+        delivery.settled().await;
+        assert_eq!(stopped_count(&sink), 0);
+        assert!(!registry_holds(item));
+    }
+
+    /// docs/07 Watch state, Ordering: a pending mark pauses the delivery (no attempt, not even in
+    /// the flush loop); a failed mark resumes it, and it lands without having been dropped.
+    #[tokio::test(start_paused = true)]
+    async fn a_paused_stopped_sends_nothing_and_resumes_when_the_guard_drops() {
+        let item = "supersede-pause-resume";
+        let sink = PendingSink::new(STOPPED_FAILS, false);
+        let session = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "supersede-pause-resume-s"),
+        );
+        let_tasks_run().await;
+        let delivery = session.stop(1).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let guard = supersede(&[item]).await;
+        let_tasks_run().await;
+        let attempts = stopped_count(&sink);
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert_eq!(stopped_count(&sink), attempts, "paused: nothing is sent");
+        assert!(is_pending(item), "paused: the hold stays");
+
+        drop(guard);
+        sink.stopped_mode.store(STOPPED_OK, Ordering::Release);
+        assert!(!delivery.settled().await, "resumed, not cancelled");
+        assert_eq!(
+            stopped_count(&sink),
+            attempts + 1,
+            "the Stopped landed once"
+        );
+        assert!(!registry_holds(item));
+    }
+
+    /// The actor hands a Stopped it finds paused to the flush queue instead of dropping it.
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_paused_before_its_first_attempt_lands_once_resumed() {
+        let item = "supersede-pause-unsent";
+        let sink = PendingSink::new(STOPPED_OK, false);
+        let session = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "supersede-pause-unsent-s"),
+        );
+        let_tasks_run().await;
+
+        let stop = session.stop(1);
+        let guard = supersede(&[item]).await;
+        let delivery = stop.await;
+        let_tasks_run().await;
+        assert_eq!(stopped_count(&sink), 0, "paused: not sent");
+        assert!(is_pending(item));
+
+        drop(guard);
+        assert!(!delivery.settled().await);
+        assert_eq!(stopped_count(&sink), 1);
+        assert!(!registry_holds(item));
+    }
+
+    /// A Start that repairs the final delivery is a request on the wire too: the superseding
+    /// action waits for it, and nothing is sent after the commit.
+    #[tokio::test(start_paused = true)]
+    async fn supersede_waits_for_a_start_repair_and_nothing_follows_the_commit() {
+        let item = "supersede-start-repair";
+        let sink = Arc::new(StartGateSink::default());
+        let session = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "supersede-start-repair-s"),
+        );
+        let_tasks_run().await;
+        // The actor is stuck in its first Start, so stop() hands the pair to the flush queue.
+        let delivery = session.stop(1).await;
+        let_tasks_run().await;
+        assert_eq!(
+            sink.kinds(),
+            ["Start", "Start"],
+            "the repair is on the wire"
+        );
+
+        let mut waiting = Box::pin(supersede(&[item]));
+        tokio::select! {
+            _ = &mut waiting => panic!("supersede returned while the Start-repair is on the wire"),
+            () = tokio::time::sleep(Duration::from_secs(600)) => {}
+        }
+        sink.gate.notify_one();
+        let guard = waiting.await;
+        let_tasks_run().await;
+        assert_eq!(
+            sink.kinds(),
+            ["Start", "Start"],
+            "paused: no Stopped follows the repair"
+        );
+
+        guard.commit();
+        assert!(delivery.settled().await, "cancelled by the newer action");
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(sink.kinds(), ["Start", "Start"], "nothing after the commit");
+        assert!(!registry_holds(item));
+    }
+
+    /// The actor's own Start-repair (the Start never acked) is counted on the wire as well.
+    #[tokio::test(start_paused = true)]
+    async fn supersede_waits_for_the_actors_start_repair() {
+        let item = "supersede-actor-repair";
+        let sink = Arc::new(StartGateSink {
+            failing_starts: TRANSIENT_REPORT_MAX_ATTEMPTS as usize,
+            ..Default::default()
+        });
+        let session = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "supersede-actor-repair-s"),
+        );
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_secs(4)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(!session.start_acked.load(Ordering::Relaxed));
+        let delivery = session.stop(1).await;
+        let_tasks_run().await;
+        assert_eq!(
+            sink.kinds().len(),
+            TRANSIENT_REPORT_MAX_ATTEMPTS as usize + 1
+        );
+
+        let mut waiting = Box::pin(supersede(&[item]));
+        tokio::select! {
+            _ = &mut waiting => panic!("supersede returned while the Start-repair is on the wire"),
+            () = tokio::time::sleep(Duration::from_secs(600)) => {}
+        }
+        sink.gate.notify_one();
+        let guard = waiting.await;
+        guard.commit();
+        assert!(delivery.settled().await);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(
+            !sink.kinds().contains(&"Stopped"),
+            "nothing follows the commit"
+        );
+        assert!(!registry_holds(item));
+    }
+
+    #[test]
+    fn begin_attempt_is_active_paused_or_cancelled() {
+        let mut hold = PendingHold::new("begin-attempt-tri");
+        let cancel = hold.begin_settling();
+        assert!(matches!(hold.begin_attempt(), Begin::Go(_)));
+        cancel.pause();
+        assert!(matches!(hold.begin_attempt(), Begin::Paused));
+        cancel.resume();
+        assert!(matches!(hold.begin_attempt(), Begin::Go(_)));
+        cancel.cancel();
+        assert!(matches!(hold.begin_attempt(), Begin::Cancelled));
+        drop(hold);
+        assert!(!registry_holds("begin-attempt-tri"));
+    }
+
+    #[test]
+    fn overlapping_pauses_resume_only_when_all_are_gone_and_a_cancel_is_final() {
+        let cancel = Cancel::new();
+        cancel.pause();
+        cancel.pause();
+        cancel.resume();
+        assert_eq!(cancel.state(), CancelState::Paused);
+        cancel.resume();
+        assert_eq!(cancel.state(), CancelState::Active);
+        cancel.pause();
+        cancel.cancel();
+        cancel.resume();
+        assert_eq!(cancel.state(), CancelState::Cancelled);
+    }
+
+    /// docs/07 Watch state: an item is released with its last holder, whichever drops last.
+    #[test]
+    fn an_attempt_that_outlives_its_hold_releases_the_item() {
+        let item = "release-attempt-last";
+        let mut hold = PendingHold::new(item);
+        hold.begin_settling();
+        let Begin::Go(attempt) = hold.begin_attempt() else {
+            panic!("an active delivery may attempt");
+        };
+        drop(hold);
+        assert!(registry_holds(item), "the attempt still holds it");
+        drop(attempt);
+        assert!(!is_pending(item));
+        assert!(!registry_holds(item));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supersede_matches_the_item_in_any_spelling_and_ignores_others() {
+        let sink = PendingSink::new(STOPPED_FAILS, false);
+        let session = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx("AABBCCDD-0000-0000-0000-0000000000D3", "supersede-spell-s"),
+        );
+        let other = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx("supersede-other", "supersede-other-s"),
+        );
+        let_tasks_run().await;
+        let delivery = session.stop(1).await;
+        let other_delivery = other.stop(1).await;
+        let_tasks_run().await;
+
+        supersede(&["aabbccdd0000000000000000000000d3"])
+            .await
+            .commit();
+        delivery.settled().await;
+        assert!(!registry_holds("aabbccdd0000000000000000000000d3"));
+        assert!(
+            is_pending("supersede-other"),
+            "an unrelated item keeps retrying"
+        );
+
+        supersede(&["supersede-other"]).await.commit();
+        other_delivery.settled().await;
+        assert!(!registry_holds("supersede-other"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supersede_leaves_a_live_session_alone() {
+        let item = "supersede-live";
+        let sink = PendingSink::new(STOPPED_OK, false);
+        let session =
+            ReportingSession::start_with_sink(sink, pending_ctx(item, "supersede-live-s"));
+        let_tasks_run().await;
+        drop(supersede(&[item]).await);
+        assert!(is_pending(item), "the live session still holds it");
+        session.abandon();
+        assert!(!registry_holds(item));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supersede_returns_at_once_for_an_idle_item() {
+        let start = tokio::time::Instant::now();
+        drop(supersede(&["supersede-idle"]).await);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replay_cancels_the_older_deliverys_retries() {
+        let item = "supersede-replay";
+        let sink = PendingSink::new(STOPPED_FAILS, false);
+        let first =
+            ReportingSession::start_with_sink(sink.clone(), pending_ctx(item, "replay-first-s"));
+        let_tasks_run().await;
+        let delivery = first.stop(1).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let attempts = stopped_count(&sink);
+        assert!(attempts >= 2, "the Stopped is retrying");
+
+        let second =
+            ReportingSession::start_with_sink(sink.clone(), pending_ctx(item, "replay-second-s"));
+        delivery.settled().await;
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(
+            stopped_count(&sink),
+            attempts,
+            "the older Stopped stops retrying"
+        );
+        assert_eq!(lock_registry()[&canonical_id(item)].live, 1);
+        second.abandon();
+        assert!(!registry_holds(item));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abandon_releases_the_item() {
+        let item = "pending-abandon";
+        let sink = PendingSink::new(STOPPED_OK, false);
+        let session =
+            ReportingSession::start_with_sink(sink, pending_ctx(item, "pending-abandon-s"));
+        assert!(is_pending(item));
+        session.abandon();
+        assert!(!is_pending(item));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_sessions_on_one_item_keep_it_pending_until_both_release() {
+        let item = "pending-refcount";
+        let sink = PendingSink::new(STOPPED_OK, false);
+        let first = ReportingSession::start_with_sink(
+            sink.clone(),
+            pending_ctx(item, "pending-refcount-a"),
+        );
+        let second =
+            ReportingSession::start_with_sink(sink, pending_ctx(item, "pending-refcount-b"));
+        first.abandon();
+        assert!(is_pending(item), "the second session still holds it");
+        second.abandon();
+        assert!(!is_pending(item));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn flush_queue_dedups_a_second_enqueue_for_a_session_already_in_flight() {
         let sink = Arc::new(GatedSink::default());
@@ -1390,6 +2433,14 @@ mod tests {
     }
 
     impl tracing::Subscriber for CapturingSubscriber {
+        // A callsite first hit on a subscriber-less test thread caches `never`; `sometimes` keeps
+        // this scoped subscriber asking per event.
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
         fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
             true
         }
@@ -1420,7 +2471,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn dropping_without_stop_logs_a_warning() {
+    // The only test that drops a session without stop(): a second one on another thread could
+    // cache this warn callsite as disabled before the scoped subscriber registers.
+    async fn dropping_without_stop_logs_a_warning_and_releases_the_item() {
         let messages = Arc::new(Mutex::new(Vec::new()));
         let subscriber = CapturingSubscriber {
             messages: messages.clone(),
@@ -1428,11 +2481,17 @@ mod tests {
         let sink = FakeSink::new(0);
 
         tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             let session = ReportingSession::start_with_sink(
                 sink.clone(),
-                ctx_with_session("dropped-session"),
+                pending_ctx("pending-drop", "dropped-session"),
             );
+            assert!(is_pending("pending-drop"));
             drop(session); // never called .stop()
+            assert!(
+                !is_pending("pending-drop"),
+                "a dropped session releases its item"
+            );
         });
 
         let logged = messages.lock().expect("lock");

@@ -16,11 +16,12 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # dependency, same backend for both reqwest and tokio-tungstenite, and
 # consistent behavior across dev/CI/notarized-release builds. See lib.rs
 # module docs for the note.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
 [dev-dependencies]
+flate2 = "1"
 tokio = { workspace = true, features = ["net", "io-util", "rt", "test-util"] }
 
 [lints]

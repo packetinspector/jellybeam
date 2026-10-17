@@ -579,6 +579,10 @@ interface CoreGateway {
     @Throws(CoreException::class)
     suspend fun validateSession()
 
+    /** docs/07 Watch state: the app came to the foreground; the core refreshes played state in
+     * the background. Runs on [Dispatchers.IO]; the core never does network work inline. */
+    suspend fun onForeground() {}
+
     /** `current_user().policy.is_administrator`, cached per session on the Rust side -- gates the
      * Refresh metadata row (docs/19 §1.1).
      */
@@ -1178,6 +1182,8 @@ class RealCoreGateway(
 
     override suspend fun validateSession() =
         ffi("ffi.validateSession") { validateSession() }
+
+    override suspend fun onForeground() = ffi("ffi.onForeground") { onForeground() }
 
     override suspend fun isAdministrator(): Boolean =
         ffi("ffi.isAdministrator") { isAdministrator() }

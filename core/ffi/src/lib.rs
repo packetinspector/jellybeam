@@ -261,6 +261,7 @@ pub fn mirror_smoke_test() -> String {
         client,
         bus_rx,
         std::sync::Arc::default(),
+        std::sync::Arc::new(std::collections::HashSet::new),
     ));
 
     // `mirror` must drop (closing the writer's mpsc channel) before `rt`:

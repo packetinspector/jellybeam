@@ -22,7 +22,9 @@ session resolves.
 mirror, no server round-trip for navigation); Home shelves (resume, next-up,
 favorites, latest, per-library visibility; a user-set shelf size caps every row,
 and Next Up never repeats a Continue Watching title and moves on as soon as an
-episode is finished or marked watched, here or on another device; grace windows keep a
+episode is finished or marked watched, here or on another device; watched, unwatched and
+partly watched changes from other clients show after a launch, a return to the app, a
+reconnect, or within 5 minutes while open (docs/07); grace windows keep a
 2-minute sample out of Continue Watching and count a stop in the credits (last
 10 min of a movie, last 2 min of anything else) as watched, Next Up included; a Home
 setting picks the Continue Watching and Next Up art: the episode's own still

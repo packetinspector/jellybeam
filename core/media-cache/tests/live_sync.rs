@@ -84,6 +84,7 @@ async fn initial_sync_against_live_server_matches_corpus_counts() {
         client,
         bus_rx,
         std::sync::Arc::default(),
+        std::sync::Arc::new(std::collections::HashSet::new),
     )
     .await
     .expect("open mirror");

@@ -2,8 +2,10 @@
 //! WebSocket deltas, and reconciliation. Every mutation flows through `WriterHandle` (the
 //! single writer), so ordering is exactly the order these `async fn`s issue writes in.
 
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 
 use futures_util::stream::{self, StreamExt};
 use jellyfin_api::models::{BaseItemDto, BaseItemKind};
@@ -12,7 +14,8 @@ use jellyfin_core::BusEvent;
 use tokio::sync::broadcast;
 
 use crate::schema::IndexGroup;
-use crate::{MirrorChange, MirrorState, SyncActivity};
+use crate::user_state::{self, UserStateInput};
+use crate::{MirrorChange, MirrorState, SyncActivity, UserStateReason};
 
 const PAGE_SIZE: u32 = 500;
 const WS_BATCH_SIZE: usize = 100;
@@ -27,9 +30,12 @@ const MAX_SYNC_PAGES: u32 = 2000;
 /// `$body`'s value -- the bail-out idiom `spawn`'s startup pass and `initial_sync` repeat
 /// between every step.
 macro_rules! with_upgraded {
-    ($weak:expr, |$s:ident| $body:expr) => {{
+    ($weak:expr, |$s:ident| $body:expr) => {
+        with_upgraded!($weak, |$s| $body, else ())
+    };
+    ($weak:expr, |$s:ident| $body:expr, else $gone:expr) => {{
         let Some($s) = $weak.upgrade() else {
-            return;
+            return $gone;
         };
         let result = $body;
         drop($s);
@@ -227,7 +233,7 @@ pub(crate) fn spawn(
             // Warm-launch resume refresh: nothing else in this pass can observe a
             // UserData-only change since the last launch (see `sync_resume`). Run early,
             // mirroring `initial_sync`'s ordering, so a stale top-row is corrected first.
-            with_upgraded!(startup_weak, |s| sync_resume(&s).await);
+            sync_resume_guarded(&startup_weak).await;
 
             with_upgraded!(startup_weak, |s| {
                 s.request_next_up_refresh();
@@ -248,6 +254,8 @@ pub(crate) fn spawn(
                 ensure_index_group(&s, IndexGroup::Favorites).await;
                 ensure_index_group(&s, IndexGroup::Resume).await;
                 ensure_index_group(&s, IndexGroup::LatestWatched).await;
+                // docs/07 Watch state: after Home's needs, never awaited.
+                s.request_user_state_refresh(UserStateReason::Startup);
             });
 
             // Delta before reconcile, at every trigger: delta is the fast path (new/updated
@@ -265,6 +273,10 @@ pub(crate) fn spawn(
     tokio::spawn(next_up_refresher(
         Arc::downgrade(&state),
         state.next_up_requested.clone(),
+    ));
+    tokio::spawn(user_state_refresher(
+        Arc::downgrade(&state),
+        state.user_state_requested.clone(),
     ));
     tokio::spawn(bus_listener(Arc::downgrade(&state), bus));
     tokio::spawn(reconcile_timer(Arc::downgrade(&state)));
@@ -295,12 +307,349 @@ async fn next_up_refresher(state: Weak<MirrorState>, requested: Arc<tokio::sync:
     }
 }
 
+/// Parks until no initial sync runs (docs/07 Sync snapshot safety); `false` if the Mirror dropped.
+async fn wait_initial_sync_done(state: &Weak<MirrorState>) -> bool {
+    loop {
+        let Some(s) = state.upgrade() else {
+            return false;
+        };
+        if !s.initial_sync_in_progress.load(Ordering::Acquire) {
+            return true;
+        }
+        let done = s.initial_sync_done.clone();
+        let notified = done.notified();
+        tokio::pin!(notified);
+        // Registered before the re-check, so a completion in the gap still wakes this wait.
+        notified.as_mut().enable();
+        if !s.initial_sync_in_progress.load(Ordering::Acquire) {
+            return true;
+        }
+        drop(s);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(60), notified).await;
+    }
+}
+
+/// Parks until `playback_active` clears (docs/18 §2.1); `false` if the Mirror dropped.
+async fn wait_playback_idle(state: &Weak<MirrorState>) -> bool {
+    loop {
+        let Some(s) = state.upgrade() else {
+            return false;
+        };
+        if !s.playback_active.load(Ordering::Acquire) {
+            return true;
+        }
+        drop(s);
+        tokio::time::sleep(PLAYBACK_YIELD_POLL).await;
+    }
+}
+
+/// The only caller of [`refresh_user_state`]: one run at a time, so a trigger during a run costs
+/// exactly one rerun.
+async fn user_state_refresher(state: Weak<MirrorState>, requested: Arc<tokio::sync::Notify>) {
+    user_state_refresher_with_wake(state, requested, std::time::Duration::from_secs(60)).await;
+}
+
+async fn user_state_refresher_with_wake(
+    state: Weak<MirrorState>,
+    requested: Arc<tokio::sync::Notify>,
+    idle_wake: std::time::Duration,
+) {
+    let mut last_finished: Option<Instant> = None;
+    let mut last_failed: Option<Instant> = None;
+    loop {
+        if tokio::time::timeout(idle_wake, requested.notified())
+            .await
+            .is_err()
+        {
+            if state.strong_count() == 0 {
+                break;
+            }
+            continue;
+        }
+        let Some(s) = state.upgrade() else { break };
+        let reason = s.take_user_state_reasons();
+        drop(s);
+        let Some(reason) = reason else { continue };
+        if !wait_initial_sync_done(&state).await || !wait_playback_idle(&state).await {
+            break;
+        }
+        let Some(s) = state.upgrade() else { break };
+        // A request that arrived while waiting is covered by the run starting now.
+        let reason = s
+            .take_user_state_reasons()
+            .map_or(reason, |late| reason.min(late));
+        if !user_state::due(last_finished, last_failed, Instant::now(), reason) {
+            continue;
+        }
+        drop(s);
+        let ok = refresh_user_state(&state, reason).await;
+        if state.strong_count() == 0 {
+            break;
+        }
+        // A failed pass only backs off [`user_state::FAILED_RETRY_FLOOR`].
+        if ok {
+            last_finished = Some(Instant::now());
+        } else {
+            last_failed = Some(Instant::now());
+        }
+    }
+}
+
+/// Server ids of every played leaf, or `None` on any error or incomplete walk (a partial set
+/// would read as "unplayed elsewhere"). Id-only pages under [`PageProgress`], yielding to playback.
+async fn fetch_played_ids(state: &Weak<MirrorState>) -> Option<HashSet<String>> {
+    let mut start_index = 0u32;
+    let mut progress = PageProgress::new(MAX_SYNC_PAGES);
+    loop {
+        if !wait_playback_idle(state).await {
+            return None;
+        }
+        let s = state.upgrade()?;
+        let query = ItemQuery {
+            recursive: true,
+            include_item_types: user_state::LEAF_TYPES.map(String::from).to_vec(),
+            is_played: Some(true),
+            // Stable page ordering: an unspecified default order can skip rows when paged.
+            sort_by: Some("SortName".to_string()),
+            start_index,
+            limit: ID_SWEEP_PAGE_SIZE,
+            enable_images: Some(false),
+            enable_user_data: Some(false),
+            ..ItemQuery::new()
+        };
+        let result = match s.client.get_items(&query).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, start_index, "user state: played-id page failed");
+                return None;
+            }
+        };
+        drop(s);
+        let page_len = result.items.len() as u32;
+        match progress.observe(&result.items, result.total_record_count) {
+            Ok(true) => break,
+            Ok(false) => start_index += page_len,
+            Err(reason) => {
+                tracing::warn!(reason, "user state: played-id walk incomplete; no writes");
+                return None;
+            }
+        }
+    }
+    Some(progress.ids.iter().map(ToString::to_string).collect())
+}
+
+/// `/UserItems/Resume` as the sweep uses it.
+struct ResumeFetch {
+    dtos: Vec<BaseItemDto>,
+    ids: HashSet<String>,
+    /// The list is truncated or failed, so "not in it" proves nothing.
+    unknown: bool,
+}
+
+/// The server's Continue Watching list, or `None` on a failed request.
+async fn fetch_resume(state: &Weak<MirrorState>) -> Option<ResumeFetch> {
+    let s = state.upgrade()?;
+    let result = s.client.get_resume_items(&item_fields()).await;
+    drop(s);
+    match result {
+        Ok(r) => Some(ResumeFetch {
+            unknown: r
+                .total_record_count
+                .is_some_and(|t| usize::try_from(t).unwrap_or(0) > r.items.len()),
+            ids: r
+                .items
+                .iter()
+                .filter_map(|i| i.id)
+                .map(|id| id.to_string())
+                .collect(),
+            dtos: r.items,
+        }),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch resume items");
+            None
+        }
+    }
+}
+
+/// Full DTOs for `ids`, in batches yielding to playback; `None` if any batch fails.
+async fn refetch_dtos(state: &Weak<MirrorState>, ids: &[String]) -> Option<Vec<BaseItemDto>> {
+    let mut dtos = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(WS_BATCH_SIZE) {
+        if !wait_playback_idle(state).await {
+            return None;
+        }
+        let query = ItemQuery {
+            recursive: true,
+            fields: item_fields(),
+            limit: chunk.len() as u32,
+            ids: chunk.to_vec(),
+            ..ItemQuery::new()
+        };
+        match state.upgrade()?.client.get_items(&query).await {
+            Ok(r) => dtos.extend(r.items),
+            Err(e) => {
+                tracing::error!(error = %e, chunk = chunk.len(), "user state: re-fetch failed; no writes");
+                return None;
+            }
+        }
+    }
+    Some(dtos)
+}
+
+/// A mirror read on the blocking pool; a SQLite or join error is logged and yields `None`.
+async fn read_blocking<T: Send + 'static>(
+    pool: &Arc<crate::pool::ReadPool>,
+    what: &'static str,
+    read: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T> + Send + 'static,
+) -> Option<T> {
+    let pool = pool.clone();
+    match tokio::task::spawn_blocking(move || read(&pool.acquire())).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, what, "user state: local read failed");
+            None
+        }
+        Err(e) => {
+            tracing::error!(error = %e, what, "user state: local read task failed");
+            None
+        }
+    }
+}
+
+/// What a sweep found to re-fetch.
+#[derive(Default)]
+struct Drift {
+    dtos: Vec<BaseItemDto>,
+    played: usize,
+    refetch: usize,
+}
+
+/// Fills `input`'s played and local sides and re-fetches the drifted rows; `None` if any step
+/// fails, since a partial view reads as drift.
+async fn fetch_drift(state: &Weak<MirrorState>, input: &mut UserStateInput) -> Option<Drift> {
+    input.server_played = fetch_played_ids(state).await?;
+    let pool = state.upgrade()?.read_pool.clone();
+    input.local = read_blocking(&pool, "leaves", user_state::read_local_leaves).await?;
+    let leaves = user_state::changed_leaves(input);
+    let (leaves, parents) = read_blocking(&pool, "parents", move |c| {
+        let parents = user_state::read_parents(c, &leaves)?;
+        Ok((leaves, parents))
+    })
+    .await?;
+    let refetch = user_state::with_parents(leaves, &parents);
+    Some(Drift {
+        dtos: refetch_dtos(state, &refetch).await?,
+        played: input.server_played.len(),
+        refetch: refetch.len(),
+    })
+}
+
+/// What a guarded watch-state write must not overwrite (docs/07 Watch state, Guards): taken before
+/// any fetch, so a local write after it is never overwritten.
+struct WriteGuard {
+    since_ms: i64,
+    /// Dashed lowercase ids of local writes the server hasn't seen yet.
+    pending: HashSet<String>,
+}
+
+/// Background sync tasks only (pending provider contract).
+fn write_guard(state: &Weak<MirrorState>) -> Option<WriteGuard> {
+    let s = state.upgrade()?;
+    Some(WriteGuard {
+        since_ms: crate::writer::now_millis(),
+        pending: normalized_pending(&s),
+    })
+}
+
+fn normalized_pending(state: &MirrorState) -> HashSet<String> {
+    state
+        .local_pending_ids()
+        .iter()
+        .filter_map(|id| user_state::normalize_id(id))
+        .collect()
+}
+
+/// The one guarded watch-state write, shared by the sweep and the warm launch's Continue Watching
+/// refresh (docs/07 Watch state, Guards): `drift` rows update existing ones, `resume` rows may
+/// also enter. Returns the changed row count, or `None` if the write failed or the mirror is gone.
+async fn apply_guarded(
+    state: &Weak<MirrorState>,
+    guard: WriteGuard,
+    drift: Vec<BaseItemDto>,
+    resume: Vec<BaseItemDto>,
+) -> Option<usize> {
+    let s = state.upgrade()?;
+    // A hold taken mid-pass must still skip its item (`since_ms` covers only the remaining
+    // writer-queue window: a new session's local write stamps updated_at). The set is keyed by item id only,
+    // so a hold from another account on this server just delays that item's correction
+    // by one pass.
+    let mut skip = guard.pending;
+    skip.extend(normalized_pending(&s));
+    let changed = s
+        .writer
+        .apply_user_state(drift, resume, guard.since_ms, skip)
+        .await?;
+    let count = changed.len();
+    if count > 0 && any_episode(&s, changed).await {
+        s.request_next_up_refresh();
+    }
+    Some(count)
+}
+
+/// Warm-launch Continue Watching refresh: the same guarded write as the sweep, with no drift.
+async fn sync_resume_guarded(state: &Weak<MirrorState>) {
+    let Some(guard) = write_guard(state) else {
+        return;
+    };
+    if let Some(resume) = fetch_resume(state).await {
+        apply_guarded(state, guard, Vec::new(), resume.dtos).await;
+    }
+}
+
+/// One watch-state sweep (docs/07 Watch state); returns whether every fetch succeeded, and
+/// writes the resume rows even if the drift fetch fails (they need no walk to be correct).
+/// Refresher task only.
+async fn refresh_user_state(state: &Weak<MirrorState>, reason: UserStateReason) -> bool {
+    let started = Instant::now();
+    let Some(guard) = write_guard(state) else {
+        return false;
+    };
+    let resume = fetch_resume(state).await;
+    let resume_ok = resume.is_some();
+    let resume = resume.unwrap_or(ResumeFetch {
+        dtos: Vec::new(),
+        ids: HashSet::new(),
+        unknown: true,
+    });
+    let mut input = UserStateInput {
+        server_resume: resume.ids,
+        pending: guard.pending.clone(),
+        resume_unknown: resume.unknown,
+        ..Default::default()
+    };
+    let drift = fetch_drift(state, &mut input).await;
+    let ok = resume_ok && drift.is_some();
+    let drift = drift.unwrap_or_default();
+
+    let applied = apply_guarded(state, guard, drift.dtos, resume.dtos).await;
+    let changed = applied.unwrap_or(0);
+    let ok = ok && applied.is_some();
+    tracing::info!(
+        "perf userState ms={} played={} refetch={} changed={changed} reason={reason:?}",
+        started.elapsed().as_millis(),
+        drift.played,
+        drift.refetch,
+    );
+    ok
+}
+
 /// Whether any of `ids` is an Episode row, the only kind whose watch state moves Next Up.
 async fn any_episode(state: &MirrorState, ids: Vec<String>) -> bool {
-    let pool = state.read_pool.clone();
-    tokio::task::spawn_blocking(move || crate::query::any_episode(&pool.acquire(), &ids))
-        .await
-        .unwrap_or(false)
+    read_blocking(&state.read_pool, "episode check", move |c| {
+        Ok(crate::query::any_episode(c, &ids))
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// "Resume + NextUp + Latest first, then breadth" -- Home is renderable as soon
@@ -423,7 +772,8 @@ async fn sync_views(state: &MirrorState) {
 /// UserData-only change (a play/stop with no metadata edit) for an item outside this
 /// session: `delta_sync` filters on metadata save time, not `UserData` save time, and the WS
 /// `UserDataChanged` event never echoes back to the originating session either. Called from
-/// `initial_sync`, the warm-launch startup pass, and reconciliation's `NeedsReconcile` arm.
+/// `initial_sync`, where the mirror is fresh and there is nothing local to protect; the warm-launch
+/// pass and later passes write through [`apply_guarded`].
 /// Full `item_fields()`, matching every other whole-persisting fetch (a field-less Resume
 /// response used to upsert-blank `Overview`/`SeriesName`/etc.).
 async fn sync_resume(state: &MirrorState) {
@@ -513,7 +863,7 @@ pub(crate) async fn refresh_next_up(state: &MirrorState) {
     let options = *state
         .next_up_options
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let api_options = jellyfin_api::NextUpOptions {
         date_cutoff: options.cutoff_days.map(next_up_date_cutoff),
         enable_rewatching: options.rewatching,
@@ -917,11 +1267,11 @@ async fn apply_bus_event(state: &MirrorState, event: BusEvent) {
     match event {
         BusEvent::Server(server_event) => apply_server_event(state, server_event).await,
         BusEvent::Connected | BusEvent::Disconnected => {}
-        // Resume, then delta, then reconcile, same order as `spawn`'s startup path: this is
-        // the reconnect signal, so delta covers the disconnected window and sync_resume
-        // covers what delta can't (a UserData-only change this session's own WS never saw).
+        // This is the reconnect signal: delta covers the disconnected window and the
+        // user-state refresher covers what delta can't (a UserData-only change this
+        // session's own WS never saw).
         BusEvent::NeedsReconcile => {
-            sync_resume(state).await;
+            state.request_user_state_refresh(UserStateReason::Reconnect);
             // A `UserDataChanged` sent while disconnected is lost, and delta/reconcile only
             // see library items, so Next Up is asked for on every (re)connect.
             state.request_next_up_refresh();
@@ -1934,18 +2284,24 @@ async fn local_summary(
     })
 }
 
+/// After a freeze the timer owes one late tick, not a burst of back-to-back passes.
+fn reconcile_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
 /// `spawn`'s `needs_initial_sync = false` branch already calls `reconcile_all` once before
 /// this timer's first tick fires; this timer is purely the backstop for whatever the
 /// startup call, WS `LibraryChanged`, and the reconnect `NeedsReconcile` signal all miss.
 async fn reconcile_timer(state: Weak<MirrorState>) {
-    let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
+    let mut interval = reconcile_interval();
     interval.tick().await; // first tick is immediate; startup already reconciles/syncs
     loop {
         interval.tick().await;
         let Some(state) = state.upgrade() else { break };
-        // Resume, then delta, then reconcile, same order as spawn's startup path: the
-        // backstop for a long-lived session that never restarts or drops its WS connection.
-        sync_resume(&state).await;
+        // The backstop for a long-lived session that never restarts or drops its WS connection.
+        state.request_user_state_refresh(UserStateReason::Timer);
         delta_sync(&state).await;
         reconcile_all(&state).await;
         // Retries a startup build that failed.
@@ -1993,6 +2349,13 @@ mod tests {
 
     impl TestMirror {
         fn new(client: JellyfinClient) -> Self {
+            Self::with_pending(client, crate::no_pending())
+        }
+
+        fn with_pending(
+            client: JellyfinClient,
+            local_pending: crate::LocalPendingProvider,
+        ) -> Self {
             let dir = tempfile::tempdir().expect("tempdir");
             let path = dir.path().join("mirror.db");
             let (conn, _empty) = crate::schema::open_and_prepare(&path).expect("open");
@@ -2003,7 +2366,6 @@ mod tests {
                 crate::writer::run(conn, rx, writer_changes_tx)
             });
             let read_pool = Arc::new(ReadPool::open(&path, 2).expect("read pool"));
-            let (sync_activity_tx, _) = tokio::sync::watch::channel(SyncActivity::Idle);
             let state = Arc::new_cyclic(|weak| {
                 MirrorState::new(
                     client,
@@ -2011,8 +2373,8 @@ mod tests {
                     read_pool,
                     path.clone(),
                     changes_tx,
-                    sync_activity_tx,
                     weak.clone(),
+                    local_pending,
                 )
             });
             Self {
@@ -4595,7 +4957,7 @@ mod tests {
     /// warm-launch pass never run again) could carry a stale Resume shelf
     /// for its entire lifetime.
     #[tokio::test]
-    async fn needs_reconcile_also_refreshes_resume() {
+    async fn needs_reconcile_requests_a_user_state_refresh() {
         let server = MockServer::start().await;
         let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
         let resume_id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
@@ -4613,15 +4975,20 @@ mod tests {
         apply_bus_event(&mirror.state, BusEvent::NeedsReconcile).await;
 
         assert_eq!(
-            mirror.item_name(resume_id).await.as_deref(),
-            Some("Reconciled Resume Item"),
-            "NeedsReconcile must call sync_resume so a long-lived session's Resume shelf \
-             converges without waiting for a full restart"
+            mirror.state.take_user_state_reasons(),
+            Some(UserStateReason::Reconnect),
+            "NeedsReconcile must ask the refresher for a run so a long-lived session's Resume \
+             shelf converges without waiting for a full restart"
+        );
+        assert_eq!(
+            server.request_count("/UserItems/Resume"),
+            0,
+            "the handler never refreshes inline"
         );
     }
 
     /// (a): the first post-launch `NeedsReconcile` must not duplicate an in-progress startup
-    /// pass's own delta+reconcile -- only `sync_resume` runs.
+    /// pass's own delta+reconcile -- only the user-state request is made.
     #[tokio::test]
     async fn first_connect_during_startup_runs_one_reconcile_total() {
         let server = MockServer::start().await;
@@ -4639,9 +5006,9 @@ mod tests {
         apply_bus_event(&mirror.state, BusEvent::NeedsReconcile).await;
 
         assert_eq!(
-            server.request_count("/UserItems/Resume"),
-            1,
-            "sync_resume must still run on the first connect"
+            mirror.state.take_user_state_reasons(),
+            Some(UserStateReason::Reconnect),
+            "the user-state refresh is still requested on the first connect"
         );
         assert_eq!(
             server.request_count("/UserViews"),
@@ -5440,6 +5807,1020 @@ mod tests {
             mirror.meta(LAST_DELTA_SYNC_KEY).await,
             None,
             "initial sync stamps the first cursor; delta must not race it"
+        );
+    }
+
+    // ---- docs/07 Watch state: the user-state sweep ----------------------------------------
+
+    const MOVIE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const BYSTANDER: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const SERIES: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const SEASON: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const EPISODE: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    /// A movie of 60 minutes: 10 minutes in is inside the Continue Watching windows.
+    const PARTWAY: i64 = 6_000_000_000;
+
+    fn leaf(id: &str, kind: &str, user_data: serde_json::Value) -> serde_json::Value {
+        json!({ "Id": id, "Name": "Synthetic", "Type": kind, "RunTimeTicks": 36_000_000_000i64,
+                "UserData": user_data })
+    }
+
+    fn dto(v: serde_json::Value) -> BaseItemDto {
+        serde_json::from_value(v).expect("dto")
+    }
+
+    async fn seed(mirror: &TestMirror, items: Vec<serde_json::Value>) {
+        mirror
+            .state
+            .writer
+            .upsert_items(items.into_iter().map(dto).collect())
+            .await;
+        mirror.state.writer.barrier().await;
+        // Rows are only rewritten when strictly older than the run's `since`.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    /// `(played, position, favorite)` of a mirror row.
+    async fn row(mirror: &TestMirror, id: &str) -> (bool, i64, bool) {
+        mirror.state.writer.barrier().await;
+        mirror
+            .state
+            .read_pool
+            .acquire()
+            .query_row(
+                "SELECT played, playback_position_ticks, is_favorite FROM items WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("row")
+    }
+
+    fn bare(id: &str) -> String {
+        id.replace('-', "").to_uppercase()
+    }
+
+    fn route_played(server: &MockServer, ids: &[&str]) {
+        server.route(
+            "/Items",
+            &[("isPlayed", "true")],
+            json!({ "Items": ids.iter().map(|i| json!({ "Id": bare(i) })).collect::<Vec<_>>(),
+                    "TotalRecordCount": ids.len() }),
+        );
+    }
+
+    fn refetch_calls(server: &MockServer) -> usize {
+        server.request_count_matching("ids=")
+    }
+
+    async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..250 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    fn spawn_refresher(mirror: &TestMirror) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(user_state_refresher(
+            mirror.weak(),
+            mirror.state.user_state_requested.clone(),
+        ))
+    }
+
+    /// State x event cells for the watch-state sweep: every cell asserts the mirror rows and the
+    /// request log. The bystander (played on both sides, favorite only locally) is never
+    /// re-fetched and keeps its flags.
+    #[tokio::test]
+    async fn user_state_matrix_converges_each_cell_with_the_expected_requests() {
+        struct Cell {
+            name: &'static str,
+            local: serde_json::Value,
+            server_played: bool,
+            resume: Option<serde_json::Value>,
+            refetched: Option<serde_json::Value>,
+            want: (bool, i64, bool),
+        }
+        let partway = json!({ "PlaybackPositionTicks": PARTWAY });
+        let cells = [
+            Cell {
+                name: "played elsewhere (favorite rides along)",
+                local: json!({ "Played": false }),
+                server_played: true,
+                resume: None,
+                refetched: Some(json!({ "Played": true, "IsFavorite": true })),
+                want: (true, 0, true),
+            },
+            Cell {
+                name: "unplayed elsewhere",
+                local: json!({ "Played": true }),
+                server_played: false,
+                resume: None,
+                refetched: Some(json!({ "Played": false })),
+                want: (false, 0, false),
+            },
+            Cell {
+                name: "finished elsewhere (stale resume)",
+                local: partway.clone(),
+                server_played: true,
+                resume: None,
+                refetched: Some(json!({ "Played": true, "PlaybackPositionTicks": 0 })),
+                want: (true, 0, false),
+            },
+            Cell {
+                name: "cleared elsewhere (stale resume)",
+                local: partway.clone(),
+                server_played: false,
+                resume: None,
+                refetched: Some(json!({ "Played": false, "PlaybackPositionTicks": 0 })),
+                want: (false, 0, false),
+            },
+            Cell {
+                name: "stopped partway elsewhere (resume list alone carries it)",
+                local: json!({ "Played": false }),
+                server_played: false,
+                resume: Some(partway.clone()),
+                refetched: None,
+                want: (false, PARTWAY, false),
+            },
+            Cell {
+                name: "no drift",
+                local: json!({ "Played": true }),
+                server_played: true,
+                resume: None,
+                refetched: None,
+                want: (true, 0, false),
+            },
+        ];
+        for cell in cells {
+            let server = MockServer::start().await;
+            let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+            let mirror = TestMirror::new(client);
+            seed(
+                &mirror,
+                vec![
+                    leaf(MOVIE, "Movie", cell.local.clone()),
+                    leaf(
+                        BYSTANDER,
+                        "Movie",
+                        json!({ "Played": true, "IsFavorite": true }),
+                    ),
+                ],
+            )
+            .await;
+            let resume: Vec<_> = cell
+                .resume
+                .iter()
+                .map(|ud| leaf(MOVIE, "Movie", ud.clone()))
+                .collect();
+            server.route("/UserItems/Resume", &[], json!({ "Items": resume }));
+            let mut played = vec![BYSTANDER];
+            if cell.server_played {
+                played.push(MOVIE);
+            }
+            route_played(&server, &played);
+            if let Some(ud) = &cell.refetched {
+                route_by_ids(&server, &[leaf(MOVIE, "Movie", ud.clone())]);
+            }
+
+            refresh_user_state(&mirror.weak(), UserStateReason::Reconnect).await;
+
+            let name = cell.name;
+            assert_eq!(row(&mirror, MOVIE).await, cell.want, "{name}: row");
+            assert_eq!(
+                row(&mirror, BYSTANDER).await,
+                (true, 0, true),
+                "{name}: bystander untouched"
+            );
+            assert_eq!(
+                server.request_count("/UserItems/Resume"),
+                1,
+                "{name}: resume"
+            );
+            assert_eq!(
+                server.request_count_matching("isPlayed=true"),
+                1,
+                "{name}: walk"
+            );
+            assert_eq!(
+                refetch_calls(&server),
+                usize::from(cell.refetched.is_some()),
+                "{name}: re-fetches"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn episode_played_elsewhere_refetches_its_parents_and_asks_for_next_up() {
+        let (server, mirror) = idle().await;
+        let ep = |ud: serde_json::Value| {
+            let mut v = leaf(EPISODE, "Episode", ud);
+            v["SeriesId"] = json!(SERIES);
+            v["SeasonId"] = json!(SEASON);
+            v
+        };
+        let parent = |id: &str, kind: &str, unplayed: i64| {
+            json!({ "Id": id, "Name": "Synthetic", "Type": kind,
+                    "UserData": { "UnplayedItemCount": unplayed } })
+        };
+        seed(
+            &mirror,
+            vec![
+                ep(json!({ "Played": false })),
+                parent(SERIES, "Series", 1),
+                parent(SEASON, "Season", 1),
+            ],
+        )
+        .await;
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[EPISODE]);
+        let mut ids = [EPISODE, SERIES, SEASON].map(String::from);
+        ids.sort();
+        server.route(
+            "/Items",
+            &[("ids", &ids.join(","))],
+            json!({ "Items": [ep(json!({ "Played": true })), parent(SERIES, "Series", 0),
+                              parent(SEASON, "Season", 0)], "TotalRecordCount": 3 }),
+        );
+
+        refresh_user_state(&mirror.weak(), UserStateReason::Reconnect).await;
+
+        assert!(row(&mirror, EPISODE).await.0);
+        let unplayed = |id: &str| -> Option<i64> {
+            mirror
+                .state
+                .read_pool
+                .acquire()
+                .query_row(
+                    "SELECT unplayed_item_count FROM items WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .expect("row")
+        };
+        assert_eq!((unplayed(SERIES), unplayed(SEASON)), (Some(0), Some(0)));
+        assert_eq!(
+            refetch_calls(&server),
+            1,
+            "leaf and parents ride one request"
+        );
+        assert!(next_up_was_requested(&mirror.state).await);
+    }
+
+    #[tokio::test]
+    async fn pending_local_item_is_neither_refetched_nor_reverted_by_resume() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        let mirror = TestMirror::with_pending(client, Arc::new(|| [MOVIE.to_uppercase()].into()));
+        seed(
+            &mirror,
+            vec![leaf(MOVIE, "Movie", json!({ "Played": true }))],
+        )
+        .await;
+        // The server still shows the pre-stop state: unplayed with an old position.
+        server.route(
+            "/UserItems/Resume",
+            &[],
+            json!({ "Items": [leaf(MOVIE, "Movie", json!({ "PlaybackPositionTicks": PARTWAY }))] }),
+        );
+        route_played(&server, &[]);
+
+        refresh_user_state(&mirror.weak(), UserStateReason::Reconnect).await;
+
+        assert_eq!(row(&mirror, MOVIE).await, (true, 0, false));
+        assert_eq!(refetch_calls(&server), 0);
+    }
+
+    #[tokio::test]
+    async fn a_hold_taken_mid_pass_protects_its_item_from_the_apply() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        // Empty at the start of the pass, held by the time the apply is built.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let mirror = TestMirror::with_pending(
+            client,
+            Arc::new(move || {
+                if provider_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                    HashSet::new()
+                } else {
+                    [MOVIE.to_string()].into()
+                }
+            }),
+        );
+        seed(
+            &mirror,
+            vec![leaf(MOVIE, "Movie", json!({ "Played": false }))],
+        )
+        .await;
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[MOVIE]);
+        let ids = MOVIE.to_string();
+        server.route(
+            "/Items",
+            &[("ids", &ids)],
+            json!({ "Items": [leaf(MOVIE, "Movie", json!({ "Played": true }))], "TotalRecordCount": 1 }),
+        );
+
+        refresh_user_state(&mirror.weak(), UserStateReason::Reconnect).await;
+
+        assert_eq!(refetch_calls(&server), 1, "it was fetched before the hold");
+        assert_eq!(row(&mirror, MOVIE).await, (false, 0, false));
+    }
+
+    /// Makes every `items` update fail inside the writer's transaction.
+    fn break_item_updates(mirror: &TestMirror) {
+        let conn = rusqlite::Connection::open(&mirror.state.db_path).expect("open");
+        conn.execute_batch(
+            "CREATE TRIGGER no_updates BEFORE UPDATE ON items
+             BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
+        )
+        .expect("trigger");
+    }
+
+    async fn failing_sweep_setup() -> (MockServer, TestMirror) {
+        let (server, mirror) = idle().await;
+        seed(
+            &mirror,
+            vec![leaf(MOVIE, "Movie", json!({ "Played": false }))],
+        )
+        .await;
+        break_item_updates(&mirror);
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[MOVIE]);
+        let ids = MOVIE.to_string();
+        server.route(
+            "/Items",
+            &[("ids", &ids)],
+            json!({ "Items": [leaf(MOVIE, "Movie", json!({ "Played": true }))], "TotalRecordCount": 1 }),
+        );
+        (server, mirror)
+    }
+
+    #[tokio::test]
+    async fn a_failed_apply_transaction_fails_the_pass() {
+        let (_server, mirror) = failing_sweep_setup().await;
+
+        let ok = refresh_user_state(&mirror.weak(), UserStateReason::Reconnect).await;
+
+        assert!(!ok, "a failed write is not a successful pass");
+        assert_eq!(row(&mirror, MOVIE).await, (false, 0, false));
+    }
+
+    #[tokio::test]
+    async fn a_local_write_after_the_run_started_survives_the_refetch() {
+        let (server, mirror) = idle().await;
+        seed(
+            &mirror,
+            vec![leaf(MOVIE, "Movie", json!({ "Played": false }))],
+        )
+        .await;
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[MOVIE]);
+        let ids = MOVIE.to_string();
+        server.route_delayed(
+            "/Items",
+            &[("ids", &ids)],
+            json!({ "Items": [leaf(MOVIE, "Movie", json!({ "Played": true }))], "TotalRecordCount": 1 }),
+            std::time::Duration::from_millis(200),
+        );
+        let weak = mirror.weak();
+        let run =
+            tokio::spawn(
+                async move { refresh_user_state(&weak, UserStateReason::Reconnect).await },
+            );
+        wait_for("the re-fetch to start", || refetch_calls(&server) == 1).await;
+        // A local stop lands while the re-fetch is in flight.
+        mirror
+            .state
+            .writer
+            .upsert_items(vec![dto(leaf(
+                MOVIE,
+                "Movie",
+                json!({ "PlaybackPositionTicks": PARTWAY }),
+            ))])
+            .await;
+        run.await.expect("run");
+
+        assert_eq!(row(&mirror, MOVIE).await, (false, PARTWAY, false));
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_incomplete_played_walk_writes_nothing() {
+        for incomplete in [false, true] {
+            let server = MockServer::start().await;
+            let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+            let mirror = TestMirror::new(client);
+            seed(
+                &mirror,
+                vec![leaf(MOVIE, "Movie", json!({ "Played": true }))],
+            )
+            .await;
+            server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+            if incomplete {
+                // Claims 3 but the walk runs dry: reads as a walk that never finished.
+                server.route(
+                    "/Items",
+                    &[("isPlayed", "true"), ("startIndex", "0")],
+                    json!({ "Items": [{ "Id": bare(BYSTANDER) }], "TotalRecordCount": 3 }),
+                );
+                server.route(
+                    "/Items",
+                    &[("isPlayed", "true"), ("startIndex", "1")],
+                    json!({ "Items": [], "TotalRecordCount": 3 }),
+                );
+            } // else: no route, HTTP 404
+            refresh_user_state(&mirror.weak(), UserStateReason::Reconnect).await;
+
+            // Absent from the (partial) played set would read as unplayed elsewhere.
+            assert_eq!(
+                row(&mirror, MOVIE).await,
+                (true, 0, false),
+                "incomplete={incomplete}"
+            );
+            assert_eq!(refetch_calls(&server), 0, "incomplete={incomplete}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_truncated_or_failed_resume_list_does_not_prove_a_resume_stale() {
+        // (resume route, expected re-fetches)
+        let cases = [
+            (
+                Some(json!({ "Items": [], "TotalRecordCount": 3 })),
+                0,
+                "truncated",
+            ),
+            (None, 0, "failed"),
+            (
+                Some(json!({ "Items": [], "TotalRecordCount": 0 })),
+                1,
+                "complete",
+            ),
+        ];
+        for (resume, want, name) in cases {
+            let server = MockServer::start().await;
+            let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+            let mirror = TestMirror::new(client);
+            seed(
+                &mirror,
+                vec![leaf(
+                    MOVIE,
+                    "Movie",
+                    json!({ "PlaybackPositionTicks": PARTWAY }),
+                )],
+            )
+            .await;
+            if let Some(body) = resume {
+                server.route("/UserItems/Resume", &[], body);
+            }
+            route_played(&server, &[]);
+            route_by_ids(&server, &[leaf(MOVIE, "Movie", json!({ "Played": false }))]);
+
+            refresh_user_state(&mirror.weak(), UserStateReason::Reconnect).await;
+
+            assert_eq!(refetch_calls(&server), want, "{name}");
+            let expected = if want == 1 { 0 } else { PARTWAY };
+            assert_eq!(row(&mirror, MOVIE).await.1, expected, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn refresher_waits_out_initial_sync_then_runs() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[]);
+        let mirror = TestMirror::new(client);
+        mirror
+            .state
+            .initial_sync_in_progress
+            .store(true, Ordering::Release);
+        let _task = spawn_refresher(&mirror);
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Reconnect);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            server.request_count("/UserItems/Resume"),
+            0,
+            "waits for initial sync"
+        );
+
+        mirror
+            .state
+            .initial_sync_in_progress
+            .store(false, Ordering::Release);
+        mirror.state.initial_sync_done.notify_waiters();
+        wait_for("the deferred run", || {
+            server.request_count("/UserItems/Resume") == 1
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn refresher_defers_during_playback_without_dropping_the_request() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[]);
+        let mirror = TestMirror::new(client);
+        mirror.state.playback_active.store(true, Ordering::Release);
+        let _task = spawn_refresher(&mirror);
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Reconnect);
+        tokio::time::sleep(PLAYBACK_YIELD_POLL * 3).await;
+        assert_eq!(
+            server.request_count("/UserItems/Resume"),
+            0,
+            "no request competes with a stream"
+        );
+
+        mirror.state.playback_active.store(false, Ordering::Release);
+        wait_for("the deferred run", || {
+            server.request_count("/UserItems/Resume") == 1
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn dropping_the_mirror_mid_run_ends_the_task_without_a_write() {
+        let (server, mirror) = idle().await;
+        seed(
+            &mirror,
+            vec![leaf(MOVIE, "Movie", json!({ "Played": false }))],
+        )
+        .await;
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[MOVIE]);
+        server.route_delayed(
+            "/Items",
+            &[("ids", MOVIE)],
+            json!({ "Items": [leaf(MOVIE, "Movie", json!({ "Played": true }))], "TotalRecordCount": 1 }),
+            std::time::Duration::from_millis(200),
+        );
+        let task = spawn_refresher(&mirror);
+        let mut changes = mirror.state.changes_tx.subscribe();
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Reconnect);
+        wait_for("the re-fetch to start", || refetch_calls(&server) == 1).await;
+
+        drop(mirror);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("task exits at its next upgrade")
+            .expect("no panic");
+        while let Ok(change) = changes.try_recv() {
+            assert!(
+                !matches!(change, MirrorChange::Upserted { .. }),
+                "no write after the drop"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_refresher_exits_at_its_wake_once_the_mirror_is_gone() {
+        let (_server, mirror) = idle().await;
+        let task = tokio::spawn(user_state_refresher_with_wake(
+            mirror.weak(),
+            mirror.state.user_state_requested.clone(),
+            std::time::Duration::from_millis(50),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        drop(mirror);
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("exits")
+            .expect("no panic");
+    }
+
+    #[tokio::test]
+    async fn triggers_during_a_run_cost_exactly_one_rerun() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        server.route_delayed(
+            "/UserItems/Resume",
+            &[],
+            json!({ "Items": [] }),
+            std::time::Duration::from_millis(200),
+        );
+        route_played(&server, &[]);
+        let mirror = TestMirror::new(client);
+        let _task = spawn_refresher(&mirror);
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Reconnect);
+        wait_for("the first run to start", || {
+            server.request_count("/UserItems/Resume") == 1
+        })
+        .await;
+        for _ in 0..5 {
+            mirror
+                .state
+                .request_user_state_refresh(UserStateReason::Reconnect);
+        }
+        wait_for("the rerun", || {
+            server.request_count("/UserItems/Resume") == 2
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert_eq!(
+            server.request_count("/UserItems/Resume"),
+            2,
+            "five triggers, one rerun"
+        );
+    }
+
+    /// docs/07 Watch state: a Startup request that arrives during another run is covered by it,
+    /// so launch walks the played set once.
+    #[tokio::test]
+    async fn a_startup_request_during_a_run_adds_no_second_walk() {
+        let (server, mirror) = idle().await;
+        server.route_delayed(
+            "/UserItems/Resume",
+            &[],
+            json!({ "Items": [] }),
+            std::time::Duration::from_millis(300),
+        );
+        route_played(&server, &[]);
+        let _task = spawn_refresher(&mirror);
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Foreground);
+        wait_for("the run to be in flight", || {
+            server.request_count("/UserItems/Resume") == 1
+        })
+        .await;
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Startup);
+
+        wait_for("the walk", || {
+            server.request_count_matching("isPlayed=true") == 1
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert_eq!(server.request_count_matching("isPlayed=true"), 1);
+        assert_eq!(server.request_count("/UserItems/Resume"), 1);
+    }
+
+    /// docs/07 Watch state: Startup and Reconnect requested together after a finished run decide by
+    /// Reconnect, so exactly one more run happens.
+    #[tokio::test]
+    async fn startup_and_reconnect_requested_together_run_once_more() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[]);
+        let mirror = TestMirror::new(client);
+        let _task = spawn_refresher(&mirror);
+        let resumes = || server.request_count("/UserItems/Resume");
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Startup);
+        wait_for("the first run", || resumes() == 1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Startup);
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Reconnect);
+        wait_for("the second run", || resumes() == 2).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert_eq!(resumes(), 2, "exactly one more run");
+    }
+
+    #[tokio::test]
+    async fn foreground_within_the_interval_is_skipped_but_reconnect_runs() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[]);
+        let mirror = TestMirror::new(client);
+        let _task = spawn_refresher(&mirror);
+        let resumes = || server.request_count("/UserItems/Resume");
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Foreground);
+        wait_for("the first run", || resumes() == 1).await;
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Foreground);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(resumes(), 1, "within 30 s of a finished run");
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Reconnect);
+        wait_for("the reconnect run", || resumes() == 2).await;
+    }
+
+    /// The sweep compares mirror ids with server ids as strings, so storage must be canonical.
+    #[tokio::test]
+    async fn mirror_row_and_parent_ids_are_dashed_lowercase() {
+        let (_server, mirror) = idle().await;
+        let mut ep = leaf(EPISODE, "Episode", json!({}));
+        ep["SeriesId"] = json!(SERIES.to_uppercase());
+        ep["SeasonId"] = json!(SEASON.replace('-', ""));
+        seed(&mirror, vec![ep]).await;
+        let pool = mirror.state.read_pool.clone();
+
+        let local = read_blocking(&pool, "test", user_state::read_local_leaves)
+            .await
+            .expect("read");
+        assert_eq!(local.known, HashSet::from([EPISODE.to_string()]));
+        let leaves = [EPISODE.to_string()];
+        let parents = read_blocking(&pool, "test", move |c| user_state::read_parents(c, &leaves))
+            .await
+            .expect("read");
+        assert_eq!(
+            parents[EPISODE],
+            vec![SERIES.to_string(), SEASON.to_string()]
+        );
+    }
+
+    const NEW_RESUME: &str = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+
+    /// A mock server and a mirror with no routes and nothing seeded.
+    async fn idle() -> (MockServer, TestMirror) {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        (server, TestMirror::new(client))
+    }
+
+    fn played_dto() -> jellyfin_api::models::UserItemDataDto {
+        serde_json::from_value(json!({ "Played": true })).expect("dto")
+    }
+
+    /// Ids carried by `Upserted` changes queued on `rx`.
+    fn upserted_ids(rx: &mut broadcast::Receiver<MirrorChange>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(change) = rx.try_recv() {
+            if let MirrorChange::Upserted { ids, .. } = change {
+                out.extend(ids);
+            }
+        }
+        out
+    }
+
+    /// docs/07 Watch state: the Continue Watching rows are written under the same guard as the
+    /// re-fetched rows, and are the only way a new in-progress item enters the mirror.
+    #[tokio::test]
+    async fn a_local_write_during_the_resume_fetch_survives_and_a_new_resume_item_enters() {
+        let (server, mirror) = idle().await;
+        seed(
+            &mirror,
+            vec![leaf(MOVIE, "Movie", json!({ "Played": false }))],
+        )
+        .await;
+        let partway = json!({ "PlaybackPositionTicks": PARTWAY });
+        server.route_delayed(
+            "/UserItems/Resume",
+            &[],
+            json!({ "Items": [leaf(MOVIE, "Movie", partway.clone()), leaf(NEW_RESUME, "Movie", partway)] }),
+            std::time::Duration::from_millis(200),
+        );
+        route_played(&server, &[]);
+        route_by_ids(&server, &[leaf(MOVIE, "Movie", json!({ "Played": false }))]);
+        let mut changes = mirror.state.changes_tx.subscribe();
+        let weak = mirror.weak();
+        let run =
+            tokio::spawn(
+                async move { refresh_user_state(&weak, UserStateReason::Reconnect).await },
+            );
+        wait_for("the resume fetch to start", || {
+            server.request_count("/UserItems/Resume") == 1
+        })
+        .await;
+
+        // A local mark-played lands while the resume GET is in flight.
+        mirror
+            .state
+            .writer
+            .apply_user_data(vec![(MOVIE.to_string(), played_dto())])
+            .await;
+        mirror.state.writer.barrier().await;
+        upserted_ids(&mut changes);
+        run.await.expect("run");
+
+        assert_eq!(
+            row(&mirror, MOVIE).await,
+            (true, 0, false),
+            "the local write is kept"
+        );
+        assert_eq!(
+            row(&mirror, NEW_RESUME).await,
+            (false, PARTWAY, false),
+            "a new resume item enters"
+        );
+        let after = upserted_ids(&mut changes);
+        assert!(after.contains(&NEW_RESUME.to_string()), "{after:?}");
+        assert!(
+            !after.contains(&MOVIE.to_string()),
+            "no change event for the kept row: {after:?}"
+        );
+    }
+
+    /// A failed pass backs off Foreground/Timer by FAILED_RETRY_FLOOR but never Startup/Reconnect.
+    #[tokio::test]
+    async fn a_failed_pass_backs_off_a_foreground_but_not_a_reconnect() {
+        let (server, mirror) = idle().await;
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        // No played route: the walk 404s and the pass fails.
+        let _task = spawn_refresher(&mirror);
+        let resumes = || server.request_count("/UserItems/Resume");
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Foreground);
+        wait_for("the failed run", || resumes() == 1).await;
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Foreground);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(resumes(), 1, "within the failure backoff");
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Reconnect);
+        wait_for("the reconnect retry", || resumes() == 2).await;
+    }
+
+    /// docs/07 Watch state: the warm startup pass requests the sweep and moves on; a slow walk
+    /// never holds up delta, reconcile or favorites.
+    #[tokio::test]
+    async fn warm_startup_requests_the_sweep_without_awaiting_it() {
+        let (server, mirror) = idle().await;
+        server.route("/UserViews", &[], json!({ "Items": [] }));
+        server.route("/Shows/NextUp", &[], json!({ "Items": [] }));
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        server.route_delayed(
+            "/Items",
+            &[("isPlayed", "true")],
+            json!({ "Items": [], "TotalRecordCount": 0 }),
+            std::time::Duration::from_millis(1500),
+        );
+        let (_bus_tx, bus_rx) = broadcast::channel(16);
+        let started = Instant::now();
+        spawn(mirror.state.clone(), bus_rx, false);
+
+        wait_for("the startup pass to finish", || {
+            !mirror.state.startup_pass_active.load(Ordering::Acquire)
+        })
+        .await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(1000));
+        assert!(
+            mirror.meta(LAST_DELTA_SYNC_KEY).await.is_some(),
+            "delta ran"
+        );
+        wait_for("the sweep's walk", || {
+            server.request_count_matching("isPlayed=true") == 1
+        })
+        .await;
+    }
+
+    /// Requests that arrive while a taken request waits for playback to stop are covered by the
+    /// run that follows, not queued behind it.
+    #[tokio::test]
+    async fn requests_arriving_while_the_run_waits_are_covered_by_it() {
+        let (server, mirror) = idle().await;
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        route_played(&server, &[]);
+        mirror.state.playback_active.store(true, Ordering::Release);
+        let _task = spawn_refresher(&mirror);
+
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Foreground);
+        tokio::time::sleep(PLAYBACK_YIELD_POLL / 2).await;
+        mirror
+            .state
+            .request_user_state_refresh(UserStateReason::Startup);
+        mirror.state.playback_active.store(false, Ordering::Release);
+
+        wait_for("the run", || server.request_count("/UserItems/Resume") >= 1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            server.request_count("/UserItems/Resume"),
+            1,
+            "one run for both requests"
+        );
+    }
+
+    /// Routes for a warm launch whose only work is the Continue Watching write: `resume` is the
+    /// server's list, held back `delay` so a test can act while it is in flight.
+    fn route_warm_resume(
+        server: &MockServer,
+        resume: Vec<serde_json::Value>,
+        delay: std::time::Duration,
+    ) {
+        server.route("/UserViews", &[], json!({ "Items": [] }));
+        server.route("/Shows/NextUp", &[], json!({ "Items": [] }));
+        server.route_delayed("/UserItems/Resume", &[], json!({ "Items": resume }), delay);
+    }
+
+    async fn run_warm_startup(mirror: &TestMirror) {
+        let (_bus_tx, bus_rx) = broadcast::channel(16);
+        spawn(mirror.state.clone(), bus_rx, false);
+        wait_for("the startup pass to finish", || {
+            !mirror.state.startup_pass_active.load(Ordering::Acquire)
+        })
+        .await;
+    }
+
+    /// docs/07 Watch state, Guards: the warm launch writes Continue Watching through the same
+    /// guarded write as the sweep, so a pending item keeps its local state.
+    #[tokio::test]
+    async fn warm_launch_resume_skips_a_pending_item() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        let mirror = TestMirror::with_pending(client, Arc::new(|| [MOVIE.to_uppercase()].into()));
+        seed(
+            &mirror,
+            vec![leaf(MOVIE, "Movie", json!({ "Played": true }))],
+        )
+        .await;
+        // The server still shows the pre-stop state: unplayed with an old position.
+        let stale = json!({ "PlaybackPositionTicks": PARTWAY });
+        route_warm_resume(
+            &server,
+            vec![
+                leaf(MOVIE, "Movie", stale.clone()),
+                leaf(NEW_RESUME, "Movie", stale),
+            ],
+            std::time::Duration::ZERO,
+        );
+
+        run_warm_startup(&mirror).await;
+
+        assert_eq!(row(&mirror, MOVIE).await, (true, 0, false), "pending kept");
+        assert_eq!(
+            row(&mirror, NEW_RESUME).await,
+            (false, PARTWAY, false),
+            "a new resume item still enters"
+        );
+    }
+
+    /// docs/07 Watch state, Guards: a local write that lands while the warm launch's Continue
+    /// Watching fetch is in flight survives it.
+    #[tokio::test]
+    async fn warm_launch_resume_keeps_a_local_write_made_during_the_fetch() {
+        let server = MockServer::start().await;
+        let client = JellyfinClient::from_token(&server.base_url, identity(), "tok");
+        let mirror = TestMirror::new(client);
+        seed(
+            &mirror,
+            vec![leaf(MOVIE, "Movie", json!({ "Played": false }))],
+        )
+        .await;
+        route_warm_resume(
+            &server,
+            vec![leaf(
+                MOVIE,
+                "Movie",
+                json!({ "PlaybackPositionTicks": PARTWAY }),
+            )],
+            std::time::Duration::from_millis(200),
+        );
+        let (_bus_tx, bus_rx) = broadcast::channel(16);
+        spawn(mirror.state.clone(), bus_rx, false);
+        wait_for("the resume fetch to start", || {
+            server.request_count("/UserItems/Resume") == 1
+        })
+        .await;
+
+        mirror
+            .state
+            .writer
+            .apply_user_data(vec![(MOVIE.to_string(), played_dto())])
+            .await;
+        wait_for("the startup pass to finish", || {
+            !mirror.state.startup_pass_active.load(Ordering::Acquire)
+        })
+        .await;
+
+        assert_eq!(row(&mirror, MOVIE).await, (true, 0, false));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconcile_timer_delays_missed_ticks_instead_of_bursting() {
+        assert_eq!(
+            reconcile_interval().missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Delay
         );
     }
 }

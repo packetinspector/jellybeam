@@ -77,6 +77,8 @@ fn build_http_client(
     request_timeout: Duration,
 ) -> Result<reqwest::Client, SeerrError> {
     reqwest::Client::builder()
+        // Feature unification enables gzip workspace-wide; this client stays byte-for-byte as before.
+        .no_gzip()
         .connect_timeout(connect_timeout)
         .timeout(request_timeout)
         .build()

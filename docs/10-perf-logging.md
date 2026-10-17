@@ -305,6 +305,20 @@ line, and the summary itself is computed and logged from the frame-metrics
 callback's own background thread (a dedicated `HandlerThread`), never the
 main thread.
 
+### Watch-state pass (core)
+
+```
+perf userState ms=412 played=5613 refetch=3 changed=3 reason=Foreground
+```
+
+One INFO line per finished pass of the docs/07 watch-state refresher, from
+the Rust core rather than the Kotlin perf gate, so it reaches the docs/21 ring
+whenever diagnostic logging is on. `ms` is the whole pass (resume, played-id
+walk, re-fetch, write). `played` is the server's played count. `refetch` is
+how many rows the pass re-fetched and `changed` how many actually moved.
+`reason` is the strongest trigger the pass served (`Startup`, `Reconnect`,
+`Timer`, `Foreground`). A failed or incomplete pass logs its error instead.
+
 ### Profile status
 
 ```

@@ -107,5 +107,7 @@ jellybeam/
    `context.filesDir/jellybeam`; images are cached by Coil on the Kotlin side under the tagged image URLs
    the mirror produces, so a changed image tag is a cache miss and a stale one is never shown.
 4. **Background lifecycle.** Android stops backgrounded apps; the websocket and sync
-   resume on foreground, and the mirror's delta plus heal passes make a missed window
-   harmless.
+   resume on foreground. Delta and heal passes cover library edits made while stopped;
+   watch state changed elsewhere needs the foreground watch-state pass (docs/07 Watch
+   state from other clients), since neither delta nor a socket that survived the stop
+   ever sees it.

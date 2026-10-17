@@ -419,6 +419,19 @@ private class FrameMetricsReporter(private val handler: Handler) : Window.OnFram
 
 private const val EPISODE_ITEM_TYPE = "Episode"
 
+/** docs/07 Watch state: one ON_START with an account runs the session check and the core's
+ * foreground refresh, once each; `foreground` must hop off Main itself (the gateway does). */
+internal fun onActivityStart(
+    event: Lifecycle.Event,
+    hasAccounts: Boolean,
+    checkSession: () -> Unit,
+    foreground: () -> Unit,
+) {
+    if (event != Lifecycle.Event.ON_START || !hasAccounts) return
+    checkSession()
+    foreground()
+}
+
 /** Foreground returns re-validate the saved token at most this often; see `checkSession`. */
 private const val SESSION_CHECK_MIN_INTERVAL_MS = 60_000L
 
@@ -815,7 +828,12 @@ private fun JellybeamRoot(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_START && accounts.isNotEmpty()) checkSession(force = false)
+            onActivityStart(
+                event,
+                hasAccounts = accounts.isNotEmpty(),
+                checkSession = { checkSession(force = false) },
+                foreground = { composableScope.launch { runCatching { gateway.onForeground() } } },
+            )
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }

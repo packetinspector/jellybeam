@@ -10,6 +10,7 @@ mod query;
 mod rows;
 mod schema;
 mod sync;
+mod user_state;
 pub mod watch_grace;
 mod writer;
 
@@ -112,6 +113,42 @@ pub struct NextUpOptions {
     pub rewatching: bool,
 }
 
+/// Why a watch-state refresh (docs/07 Watch state) was requested, strongest first (`Ord`).
+/// Reconnect always runs; Timer/Foreground are rate-limited; Startup is weakest, so a coalesced
+/// {Startup, Reconnect} decides by Reconnect (all by `user_state::due`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UserStateReason {
+    Reconnect,
+    Timer,
+    Foreground,
+    Startup,
+}
+
+impl UserStateReason {
+    /// Strongest first; must equal the `Ord` order.
+    const ALL: [Self; 4] = [
+        Self::Reconnect,
+        Self::Timer,
+        Self::Foreground,
+        Self::Startup,
+    ];
+
+    const fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+}
+
+/// Raw ids of local watch-state writes the server hasn't seen yet; called only from background
+/// sync tasks (the refresher and the warm startup pass), never under the core state lock.
+pub type LocalPendingProvider =
+    std::sync::Arc<dyn Fn() -> std::collections::HashSet<String> + Send + Sync>;
+
+/// A provider with nothing pending.
+#[cfg(test)]
+pub(crate) fn no_pending() -> LocalPendingProvider {
+    std::sync::Arc::new(std::collections::HashSet::new)
+}
+
 /// Shared state behind every `Mirror` clone: the single writer's command
 /// queue, the read-only pool, the server connection (for the sync engine),
 /// and the change-feed broadcaster.
@@ -138,6 +175,12 @@ pub(crate) struct MirrorState {
     /// docs/07 §1: wakes `sync::next_up_refresher`, the one place Next Up is fetched from;
     /// `Notify` keeps at most one pending wake, which is what coalesces a burst of triggers.
     pub(crate) next_up_requested: std::sync::Arc<tokio::sync::Notify>,
+    /// docs/07 Watch state: wakes the user-state refresher; `Notify` coalesces a burst to one run.
+    pub(crate) user_state_requested: std::sync::Arc<tokio::sync::Notify>,
+    /// [`UserStateReason::bit`]s requested since the refresher last took them.
+    pub(crate) user_state_reasons: std::sync::atomic::AtomicU8,
+    /// Handed to [`Mirror::open`], so it exists before any sync task starts.
+    pub(crate) local_pending: LocalPendingProvider,
     /// One-shot gate: only the very first post-launch `NeedsReconcile` may be skipped under
     /// `startup_pass_active`; every later (re)connect runs `apply_bus_event`'s handler in full.
     pub(crate) first_reconcile_handled: std::sync::atomic::AtomicBool,
@@ -173,7 +216,7 @@ pub(crate) struct MirrorState {
     /// Self-referential weak handle so code holding only `&MirrorState` can hand out a
     /// `Weak<MirrorState>` (the startup sync task checks liveness per page via this instead
     /// of holding a strong `Arc` for its whole run).
-    pub(crate) self_weak: std::sync::Weak<MirrorState>,
+    pub(crate) self_weak: std::sync::Weak<Self>,
     /// Sync activity observable; see [`SyncActivity`] and [`Mirror::sync_activity`].
     pub(crate) sync_activity: tokio::sync::watch::Sender<SyncActivity>,
     /// Current Next Up filtering knobs; see [`NextUpOptions`]. A plain `Mutex`, not an
@@ -189,7 +232,7 @@ impl MirrorState {
     /// Shared constructor for [`Mirror::open`] and the `lib.rs`/`sync.rs` test harnesses:
     /// every field below the parameters starts out identical in both (freshly opened, nothing
     /// in flight yet) -- only what's built differently per caller (the client, the writer
-    /// handle, the read pool, the db path, the change/activity broadcast senders, and the
+    /// handle, the read pool, the db path, the change broadcast sender, and the
     /// self-referential weak handle `Arc::new_cyclic` hands back) is passed in.
     pub(crate) fn new(
         client: jellyfin_api::JellyfinClient,
@@ -197,10 +240,10 @@ impl MirrorState {
         read_pool: std::sync::Arc<pool::ReadPool>,
         db_path: std::path::PathBuf,
         changes_tx: tokio::sync::broadcast::Sender<MirrorChange>,
-        sync_activity: tokio::sync::watch::Sender<SyncActivity>,
-        self_weak: std::sync::Weak<MirrorState>,
+        self_weak: std::sync::Weak<Self>,
+        local_pending: LocalPendingProvider,
     ) -> Self {
-        MirrorState {
+        Self {
             client,
             writer,
             read_pool,
@@ -209,6 +252,9 @@ impl MirrorState {
             initial_sync_in_progress: std::sync::atomic::AtomicBool::new(false),
             startup_pass_active: std::sync::atomic::AtomicBool::new(false),
             next_up_requested: std::sync::Arc::new(tokio::sync::Notify::new()),
+            user_state_requested: std::sync::Arc::new(tokio::sync::Notify::new()),
+            user_state_reasons: std::sync::atomic::AtomicU8::new(0),
+            local_pending,
             first_reconcile_handled: std::sync::atomic::AtomicBool::new(false),
             breadth_syncs_in_flight: std::sync::atomic::AtomicUsize::new(0),
             reconcile_in_progress: std::sync::atomic::AtomicBool::new(false),
@@ -219,7 +265,7 @@ impl MirrorState {
             initial_sync_done: std::sync::Arc::new(tokio::sync::Notify::new()),
             reconcile_after_sync: std::sync::atomic::AtomicBool::new(false),
             self_weak,
-            sync_activity,
+            sync_activity: tokio::sync::watch::channel(SyncActivity::Idle).0,
             next_up_options: std::sync::Mutex::new(NextUpOptions::default()),
             ready_index_groups: std::sync::atomic::AtomicU8::new(0),
         }
@@ -228,6 +274,28 @@ impl MirrorState {
     /// Asks for a Next Up re-fetch; see `sync::next_up_refresher` for the cooldown.
     pub(crate) fn request_next_up_refresh(&self) {
         self.next_up_requested.notify_one();
+    }
+
+    /// docs/07 Watch state: records `reason`, then wakes the refresher; never runs inline.
+    pub(crate) fn request_user_state_refresh(&self, reason: UserStateReason) {
+        self.user_state_reasons
+            .fetch_or(reason.bit(), std::sync::atomic::Ordering::AcqRel);
+        self.user_state_requested.notify_one();
+    }
+
+    /// Clears the requested reasons and returns the strongest (declaration order), if any.
+    pub(crate) fn take_user_state_reasons(&self) -> Option<UserStateReason> {
+        let bits = self
+            .user_state_reasons
+            .swap(0, std::sync::atomic::Ordering::AcqRel);
+        UserStateReason::ALL
+            .into_iter()
+            .find(|r| bits & r.bit() != 0)
+    }
+
+    /// The provider's raw ids. Background sync tasks only, never under the core state lock.
+    pub(crate) fn local_pending_ids(&self) -> std::collections::HashSet<String> {
+        (self.local_pending)()
     }
 
     /// Whether deferred index `group` exists (docs/25 §4.8).
@@ -368,6 +436,7 @@ impl Mirror {
         client: jellyfin_api::JellyfinClient,
         bus: tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>,
         playback_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        local_pending: LocalPendingProvider,
     ) -> Result<Self, CacheError> {
         tokio::fs::create_dir_all(&dir)
             .await
@@ -395,7 +464,6 @@ impl Mirror {
         let (changes_tx, _) = tokio::sync::broadcast::channel(256);
         let writer_changes_tx = changes_tx.clone();
         tokio::task::spawn_blocking(move || writer::run(conn, write_rx, writer_changes_tx));
-        let (sync_activity_tx, _) = tokio::sync::watch::channel(SyncActivity::Idle);
 
         let state = std::sync::Arc::new_cyclic(|weak| MirrorState {
             playback_active,
@@ -405,8 +473,8 @@ impl Mirror {
                 read_pool,
                 db_path,
                 changes_tx,
-                sync_activity_tx,
                 weak.clone(),
+                local_pending,
             )
         });
 
@@ -415,7 +483,7 @@ impl Mirror {
             .store(built_index_groups, std::sync::atomic::Ordering::Release);
         sync::spawn(state.clone(), bus, is_empty);
 
-        Ok(Mirror { inner: state })
+        Ok(Self { inner: state })
     }
 
     /// Change feed for live UI updates (commit-ordered). Consumers MUST read via
@@ -461,7 +529,7 @@ impl Mirror {
             .inner
             .next_up_options
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = options;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = options;
     }
 
     /// Total item count for the sidebar's sync progress text. A plain `COUNT(*)`, cheap and
@@ -764,6 +832,12 @@ impl Mirror {
         self.inner.request_next_up_refresh();
     }
 
+    /// docs/07 Watch state: asks for a sweep of watch state set on other clients. Coalesced and
+    /// asynchronous; the refresher decides whether `reason` is due.
+    pub fn request_user_state_refresh(&self, reason: UserStateReason) {
+        self.inner.request_user_state_refresh(reason);
+    }
+
     /// docs/19-detail-action-menu.md §2.2: authoritative re-read of items by id, in batches
     /// of 100, to refresh parent rows (`unplayed_item_count`) only the server can recompute.
     /// Thin wrapper over [`sync::fetch_and_upsert_ids`].
@@ -1010,6 +1084,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn user_state_reasons_are_listed_strongest_first() {
+        let all = UserStateReason::ALL;
+        assert!(all.windows(2).all(|w| w[0] < w[1]), "{all:?}");
+        assert_eq!(
+            all.last(),
+            Some(&UserStateReason::Startup),
+            "Startup is weakest"
+        );
+    }
+
+    /// docs/07 Watch state: a coalesced {Startup, Reconnect} decides by Reconnect.
+    #[tokio::test]
+    async fn a_coalesced_startup_and_reconnect_decide_by_reconnect() {
+        use jellyfin_api::{ClientIdentity, JellyfinClient};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = JellyfinClient::from_token(
+            "http://127.0.0.1:1",
+            ClientIdentity {
+                client: "Jellybeam Test".to_string(),
+                device: "test".to_string(),
+                device_id: "test-device".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            "tok",
+        );
+        let mirror = test_mirror(client, &dir.path().join("mirror.db"));
+        mirror.request_user_state_refresh(UserStateReason::Startup);
+        mirror.request_user_state_refresh(UserStateReason::Reconnect);
+        assert_eq!(
+            mirror.inner.take_user_state_reasons(),
+            Some(UserStateReason::Reconnect)
+        );
+    }
+
+    #[test]
     fn schema_version_is_stable_constant() {
         assert_eq!(SCHEMA_VERSION, 17);
     }
@@ -1095,7 +1204,6 @@ mod tests {
         let _writer_task =
             tokio::task::spawn_blocking(move || writer::run(conn, rx, writer_changes_tx));
         let read_pool = std::sync::Arc::new(ReadPool::open(path, 2).expect("read pool"));
-        let (sync_activity_tx, _) = tokio::sync::watch::channel(SyncActivity::Idle);
         let state = std::sync::Arc::new_cyclic(|weak| {
             MirrorState::new(
                 client,
@@ -1103,11 +1211,57 @@ mod tests {
                 read_pool,
                 path.to_path_buf(),
                 changes_tx,
-                sync_activity_tx,
                 weak.clone(),
+                no_pending(),
             )
         });
         Mirror { inner: state }
+    }
+
+    /// docs/07 Watch state: requests coalesce into one wake, `take` returns the strongest
+    /// reason and clears, and the provider is optional.
+    #[tokio::test]
+    async fn user_state_requests_coalesce_and_take_returns_the_strongest_reason() {
+        use jellyfin_api::{ClientIdentity, JellyfinClient};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = JellyfinClient::from_token(
+            "http://127.0.0.1:1",
+            ClientIdentity {
+                client: "Jellybeam Test".to_string(),
+                device: "test".to_string(),
+                device_id: "test-device".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            "tok",
+        );
+        let mirror = test_mirror(client, &dir.path().join("mirror.db"));
+        let state = &mirror.inner;
+        assert_eq!(state.take_user_state_reasons(), None);
+        assert!(state.local_pending_ids().is_empty());
+
+        mirror.request_user_state_refresh(UserStateReason::Foreground);
+        mirror.request_user_state_refresh(UserStateReason::Timer);
+        mirror.request_user_state_refresh(UserStateReason::Reconnect);
+        // Three requests leave exactly one stored wake.
+        state.user_state_requested.notified().await;
+        let second = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            state.user_state_requested.notified(),
+        )
+        .await;
+        assert!(second.is_err(), "a burst coalesces to one wake");
+        assert_eq!(
+            state.take_user_state_reasons(),
+            Some(UserStateReason::Reconnect)
+        );
+        assert_eq!(state.take_user_state_reasons(), None);
+
+        mirror.request_user_state_refresh(UserStateReason::Foreground);
+        mirror.request_user_state_refresh(UserStateReason::Timer);
+        assert_eq!(
+            state.take_user_state_reasons(),
+            Some(UserStateReason::Timer)
+        );
     }
 
     /// docs/19-detail-action-menu.md §2.2: [`Mirror::refresh_items`] must split its id list
