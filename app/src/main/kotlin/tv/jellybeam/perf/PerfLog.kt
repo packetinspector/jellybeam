@@ -146,6 +146,13 @@ object PerfLog {
         }
     }
 
+    /** Like [armDetailImageMark], but many URLs share [mark] (docs/10 `detail.castArt`): each
+     * success logs its own line, so the first and last bound the whole row's load. */
+    fun armDetailImageMarkMember(mark: String, url: String?) {
+        if (!enabled || url.isNullOrBlank()) return
+        pendingDetailImageMarks[url] = mark
+    }
+
     /** [tv.jellybeam.PerfImageEventListener]'s per-success hook: fires and disarms a matching
      * [armDetailImageMark] entry, if any. */
     fun notifyImageUrlSucceeded(url: String?) {

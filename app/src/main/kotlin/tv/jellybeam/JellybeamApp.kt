@@ -50,6 +50,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import uniffi.jellybeam_core.DeviceCaps
 import uniffi.jellybeam_core.JellybeamCore
@@ -137,6 +139,9 @@ object AppGraph {
             .callTimeout(0, TimeUnit.SECONDS)
             .build()
     }
+
+    /** Coil's client, from [imageHttpClient]. */
+    internal val artHttpClient: OkHttpClient by lazy { imageHttpClient(httpClient) }
 
     /**
      * Process-scoped coroutine scope, never cancelled by Activity/ViewModel teardown --
@@ -304,6 +309,19 @@ private const val IMAGE_DISK_CACHE_MAX_BYTES = 256L * 1024 * 1024
  */
 private const val IMAGE_MEMORY_CACHE_MAX_PERCENT = 0.20
 
+/** Parallel art downloads per server: OkHttp's default 5 let a detail page's portraits, backdrop
+ * and Similar posters land in waves; idle connections are kept to match so a revisit skips the
+ * TLS handshakes. */
+internal const val IMAGE_MAX_REQUESTS_PER_HOST = 8
+
+/** Coil's client: the app's timeouts, but its own queue and pool so art never waits on (or holds
+ * up) the player's requests. */
+internal fun imageHttpClient(base: OkHttpClient): OkHttpClient =
+    base.newBuilder()
+        .dispatcher(Dispatcher().apply { maxRequestsPerHost = IMAGE_MAX_REQUESTS_PER_HOST })
+        .connectionPool(ConnectionPool(IMAGE_MAX_REQUESTS_PER_HOST, 5, TimeUnit.MINUTES))
+        .build()
+
 /** docs/07 §6's "Image fade 150ms" -- promised by `CardArt.kt`'s own doc comment but never actually
  * wired into a Coil config until this one.
  */
@@ -350,6 +368,7 @@ class JellybeamApp : Application(), ImageLoaderFactory {
             .transitionFactory(networkOnlyCrossfade(IMAGE_CROSSFADE_MS))
             .bitmapConfig(Bitmap.Config.RGB_565)
             .respectCacheHeaders(false)
+            .okHttpClient { AppGraph.artHttpClient }
             .memoryCache {
                 MemoryCache.Builder(this)
                     .maxSizePercent(IMAGE_MEMORY_CACHE_MAX_PERCENT)

@@ -68,7 +68,10 @@ nothing overlaps however long the title, synopsis, or a cast name runs, and
 nothing moves while the page loads: each region still waiting on its data -- eyebrow,
 genre chips, credits, spec capsule, cast, Up Next, season chips, episode shelf --
 holds its final size as a quiet pulsing skeleton and fades its content in; a
-region that turns out empty collapses once, docs/11 §Loading state);
+region that turns out empty collapses once, docs/11 §Loading state; a movie's
+spec capsule sits just under its synopsis and credits whether or not it has a
+cast; art downloads run up to eight at a time per server on their own queue,
+so cast portraits and the backdrop land together instead of in waves);
 selecting a cast member opens a person page (portrait, name, birth and death
 details, biography, "In your library" with their movies and series, and --
 when Discover is connected -- "Not in your library" with their remaining

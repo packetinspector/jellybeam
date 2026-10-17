@@ -243,6 +243,10 @@ perf startup phase=detail.poster ms=210.75
   (Series/Movie only; Episode has no poster figure).
 - `detail.backdrop` -- the header backdrop's first successful Coil decode,
   on every item type.
+- `detail.content` -- the first frame after the live item record lands,
+  when the spec capsule, credits and cast regions paint (Movie only).
+- `detail.castArt` -- one line per cast portrait's successful decode; the
+  first and last lines bound the cast row's load.
 
 A second push always measures from *its own* `detail.push`, never a stale
 one left over from the previous screen. Like `activity.firstFrame`, these

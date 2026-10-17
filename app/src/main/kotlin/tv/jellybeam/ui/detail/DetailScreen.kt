@@ -1716,6 +1716,13 @@ private fun MovieDetailScreen(
     val primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList())
     val hasPrimaryButton = DetailFormatting.primaryTakesFocus(primaryAction)
     val castMembers = remember(detail) { DetailFormatting.castMembers(detail?.people.orEmpty()) }
+    // docs/10 `detail.content`: the frame the live record's regions first paint.
+    LaunchedEffect(state.itemDetailLoaded) {
+        if (state.itemDetailLoaded) {
+            withFrameNanos { }
+            PerfLog.markDetailPhase("detail.content")
+        }
+    }
     val specFields = remember(strings, detail) {
         DetailFormatting.specCapsuleFields(
             strings,
@@ -1858,9 +1865,8 @@ private fun MovieDetailScreen(
                 )
 
                 // docs/23-detail-layout-rules.md Rule 1: one flow column, no absolute content
-                // below the backdrop/scrim pair. Bound to at least the viewport height so the spec
-                // capsule's margin-top:auto (the weighted Spacer below, a direct child of this
-                // Column) has real room to push against on a short page.
+                // below the backdrop/scrim pair. At least one viewport tall so the cast band's
+                // bottom anchor (the weighted Spacer below) has room on a short page.
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1875,7 +1881,9 @@ private fun MovieDetailScreen(
                             horizontalArrangement = Arrangement.spacedBy(HERO_POSTER_GAP),
                             verticalAlignment = Alignment.Top,
                         ) {
-                            HeroPoster(card)
+                            // With the capsule's 8dp this clears the poster by the cast band's
+                            // 22dp; a taller text column is unaffected, so dense pages keep their height.
+                            HeroPoster(card, Modifier.padding(bottom = 14.dp))
                             Column(
                                 modifier = Modifier.weight(1f, fill = false).widthIn(max = 510.dp),
                                 verticalArrangement = Arrangement.spacedBy(11.dp),
@@ -1923,12 +1931,10 @@ private fun MovieDetailScreen(
                         }
                     }
 
-                    // The spec's margin-top: auto -- must be a direct child here, not nested inside
-                    // the padded Column above.
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    // 8dp fixed minimum above the capsule: the weighted Spacer can compute to
-                    // zero on a two-line-title page.
+                    // docs/23 Rule 4: the capsule follows the content at a fixed 8dp (the docs/11
+                    // height budget) and only the cast is pinned to the bottom, so whether a cast
+                    // exists cannot move it.
+                    val bandGap = 22.dp
                     val specModifier = Modifier.padding(start = PAGE_MARGIN, top = 8.dp)
                     RegionReveal(
                         show = regionShow(state.itemDetailLoaded, specFields.isNotEmpty()),
@@ -1936,19 +1942,22 @@ private fun MovieDetailScreen(
                         content = { SpecStripRow(fields = specFields, modifier = specModifier) },
                     )
 
+                    // The cast band's margin-top: auto, a direct child of this Column; [bandGap]
+                    // inside the band is its fixed minimum.
+                    Spacer(modifier = Modifier.weight(1f))
                     // [CastRow]'s own LazyRow already carries a PAGE_MARGIN `contentPadding`, so
                     // adding padding here too would double the left margin.
                     RegionReveal(
                         show = regionShow(state.itemDetailLoaded, castMembers.isNotEmpty()),
                         skeleton = {
                             Column {
-                                Spacer(modifier = Modifier.height(22.dp))
+                                Spacer(modifier = Modifier.height(bandGap))
                                 CastRowSkeleton(showHeader = true, showRole = true, contentWidth = contentWidth)
                             }
                         },
                         content = {
                             Column {
-                                Spacer(modifier = Modifier.height(22.dp))
+                                Spacer(modifier = Modifier.height(bandGap))
                                 CastRow(
                                     members = castMembers,
                                     onOpenPerson = onOpenPerson,
@@ -2749,7 +2758,10 @@ private fun CastPortrait(
         ) {
             CardArtImage(
                 source = ArtSource.Own(person.id!!, person.primaryImageTag!!, ImageKind.PRIMARY),
-                imageUrl = { itemId, kind, tag -> AppGraph.gateway.imageUrl(itemId, kind, tag, avatarWidthPx) },
+                imageUrl = { itemId, kind, tag ->
+                    AppGraph.gateway.imageUrl(itemId, kind, tag, avatarWidthPx)
+                        ?.also { PerfLog.armDetailImageMarkMember("detail.castArt", it) }
+                },
                 itemName = person.name.orEmpty(),
                 contentAlpha = 1f,
                 modifier = Modifier.fillMaxSize(),

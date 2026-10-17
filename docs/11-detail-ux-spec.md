@@ -272,10 +272,10 @@ the repo). Applies to Movie, Series and Episode alike.
   The old fixed y-offsets (details panel 310dp, spec strip 323dp, cast
   374dp; Series chips 318dp / shelf 380dp) are gone.
 - **Movie frame.** Content column is at least one viewport tall; the spec
-  capsule takes the flexible gap (`margin-top: auto`, with a fixed 8dp
-  minimum so credits never sit flush on the pill) and the cast band sits a
-  fixed 22dp under it, so on a short page both stay pinned to the bottom
-  and on a tall page the column grows and the page scrolls. Similar Titles
+  capsule sits a fixed 8dp under the content and the cast band takes the
+  flexible gap (pinned to the bottom, at least 22dp under the capsule), so
+  neither a short synopsis nor a missing cast moves the capsule, and on a
+  tall page the column grows and the page scrolls. Similar Titles
   follows below the frame. The Movie scroll container replaces the
   platform's TV pivot (which dragged the title off-screen the moment MORE
   took focus) with a frame rule: focus landing on anything inside the frame

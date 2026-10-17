@@ -24,15 +24,15 @@ frame 1920×1080, overflow hidden
    ├─ top row      display flex, gap 52px, align-items flex-start
    │  ├─ poster    296×444, flex 0 0 296px, radius 8
    │  └─ text col  flex 0 1 1020px, min-width 0, gap 22px
-   ├─ spec capsule margin-top auto, align-self flex-start
-   └─ cast band    margin-top 44px, gap 20px
+   ├─ spec capsule margin-top 16px, align-self flex-start
+   └─ cast band    margin-top auto (min 44px), gap 20px
 ```
 
 **Loading amendment.** While its data loads, a region reserves its final height with a skeleton (docs/11 §Loading state); a region that settles empty collapses once. Absent-until-loaded is the failure this prevents: a region that appears later shoves everything below it.
 
 **`min-width: 0` on the text column is load-bearing.** Without it a flex item refuses to shrink below its content width and pushes into its siblings — which is the overlap, in one line of CSS.
 
-**Never combine `margin-top: auto` with an adjacent region that needs a minimum gap.** Give the flexible region the `auto` and its neighbour a fixed margin. Here the spec capsule takes the `auto`; the cast band sits a fixed 44px below it. If `auto` computed to 0 on a tall page, the two would sit flush — the same class of bug in a new place.
+**Only the cast band takes `margin-top: auto`.** The spec capsule sits a fixed 16px under the content; the cast band is pinned to the bottom with a 44px minimum above it. A capsule pinned to the bottom would take its position from whatever shares the bottom with it, so a title without cast would move it — and since the cast is only known once the live record lands, it would also jump while loading.
 
 ## Rule 2 — Two hard clamps
 
@@ -62,7 +62,7 @@ This keeps the right half of the frame as backdrop, which is what makes the page
 
 The technical strip stays where it always was: its own line between the credits and the cast, outlined pill (1px `#322A22`, radius 999px, 12px/10px padding), Martian Mono 18px at `#8C8478`, `│` separators, `align-self: flex-start` so it hugs its content.
 
-It is doing structural work, not just reporting: it is the rule that separates the reading half of the page from the browsing half, and it lands in the same place on every title.
+It is doing structural work, not just reporting: it is the rule that separates the reading half of the page from the browsing half, and it always sits the same distance under the content, whatever follows it.
 
 ## Rule 5 — Cast items are fixed-size and truncate
 
@@ -73,7 +73,7 @@ Cards are `168px` wide, `flex: 0 0 168px`, gap 44px, 128px round avatars. Name a
 Ship none of this until all five pass on a 1920×1080 frame with `overflow: hidden`:
 
 1. **Long everything.** Two-line title + 9-line synopsis + 3 genre chips: no region overlaps another, content bottom ≤ 1080.
-2. **Short everything.** One-line title, one-line synopsis: the spec capsule and cast band stay at the bottom, no dead-looking gap in the middle.
+2. **Short everything.** One-line title, one-line synopsis: the spec capsule follows the content and the cast band stays at the bottom.
 3. **Long names.** A 40-character cast name and a 4-name writer list: both truncate, neither reflows its neighbours.
 4. **No cast.** Cast band absent entirely: nothing else moves out of position.
 5. **Series and Episode.** Same three checks — they inherit the same structure.
