@@ -3120,15 +3120,23 @@ impl JellybeamCore {
     fn playing_epoch_locked(state: &State) -> Option<u64> {
         let owner = &state.playback_owner;
         owner.claim.as_ref().map(|claim| claim.epoch).or_else(|| {
-            Self::playback_live_locked(state)
-                .then(|| owner.parked.as_ref().map_or(state.account.epoch, |parked| parked.epoch))
+            Self::playback_live_locked(state).then(|| {
+                owner
+                    .parked
+                    .as_ref()
+                    .map_or(state.account.epoch, |parked| parked.epoch)
+            })
         })
     }
 
     /// docs/18 §2.1: whether the newest playback is the parked one, so leaving its account ends
     /// it; a parked account whose playback ended or was replaced is only dropped.
     fn parked_plays_locked(state: &State) -> bool {
-        let parked = state.playback_owner.parked.as_ref().map(|parked| parked.epoch);
+        let parked = state
+            .playback_owner
+            .parked
+            .as_ref()
+            .map(|parked| parked.epoch);
         parked.is_some() && Self::playing_epoch_locked(state) == parked
     }
 
@@ -5377,7 +5385,10 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut ticks = 1;
         while calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-            assert!(std::time::Instant::now() < deadline, "listener never called");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "listener never called"
+            );
             write(ticks);
             ticks += 1;
             std::thread::sleep(Duration::from_millis(100));
@@ -6968,7 +6979,11 @@ mod tests {
                 .user_id,
             "u1"
         );
-        assert_eq!(installed_user(&core).as_deref(), Some("u1"), "the fallback is installed");
+        assert_eq!(
+            installed_user(&core).as_deref(),
+            Some("u1"),
+            "the fallback is installed"
+        );
     }
 
     #[test]
@@ -10110,7 +10125,11 @@ mod tests {
         seed_session(core.data_dir(), &first.server_url, "u-b");
         core.switch_session(1).expect("browses B");
         reopen_mirror(&core);
-        assert_eq!(core.parked_account_epoch(), None, "A's playback had stopped");
+        assert_eq!(
+            core.parked_account_epoch(),
+            None,
+            "A's playback had stopped"
+        );
 
         let held = mock.hold_playback_info(1);
         let b = spawn_prepare(&core, "item-2");

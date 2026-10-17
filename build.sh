@@ -77,11 +77,18 @@ case "${1:-shell}" in
         # build before building the next (tools/updates/README.md).
         run_cmd ./gradlew assembleRelease -Pjellybeam.updateFixture=true "-Pjellybeam.updateVersionCode=$fixture_code" "-Pjellybeam.updateVersionName=${3:-0.1.6}"
         ;;
-    test)
+    test-rust)
         echo "Running Rust workspace tests (host arch, proves the container toolchain)..."
         # JELLYBEAM_TEST_JOBS caps cargo's parallel compiles (default 2) so the
         # memory-limited build container is not exhausted (docs/06).
         run_cmd env "CARGO_BUILD_JOBS=${JELLYBEAM_TEST_JOBS:-2}" bash -c 'cd /app/core && cargo test --workspace'
+        ;;
+    lint-rust)
+        echo "Rust format + clippy (warnings are errors)..."
+        run_cmd env "CARGO_BUILD_JOBS=${JELLYBEAM_TEST_JOBS:-2}" bash -c 'cd /app/core && { cargo fmt --all --check; f=$?; cargo clippy --workspace -- -D warnings; c=$?; echo "fmt=$f clippy=$c"; [ $f -eq 0 ] && [ $c -eq 0 ]; }'
+        ;;
+    test)
+        ./build.sh test-rust
         echo ""
         echo "Running Gradle JVM unit tests..."
         run_cmd ./gradlew testReleaseUnitTest
@@ -201,7 +208,7 @@ PY
         run_cmd bash
         ;;
     *)
-        echo "Usage: $0 {image|core|build|release|install|test|check|check-fast [package]|update-fixture <code>|stop|shell}"
+        echo "Usage: $0 {image|core|build|release|install|test|test-rust|lint-rust|check|check-fast [package]|update-fixture <code>|stop|shell}"
         echo ""
         echo "Commands:"
         echo "  image    - Build the Docker image (Android SDK + NDK + Rust + cargo-ndk)"
@@ -210,6 +217,8 @@ PY
         echo "  release  - Build the release APK (R8 minified, includes the embedded Baseline Profile)"
         echo "  install  - Install the release APK + matching Baseline Profile (.dm) via host adb"
         echo "  test     - Run cargo test --workspace inside the container, then the Gradle unit tests"
+        echo "  test-rust - Run cargo test --workspace inside the container (no Gradle)"
+        echo "  lint-rust - cargo fmt --check + clippy -D warnings inside the container"
         echo "  check    - Pre-commit gate: Gradle unit tests (release variant) + lint"
         echo "  update-fixture <code> - Local HTTPS emulator fixture; rejected by production release validation"
         echo "  check-fast [package] - Iteration gate: unit tests only, offline; optional dotted package prefix, e.g. tv.jellybeam.ui.settings"

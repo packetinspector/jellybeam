@@ -107,7 +107,8 @@ Fastest to slowest, by scope:
 - `./build.sh test` — `cargo test --workspace` inside the container (host arch; set
   `JELLYBEAM_TEST_JOBS` to change cargo's parallel jobs, default 2, which keeps the
   memory-limited container from being exhausted), then
-  the full Gradle `testReleaseUnitTest` run.
+  the full Gradle `testReleaseUnitTest` run. `test-rust` is the cargo half alone; `lint-rust`
+  runs `cargo fmt --check` and clippy with warnings as errors.
 
 One Kotlin test class: `./build.sh shell`, then inside the container
 `./gradlew testReleaseUnitTest --tests 'tv.jellybeam.player.SomeTest'`.
@@ -133,6 +134,28 @@ cargo test -p jellybeam-ffi --test live_local_server -- --ignored --nocapture
 
 The last one also has a negative-control variant gated behind
 `--features live-test-knobs`; both read `JELLYBEAM_DEV_SERVER_URL`.
+
+## Workflow scripts
+
+Repeatable session tooling under `tools/`; each takes `--help`. Device serials come from
+`internal/device.env` (`TV`, `EMU`) when present, else the same env vars.
+
+- `tools/gate.sh [--rust-only|--kotlin-only|--fast <pkg|crate> [test]] [--keep-lock]` — the gates
+  (`build.sh test-rust`, `lint-rust`, `check`) under timeouts, one summary line, logs in a temp
+  dir. Copies `core/Cargo.lock` aside and back without git, and refuses to start while another
+  Gradle or container build runs.
+- `tools/scorecard.sh BASE HEAD [--md]` — production/test lines per language (comments and
+  blanks stripped, Rust `#[cfg(test)]` mods as tests), coordination counts, and every new type,
+  FFI export, settings field and file by name. Works on `git archive` snapshots, read-only.
+- `tools/perf-ab.sh A B [--rounds 8] [--device emu|tv] [--metrics cold,ttff,dwell]` — A/B speed
+  of two refs or APKs: builds missing release APKs in throwaway worktrees first, installs each with
+  its `.dm` and checks dexopt, then runs A/B/A/B and B/A/B/A rounds and prints median, IQR and n per
+  metric with a verdict (`unchanged` unless the IQRs separate in both orders). The TV gets a busy
+  check first and its signed-in account is never touched.
+- `tools/status.sh [--no-devices]` — branch, dirty files, ahead/behind, worktrees, and per device
+  the installed version, dexopt status and whether the app is in front. Read-only, no input sent.
+- `tools/emu-signin.sh [showcase|dev12]` — clears the app's data on the emulator and signs in with a
+  password (showcase defaults, or `JB_SERVER`/`JB_USER`/`JB_PASS`), succeeding when Home shows.
 
 ## Signing releases
 
