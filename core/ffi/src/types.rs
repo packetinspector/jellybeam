@@ -280,6 +280,10 @@ pub struct AccountInfo {
     pub server_url: String,
     pub user_id: String,
     pub user_name: String,
+    /// docs/13 Navigation: the server's own configured name as last saved, for the Servers rows;
+    /// `None` until this account has been active once.
+    #[uniffi(default = None)]
+    pub server_name: Option<String>,
 }
 
 impl AccountInfo {
@@ -289,6 +293,7 @@ impl AccountInfo {
             server_url: saved.server_url.clone(),
             user_id: saved.user_id.clone(),
             user_name: saved.user_name.clone(),
+            server_name: saved.server_name.clone(),
         }
     }
 }

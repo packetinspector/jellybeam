@@ -82,6 +82,7 @@ import tv.jellybeam.ui.focus.ringClearBringIntoViewSpec
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import tv.jellybeam.ui.common.serverHostLabel
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.ViewSnapshot
 
@@ -105,8 +106,9 @@ fun matchesCurrentScreen(entryScreen: Screen, current: Screen): Boolean = when (
     else -> current == entryScreen
 }
 
-/** The Servers section's verbatim account label (never prettified): "user_name — server_url". */
-fun accountDrawerLabel(account: AccountInfo): String = "${account.userName} — ${account.serverUrl}"
+/** docs/13 Navigation: "user@Server Name", both verbatim; the host stands in until the server's name is known. */
+fun accountDrawerLabel(account: AccountInfo): String =
+    "${account.userName}@${account.serverName ?: serverHostLabel(account.serverUrl) ?: account.serverUrl}"
 
 /** Whether selecting the Servers-section row for [index] should call `switchSession`; `false`
  * for the already-active row, since re-switching onto it would still force a pointless full app

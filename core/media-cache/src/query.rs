@@ -1610,7 +1610,10 @@ mod tests {
         let rows = library_grid(&conn, &parent, name_sort(), &no_filters(), 0, 10);
         assert_eq!(names(&rows), ["Bare", "Seen"]);
         assert_eq!(rows[0].date_created.as_deref(), None);
-        assert_eq!(rows[1].date_created.as_deref(), Some("2024-03-05T10:20:30+00:00"));
+        assert_eq!(
+            rows[1].date_created.as_deref(),
+            Some("2024-03-05T10:20:30+00:00")
+        );
     }
 
     /// `CardRow::is_virtual`/`premiere_date` must round-trip: `LocationType == "Virtual"`

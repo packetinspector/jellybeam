@@ -6540,6 +6540,22 @@ mod tests {
     }
 
     #[test]
+    fn list_accounts_carries_each_saved_server_name_verbatim() {
+        let (dir, core) = core_in_tempdir();
+        seed_session(dir.path(), "http://server-a.test", "u1");
+        seed_session(dir.path(), "http://server-b.test", "u2");
+        session::mutate(dir.path(), &Mutex::new(()), |sessions| {
+            sessions.sessions[1].server_name = Some(" Ünïcode Server ".to_string());
+            Ok::<_, CoreError>(())
+        })
+        .expect("name the second server");
+
+        let accounts = core.list_accounts();
+        assert_eq!(accounts[0].server_name, None);
+        assert_eq!(accounts[1].server_name.as_deref(), Some(" Ünïcode Server "));
+    }
+
+    #[test]
     fn switch_session_persists_active_and_swaps_client_state_without_network() {
         let (dir, core) = core_in_tempdir();
         seed_session(dir.path(), "http://server-a.test", "u1");

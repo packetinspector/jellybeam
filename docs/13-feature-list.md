@@ -155,8 +155,10 @@ closed edge is always visible as a menu spine: a thin non-focusable strip
 with a centred chevron, so the gesture is discoverable without a focus
 stop in the gutter, a coach mark, or any copy, and the open drawer widens
 out of that same strip rather than sliding in over it (docs/07 §5). Never on Search or
-during playback.
-<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/nav/NavDrawerHost.kt; app/src/main/kotlin/tv/jellybeam/ui/nav/MenuSpine.kt -->
+during playback. Servers rows (and Manage Servers) read `user@Server Name`, using the name
+configured on the server verbatim; until an account has been active once, its host stands
+in, never the full URL.
+<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/nav/NavDrawerHost.kt accountDrawerLabel(); core/ffi/src/types.rs AccountInfo.server_name; app/src/main/kotlin/tv/jellybeam/ui/nav/MenuSpine.kt -->
 
 **Discover & requests** — optional Jellyseerr/Overseerr integration: a
 "Discover" side-drawer entry (shown only once connected) with Trending/

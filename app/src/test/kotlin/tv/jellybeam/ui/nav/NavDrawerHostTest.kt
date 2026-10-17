@@ -19,16 +19,22 @@ class NavDrawerHostTest {
     // ---- accountDrawerLabel (CLAUDE.md: server-configured names/URLs are shown verbatim) ----
 
     @Test
-    fun `account label joins user name and server url verbatim`() {
-        val account = AccountInfo(serverUrl = "https://media.example.test", userId = "user-1", userName = "Example User")
-        assertEquals("Example User — https://media.example.test", accountDrawerLabel(account))
+    fun `account label is user at the server's configured name`() {
+        val account = AccountInfo(serverUrl = "https://media.example.test", userId = "user-1", userName = "Example User", serverName = "Den Server")
+        assertEquals("Example User@Den Server", accountDrawerLabel(account))
+    }
+
+    @Test
+    fun `account label falls back to the host, never the scheme, before the name is known`() {
+        val account = AccountInfo(serverUrl = "https://media.example.test:8920/jellyfin", userId = "user-1", userName = "Example User", serverName = null)
+        assertEquals("Example User@media.example.test:8920", accountDrawerLabel(account))
     }
 
     @Test
     fun `account label does not trim or reformat unusual values`() {
         // Locks accountDrawerLabel against adding trim/normalize behavior.
-        val account = AccountInfo(serverUrl = "https://mixed-case.example.test:8920/ ", userId = "user-2", userName = " Ünïcode User ")
-        assertEquals(" Ünïcode User  — https://mixed-case.example.test:8920/ ", accountDrawerLabel(account))
+        val account = AccountInfo(serverUrl = "https://mixed-case.example.test", userId = "user-2", userName = " Ünïcode User ", serverName = " Ünïcode Server ")
+        assertEquals(" Ünïcode User @ Ünïcode Server ", accountDrawerLabel(account))
     }
 
     // ---- shouldSwitchServer ------------------------------------------------
