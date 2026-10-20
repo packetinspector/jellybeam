@@ -344,6 +344,12 @@ data class PlaybackUiState(
     /** The speed menu (docs/12 §12). */
     val speedMenuOpen: Boolean get() = openSurface is OpenSurface.Speed
 
+    /** The subtitle delay control (docs/12 §16): non-null exactly while open. */
+    val subtitleDelay: DelayState? get() = (openSurface as? OpenSurface.DelayControl)?.state
+
+    /** What Back closes first: the speed or chapters menu, or the delay control (docs/12 §9). */
+    val menuOpen: Boolean get() = speedMenuOpen || chaptersMenuOpen || subtitleDelay != null
+
     /** The chapters menu (docs/12 §8/§12, shown only when the item has markers). */
     val chaptersMenuOpen: Boolean get() = openSurface is OpenSurface.Chapters
 
@@ -377,7 +383,13 @@ sealed interface OpenSurface {
     data class Stats(val live: PlaybackLiveStats) : OpenSurface
 
     data class LibraryInfo(val overlay: LibraryInfoOverlayState) : OpenSurface
+
+    /** docs/12 §16: the subtitle delay chip, opened from the track picker's Delay row. */
+    data class DelayControl(val state: DelayState) : OpenSurface
 }
+
+/** docs/12 §9, §16: whether this surface pins the OSD visible; the delay control instead hides it so subtitles sit at normal padding. */
+val OpenSurface.pinsOsd: Boolean get() = this !is OpenSurface.None && this !is OpenSurface.DelayControl
 
 /** [PlaybackUiState.reconnecting]'s payload -- just the 1-based retry [attempt]: the
  * "Reconnecting…" pill has no live percent/throughput to show while `Player.STATE_IDLE` waits on a
@@ -416,7 +428,15 @@ data class TrackChoice(
 data class TrackPickerState(
     val audioTracks: List<TrackChoice>,
     val subtitleTracks: List<TrackChoice>,
-)
+    /** docs/12 §16: the delay, already worded, trailing the final "Delay" row. */
+    val delayText: String = "",
+) {
+    /** docs/12 §16: the "Delay" row ends the list exactly while a real subtitle (embedded or sidecar) is selected. */
+    val delayRowShown: Boolean get() = subtitleTracks.any { it.selected && it.id >= 0 }
+
+    /** Rows in the one focus order: audio, subtitles, then the Delay row. */
+    val rowCount: Int get() = audioTracks.size + subtitleTracks.size + if (delayRowShown) 1 else 0
+}
 
 /**
  * The next-up card's state. [countdownStartPositionTicks] lets [NextUpCountdown] derive live
@@ -905,6 +925,7 @@ class PlaybackViewModel(
             }
             // An open picker follows the player's real tracks, never a stale snapshot.
             _state.update { it.withTrackPicker { _ -> buildTrackPickerState(tracks) } }
+            closeDelayWithoutSubtitle(tracks)
             // docs/18 §1's second local-evidence signal (the other is onPlayerError
             // below): every track of a present type rejected by this device's
             // decoders. maybeFallBackToTranscode's own gate gets it right
@@ -2143,7 +2164,11 @@ class PlaybackViewModel(
                 isDefault = info.isDefault,
             )
         }
-        return TrackPickerState(audioTracks = audioChoices, subtitleTracks = subtitleChoices(tracks))
+        return TrackPickerState(
+            audioTracks = audioChoices,
+            subtitleTracks = subtitleChoices(tracks),
+            delayText = SubtitleDelay.format(strings, playerHolder.subtitleDelayMs),
+        )
     }
 
     /** docs/18 §3.2: subtitle rows, "Off" first and selected exactly when no real subtitle is. */
@@ -2337,7 +2362,50 @@ class PlaybackViewModel(
                 nonDefaultTrackActive = computeNonDefaultTrackActive(allTrackInfos(tracks)),
             ).withTrackPicker { it.copy(subtitleTracks = subtitleChoices(tracks)) }
         }
+        closeDelayWithoutSubtitle(tracks)
     }
+
+    /** docs/12 §16: a delay means something only while a real subtitle (embedded or sidecar, never burn-in) is selected. */
+    private fun subtitleDelayApplies(tracks: Tracks): Boolean =
+        allTrackInfos(tracks).any { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }
+
+    /** docs/12 §16: the control ends when its subtitle does; an empty announcement is a retry's and says nothing. */
+    private fun closeDelayWithoutSubtitle(tracks: Tracks) {
+        if (!tracks.isEmpty && !subtitleDelayApplies(tracks)) closeSubtitleDelay()
+    }
+
+    /** docs/12 §16: the Delay row's Select -- replaces the picker with the delay strip; refused without a selected subtitle. */
+    fun openSubtitleDelay() {
+        val tracks = playerHolder.currentTracks ?: return
+        val subtitles = allTrackInfos(tracks).filter { it.kind == TrackKindFfi.SUBTITLE }
+        val shown = subtitles.indexOfFirst { it.isSelected }
+        if (shown < 0) return
+        val track = TrackChoiceText.delayTrack(strings, subtitles[shown], shown)
+        open(OpenSurface.DelayControl(DelayState(playerHolder.subtitleDelayMs, track = track)))
+    }
+
+    /** docs/12 §16: one key for the open delay control; each changed value reaches the player at once. */
+    fun subtitleDelayKey(key: DelayKey) {
+        val before = _state.value.subtitleDelay ?: return
+        val step = SubtitleDelay.reduce(before, key)
+        if (step.state.delayMs != before.delayMs) playerHolder.setSubtitleDelayMs(step.state.delayMs)
+        replaceSurface { if (it is OpenSurface.DelayControl) (if (step.open) OpenSurface.DelayControl(step.state) else OpenSurface.None) else it }
+    }
+
+    /** docs/12 §16: a different subtitle track starts its own sync, so the item's stored delay returns to 0. */
+    private fun resetDelayForNewSubtitle(tracks: Tracks, chosenId: Long) {
+        val shownId = (allTrackInfos(tracks) + burnableSubtitles(tracks)).firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }?.id ?: TRACK_PICKER_SUBTITLE_OFF_ID
+        if (chosenId == shownId || playerHolder.subtitleDelayMs == 0L) return
+        playerHolder.setSubtitleDelayMs(0L)
+        // An open picker's Delay row shows the reset at once, not after the next tracks change.
+        _state.update { it.withTrackPicker { picker -> picker.copy(delayText = SubtitleDelay.format(strings, 0L)) } }
+    }
+
+    /** Closes the delay control only; any other open surface stays (a card or PiP ends it, docs/12 §16). */
+    fun closeSubtitleDelay() = replaceSurface { if (it is OpenSurface.DelayControl) OpenSurface.None else it }
+
+    /** The live subtitle delay for the stats sheet's SUBTITLES row (docs/12 §17). */
+    val subtitleDelayMs: Long get() = playerHolder.subtitleDelayMs
 
     /**
      * Chooses [id] as the audio track (docs/09 slice 3b): applies it via
@@ -2378,6 +2446,7 @@ class PlaybackViewModel(
         val trackInfos = allTrackInfos(tracks)
         val info = trackInfos.firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.id == id }
         if (id != TRACK_PICKER_SUBTITLE_OFF_ID && info == null) return
+        resetDelayForNewSubtitle(tracks, id)
 
         // See chooseAudio's comment on why this cancels the pending resolution outright.
         cancelTrackSelection()
@@ -2417,6 +2486,7 @@ class PlaybackViewModel(
         val info = burnableSubtitles(tracks).firstOrNull { it.id == id } ?: return
         // Already burned in and nothing negotiating; mid-negotiation the landing re-checks the choice.
         if (info.isSelected && negotiation == null) return
+        resetDelayForNewSubtitle(tracks, id)
         cancelTrackSelection()
         dropPendingReapply(TrackKindFfi.SUBTITLE)
         manualTrackChoiceMade = true
@@ -2462,8 +2532,8 @@ class PlaybackViewModel(
         if (last == PlaybackEvent.SeekUnavailable || last == PlaybackEvent.SubtitleUnavailable) _events.resetReplayCache()
     }
 
-    /** The live playback position in microseconds, for the sidecar cue feed (docs/18 §3.2). */
-    fun positionUs(): Long = PlaybackTicks.ticksToUs(playerHolder.currentPositionTicks())
+    /** The sidecar cue feed's clock (docs/18 §3.2): the live position behind the subtitle delay (docs/12 §16). */
+    fun sidecarClockUs(): Long = subtitleClockUs(PlaybackTicks.ticksToUs(playerHolder.currentPositionTicks()), playerHolder.subtitleDelayMs)
 
     /** Raises the one-shot "can't seek" notice for a UI-side seek attempt (docs/12 §9). */
     fun notifySeekUnavailable() {

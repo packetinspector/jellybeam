@@ -10,6 +10,7 @@ import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.ForwardingRenderer
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.RendererCapabilities
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
@@ -172,6 +173,21 @@ private class LevelTolerantMediaCodecVideoRenderer(
 }
 
 /**
+ * docs/12 §16: renders at [subtitleClockUs]. Only `render` shifts: `resetPosition` and `enable` positions are
+ * seek targets, and the sample stream's discard belongs to the player.
+ */
+@OptIn(UnstableApi::class)
+internal class DelayedTextRenderer(inner: Renderer, private val delayMs: () -> Long) : ForwardingRenderer(inner) {
+    override fun render(positionUs: Long, elapsedRealtimeUs: Long) =
+        super.render(subtitleClockUs(positionUs, delayMs()), elapsedRealtimeUs)
+}
+
+/** [renderers] with each text one wrapped in [DelayedTextRenderer]; the rest untouched. */
+@OptIn(UnstableApi::class)
+internal fun withSubtitleDelay(renderers: List<Renderer>, delayMs: () -> Long): List<Renderer> =
+    renderers.map { if (it.trackType == C.TRACK_TYPE_TEXT) DelayedTextRenderer(it, delayMs) else it }
+
+/**
  * [DefaultRenderersFactory] override that swaps in [LevelTolerantMediaCodecVideoRenderer] for the
  * video renderer ([PlayerHolder.buildPlayer] uses this in place of a plain
  * `DefaultRenderersFactory`).
@@ -195,6 +211,8 @@ class JellybeamRenderersFactory(
     private val audioDecoderPreferences: () -> AudioDecoderPreferences = { AudioDecoderPreferences() },
     /** Builds the raw-SSA renderers placed ahead of Media3's TextRenderer; null leaves text stock. */
     private val ssaRenderers: ((TextOutput, Looper) -> List<Renderer>)? = null,
+    /** docs/12 §16: read on the playback thread each render, so a change lands on the next one. */
+    private val subtitleDelayMs: () -> Long = { 0L },
 ) : DefaultRenderersFactory(context) {
 
     /** Media3's TextRenderer also claims raw SSA (then fails without legacy decoding); first wins. */
@@ -206,7 +224,9 @@ class JellybeamRenderersFactory(
         out: ArrayList<Renderer>,
     ) {
         ssaRenderers?.let { out.addAll(it(output, outputLooper)) }
-        super.buildTextRenderers(context, output, outputLooper, extensionRendererMode, out)
+        val stock = ArrayList<Renderer>()
+        super.buildTextRenderers(context, output, outputLooper, extensionRendererMode, stock)
+        out.addAll(withSubtitleDelay(stock, subtitleDelayMs))
     }
 
     /**

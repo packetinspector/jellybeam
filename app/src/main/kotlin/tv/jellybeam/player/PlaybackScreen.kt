@@ -67,6 +67,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -97,6 +98,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
@@ -201,7 +203,7 @@ private const val IDLE_TICK_MS = 250L
 /** docs/12 §9: fixed cadence, one FFI call per tick. Independent of [IDLE_TICK_MS] since the glide
  * surface advances far more often than the OSD's idle clock. */
 private const val GLIDE_TICK_MS = 33L
-private val SELECT_KEYS = setOf(Key.DirectionCenter, Key.Enter)
+internal val SELECT_KEYS = setOf(Key.DirectionCenter, Key.Enter)
 
 /** docs/12 §2: how far the OSD's reserved zone extends above the bottom, keeping the next-up
  * card/skip pill clear of it. */
@@ -715,7 +717,7 @@ fun PlaybackScreen(
     val focusRequester = remember { FocusRequester() }
     var pickerFocusIndex by remember { mutableIntStateOf(0) }
     // A rebuilt picker can lose rows; focus stays on a real one.
-    val pickerRows = state.trackPicker?.let { it.audioTracks.size + it.subtitleTracks.size } ?: 0
+    val pickerRows = state.trackPicker?.rowCount ?: 0
     LaunchedEffect(pickerRows) {
         if (pickerRows > 0) pickerFocusIndex = pickerFocusIndex.coerceIn(0, pickerRows - 1)
     }
@@ -890,7 +892,7 @@ fun PlaybackScreen(
                 pickerOpen = current.trackPicker != null,
                 nextUpShown = current.nextUp != null,
                 osdVisible = osdVisible,
-                menuOpen = current.speedMenuOpen || current.chaptersMenuOpen,
+                menuOpen = current.menuOpen,
                 sheetOpen = current.statsSheetLive != null || current.libraryInfoOverlay != null,
                 stillWatchingShown = current.stillWatching != null,
                 glideActive = glide?.isGliding == true,
@@ -941,6 +943,8 @@ fun PlaybackScreen(
 
     LaunchedEffect(state.isPaused) {
         osd.onPausedChanged(state.isPaused)
+        // docs/12 §16: pausing under the delay control does not bring the OSD back.
+        if (viewModel.state.value.subtitleDelay != null) osd.hide()
         osdVisible = osd.isVisible
     }
 
@@ -953,14 +957,40 @@ fun PlaybackScreen(
     }
 
     // docs/12 §9's "never auto-hide while..." list, minus paused (handled above).
-    val pinned = state.openSurface !is OpenSurface.None ||
+    val pinned = state.openSurface.pinsOsd ||
         state.nextUp != null ||
         state.stillWatching != null ||
         trickplayPreviewState != null ||
         state.reconnecting != null
     LaunchedEffect(pinned) {
         osd.setPinned(pinned)
+        // docs/12 §16: a pin edge (e.g. reconnecting) under the delay strip keeps the OSD hidden.
+        if (viewModel.state.value.subtitleDelay != null) osd.hide()
         osdVisible = osd.isVisible
+    }
+
+    // docs/12 §16: opening the strip hides the OSD, also when no pin edge comes with it.
+    val delayOpen = state.subtitleDelay != null
+    LaunchedEffect(delayOpen) {
+        if (delayOpen) {
+            osd.hide()
+            osdVisible = false
+        }
+    }
+
+    // docs/12 §16: the pressed arrow lights for 150 ms; keyed on the press so a quick repeat restarts it.
+    var delayFlash by remember { mutableStateOf<DelayFlash?>(null) }
+    LaunchedEffect(delayFlash) {
+        if (delayFlash != null) {
+            delay(DELAY_ARROW_FLASH_MS)
+            delayFlash = null
+        }
+    }
+
+    // docs/12 §16: a card or PiP ends the delay control.
+    val coversDelay = state.nextUp != null || state.stillWatching != null || inPictureInPicture
+    LaunchedEffect(coversDelay) {
+        if (coversDelay) viewModel.closeSubtitleDelay()
     }
 
     LaunchedEffect(state.nextUp != null, state.stillWatching != null) {
@@ -1018,7 +1048,7 @@ fun PlaybackScreen(
         }
         var shown: List<Cue>? = null
         while (true) {
-            val positionUs = viewModel.positionUs()
+            val positionUs = viewModel.sidecarClockUs()
             val cues = sidecarCues.cuesAt(positionUs)
             if (cues !== shown) {
                 view.setCues(cues)
@@ -1055,6 +1085,18 @@ fun PlaybackScreen(
 
     val handleKeyEvent = remember(viewModel, sheetScrollState, sheetScrollStepPx, glide) {
         keyHandler@{ event: KeyEvent ->
+            // docs/12 §16: the open delay control owns every key, first, so Select's release and the
+            // hidden-OSD seek and reveal rules below never see them; unlisted keys (transport, Back) pass.
+            if (viewModel.state.value.subtitleDelay != null) {
+                if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0) viewModel.noteUserInput()
+                val native = event.nativeKeyEvent
+                val delayKey = SubtitleDelay.keyOf(event.key, event.type, native.repeatCount, native.eventTime - native.downTime) ?: return@keyHandler false
+                if (delayKey is DelayKey.Left) delayFlash = DelayFlash(right = false, atMs = native.eventTime)
+                if (delayKey is DelayKey.Right) delayFlash = DelayFlash(right = true, atMs = native.eventTime)
+                viewModel.subtitleDelayKey(delayKey)
+                return@keyHandler true
+            }
+
             // docs/12 §9: every Left/Right KeyUp reaches the glide machine regardless of OSD
             // visibility; an unstarted glide reports unconsumed. A release whose direction didn't
             // start the current cycle is ignored (reversal).
@@ -1264,7 +1306,7 @@ fun PlaybackScreen(
 
             val picker = current.trackPicker
             if (picker != null) {
-                val rowCount = picker.audioTracks.size + picker.subtitleTracks.size
+                val rowCount = picker.rowCount
                 when (event.key) {
                     Key.Escape, Key.Menu -> {
                         viewModel.closeSurface()
@@ -1276,8 +1318,11 @@ fun PlaybackScreen(
                         val audioCount = picker.audioTracks.size
                         if (pickerFocusIndex < audioCount) {
                             picker.audioTracks.getOrNull(pickerFocusIndex)?.let { viewModel.chooseAudio(it.id) }
-                        } else {
+                        } else if (pickerFocusIndex < audioCount + picker.subtitleTracks.size) {
                             picker.subtitleTracks.getOrNull(pickerFocusIndex - audioCount)?.let { viewModel.chooseSubtitle(it.id) }
+                        } else {
+                            // docs/12 §16: the Delay row swaps the picker for the strip; the delayOpen effect hides the OSD.
+                            viewModel.openSubtitleDelay()
                         }
                     }
                     else -> Unit
@@ -1348,7 +1393,8 @@ fun PlaybackScreen(
                         stillWatchingShown = current.stillWatching != null,
                     )
                     if (route == SelectRoute.PLAY_NEXT) {
-                        viewModel.playNext()
+                        // A held Select's repeats (e.g. one that began under the delay chip, docs/12 §16) never start the next item.
+                        if (event.nativeKeyEvent.repeatCount == 0) viewModel.playNext()
                     } else if (route == SelectRoute.SKIP_SEGMENT && segment != null) {
                         skipSegmentNow(segment)
                     } else {
@@ -1607,7 +1653,8 @@ fun PlaybackScreen(
                     val subtitleSelection = remember(detail, state.nonDefaultTrackActive) {
                         viewModel.currentSubtitleSelection()
                     }
-                    val content = remember(strings, detail, subtitleSelection, state.statsServerName, state.playMethod, state.transcodeReason) {
+                    val subtitleDelayMs = viewModel.subtitleDelayMs
+                    val content = remember(strings, detail, subtitleSelection, state.statsServerName, state.playMethod, state.transcodeReason, subtitleDelayMs) {
                         StatsSheetFormat.build(
                             strings,
                             detail,
@@ -1617,6 +1664,7 @@ fun PlaybackScreen(
                             live = null,
                             playMethod = state.playMethod,
                             transcodeReason = state.transcodeReason,
+                            subtitleDelayMs = subtitleDelayMs,
                         )
                     }
                     OsdSheetContainer(kicker = strings.get(R.string.player_sheet_stats_kicker).uppercaseUi(), scrollState = sheetScrollState, modifier = Modifier.align(Alignment.TopEnd)) {
@@ -1721,7 +1769,11 @@ fun PlaybackScreen(
             // One top-centre slot. The notice (docs/12 §9: informational, no key route reads it)
             // outranks the Undo toast, which is drawn only while Select would undo, i.e. with the
             // OSD hidden (docs/12 §14); Select still undoes underneath a notice.
-            if (noticeShown) {
+            val delayControl = state.subtitleDelay
+            if (delayControl != null) {
+                // docs/12 §16: the delay strip takes the slot while it is open.
+                SubtitleDelayStrip(delay = delayControl, flash = delayFlash, strings = strings, modifier = Modifier.align(Alignment.TopCenter))
+            } else if (noticeShown) {
                 NoticeToast(text = noticeText, modifier = Modifier.align(Alignment.TopCenter))
             } else {
                 state.skipUndo?.takeIf {
@@ -3070,7 +3122,19 @@ private fun ColumnScope.TrackPickerRows(picker: TrackPickerState, focusedIndex: 
     picker.subtitleTracks.forEachIndexed { index, choice ->
         TrackChoiceRow(choice = choice, isFocused = audioCount + index == focusedIndex, revealAbove = if (index == 0) TRACK_SECTION_HEAD_REVEAL else 0.dp)
     }
+
+    // docs/12 §16: the final row, only while a real subtitle is selected.
+    if (picker.delayRowShown) {
+        val delayLabel = stringResource(R.string.player_subtitle_delay_row)
+        val delayRow = remember(delayLabel, picker.delayText) {
+            TrackChoice(id = TRACK_PICKER_DELAY_ROW_ID, label = delayLabel, selected = false, meta = picker.delayText)
+        }
+        TrackChoiceRow(choice = delayRow, isFocused = audioCount + picker.subtitleTracks.size == focusedIndex)
+    }
 }
+
+/** Display-only id of the picker's Delay row; no [TrackMapping] id is ever this. */
+private const val TRACK_PICKER_DELAY_ROW_ID = Long.MIN_VALUE
 
 @Composable
 private fun TrackPickerSectionHeader(text: String) {
@@ -3200,6 +3264,147 @@ private fun NoticeToast(@androidx.annotation.StringRes text: Int, modifier: Modi
             text = stringResource(text),
             style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 13.sp),
         )
+    }
+}
+
+private const val DELAY_ARROW_FLASH_MS = 150L
+
+/** The arrow a Left / Right press lights; [atMs] tells one press from the next. */
+private data class DelayFlash(val right: Boolean, val atMs: Long)
+
+private val DELAY_SCRIM = Color(0xFF070605)
+
+/** docs/12 §16: the strip's top-edge fade. */
+private val DELAY_SCRIM_BRUSH = Brush.verticalGradient(
+    0f to DELAY_SCRIM.copy(alpha = 0.75f),
+    0.6f to DELAY_SCRIM.copy(alpha = 0.55f),
+    1f to DELAY_SCRIM.copy(alpha = 0f),
+)
+
+/** docs/12 §16: a soft dark halo so the strip's text reads over bright video under a light scrim. */
+private val DELAY_TEXT_SHADOW = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset.Zero, blurRadius = 6f)
+private val DELAY_STRIP_HEIGHT = 96.dp
+private val DELAY_SIDE_COLUMN = 150.dp
+private val DELAY_RULER_WIDTH = 320.dp
+private val DELAY_RULER_TOP = 60.dp
+private val DELAY_MARKER_HEIGHT = 9.dp
+private val DELAY_RULER_LABEL_WIDTH = 32.dp
+
+/** docs/12 §16: the delay control's top strip -- header, direction line and ruler on a fading scrim. */
+@Composable
+private fun SubtitleDelayStrip(delay: DelayState, flash: DelayFlash?, strings: UiStrings, modifier: Modifier = Modifier) {
+    val mono = JellybeamTheme.MartianMono
+    val archivo = JellybeamTheme.Archivo
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(DELAY_STRIP_HEIGHT)
+            .background(DELAY_SCRIM_BRUSH),
+    ) {
+        Row(modifier = Modifier.fillMaxWidth().padding(start = 48.dp, end = 48.dp, top = 16.dp)) {
+            Column(modifier = Modifier.width(DELAY_SIDE_COLUMN)) {
+                BasicText(
+                    text = stringResource(R.string.player_subtitle_delay_row).uppercaseUi(),
+                    style = TextStyle(fontFamily = mono, color = JellybeamTheme.Pistacchio, fontSize = 8.sp, letterSpacing = (-0.02).em, shadow = DELAY_TEXT_SHADOW),
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                BasicText(
+                    text = delay.track,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = TextStyle(fontFamily = archivo, color = JellybeamTheme.Panna2, fontSize = 9.sp, shadow = DELAY_TEXT_SHADOW),
+                )
+            }
+            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    DelayArrow(text = "◀", lit = flash != null && !flash.right)
+                    BasicText(
+                        text = SubtitleDelay.format(strings, delay.delayMs),
+                        modifier = Modifier.widthIn(min = 100.dp),
+                        style = TextStyle(
+                            fontFamily = mono,
+                            fontWeight = FontWeight.Medium,
+                            color = JellybeamTheme.Panna,
+                            fontSize = 18.sp,
+                            letterSpacing = (-0.04).em,
+                            textAlign = TextAlign.Center,
+                            shadow = DELAY_TEXT_SHADOW,
+                        ),
+                    )
+                    DelayArrow(text = "▶", lit = flash != null && flash.right)
+                }
+                Spacer(modifier = Modifier.height(3.dp))
+                BasicText(
+                    text = SubtitleDelay.direction(strings, delay.delayMs),
+                    style = TextStyle(
+                        fontFamily = archivo,
+                        color = if (delay.delayMs == 0L) JellybeamTheme.Panna2 else JellybeamTheme.Pistacchio,
+                        fontSize = 9.sp,
+                        shadow = DELAY_TEXT_SHADOW,
+                    ),
+                )
+            }
+            Column(modifier = Modifier.width(DELAY_SIDE_COLUMN), horizontalAlignment = Alignment.End) {
+                val hint = TextStyle(fontFamily = mono, color = JellybeamTheme.Panna2, fontSize = 7.sp, letterSpacing = (-0.02).em, shadow = DELAY_TEXT_SHADOW)
+                BasicText(text = stringResource(R.string.player_subtitle_delay_reset_hint).uppercaseUi(), style = hint)
+                Spacer(modifier = Modifier.height(4.dp))
+                BasicText(text = stringResource(R.string.player_subtitle_delay_close_hint).uppercaseUi(), style = hint)
+            }
+        }
+        DelayRuler(valueMs = delay.delayMs, modifier = Modifier.align(Alignment.TopCenter).padding(top = DELAY_RULER_TOP))
+    }
+}
+
+@Composable
+private fun DelayArrow(text: String, lit: Boolean) {
+    BasicText(
+        text = text,
+        style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (lit) JellybeamTheme.Pistacchio else JellybeamTheme.Panna2, fontSize = 10.sp, shadow = DELAY_TEXT_SHADOW),
+    )
+}
+
+/** docs/12 §16: 20 ticks across [DELAY_RULER_WIDTH] with the offset filled from 0 to the marker; [rulerWindow] scrolls it past +-2500 ms. */
+@Composable
+private fun DelayRuler(valueMs: Long, modifier: Modifier = Modifier) {
+    val startMs = rulerWindow(valueMs)
+    val ticks = remember(startMs) { rulerTicks(startMs) }
+    val spanMs = 2 * SubtitleDelay.RULER_HALF_SPAN_MS
+    val line = JellybeamTheme.Panna.copy(alpha = 0.55f)
+    val tick = JellybeamTheme.Panna.copy(alpha = 0.75f)
+    Box(modifier = modifier.size(DELAY_RULER_WIDTH, 22.dp)) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val pxPerMs = size.width / spanMs
+            val baseline = DELAY_MARKER_HEIGHT.toPx() / 2
+            val hairline = 1.dp.toPx()
+            fun xOf(ms: Long) = (ms - startMs) * pxPerMs
+            drawRect(line, Offset(0f, baseline - hairline / 2), Size(size.width, hairline))
+            val zeroX = xOf(0)
+            val valueX = xOf(valueMs)
+            val bar = 2.dp.toPx()
+            drawRect(JellybeamTheme.Pistacchio, Offset(minOf(zeroX, valueX), baseline - bar / 2), Size(kotlin.math.abs(valueX - zeroX), bar))
+            for (ms in ticks) {
+                val major = ms % (2 * SubtitleDelay.RULER_TICK_MS) == 0L
+                val height = (if (major) 6.dp else 3.dp).toPx()
+                drawRect(if (ms == 0L) JellybeamTheme.Panna else tick, Offset(xOf(ms) - hairline / 2, baseline), Size(hairline, height))
+            }
+            val markerWidth = 2.dp.toPx()
+            drawRoundRect(
+                JellybeamTheme.Pistacchio,
+                Offset(valueX - markerWidth / 2, 0f),
+                Size(markerWidth, DELAY_MARKER_HEIGHT.toPx()),
+                CornerRadius(markerWidth / 2),
+            )
+        }
+        val labelStyle = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna2, fontSize = 6.sp, textAlign = TextAlign.Center, shadow = DELAY_TEXT_SHADOW)
+        for (ms in ticks) {
+            if (ms % 1_000L != 0L) continue
+            val centreDp = ((ms - startMs).toFloat() / spanMs * DELAY_RULER_WIDTH.value).dp
+            BasicText(
+                text = SubtitleDelay.signed(ms),
+                modifier = Modifier.offset(x = centreDp - DELAY_RULER_LABEL_WIDTH / 2, y = 13.dp).width(DELAY_RULER_LABEL_WIDTH),
+                style = labelStyle,
+            )
+        }
     }
 }
 

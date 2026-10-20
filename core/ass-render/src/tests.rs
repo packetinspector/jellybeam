@@ -97,14 +97,14 @@ fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
 }
 
 fn showing(engine: &Engine, sink: &BufferSink, text_payload: &str) {
-    showing_in(engine, Box::new(sink.clone()), text_payload);
+    showing_in(engine, Box::new(sink.clone()), text_payload, (640, 360));
 }
 
-fn showing_in(engine: &Engine, sink: Box<dyn FrameSink>, text_payload: &str) {
+fn showing_in(engine: &Engine, sink: Box<dyn FrameSink>, text_payload: &str, size: (i32, i32)) {
     engine.begin_item();
     engine.add_track("t".into(), HEADER.as_bytes().to_vec(), engine.item());
     engine.select(Some("t".into()), engine.item());
-    engine.set_sink(Some((sink, 640, 360)));
+    engine.set_sink(Some((sink, size.0, size.1)));
     engine.add_sample("t".into(), 1_000_000, sample(500, text_payload));
     engine.set_position(2_000_000, false);
 }
@@ -413,7 +413,12 @@ fn detaching_during_a_copy_waits_for_that_copy_only_then_never_draws_again() {
         entered,
         gate,
     };
-    showing_in(&engine, Box::new(gated), "1,0,Default,,0,0,0,,Copying");
+    showing_in(
+        &engine,
+        Box::new(gated),
+        "1,0,Default,,0,0,0,,Copying",
+        (640, 360),
+    );
     on_entered.recv_timeout(Duration::from_secs(5)).unwrap();
     let (engine, released) = (&engine, &inner);
     std::thread::scope(|s| {
@@ -725,4 +730,72 @@ fn an_unselect_stamped_for_an_ended_item_leaves_the_live_items_selection() {
     );
     engine.unselect("t".into(), live);
     wait_for("deselected", || !engine.stats().track_selected);
+}
+
+/// Pixels of `payload` drawn at `size` once the first frame lands.
+fn frame_of(payload: &str, size: (i32, i32)) -> Vec<u8> {
+    let engine = Engine::spawn(config()).unwrap();
+    let sink = BufferSink::default();
+    showing_in(&engine, Box::new(sink.clone()), payload, size);
+    wait_for("ink", || !sink.ink().is_empty());
+    let pixels = sink.0.lock().unwrap().pixels.clone();
+    pixels
+}
+
+#[test]
+fn be_follows_the_render_scale_as_vsfilter_draws_it() {
+    let rect = "1,0,Default,,0,0,0,,{\\pos(100,100)\\p1\\bord0\\be1}m 0 0 l 80 0 80 40 0 40";
+    let soft = |px: Vec<u8>| {
+        px.as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 0 && p[3] < 255)
+            .count()
+    };
+    let (native, doubled) = (
+        soft(frame_of(rect, (640, 360))),
+        soft(frame_of(rect, (1280, 720))),
+    );
+    // Twice the size doubles the perimeter; libass's fixed `\be1` band keeps the ratio near 2,
+    // VSFilter's band doubles with it.
+    assert!(
+        doubled > 3 * native,
+        "soft edge {native} px at 1x, {doubled} px at 2x"
+    );
+}
+
+#[test]
+fn the_outline_under_fill_fix_stays_off() {
+    use substation::VsfilterFix;
+    assert!(crate::engine::VSFILTER_FIXES.contains(&VsfilterFix::ScaledBe));
+    assert!(crate::engine::VSFILTER_FIXES.contains(&VsfilterFix::EmSizedFallback));
+    assert!(!crate::engine::VSFILTER_FIXES.contains(&VsfilterFix::OutlineUnderFill));
+    assert!(!crate::engine::VSFILTER_FIXES.contains(&VsfilterFix::All));
+}
+
+#[test]
+fn a_line_without_spaces_wraps_where_unicode_allows() {
+    let word = "lorem-ipsum-dolor-sit-amet-consectetur-adipiscing-elit-sed-do-eiusmod-tempor";
+    let wrapped = |sink: &BufferSink, path: &str| {
+        wait_for("ink", || !sink.ink().is_empty());
+        let ink = sink.ink();
+        assert!(
+            ink.y1 - ink.y0 > 60,
+            "{path}: two lines of 36 px text, not one overflowing: {ink:?}"
+        );
+    };
+    let engine = Engine::spawn(config()).unwrap();
+    let sink = BufferSink::default();
+    showing(&engine, &sink, &format!("1,0,Default,,0,0,0,,{word}"));
+    wrapped(&sink, "embedded track");
+
+    let engine = Engine::spawn(config()).unwrap();
+    let sink = BufferSink::default();
+    engine.begin_item();
+    let line = format!("Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{word}");
+    assert!(engine.add_script("s".into(), script(&[&line]), engine.item()));
+    engine.select(Some("s".into()), engine.item());
+    engine.set_sink(Some((Box::new(sink.clone()), 640, 360)));
+    engine.set_position(2_000_000, false);
+    wrapped(&sink, "sidecar script");
 }

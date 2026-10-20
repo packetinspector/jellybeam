@@ -1,6 +1,8 @@
 package tv.jellybeam.player
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** [resolveBackAction] backs [tv.jellybeam.player.PlaybackScreen]'s `BackHandler` chain
@@ -98,5 +100,14 @@ class PlaybackScreenBackActionTest {
     @Test
     fun `exit is the last resort -- nothing else showing and the OSD already hidden`() {
         assertEquals(BackAction.EXIT, resolveBackAction(pickerOpen = false, nextUpShown = false, osdVisible = false))
+    }
+
+    @Test
+    fun `the delay control counts as an open menu for Back and the speed and chapters menus still do`() {
+        assertTrue(PlaybackUiState(openSurface = OpenSurface.DelayControl(DelayState(0))).menuOpen)
+        assertTrue(PlaybackUiState(openSurface = OpenSurface.Speed).menuOpen)
+        assertTrue(PlaybackUiState(openSurface = OpenSurface.Chapters).menuOpen)
+        assertFalse(PlaybackUiState().menuOpen)
+        assertFalse(PlaybackUiState(openSurface = OpenSurface.Tracks(TrackPickerState(emptyList(), emptyList()))).menuOpen)
     }
 }

@@ -18,6 +18,7 @@ import androidx.media3.extractor.mkv.EbmlProcessor
 import androidx.media3.extractor.mkv.MatroskaExtractor
 import androidx.media3.extractor.text.DefaultSubtitleParserFactory
 import androidx.media3.extractor.text.SubtitleParser
+import tv.jellybeam.player.subtitleClockUs
 import uniffi.jellybeam_core.AssOverlay
 import uniffi.jellybeam_core.AssSample
 
@@ -361,6 +362,8 @@ class AssTextRenderer(
     private val overlay: () -> AssOverlay?,
     /** Settings > Subtitles "Full styling for styled subtitles", as the playing item loaded it. */
     private val fullStyling: () -> Boolean,
+    /** docs/12 §16: the subtitle delay, read each render; a change resends the position. */
+    private val delayMs: () -> Long = { 0L },
     /** Playback thread: playback (re)started at a media time, so lines that began earlier are unread (docs/13). */
     private val linesNeeded: (trackKey: String, mediaUs: Long) -> Unit = { _, _ -> },
 ) : BaseRenderer(C.TRACK_TYPE_TEXT) {
@@ -372,6 +375,7 @@ class AssTextRenderer(
     private var item = 0uL
     private var sentUs = Long.MIN_VALUE
     private var sentPlaying = false
+    private var sentDelayMs = 0L
     private var latestUs = 0L
 
     override fun getName(): String = "AssTextRenderer"
@@ -408,7 +412,7 @@ class AssTextRenderer(
         samples.reset()
         sentUs = Long.MIN_VALUE
         // Enabling runs this after onStreamChanged too, so a start, seek or track switch all land here.
-        val mediaUs = positionUs - streamOffsetUs
+        val mediaUs = subtitleClockUs(positionUs - streamOffsetUs, delayMs())
         trackKey?.let { if (mediaUs > 0) linesNeeded(it, mediaUs) }
     }
 
@@ -422,7 +426,12 @@ class AssTextRenderer(
 
     override fun render(positionUs: Long, elapsedRealtimeUs: Long) {
         val sink = overlay() ?: return
-        val mediaUs = positionUs - streamOffsetUs
+        val delay = delayMs()
+        if (delay != sentDelayMs) {
+            sentDelayMs = delay
+            sentUs = Long.MIN_VALUE
+        }
+        val mediaUs = subtitleClockUs(positionUs - streamOffsetUs, delay)
         val onFormat = { format: Format ->
             send(sink)
             register(format)

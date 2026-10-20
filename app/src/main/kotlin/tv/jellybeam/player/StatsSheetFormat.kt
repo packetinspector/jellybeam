@@ -47,6 +47,7 @@ object StatsSheetFormat {
         live: PlaybackLiveStats?,
         playMethod: PlayMethodFfi = PlayMethodFfi.DIRECT_PLAY,
         transcodeReason: String? = null,
+        subtitleDelayMs: Long = 0L,
         locale: Locale = AppLocale.format,
     ): StatsSheetContent {
         val video = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.VIDEO }
@@ -63,7 +64,7 @@ object StatsSheetFormat {
         val rows = buildList {
             videoValue(strings, video, locale)?.let { add(StatsRow(label(strings, R.string.player_stats_label_video), it)) }
             audioValue(strings, audio, locale)?.let { add(StatsRow(label(strings, R.string.player_stats_label_audio), it)) }
-            add(StatsRow(label(strings, R.string.player_stats_label_subtitles), subtitlesValue(strings, selectedSubtitleTitle, subtitleCount)))
+            add(StatsRow(label(strings, R.string.player_stats_label_subtitles), subtitlesValue(strings, selectedSubtitleTitle, subtitleCount, subtitleDelayMs)))
             containerValue(detail)?.let { add(StatsRow(label(strings, R.string.player_stats_label_container), it)) }
             serverName?.let { add(StatsRow(label(strings, R.string.player_stats_label_source), it)) }
             live?.let { addAll(liveRows(strings, it)) }
@@ -103,10 +104,11 @@ object StatsSheetFormat {
         return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
     }
 
-    /** Always present -- "Off · N available" or "<title> · N available"; never dropped. */
-    private fun subtitlesValue(strings: UiStrings, selectedSubtitleTitle: String?, subtitleCount: Int): String {
+    /** Always present -- "Off · N available" or "<title> · N available", plus "· delay +250 ms" (docs/12 §16) when non-zero; never dropped. */
+    private fun subtitlesValue(strings: UiStrings, selectedSubtitleTitle: String?, subtitleCount: Int, delayMs: Long): String {
         val label = selectedSubtitleTitle?.takeIf { it.isNotBlank() } ?: strings.get(R.string.player_track_off)
-        return strings.plural(R.plurals.player_stats_subtitles_value, subtitleCount, label, subtitleCount)
+        val base = strings.plural(R.plurals.player_stats_subtitles_value, subtitleCount, label, subtitleCount)
+        return if (delayMs == 0L) base else strings.get(R.string.player_stats_subtitles_with_delay, base, SubtitleDelay.format(strings, delayMs))
     }
 
     /** `"MKV · 1.4 GB"` -- either half may drop; `null` when both absent. Reuses

@@ -487,7 +487,8 @@ disabled late can't blank a sidecar chosen meanwhile. The server serves
 sidecars as UTF-8 (it converts UTF-16; a UTF-8 byte-order mark is skipped). Our own `SubtitleView`, a sibling of PlayerView's with
 the same styling, is fed from the live position, sleeping until the next cue
 change scaled by the playback rate (at most 120 ms, so a seek lands promptly).
-The video is never re-prepared, so a pick or a switch never rebuffers. The row
+Every subtitle path (stock text, plain and styled ASS, both sidecar kinds) draws at `subtitleClockUs`,
+the media position minus the viewer's subtitle delay (docs/12 §16). The video is never re-prepared, so a pick or a switch never rebuffers. The row
 reads `Loading…` until the file is in; a fetch or parse failure (or a file with
 no cues) marks it `Unavailable`, returns subtitles to Off and shows a short
 notice, and the video plays on. Sidecar indices belong to one media source: a

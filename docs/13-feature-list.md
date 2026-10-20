@@ -231,6 +231,7 @@ track selection
 (audio/subtitle) with per-series memory; subtitle mode Default/Always/
 OnlyForced/None (OnlyForced keeps a burned-in forced track when a transcode hides the audio language; a remembered language matches whether the next episode ships it embedded, burned in or as a sidecar); subtitle styling (size, vertical position, text color, bold,
 background opacity, or Android's system caption style); skip back/forward length presets (5/10/15/30/60s, default 10/10);
+a subtitle delay control (a "Subtitle delay" row ends the picker's Subtitles section while a real subtitle is selected; Select hides the OSD and opens a top strip with the signed value, a direction line and a ruler, where Left/Right shift the cues by 50 ms (250 ms once held a second) up to 5 s either way, OK resets, Back returns to the video; kept per item for the app session, reset when another subtitle track is picked, and shown on the stats sheet);
 on-demand playback-stats sheet with live pipeline stats (video/audio/subtitle
 stream breakdown, buffered-ahead time, allocated buffer size, network estimate,
 playback state, dropped frames, plus the source file's name/size); a separate, on-demand library-info panel for the current
@@ -571,7 +572,12 @@ public display.)*
   before a resume, seek or track switch show at once: the player reads just
   those lines back from the file's index instead of waiting for the next
   one. Colours follow the script's `YCbCr Matrix` header onto the video's
-  colour space, as scripts timed against VSFilter expect.
+  colour space, as scripts timed against VSFilter expect. Two VSFilter
+  behaviours libass lacks are on: `\be` blur keeps its strength at any
+  render size (a 4K video or a lowered render quality no longer softens
+  signs), and fallback glyphs match the main font's size. A line with no
+  spaces (CJK, long URLs) wraps where Unicode allows instead of running off
+  screen.
   <!-- verified: core/ass-render (engine.rs, limits.rs, fonts.rs, budget.rs, script.rs, colour.rs); app/src/main/kotlin/tv/jellybeam/player/ass/ (MatroskaCues.kt, MatroskaAttachments.kt, AssMatroskaExtractor in AssMedia3.kt); emulator run of substation's open test set T01-T12 (T10 needs HEVC Main10) plus seek-span, system-glyph and colour-matrix files -->
 - Pure-black letterbox bars — no washed-out gray edges on OLED panels
   during scope/widescreen content.

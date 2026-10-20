@@ -1,6 +1,7 @@
 package tv.jellybeam.player
 
 import tv.jellybeam.i18n.ResourceUiStrings
+import tv.jellybeam.i18n.UsLocaleRule
 import androidx.lifecycle.ViewModelStore
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -169,6 +170,9 @@ class PlaybackViewModelTest {
 
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
+
+    @get:Rule
+    val usLocale = UsLocaleRule()
 
     /** Unconfined so `reportScope.launch { ... }` runs synchronously ([MainDispatcherRule]'s doc).
      */
@@ -4642,6 +4646,20 @@ class PlaybackViewModelTest {
     }
 
     @Test
+    fun `the sidecar feed runs on the position behind the subtitle delay`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(seriesId = "series-1")
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(FakeCoreGateway(preparePlaybackResult = Result.success(plan)), player, plan.itemId)
+        player.positionTicks = PlaybackTicks.msToTicks(10_000)
+        withSession(viewModel) {
+            player.setSubtitleDelayMs(2_000)
+            assertEquals(8_000_000L, viewModel.sidecarClockUs())
+            player.setSubtitleDelayMs(-500)
+            assertEquals(10_500_000L, viewModel.sidecarClockUs())
+        }
+    }
+
+    @Test
     fun `a styled ass sidecar the overlay refuses goes back to Off with a notice`() = runTest(timeout = TEST_TIMEOUT) {
         val plan = samplePlan(seriesId = "series-1", externalSubtitles = listOf(sampleSidecar().copy(codec = "ass")))
         val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan)).apply { assSidecarLoads = false }
@@ -6775,5 +6793,333 @@ class PlaybackViewModelTest {
             ViewModelStore().apply { put("second", second) }.clear() // a live session would keep runTest's scheduler busy
         }
         assertNull("clearing the owner removes it", player.onVideoDecoderInitialized)
+    }
+
+    // -- docs/12 §16: the subtitle delay control. --------------------------------------------
+
+    /** [pickerTracks] with its English subtitle selected. */
+    private fun tracksWithSubtitleOn(): Tracks {
+        val english = Format.Builder().setSampleMimeType("audio/mp4a-latm").setLabel("English").setLanguage("eng").build()
+        val subtitle = Format.Builder().setSampleMimeType("text/vtt").setLabel("English").setLanguage("eng").build()
+        return Tracks(
+            listOf(
+                Tracks.Group(TrackGroup(english), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(true)),
+                Tracks.Group(TrackGroup(subtitle), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(true)),
+            ),
+        )
+    }
+
+    /** Two English subtitles, the one at [selected] showing, after one English audio track. */
+    private fun tracksWithTwoSubtitles(selected: Int): Tracks {
+        val audio = Format.Builder().setSampleMimeType("audio/mp4a-latm").setLabel("English").setLanguage("eng").build()
+        fun subtitle(label: String) = Format.Builder().setSampleMimeType("text/vtt").setLabel(label).setLanguage("eng").build()
+        fun group(format: Format, on: Boolean) = Tracks.Group(TrackGroup(format), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(on))
+        return Tracks(listOf(group(audio, true), group(subtitle("Full"), selected == 0), group(subtitle("Forced"), selected == 1)))
+    }
+
+    private fun delayViewModel(player: FakePlaybackPlayer): PlaybackViewModel {
+        val plan = samplePlan()
+        return buildViewModel(FakeCoreGateway(preparePlaybackResult = Result.success(plan)), player, plan.itemId)
+    }
+
+    @Test
+    fun `the picker has no Delay row while subtitles are off`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+            viewModel.openTrackPicker()
+
+            val picker = viewModel.state.value.trackPicker!!
+            assertFalse(picker.delayRowShown)
+            assertEquals(4, picker.rowCount) // 2 audio, Off, English
+        }
+    }
+
+    @Test
+    fun `the picker ends with a Delay row showing the current delay once a subtitle is selected`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.setSubtitleDelayMs(250)
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openTrackPicker()
+
+            val picker = viewModel.state.value.trackPicker!!
+            assertTrue(picker.delayRowShown)
+            assertEquals(4, picker.rowCount) // 1 audio, Off, English, Delay
+            assertEquals("+250 ms", picker.delayText)
+        }
+    }
+
+    @Test
+    fun `choosing Off in the picker takes the Delay row away at once`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openTrackPicker()
+            assertTrue(viewModel.state.value.trackPicker!!.delayRowShown)
+
+            viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+
+            assertFalse(viewModel.state.value.trackPicker!!.delayRowShown)
+        }
+    }
+
+    @Test
+    fun `opening the delay control from the picker replaces it and leaves the OSD unpinned`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.setSubtitleDelayMs(-500)
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openTrackPicker()
+
+            viewModel.openSubtitleDelay()
+
+            val state = viewModel.state.value
+            assertNull("the picker is gone", state.trackPicker)
+            assertEquals(-500L, state.subtitleDelay!!.delayMs)
+            assertEquals("English · VTT", state.subtitleDelay!!.track)
+            assertFalse("the control hides the OSD instead of pinning it", state.openSurface.pinsOsd)
+            assertTrue("every other surface pins it", OpenSurface.Speed.pinsOsd && OpenSurface.Chapters.pinsOsd)
+            assertFalse(OpenSurface.None.pinsOsd)
+        }
+    }
+
+    @Test
+    fun `the delay control is refused while subtitles are off`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(pickerTracks())
+
+            viewModel.openSubtitleDelay()
+
+            assertNull(viewModel.state.value.subtitleDelay)
+        }
+    }
+
+    @Test
+    fun `each step reaches the player at once and the control shows it`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openSubtitleDelay()
+
+            viewModel.subtitleDelayKey(DelayKey.Right(0))
+            viewModel.subtitleDelayKey(DelayKey.Right(0))
+            assertEquals(100L, player.subtitleDelayMs)
+            assertEquals(100L, viewModel.state.value.subtitleDelay!!.delayMs)
+
+            viewModel.subtitleDelayKey(DelayKey.Left(1_000))
+            assertEquals(-150L, player.subtitleDelayMs)
+            assertEquals(-150L, viewModel.state.value.subtitleDelay!!.delayMs)
+        }
+    }
+
+    @Test
+    fun `a fresh Select press resets the delay on the player and keeps the control open`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.setSubtitleDelayMs(1_500)
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openSubtitleDelay()
+
+            viewModel.subtitleDelayKey(DelayKey.Reset)
+            viewModel.subtitleDelayKey(DelayKey.Swallow)
+
+            assertEquals(0L, player.subtitleDelayMs)
+            assertEquals(0L, viewModel.state.value.subtitleDelay!!.delayMs)
+        }
+    }
+
+    @Test
+    fun `Close keeps the delay`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.setSubtitleDelayMs(1_500)
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openSubtitleDelay()
+
+            viewModel.subtitleDelayKey(DelayKey.Close)
+
+            assertNull(viewModel.state.value.subtitleDelay)
+            assertEquals(1_500L, player.subtitleDelayMs)
+        }
+    }
+
+    @Test
+    fun `opening and stepping never pauses playback`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            val playingBefore = player.playWhenReady
+
+            viewModel.openSubtitleDelay()
+            viewModel.subtitleDelayKey(DelayKey.Right(0))
+            viewModel.subtitleDelayKey(DelayKey.Reset)
+            viewModel.subtitleDelayKey(DelayKey.Swallow)
+
+            assertEquals(playingBefore, player.playWhenReady)
+            assertEquals(0, player.togglePlayPauseCallCount)
+        }
+    }
+
+    @Test
+    fun `the delay returns when the same item is opened again and each item keeps its own`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        suspend fun session(itemId: String, body: suspend (PlaybackViewModel) -> Unit) {
+            val plan = samplePlan(itemId = itemId)
+            val viewModel = buildViewModel(FakeCoreGateway(preparePlaybackResult = Result.success(plan)), player, plan.itemId)
+            withSession(viewModel) {
+                player.fireTracksChanged(tracksWithSubtitleOn())
+                viewModel.openSubtitleDelay()
+                body(viewModel)
+            }
+        }
+
+        session("item-a") { viewModel ->
+            repeat(15) { viewModel.subtitleDelayKey(DelayKey.Right(0)) }
+            assertEquals(750L, player.subtitleDelayMs)
+        }
+        session("item-b") { viewModel ->
+            assertEquals("a different item starts at zero", 0L, viewModel.state.value.subtitleDelay!!.delayMs)
+            repeat(4) { viewModel.subtitleDelayKey(DelayKey.Left(0)) }
+            assertEquals(-200L, player.subtitleDelayMs)
+        }
+        session("item-a") { viewModel ->
+            assertEquals("the first item gets its own value back", 750L, viewModel.state.value.subtitleDelay!!.delayMs)
+        }
+        session("item-b") { viewModel ->
+            assertEquals(-200L, viewModel.state.value.subtitleDelay!!.delayMs)
+        }
+    }
+
+    @Test
+    fun `picking a different subtitle track returns the item's delay to zero`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithTwoSubtitles(selected = 1))
+            player.setSubtitleDelayMs(900)
+            val subtitles = TrackMapping.toTrackInfos(player.currentTracks!!).filter { it.kind == TrackKindFfi.SUBTITLE }
+            val other = subtitles.first { !it.isSelected }
+            viewModel.openTrackPicker()
+
+            viewModel.chooseSubtitle(other.id)
+
+            assertEquals(0L, player.subtitleDelayMs)
+            assertEquals("0 ms", viewModel.state.value.trackPicker?.delayText)
+        }
+    }
+
+    @Test
+    fun `picking the subtitle that already shows leaves the delay`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithTwoSubtitles(selected = 1))
+            player.setSubtitleDelayMs(900)
+            val shown = TrackMapping.toTrackInfos(player.currentTracks!!).first { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }
+
+            viewModel.chooseSubtitle(shown.id)
+
+            assertEquals(900L, player.subtitleDelayMs)
+        }
+    }
+
+    @Test
+    fun `a track announcement without a choice leaves the delay`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithTwoSubtitles(selected = 1))
+            player.setSubtitleDelayMs(900)
+
+            player.fireTracksChanged(tracksWithTwoSubtitles(selected = 1))
+            player.fireTracksChanged(tracksWithTwoSubtitles(selected = 0))
+
+            assertEquals(900L, player.subtitleDelayMs)
+        }
+    }
+
+    @Test
+    fun `keys sent after the control closed change nothing`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithSubtitleOn())
+
+            viewModel.subtitleDelayKey(DelayKey.Right(0))
+
+            assertEquals(0L, player.subtitleDelayMs)
+            assertNull(viewModel.state.value.subtitleDelay)
+        }
+    }
+
+    @Test
+    fun `the control closes when the player reports no subtitle selected`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openSubtitleDelay()
+            assertNotNull(viewModel.state.value.subtitleDelay)
+
+            player.fireTracksChanged(pickerTracks())
+
+            assertNull(viewModel.state.value.subtitleDelay)
+        }
+    }
+
+    @Test
+    fun `the control survives a track announcement that still has the subtitle and an empty one`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openSubtitleDelay()
+
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            player.fireTracksChanged(Tracks.EMPTY)
+
+            assertNotNull(viewModel.state.value.subtitleDelay)
+        }
+    }
+
+    @Test
+    fun `stopping the session closes the control`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openSubtitleDelay()
+
+            viewModel.stopPlaybackOnce()
+
+            assertNull(viewModel.state.value.subtitleDelay)
+        }
+    }
+
+    @Test
+    fun `closeSubtitleDelay closes only the delay control`() = runTest(timeout = TEST_TIMEOUT) {
+        val player = FakePlaybackPlayer()
+        val viewModel = delayViewModel(player)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksWithSubtitleOn())
+            viewModel.openSpeedMenu()
+            viewModel.closeSubtitleDelay()
+            assertTrue(viewModel.state.value.speedMenuOpen)
+
+            viewModel.openSubtitleDelay()
+            viewModel.closeSubtitleDelay()
+            assertEquals(OpenSurface.None, viewModel.state.value.openSurface)
+        }
     }
 }

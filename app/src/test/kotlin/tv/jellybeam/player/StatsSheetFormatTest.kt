@@ -173,6 +173,16 @@ class StatsSheetFormatTest {
     }
 
     @Test
+    fun `a non-zero subtitle delay is appended to the SUBTITLES row and zero is not`() {
+        fun subtitles(delayMs: Long) = StatsSheetFormat.build(
+            strings, detail(), "English", 3, null, null, subtitleDelayMs = delayMs,
+        ).rows.single { it.label == "SUBTITLES" }.value
+        assertEquals("English · 3 available · delay +250 ms", subtitles(250))
+        assertEquals("English · 3 available · delay \u2212500 ms", subtitles(-500))
+        assertEquals("English · 3 available", subtitles(0))
+    }
+
+    @Test
     fun `a null path never produces a file name`() {
         val content = StatsSheetFormat.build(strings, detail(path = null), null, 0, null, null)
         assertNull(content.fileName)

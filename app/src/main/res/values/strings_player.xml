@@ -45,6 +45,7 @@
     <string name="player_sheet_stats_kicker">Playback stats</string>
     <string name="player_sheet_library_kicker">In your library</string>
     <string name="player_sheet_back_to_close">Back to close</string>
+    <string name="player_stats_subtitles_with_delay">%1$s · delay %2$s</string>
     <string name="player_stats_file">FILE %1$s</string>
     <string name="player_library_loading">Loading…</string>
     <string name="player_library_unavailable">Library info unavailable</string>
@@ -89,6 +90,14 @@
     <!-- Track picker. -->
     <string name="player_picker_audio">Audio</string>
     <string name="player_picker_subtitles">Subtitles</string>
+    <string name="player_subtitle_delay_row">Subtitle delay</string>
+    <string name="player_subtitle_delay_value">%1$s ms</string>
+    <string name="player_subtitle_delay_later">Subtitles appear later</string>
+    <string name="player_subtitle_delay_earlier">Subtitles appear earlier</string>
+    <string name="player_subtitle_delay_in_sync">In sync with the file</string>
+    <string name="player_subtitle_delay_reset_hint">OK to reset</string>
+    <string name="player_subtitle_delay_close_hint">Back to close</string>
+    <string name="player_subtitle_delay_track">%1$s · %2$s</string>
     <string name="player_track_default_name">Track %1$d</string>
     <string name="player_track_external">External</string>
     <string name="player_track_external_meta">%1$s · External</string>

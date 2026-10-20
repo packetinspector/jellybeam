@@ -211,7 +211,8 @@ Owner: `PlaybackOsdController`, ticked every 250ms.
 - Idle auto-hide after 5s of no input while playing. Pinned visible
   while: paused, track picker, either sheet, either menu, up-next card,
   still-watching card, trickplay preview showing, or a reconnect in
-  progress. Unpinning and resuming each grant a fresh 5s window. Pinned
+  progress. The subtitle delay control (§16) is the one surface that hides
+  the OSD instead. Unpinning and resuming each grant a fresh 5s window. Pinned
   overlays that render independently of the OSD (cards, picker) still pin
   the chrome under them.
 - Reveal from hidden always lands focus on Play / Pause (or the first
@@ -291,7 +292,7 @@ Owner: `PlaybackOsdController`, ticked every 250ms.
   counts as viewer input for the still-watching guard.
 
 Back chain, one level per press, resolved by `resolveBackAction`:
-menu → track picker → sheet → still-watching card (Back means Stop, §13)
+menu (the subtitle delay control counts as one, §16) → track picker → sheet → still-watching card (Back means Stop, §13)
 → dismiss up-next card → cancel glide (hold-to-seek,
 hold-to-seek's cancel rule -- no seek is issued, the
 target is discarded) → hide OSD → exit playback. Escape and Menu close
@@ -583,6 +584,68 @@ Plain ASS/SSA (full styling off) follows the same rule for lines without
 are stacked into one cue as libass stacks them (later bottom lines above
 earlier ones, later top or middle lines below) and the bottom stack takes the
 bottom padding; positioned signs keep their place.
+
+### Subtitle delay
+
+Shifts when cues appear, for a file whose subtitles run early or late.
+
+- Row: the final row of the picker's Subtitles section, label "Subtitle
+  delay", trailing meta the current value in Archivo 11sp Grigio. Shown only
+  while a real subtitle (embedded or sidecar) is selected; absent with Off and
+  with a transcode's burned-in subtitle. Up / Down clamp across it like any row.
+- Value: signed integer milliseconds, `+300 ms` / `−1250 ms` (U+2212) /
+  `0 ms`, never grouped. Positive = cues appear later. Range ±5000 ms,
+  clamped, no wrap.
+- Select on the row closes the picker and hides the OSD (subtitles sit at
+  their normal bottom padding), then shows a top strip over the video;
+  playback keeps its state (never paused by opening). The strip is a full-width,
+  96dp scrim fading top to bottom (75% / 55% at 60% / clear, of #070605), so
+  the video shows through below it; every strip label carries a soft dark halo so it reads over bright video, no box, border or radius, and it replaces any other top-centre
+  notice while up. It never reaches the subtitle line.
+  - Header, top 16dp, 48dp side inset, three columns. Left (150dp):
+    `SUBTITLE DELAY` in Martian Mono 8sp Pistacchio, and 4dp below the
+    selected subtitle's picker label and format (`English · SRT`; SRT, ASS,
+    PGS or VTT, omitted for any other) in Archivo 9sp Panna2, the server's
+    name verbatim. Centre: `◀ value ▶` (10dp gaps, arrows Archivo 10sp Panna2,
+    lighting Pistacchio for 150 ms on the matching press), the value in Martian
+    Mono 18sp Panna, minimum width 100dp and centred so the arrows never
+    shift; 3dp under it a direction line in Archivo 9sp Pistacchio:
+    "Subtitles appear later" (positive), "Subtitles appear earlier"
+    (negative), "In sync with the file" in Panna2 at 0. Right (150dp, end
+    aligned): `OK TO RESET` over `BACK TO CLOSE`, Martian Mono 7sp Panna2,
+    4dp apart.
+  - Ruler, centred, 320dp wide, top 60dp: a 1dp baseline (Panna 55%), ticks (Panna 75%) every
+    250 ms (16dp apart) across a visible ±2500 ms, every 500 ms a 6dp major
+    tick and the rest 3dp minors, the 0 tick in Panna. Majors at whole
+    seconds carry a signed label in Martian Mono 6sp Panna2 (`−2000`,
+    `−1000`, `0`, `+1000`, `+2000`; no unit). A 2dp Pistacchio bar runs along
+    the baseline from 0 to the value, and a 2×9dp rounded Pistacchio marker
+    sits at the value. Past ±2500 ms the ruler slides just far enough to hold
+    the marker at its edge; the 0 tick always stays on screen.
+- Keys, all consumed except transport keys (§9): Left / Right move the delay
+  by 50ms per press, 250ms once the key has been held for a second; each
+  step applies at once to every subtitle path. A fresh Select press resets to
+  0 ms and stays open; its repeats and release do nothing, so the press that
+  opened the control cannot reset it. Back, Escape or Menu closes straight to
+  the video, the OSD staying hidden. Up / Down / Page / Channel do nothing;
+  Left / Right never seek or glide while it is open. Pausing does not bring
+  the OSD back.
+- Ends (the value is kept, as with Back) when subtitles go Off or the selected subtitle is lost, when the item
+  changes, when the up-next or still-watching card appears, on entering PiP,
+  and when the session stops (including an account change).
+- Scope: the app process, per item. Opening the same item again, or a reload
+  of it (transcode fallback, reconnect), restores its value; another item
+  starts at its own stored value or 0. Choosing a different subtitle track
+  (Off included) returns that item's value to 0; an announcement or fallback
+  reload of the same track does not. Never sent to the server, never persisted
+  across launches.
+- The stats sheet's SUBTITLES row (§17) ends `· delay +300 ms` while the delay
+  is non-zero.
+- Plain SSA keeps lines that ended up to 10 s behind the subtitle clock, so
+  a swing of the delay back over them shows them again.
+- Known limitation: on the stock text path (embedded SRT, VTT and PGS) a step
+  that makes subtitles later leaves the line already on screen up until the
+  next cue change; styled and plain ASS and sidecars redraw at once.
 
 ## 17. Sheets
 

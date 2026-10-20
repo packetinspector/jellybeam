@@ -27,6 +27,12 @@ class FakePlaybackPlayer : PlaybackPlayer {
         shownAssSidecars += target
     }
 
+    private val delayMemory = SubtitleDelayMemory()
+
+    override val subtitleDelayMs: Long get() = delayMemory.delayMs
+
+    override fun setSubtitleDelayMs(ms: Long) = delayMemory.set(ms)
+
     var loadedPlan: PlaybackPlan? = null
         private set
 
@@ -118,6 +124,7 @@ class FakePlaybackPlayer : PlaybackPlayer {
         loadedPlan = plan
         lastFullAssStyling = fullAssStyling
         loadedPlans += plan
+        delayMemory.load(plan.itemId)
         // The real per-load reset (docs/18 §3.1), so a test sees what a reload does to text.
         trackSelectionParameters = trackSelectionBaseline(trackSelectionParameters)
         currentTracks = null

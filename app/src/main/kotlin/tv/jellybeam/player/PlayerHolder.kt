@@ -200,6 +200,12 @@ interface PlaybackPlayer {
 
     /** Main thread: draws the loaded [target] on the overlay in place of any earlier one; null hides it. */
     fun showAssSidecar(target: AssSidecarTarget?) = Unit
+
+    /** docs/12 §16: ms, positive = cues appear later; kept per item for the process, never sent to the server. */
+    val subtitleDelayMs: Long get() = 0L
+
+    /** Main thread: sets [subtitleDelayMs] (clamped) and re-times every subtitle path. */
+    fun setSubtitleDelayMs(ms: Long) = Unit
 }
 
 /** A styled ASS sidecar's overlay track: [key] within overlay item [item] (docs/18 §3.2). */
@@ -562,15 +568,16 @@ class PlayerHolder(
             ssaRenderers = { output, looper ->
                 val outputHandler = Handler(looper)
                 listOf(
-                    AssTextRenderer({ assOverlay }, { fullAssStyling }) { key, mediaUs ->
+                    AssTextRenderer({ assOverlay }, { fullAssStyling }, { subtitleDelayMs }) { key, mediaUs ->
                         seekTimeoutHandler.post {
                             assLinesWanted = key to mediaUs
                             maybeFetchSpanningLines()
                         }
                     },
-                    PlainSsaRenderer(output) { outputHandler.post(it) },
+                    PlainSsaRenderer(output, { subtitleDelayMs }) { outputHandler.post(it) },
                 )
             },
+            subtitleDelayMs = { subtitleDelayMs },
         ).apply {
             setEnableDecoderFallback(true)
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
@@ -768,6 +775,7 @@ class PlayerHolder(
     ) {
         loadErrorHandlingPolicy.resetForNewPlayback()
         this.fullAssStyling = fullAssStyling
+        delayMemory.load(plan.itemId)
         // A new item starts with no styled track, fonts or overlay frame from the last one.
         beginAssItem()
         assItemUrl = plan.url
@@ -906,7 +914,7 @@ class PlayerHolder(
         override fun run() {
             val overlay = assOverlay ?: return
             if (assSidecar == null) return
-            val us = player.currentPosition * 1000
+            val us = subtitleClockUs(player.currentPosition * 1000, subtitleDelayMs)
             val playing = player.isPlaying
             if (shouldSendPosition(assSidecarSentUs, assSidecarSentPlaying, us, playing)) {
                 overlay.setPosition(us, playing)
@@ -920,6 +928,21 @@ class PlayerHolder(
     override fun assSidecarTarget(index: Int): AssSidecarTarget? {
         val overlay = assOverlay?.takeIf { fullAssStyling } ?: return null
         return AssSidecarTarget(overlay, "sidecar:$index", overlay.item())
+    }
+
+    private val delayMemory = SubtitleDelayMemory()
+
+    override val subtitleDelayMs: Long get() = delayMemory.delayMs
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    override fun setSubtitleDelayMs(ms: Long) {
+        delayMemory.set(ms)
+        // The sidecar clock exits unless a sidecar is shown; the renderers resend on their next render.
+        assSidecarSentUs = Long.MIN_VALUE
+        seekTimeoutHandler.removeCallbacks(assSidecarClock)
+        assSidecarClock.run()
+        // A no-op playback-thread message makes a paused player render now instead of in ~1 s.
+        player.createMessage { _, _ -> }.send()
     }
 
     override fun showAssSidecar(target: AssSidecarTarget?) {

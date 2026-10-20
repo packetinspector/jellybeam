@@ -24,4 +24,22 @@ object TrackChoiceText {
         }
         return strings.get(R.string.player_track_status_meta, tagged, statusText)
     }
+
+    /** docs/12 §16: `SRT`, `ASS`, `PGS` or `VTT` for the codec or mime a subtitle carries; `null` for any other. */
+    fun subtitleFormat(codec: String?): String? {
+        val tokens = codec?.lowercase()?.split(Regex("[^a-z0-9]+")).orEmpty()
+        return when {
+            tokens.any { it == "srt" || it == "subrip" } -> "SRT"
+            tokens.any { it == "ass" || it == "ssa" } -> "ASS"
+            tokens.any { it == "pgs" || it == "pgssub" || it == "hdmv_pgs_subtitle" } -> "PGS"
+            tokens.any { it == "vtt" || it == "webvtt" } -> "VTT"
+            else -> null
+        }
+    }
+
+    /** docs/12 §16: the delay control's track line: the picker's [label] and the subtitle format, `"English · SRT"`. */
+    fun delayTrack(strings: UiStrings, info: TrackInfo, indexInKind: Int): String {
+        val label = label(strings, info, indexInKind)
+        return subtitleFormat(info.codec)?.let { strings.get(R.string.player_subtitle_delay_track, label, it) } ?: label
+    }
 }

@@ -16,6 +16,8 @@ import androidx.media3.exoplayer.text.TextOutput
 import androidx.media3.extractor.text.DefaultSubtitleParserFactory
 import androidx.media3.extractor.text.SubtitleParser
 import tv.jellybeam.player.SidecarCues
+import tv.jellybeam.player.SubtitleDelay
+import tv.jellybeam.player.subtitleClockUs
 
 /**
  * Raw SSA samples read from a renderer's stream no further than [SAMPLE_LOOKAHEAD_US] ahead of
@@ -84,7 +86,9 @@ internal class LookaheadSamples(private val readSource: (FormatHolder, DecoderIn
  * most [cap] at once, and a line arriving while [cap] held lines still run is dropped unparsed.
  */
 internal class PlainSsaLines(private val cap: Int = SidecarCues.MAX_VISIBLE) {
-    private class Line(val startUs: Long, val endUs: Long, val cues: List<Cue>)
+    private class Line(val startUs: Long, val endUs: Long, val cues: List<Cue>) {
+        fun showsAt(positionUs: Long) = positionUs in startUs until endUs
+    }
 
     /** In arrival order, which is start order for a muxed track. */
     private val lines = ArrayList<Line>()
@@ -98,20 +102,20 @@ internal class PlainSsaLines(private val cap: Int = SidecarCues.MAX_VISIBLE) {
         if (endUs > startUs && cues.isNotEmpty()) lines += Line(startUs, endUs, cues)
     }
 
-    /** The cues showing at [positionUs], the same instance until they change; ended lines are dropped. */
+    /** The cues showing at [positionUs], the same instance until they change; lines ended more than [KEEP_US] ago are dropped. */
     fun at(positionUs: Long): List<Cue> {
-        lines.removeAll { it.endUs <= positionUs }
+        lines.removeAll { it.endUs <= positionUs - KEEP_US }
         // Called every render, so nothing is allocated unless what shows changed.
         var count = 0
         var same = true
         for (line in lines) {
-            if (line.startUs > positionUs) continue
+            if (!line.showsAt(positionUs)) continue
             if (count == cap) break
             if (shownLines.getOrNull(count) !== line) same = false
             count++
         }
         if (same && count == shownLines.size) return shown
-        shownLines = lines.filter { it.startUs <= positionUs }.take(cap)
+        shownLines = lines.filter { it.showsAt(positionUs) }.take(cap)
         shown = arrangePlainSsa(shownLines.flatMap { it.cues }.take(cap))
         return shown
     }
@@ -122,6 +126,9 @@ internal class PlainSsaLines(private val cap: Int = SidecarCues.MAX_VISIBLE) {
         shown = emptyList()
     }
 }
+
+/** docs/12 §16: ended lines are kept this far behind the clock, so a delay swing back finds them. */
+private const val KEEP_US = 2 * SubtitleDelay.MAX_MS * 1000
 
 /** Where Media3's SsaParser puts a line without `\pos`: one spot per vertical alignment. */
 internal enum class SsaSpot { TOP, MIDDLE, BOTTOM }
@@ -202,6 +209,8 @@ internal fun PlainSsaLines.addSample(parser: SubtitleParser, timeUs: Long, sampl
 @OptIn(UnstableApi::class)
 class PlainSsaRenderer(
     private val output: TextOutput,
+    /** docs/12 §16: the subtitle delay, read each render. */
+    private val delayMs: () -> Long = { 0L },
     /** Runs on the player's output looper, where [output] expects its calls. */
     private val post: (Runnable) -> Unit,
 ) : BaseRenderer(C.TRACK_TYPE_TEXT) {
@@ -238,7 +247,7 @@ class PlainSsaRenderer(
     override fun onPositionReset(positionUs: Long, joining: Boolean, sampleStreamWasReset: Boolean) {
         samples.reset()
         lines.clear()
-        show(emptyList(), positionUs - streamOffsetUs)
+        show(emptyList(), subtitleClockUs(positionUs - streamOffsetUs, delayMs()))
     }
 
     override fun onDisabled() {
@@ -248,7 +257,7 @@ class PlainSsaRenderer(
     }
 
     override fun render(positionUs: Long, elapsedRealtimeUs: Long) {
-        val mediaUs = positionUs - streamOffsetUs
+        val mediaUs = subtitleClockUs(positionUs - streamOffsetUs, delayMs())
         samples.drain(mediaUs, streamOffsetUs, ::useFormat, MAX_SAMPLES_PER_RENDER) { timeUs, sample ->
             parser?.let { lines.addSample(it, timeUs, sample) }
         }

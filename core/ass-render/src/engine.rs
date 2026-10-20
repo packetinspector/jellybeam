@@ -22,7 +22,15 @@ use crate::limits::{refusal_backoff_ms, security};
 use crate::script::{FontCandidates, Script, Tally};
 use crate::{lock, note};
 use substation::api::{Hinting, ShapingLevel};
-use substation::{script, FontFallback, FrameAdmission, Library, Renderer, SecurityConfig, Track};
+use substation::{
+    script, Feature, FontFallback, FrameAdmission, Library, Renderer, SecurityConfig, Track,
+    VsfilterFix,
+};
+
+/// docs/13: the VSFilter fixes we draw with; the outline-under-fill fix stays off because on the
+/// 32-bit TV it costs ~10% frame time on heavy scripts.
+pub(crate) const VSFILTER_FIXES: [VsfilterFix; 2] =
+    [VsfilterFix::ScaledBe, VsfilterFix::EmSizedFallback];
 
 /// Where finished frames go: an Android window in the app, a buffer in tests.
 pub trait FrameSink: Send {
@@ -592,6 +600,7 @@ impl Worker {
         }
         let mut track = script::new_track();
         self.security.apply_track(&mut track);
+        wrap_unicode(&mut track);
         let lib = self.ensure_lib();
         // A panic on hostile input loses this track only, never the render thread.
         let parsed = catch_unwind(AssertUnwindSafe(|| {
@@ -694,7 +703,10 @@ impl Worker {
         let lib = self.ensure_lib();
         // A panic on hostile input loses this script only, never the render thread.
         let track = match catch_unwind(AssertUnwindSafe(|| script::read_memory(lib, data, None))) {
-            Ok(Some(track)) if !track.events().is_empty() => track,
+            Ok(Some(mut track)) if !track.events().is_empty() => {
+                wrap_unicode(&mut track);
+                track
+            }
             Ok(_) => return false,
             Err(_) => {
                 note(format!("script {key}: parse panicked; script skipped"));
@@ -748,6 +760,9 @@ impl Worker {
         self.security.apply_renderer(&mut r);
         r.set_shaper(ShapingLevel::Complex);
         r.set_hinting(Hinting::None);
+        for fix in VSFILTER_FIXES {
+            r.set_vsfilter_fix(fix, true);
+        }
         r.set_line_position(self.line_lift);
         // A glyph the style's font lacks comes from an attached font, then the system list.
         r.set_font_fallback(FontFallback {
@@ -1045,6 +1060,11 @@ impl Worker {
         s.render_peak_bytes = peak;
         s.max_frame_work = self.max_frame_work;
     }
+}
+
+/// A line without spaces (CJK, long URLs) breaks where UAX #14 allows instead of running off screen.
+fn wrap_unicode(track: &mut Track) {
+    track.set_feature(Feature::WrapUnicode, true);
 }
 
 #[cfg(test)]

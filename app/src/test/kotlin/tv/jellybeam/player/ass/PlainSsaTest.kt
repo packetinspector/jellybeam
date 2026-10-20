@@ -59,6 +59,21 @@ class PlainSsaTest {
     }
 
     @Test
+    fun `a clock that swings forward and back finds the lines it passed, until they are older than the window`() {
+        val lines = PlainSsaLines()
+        val first = cue("first")
+        val second = cue("second")
+        val third = cue("third")
+        lines.add(20_000_000, 22_000_000, listOf(first))
+        lines.add(22_000_000, 24_000_000, listOf(second))
+        lines.add(24_000_000, 26_000_000, listOf(third))
+        assertTrue(lines.at(28_000_000).isEmpty())
+        assertEquals(listOf(second), lines.at(23_000_000))
+        assertTrue("the window is twice the delay range", lines.at(34_000_000).isEmpty())
+        assertTrue("a line ended more than the window ago is gone", lines.at(23_000_000).isEmpty())
+    }
+
+    @Test
     fun `the same list is returned until what shows changes`() {
         val lines = PlainSsaLines()
         lines.add(0, 2_000_000, listOf(cue("a")))
