@@ -141,8 +141,9 @@ Repeatable session tooling under `tools/`; each takes `--help`. Device serials c
 `internal/device.env` (`TV`, `EMU`) when present, else the same env vars.
 
 - `tools/gate.sh [--rust-only|--kotlin-only|--fast <pkg|crate> [test]] [--keep-lock]` — the gates
-  (`build.sh test-rust`, `lint-rust`, `check`) under timeouts, one summary line, logs in a temp
-  dir. Copies `core/Cargo.lock` aside and back without git, and refuses to start while another
+  (`build.sh test-rust`, `lint-rust`, `check`, and the launcher icon check
+  `tools/launcher-icon/check.py`) under timeouts, one summary line, logs in a temp dir.
+  Copies `core/Cargo.lock` aside and back without git, and refuses to start while another
   Gradle or container build runs.
 - `tools/scorecard.sh BASE HEAD [--md]` — production/test lines per language (comments and
   blanks stripped, Rust `#[cfg(test)]` mods as tests), coordination counts, and every new type,
@@ -194,7 +195,8 @@ What the release APK is built with, so nothing ships half-optimized:
 - 32-bit ARM: the Rust code is built with `+neon` (`cargoNdkBuild` in `app/build.gradle.kts`),
   as the NDK already builds the bundled C (SQLite, ring) and FFmpeg. Nothing newer: no VFPv4,
   no `target-cpu`. `llvm-readelf -A` on the armeabi-v7a `libjellybeam_core.so` must read
-  ARM v7 / VFPv3 / NEONv1.
+  ARM v7 / VFPv3 / NEONv1. Measured on a TV, `+vfp4` gained nothing: substation picks its
+  VFPv4/NEON kernels at run time.
 - ABIs: `abiFilters` keeps only the three slices the core is built for. JNA's AAR brings
   x86, mips and armeabi copies of `libjnidispatch.so`; packaged, they let such a device
   install an APK that has no core to load.

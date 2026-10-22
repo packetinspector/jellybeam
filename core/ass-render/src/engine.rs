@@ -46,16 +46,37 @@ pub struct EngineConfig {
     pub font_budget_bytes: usize,
     pub bitmap_cache_mb: i32,
     pub glyph_cache_max: i32,
-    /// p90 frame cost above which the quality ladder steps down.
+    /// p90 of a frame's pixel work (blend + present) above which the quality ladder steps down.
     pub frame_budget_ms: f32,
     /// Render-buffer pixel cap before quality scaling; 1080p is the UI's own resolution.
     pub max_render_pixels: i64,
     /// substation work units one frame may use before admission refuses it (limits.rs).
     pub frame_work: u64,
     pub fonts: FontCandidates,
+    /// Debug only: holds the quality ladder at this level (see [`Self::with_debug_overrides`]).
+    pub pin_quality: Option<Quality>,
 }
 
 impl EngineConfig {
+    /// Debug knobs from system properties `debug.jellybeam.ass.budget_ms` and
+    /// `debug.jellybeam.ass.quality`, so a fast emulator can stand in for a slow TV; unset or
+    /// unparseable values keep the defaults.
+    pub fn with_debug_overrides(self, budget_ms: Option<&str>, quality: Option<&str>) -> Self {
+        let budget = budget_ms
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|ms| ms.is_finite() && *ms > 0.0);
+        Self {
+            frame_budget_ms: budget.unwrap_or(self.frame_budget_ms),
+            pin_quality: quality.and_then(Quality::parse).or(self.pin_quality),
+            ..self
+        }
+    }
+
+    fn ladder(&self) -> Ladder {
+        self.pin_quality
+            .map_or_else(Ladder::default, Ladder::pinned)
+    }
+
     /// docs/09: (largest single font, per-item total) in bytes; the player fetches nothing past
     /// these, and the font store and substation's limits use the same numbers.
     pub fn font_limits(&self) -> (usize, usize) {
@@ -69,14 +90,28 @@ impl Default for EngineConfig {
             font_budget_bytes: 48 << 20,
             bitmap_cache_mb: 32,
             glyph_cache_max: 4000,
-            frame_budget_ms: 20.0,
+            // Layout cost is left out: resolution doesn't move it, and a heavy layout only lowers
+            // the frame rate. Pixel work past 40 ms holds a full-screen sign under 25 fps.
+            frame_budget_ms: 40.0,
             max_render_pixels: 1920 * 1080,
             // Units track no clock: a 7038-event stress script needs 1.7G units in 11 ms, and
             // substation's pathological test set peaks at 7.4G in 29 ms (desktop), which this refuses.
             frame_work: 1 << 32,
             fonts: FontCandidates::default(),
+            pin_quality: None,
         }
     }
+}
+
+/// A window's p90 per frame stage, in ms.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StageP90 {
+    /// substation lays out the events.
+    pub layout_ms: f32,
+    /// The canvas composites the bitmaps.
+    pub blend_ms: f32,
+    /// Lock, copy and post into the overlay window.
+    pub present_ms: f32,
 }
 
 /// A snapshot for the stats sheet and diagnostics.
@@ -88,6 +123,7 @@ pub struct Stats {
     pub frames_drawn: u64,
     pub last_frame_ms: f32,
     pub window_p90_ms: f32,
+    pub window_stage_p90: StageP90,
     pub quality: Quality,
     pub render_width: i32,
     pub render_height: i32,
@@ -360,6 +396,10 @@ struct Worker {
     canvas: Canvas,
     ladder: Ladder,
     times: FrameTimes,
+    /// Layout, blend and present times, split so the perf line can name the slow stage.
+    stage_times: [FrameTimes; 3],
+    /// Blend + present per drawn frame: the only cost a lower resolution reduces, so the ladder's input.
+    pixel_times: FrameTimes,
     window_start: Instant,
     pos_us: i64,
     pos_at: Instant,
@@ -398,6 +438,7 @@ impl Worker {
     fn new(cfg: EngineConfig, stats: Arc<Mutex<Stats>>, output: Arc<Mutex<Output>>) -> Self {
         let fonts = FontStore::new(cfg.font_budget_bytes, MAX_FONT_BYTES);
         let security = security(&cfg);
+        let ladder = cfg.ladder();
         Self {
             cfg,
             security,
@@ -418,8 +459,10 @@ impl Worker {
             video_colour: VideoColour::default(),
             mangle: None,
             canvas: Canvas::new(0, 0),
-            ladder: Ladder::default(),
+            ladder,
             times: FrameTimes::default(),
+            stage_times: Default::default(),
+            pixel_times: FrameTimes::default(),
             window_start: Instant::now(),
             pos_us: 0,
             pos_at: Instant::now(),
@@ -885,10 +928,12 @@ impl Worker {
         let force = self.force;
         let mangle = self.mangle;
         let canvas = &mut self.canvas;
+        let mut layout_ms = 0.0;
         // substation unwinds its own admission refusals; anything else that panics costs this
         // renderer (rebuilt below), never the render thread.
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             let frame = renderer.render_frame(lib, track, now_ms);
+            layout_ms = ms_since(started);
             let admission = frame.admission;
             if frame.changed == 0 && !force {
                 return (admission, None);
@@ -909,6 +954,7 @@ impl Worker {
                 .collect();
             (admission, Some(canvas.draw(&images)))
         }));
+        let blend_ms = ms_since(started) - layout_ms;
         let work = renderer.last_frame_work();
         self.max_frame_work = self.max_frame_work.max(work);
         let (admission, dirty) = match outcome {
@@ -922,6 +968,7 @@ impl Worker {
         };
         self.on_admission(admission, now_ms, work);
         let drew = dirty.is_some();
+        let presented = Instant::now();
         if let Some(dirty) = dirty {
             self.force = false;
             self.present(dirty);
@@ -930,10 +977,14 @@ impl Worker {
         if admission != FrameAdmission::Complete {
             return;
         }
-        // Unchanged frames still cost a full layout, so they count toward the ladder too.
-        let ms = started.elapsed().as_secs_f32() * 1000.0;
+        let ms = ms_since(started);
         self.times.push(ms);
+        self.stage_times[0].push(layout_ms);
         if drew {
+            let present_ms = ms_since(presented);
+            self.stage_times[1].push(blend_ms);
+            self.stage_times[2].push(present_ms);
+            self.pixel_times.push(blend_ms + present_ms);
             let mut s = lock(&self.stats);
             s.frames_drawn += 1;
             s.last_frame_ms = ms;
@@ -941,9 +992,24 @@ impl Worker {
         if self.window_start.elapsed() >= WINDOW {
             self.window_start = Instant::now();
             let w = self.times.take_window();
-            lock(&self.stats).window_p90_ms = w.p90_ms;
+            let [layout_ms, blend_ms, present_ms] =
+                self.stage_times.each_mut().map(|t| t.take_window().p90_ms);
+            let pixels = self.pixel_times.take_window();
+            {
+                let mut s = lock(&self.stats);
+                s.window_p90_ms = w.p90_ms;
+                s.window_stage_p90 = StageP90 {
+                    layout_ms,
+                    blend_ms,
+                    present_ms,
+                };
+            }
             self.publish();
-            if self.ladder.on_window(w, self.cfg.frame_budget_ms).is_some() {
+            if self
+                .ladder
+                .on_window(pixels, self.cfg.frame_budget_ms)
+                .is_some()
+            {
                 self.reconfigure();
             }
         }
@@ -998,8 +1064,10 @@ impl Worker {
         self.selected = None;
         self.mangle = None;
         self.default_script = None;
-        self.ladder = Ladder::default();
+        self.ladder = self.cfg.ladder();
         self.times = FrameTimes::default();
+        self.stage_times = Default::default();
+        self.pixel_times = FrameTimes::default();
         self.last_render = None;
         let dirty = self.canvas.clear();
         self.present(dirty);
@@ -1060,6 +1128,10 @@ impl Worker {
         s.render_peak_bytes = peak;
         s.max_frame_work = self.max_frame_work;
     }
+}
+
+fn ms_since(t: Instant) -> f32 {
+    t.elapsed().as_secs_f32() * 1000.0
 }
 
 /// A line without spaces (CJK, long URLs) breaks where UAX #14 allows instead of running off screen.

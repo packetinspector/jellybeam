@@ -44,6 +44,10 @@ pub struct AssOverlayStats {
     pub frames_drawn: u64,
     pub last_frame_ms: f32,
     pub window_p90_ms: f32,
+    /// The window's p90 per stage: substation layout, canvas blend, window present.
+    pub layout_p90_ms: f32,
+    pub blend_p90_ms: f32,
+    pub present_p90_ms: f32,
     /// `Full`, `Reduced`, `Low` or `Minimal` -- see `ass_render::Quality`.
     pub quality: String,
     pub render_width: i32,
@@ -72,7 +76,11 @@ impl AssOverlay {
         let config = EngineConfig {
             fonts,
             ..EngineConfig::default()
-        };
+        }
+        .with_debug_overrides(
+            system_property("debug.jellybeam.ass.budget_ms").as_deref(),
+            system_property("debug.jellybeam.ass.quality").as_deref(),
+        );
         let (max_font, total) = config.font_limits();
         let font_limits = AssFontLimits {
             max_font_bytes: max_font as u64,
@@ -200,6 +208,9 @@ impl AssOverlay {
             frames_drawn: s.frames_drawn,
             last_frame_ms: s.last_frame_ms,
             window_p90_ms: s.window_p90_ms,
+            layout_p90_ms: s.window_stage_p90.layout_ms,
+            blend_p90_ms: s.window_stage_p90.blend_ms,
+            present_p90_ms: s.window_stage_p90.present_ms,
             quality: format!("{:?}", s.quality),
             render_width: s.render_width,
             render_height: s.render_height,
@@ -233,6 +244,35 @@ pub unsafe extern "system" fn Java_tv_jellybeam_player_ass_AssSurfaces_nativeAcq
     surface: *mut std::ffi::c_void,
 ) -> i64 {
     ass_render::NativeWindowSink::acquire(env, surface)
+}
+
+/// An Android system property, `None` when unset or off Android (bionic exports the getter).
+fn system_property(name: &str) -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        unsafe extern "C" {
+            fn __system_property_get(
+                name: *const std::ffi::c_char,
+                value: *mut std::ffi::c_char,
+            ) -> i32;
+        }
+        let name = std::ffi::CString::new(name).ok()?;
+        // PROP_VALUE_MAX is 92 bytes including the terminator.
+        let mut value = [0 as std::ffi::c_char; 92];
+        // SAFETY: `name` is NUL-terminated and `value` holds PROP_VALUE_MAX bytes, the most the getter writes.
+        let len = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
+        if len <= 0 {
+            return None;
+        }
+        // SAFETY: the getter NUL-terminates what it writes inside `value`.
+        let value = unsafe { std::ffi::CStr::from_ptr(value.as_ptr()) };
+        Some(value.to_string_lossy().into_owned())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = name;
+        None
+    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,9 @@
 ## Shipped
 
 **Brand & identity** — the Jellybeam identity throughout: adaptive launcher icon
-(the mascot on its own dark ground, with a monochrome layer) and the Google TV
+(a flat vector mascot on its own dark ground, with the face cut out, so
+launchers that redraw app tiles, such as Plume with colour icons on, show it as a
+green tile, and Android 13+ themed icons get a clean silhouette) and the Google TV
 banner; the header lockup on every top-level screen (mascot beside the
 two-tone wordmark, `Jelly` in Panna and `beam` in Pistacchio, kerned only
 between the y and the b, in Bagel Fat One -- a face used for that word and
@@ -12,11 +14,11 @@ content only -- Home with a reachable server and empty libraries (one factual
 title and body plus a `host:port │ N LIBRARIES │ 0 ITEMS` strip, no button),
 Search with no matches, and the Quick Connect pairing code -- never over
 posters, backdrops, video or a populated shelf; on launch, a system splash
-(Android 12+ SplashScreen, Notte background and the launcher icon) hands off
+(Android 12+ SplashScreen, Notte background and the painted mascot) hands off
 immediately to a Compose launch screen -- mascot, rayed wordmark, and a status
 line naming the saved server's host, or reporting it unreachable, while the
 session resolves.
-<!-- verified: app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml; app/src/main/res/drawable-xhdpi/banner.png; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamWordmark.kt; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamLockup.kt; app/src/main/kotlin/tv/jellybeam/ui/home/HomeScreen.kt EmptyLibraryState/HomeMasthead; app/src/main/kotlin/tv/jellybeam/ui/common/EmptyStateFormat.kt; app/src/main/kotlin/tv/jellybeam/ui/search/SearchScreen.kt SearchNoResults; app/src/main/kotlin/tv/jellybeam/ui/signin/SignInScreen.kt quick connect column; app/src/main/kotlin/tv/jellybeam/ui/settings/AboutSection.kt; app/src/main/kotlin/tv/jellybeam/ui/launch/LaunchScreen.kt; app/src/main/res/values/themes.xml Theme.Jellybeam.Starting; app/src/main/kotlin/tv/jellybeam/MainActivity.kt installSplashScreen -->
+<!-- verified: app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml; app/src/main/res/drawable-v26/ic_launcher_foreground.xml; tools/launcher-icon/check.py; app/src/main/res/drawable-xhdpi/banner.png; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamWordmark.kt; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamLockup.kt; app/src/main/kotlin/tv/jellybeam/ui/home/HomeScreen.kt EmptyLibraryState/HomeMasthead; app/src/main/kotlin/tv/jellybeam/ui/common/EmptyStateFormat.kt; app/src/main/kotlin/tv/jellybeam/ui/search/SearchScreen.kt SearchNoResults; app/src/main/kotlin/tv/jellybeam/ui/signin/SignInScreen.kt quick connect column; app/src/main/kotlin/tv/jellybeam/ui/settings/AboutSection.kt; app/src/main/kotlin/tv/jellybeam/ui/launch/LaunchScreen.kt; app/src/main/res/values/themes.xml Theme.Jellybeam.Starting; app/src/main/kotlin/tv/jellybeam/MainActivity.kt installSplashScreen -->
 
 **Browsing & library** — mirror-backed instant browse everywhere (local SQLite
 mirror, no server round-trip for navigation; the library list in the menu follows
@@ -385,8 +387,10 @@ toggle hands color, font and background to Android's caption settings; a
 change made from the mini player applies when the player returns to full
 screen; styled (SSA) and image (PGS, VobSub) subtitles keep their own
 colors, size and placement; a "Full styling for styled subtitles" toggle,
-off by default while it is new, renders ASS/SSA as authored, off shows them
-simplified);
+off by default while it is new, renders ASS/SSA as authored and at full
+sharpness -- a karaoke-heavy scene too heavy for the device to draw every
+frame lowers the frame rate, and resolution drops only when drawing the
+pixels themselves is what's slow -- off shows them simplified);
 Discover section
 (Jellyseerr/Overseerr connect/disconnect: server address, auth method,
 credentials -- the identity field reads "Email address" for a Seerr account, a

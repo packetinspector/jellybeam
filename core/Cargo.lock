@@ -600,7 +600,7 @@ dependencies = [
 [[package]]
 name = "harfrust"
 version = "0.13.3"
-source = "git+https://github.com/packetinspector/substation?rev=5267857e2a739a626ecaf8123afc065f8f2a56de#5267857e2a739a626ecaf8123afc065f8f2a56de"
+source = "git+https://github.com/packetinspector/substation?rev=031becfa4faf96ad11f42f77bcaa5b9b8172f677#031becfa4faf96ad11f42f77bcaa5b9b8172f677"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -1643,7 +1643,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "substation"
 version = "0.1.0"
-source = "git+https://github.com/packetinspector/substation?rev=5267857e2a739a626ecaf8123afc065f8f2a56de#5267857e2a739a626ecaf8123afc065f8f2a56de"
+source = "git+https://github.com/packetinspector/substation?rev=031becfa4faf96ad11f42f77bcaa5b9b8172f677#031becfa4faf96ad11f42f77bcaa5b9b8172f677"
 dependencies = [
  "encoding_rs",
  "harfrust",

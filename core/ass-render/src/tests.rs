@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::{
-    Canvas, Engine, EngineConfig, FontCandidates, FrameSink, Rect, Script, VideoColour, VideoMatrix,
+    Canvas, Engine, EngineConfig, FontCandidates, FrameSink, Quality, Rect, Script, VideoColour,
+    VideoMatrix,
 };
 
 const HEADER: &str = "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 360\nScaledBorderAndShadow: yes\n\n\
@@ -798,4 +799,75 @@ fn a_line_without_spaces_wraps_where_unicode_allows() {
     engine.set_sink(Some((Box::new(sink.clone()), 640, 360)));
     engine.set_position(2_000_000, false);
     wrapped(&sink, "sidecar script");
+}
+
+#[test]
+fn debug_overrides_take_only_valid_values() {
+    let base = EngineConfig::default();
+    let set = base
+        .clone()
+        .with_debug_overrides(Some(" 2.5"), Some("full"));
+    assert_eq!(set.frame_budget_ms, 2.5);
+    assert_eq!(set.pin_quality, Some(Quality::Full));
+    for bad in ["", "0", "-3", "NaN", "inf", "fast"] {
+        let kept = base.clone().with_debug_overrides(Some(bad), Some(bad));
+        assert_eq!(kept.frame_budget_ms, base.frame_budget_ms, "{bad}");
+        assert_eq!(kept.pin_quality, None, "{bad}");
+    }
+}
+
+/// A window whose copy takes `delay`, like a slow device's present.
+struct SlowSink {
+    inner: BufferSink,
+    delay: Duration,
+}
+
+impl FrameSink for SlowSink {
+    fn configure(&mut self, width: i32, height: i32) -> bool {
+        self.inner.configure(width, height)
+    }
+
+    fn present(&mut self, canvas: &Canvas, dirty: Rect) -> bool {
+        std::thread::sleep(self.delay);
+        self.inner.present(canvas, dirty)
+    }
+}
+
+/// Plays a line that moves every frame through a window whose present takes `delay`, for `secs`.
+fn quality_after_moving_text(delay: Duration, secs: u64) -> Quality {
+    let engine = Engine::spawn(config()).unwrap();
+    let sink = SlowSink {
+        inner: BufferSink::default(),
+        delay,
+    };
+    engine.begin_item();
+    engine.add_track("t".into(), HEADER.as_bytes().to_vec(), engine.item());
+    engine.select(Some("t".into()), engine.item());
+    engine.set_sink(Some((Box::new(sink), 640, 360)));
+    engine.add_sample(
+        "t".into(),
+        0,
+        sample(3000, "1,0,Default,,0,0,0,,{\\move(20,20,600,340)}Moving"),
+    );
+    engine.set_position(1_000_000, true);
+    std::thread::sleep(Duration::from_secs(secs));
+    engine.stats().quality
+}
+
+#[test]
+fn pixel_work_over_budget_steps_the_resolution_down() {
+    assert_ne!(
+        quality_after_moving_text(Duration::from_millis(60), 8),
+        Quality::Full
+    );
+}
+
+#[test]
+fn pixel_work_a_slow_tv_sustains_keeps_full_resolution() {
+    // A 32-bit TV box spends 10-25 ms blending and presenting a full 1080p frame; 15 ms leaves margin
+    // for sleep overshoot on a loaded machine.
+    assert_eq!(
+        quality_after_moving_text(Duration::from_millis(15), 8),
+        Quality::Full
+    );
 }

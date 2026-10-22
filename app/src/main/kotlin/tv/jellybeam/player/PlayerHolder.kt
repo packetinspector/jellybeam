@@ -1142,7 +1142,9 @@ class PlayerHolder(
             val s = assOverlay?.stats() ?: return
             PerfLog.line(
                 "perf ass frames=${s.framesDrawn} lastMs=${"%.1f".format(s.lastFrameMs)} " +
-                    "p90Ms=${"%.1f".format(s.windowP90Ms)} quality=${s.quality} " +
+                    "p90Ms=${"%.1f".format(s.windowP90Ms)} layoutP90=${"%.1f".format(s.layoutP90Ms)} " +
+                    "blendP90=${"%.1f".format(s.blendP90Ms)} presentP90=${"%.1f".format(s.presentP90Ms)} " +
+                    "quality=${s.quality} " +
                     "size=${s.renderWidth}x${s.renderHeight} fontBytes=${s.fontBytes} " +
                     "eventsSkipped=${s.eventsSkipped} refused=${s.framesRefused} " +
                     "inputRefused=${s.inputRefusals} renderBytes=${s.renderMemoryBytes} " +

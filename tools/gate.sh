@@ -7,9 +7,10 @@ usage() {
 Usage: tools/gate.sh [--rust-only | --kotlin-only | --fast <target> [test]] [--keep-lock]
                      [--rust-timeout S] [--check-timeout S]
 
-Default: Rust tests, fmt + clippy, then ./build.sh check (Kotlin unit tests + lint).
+Default: Rust tests, fmt + clippy, then ./build.sh check (Kotlin unit tests + lint) and the
+launcher icon check (tools/launcher-icon/check.py).
   --rust-only       Rust lanes only
-  --kotlin-only     ./build.sh check only
+  --kotlin-only     ./build.sh check and the icon check only
   --fast <target>   iteration gate: a dotted Kotlin package (tv.jellybeam.x) runs
                     ./build.sh check-fast <pkg>; anything else is a Rust crate run
                     as cargo test -p <crate> [test] on the host from core/
@@ -113,6 +114,7 @@ if [ "$mode" = all ] || [ "$mode" = rust ]; then
 fi
 if [ "$mode" = all ] || [ "$mode" = kotlin ]; then
   lane check "$check_to" ./build.sh check
+  lane icon 120 python3 tools/launcher-icon/check.py
 fi
 if [ "$mode" = fast ]; then
   case "$fast" in

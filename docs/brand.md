@@ -30,8 +30,17 @@ and excluded from the code licence; a distributed fork replaces them
 
 The launcher icon is the mascot on its own ground. Adaptive icon
 background: `@color/ic_launcher_background` = `#1A1D15`. The foreground
-stays inside the 66dp safe zone; the monochrome layer reuses the
-foreground so themed launcher icons still read as the mascot.
+(`drawable-v26/ic_launcher_foreground.xml`) is a flat, single-path vector of the
+mascot in PISTACCHIO, with the eyes and smile cut out, inside the 66dp safe
+zone. It's flat because launchers such as Plume rebuild app tiles as a
+luminance glyph tinted by the icon's dominant saturated hue: shading turns to
+mud, and a pastel or too-small green leaves the tile grey. The monochrome
+layer is the same drawable, so Android 13+ themed icons get the cut-out
+silhouette. `tools/launcher-icon/check.py` (run by `tools/gate.sh`) replays
+that glyph heuristic and fails the icon if it would lose its colour or face.
+The pre-API-26 `mipmap-*/ic_launcher*.png` fallbacks are rendered from the
+vector. The system splash keeps the painted mascot
+(`mipmap-*/ic_splash_foreground.png`, §6.3).
 
 The Google TV banner is `drawable-xhdpi/banner.png` (640×360); Android
 scales the xhdpi asset for other densities, so one file is enough. Play
@@ -132,7 +141,7 @@ column on NOTTE; header and spine as normal.
 
 ### 6.3 Launch screen
 After the system splash (Android 12+ `SplashScreen`: background
-`#14100D`, icon = the launcher foreground), a full-screen NOTTE composable
+`#14100D`, icon = the painted mascot, `ic_splash_foreground`), a full-screen NOTTE composable
 holds until the first server response.
 - Fast pose, 280dp wide.
 - 22dp gap, then the wordmark at 66sp **with rays** (§4).

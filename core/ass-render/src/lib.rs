@@ -20,7 +20,7 @@ mod window;
 pub use budget::Quality;
 pub use colour::{VideoColour, VideoMatrix};
 pub use compositor::{Canvas, Rect};
-pub use engine::{Engine, EngineConfig, FrameSink, Stats};
+pub use engine::{Engine, EngineConfig, FrameSink, StageP90, Stats};
 pub use limits::MAX_SCRIPT_BYTES;
 pub use script::{FontCandidates, Script};
 #[cfg(target_os = "android")]

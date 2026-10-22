@@ -309,6 +309,32 @@ line, and the summary itself is computed and logged from the frame-metrics
 callback's own background thread (a dedicated `HandlerThread`), never the
 main thread.
 
+### Styled subtitles (`perf ass`)
+
+```
+perf ass frames=1017 lastMs=4.6 p90Ms=14.6 layoutP90=2.7 blendP90=0.1 presentP90=12.7 quality=Full size=1920x1080 ...
+```
+
+One line every 2 seconds while a styled (ASS/SSA) track shows. `frames` counts
+drawn frames this item; `p90Ms` is the window's p90 cost of one frame. It
+splits into `layoutP90` (substation renders the events), `blendP90` (the
+canvas composites the bitmaps) and `presentP90` (lock, copy and post into the
+overlay window), each the p90 of its own stage, so they need not sum to
+`p90Ms`. The quality ladder steps on blend + present only: a lower resolution
+doesn't make layout cheaper, so a heavy layout just lowers the frame rate. `quality` and `size` are the
+ladder's level and the render buffer it chose; the rest are admission and
+memory counters (`eventsSkipped`, `refused`, `renderPeak`, `maxWork`) and the
+player's `droppedVideo`.
+
+Two debug-only system properties change the engine for measurement and are
+read when the overlay is created (restart the app after setting them):
+
+- `adb shell setprop debug.jellybeam.ass.budget_ms 5` sets the ladder's
+  blend + present budget (default 40), so a fast emulator steps the way a
+  slow TV does.
+- `adb shell setprop debug.jellybeam.ass.quality full` pins the ladder at
+  `full`, `reduced`, `low` or `minimal`; an empty value restores the ladder.
+
 ### Watch-state pass (core)
 
 ```

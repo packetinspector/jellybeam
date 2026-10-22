@@ -1,5 +1,5 @@
-//! Render-cost guard: per-window frame times step the overlay down a quality ladder when the renderer
-//! can't keep up, and back up once it has headroom. Video never waits on subtitles.
+//! Render-cost guard: per-window pixel-work times (blend + present) step the overlay down a quality
+//! ladder when they can't keep up, and back up once there is headroom. Video never waits on subtitles.
 
 /// Overlay quality, best first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -31,6 +31,17 @@ impl Quality {
         }
     }
 
+    /// A level by its perf-line name, case-insensitive (`full`, `reduced`, `low`, `minimal`).
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(Self::Full),
+            "reduced" => Some(Self::Reduced),
+            "low" => Some(Self::Low),
+            "minimal" => Some(Self::Minimal),
+            _ => None,
+        }
+    }
+
     fn down(self) -> Self {
         match self {
             Quality::Full => Quality::Reduced,
@@ -39,15 +50,12 @@ impl Quality {
         }
     }
 
-    /// The share of the budget a window must stay under before stepping up from this level. Low
-    /// draws the same pixels as Minimal, only more often, so Minimal climbs at near-budget cost;
-    /// every other step up draws 1.8-2.25x the pixels.
+    /// The share of the budget a window must stay under before stepping up from this level: the
+    /// ladder steps on pixel work, which grows with the next level's pixels (1.8-2.25x; Low draws
+    /// Minimal's pixels, only more often), so the step up must still fit with [`HEADROOM`] to spare.
     fn up_headroom(self) -> f32 {
-        if self == Quality::Minimal {
-            0.8
-        } else {
-            HEADROOM
-        }
+        let next = self.up().scale() / self.scale();
+        HEADROOM / (next * next)
     }
 
     fn up(self) -> Self {
@@ -75,14 +83,16 @@ const MIN_FRAMES: u32 = 5;
 /// Two slow windows in a row step down; five fast ones step up.
 const DOWN_AFTER: u32 = 2;
 const UP_AFTER: u32 = 5;
-/// "Fast" means using under this fraction of the budget, so a step up doesn't bounce straight back.
-const HEADROOM: f32 = 0.35;
+/// A step up must land under this fraction of the budget, so it doesn't bounce straight back.
+const HEADROOM: f32 = 0.8;
 
 #[derive(Debug)]
 pub struct Ladder {
     level: Quality,
     slow: u32,
     fast: u32,
+    /// A debug pin (engine.rs `EngineConfig::pin_quality`) holds the level whatever frames cost.
+    pinned: bool,
 }
 
 impl Default for Ladder {
@@ -91,17 +101,29 @@ impl Default for Ladder {
             level: Quality::Full,
             slow: 0,
             fast: 0,
+            pinned: false,
         }
     }
 }
 
 impl Ladder {
+    pub(crate) fn pinned(level: Quality) -> Self {
+        Self {
+            level,
+            pinned: true,
+            ..Self::default()
+        }
+    }
+
     pub fn level(&self) -> Quality {
         self.level
     }
 
     /// Feeds one window; returns the new level when it changes.
     pub fn on_window(&mut self, w: WindowStats, budget_ms: f32) -> Option<Quality> {
+        if self.pinned {
+            return None;
+        }
         let sparse = w.frames < MIN_FRAMES && w.busy_ms < budget_ms * MIN_FRAMES as f32;
         if sparse && w.p90_ms > budget_ms {
             return None;
@@ -194,6 +216,22 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_ladder_never_moves() {
+        let mut l = Ladder::pinned(Quality::Full);
+        for p90 in [100.0, 100.0, 100.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] {
+            assert_eq!(l.on_window(w(p90), 20.0), None);
+        }
+        assert_eq!(l.level(), Quality::Full);
+    }
+
+    #[test]
+    fn quality_names_parse_case_insensitively() {
+        assert_eq!(Quality::parse(" Minimal"), Some(Quality::Minimal));
+        assert_eq!(Quality::parse("full"), Some(Quality::Full));
+        assert_eq!(Quality::parse("auto"), None);
+    }
+
+    #[test]
     fn steps_up_only_with_sustained_headroom() {
         let mut l = Ladder::default();
         l.on_window(w(40.0), 20.0);
@@ -203,6 +241,25 @@ mod tests {
             assert_eq!(l.on_window(w(5.0), 20.0), None);
         }
         assert_eq!(l.on_window(w(5.0), 20.0), Some(Quality::Full));
+    }
+
+    #[test]
+    fn a_tv_that_stepped_down_climbs_back_when_full_would_fit() {
+        // Reduced pixel work of 14 ms is ~25 ms at Full: inside a 40 ms budget, so it climbs back.
+        let mut l = Ladder::default();
+        l.on_window(w(50.0), 40.0);
+        l.on_window(w(50.0), 40.0);
+        assert_eq!(l.level(), Quality::Reduced);
+        for _ in 0..4 {
+            assert_eq!(l.on_window(w(14.0), 40.0), None);
+        }
+        assert_eq!(l.on_window(w(14.0), 40.0), Some(Quality::Full));
+        // 20 ms at Reduced would be ~36 ms at Full, too close to the budget to climb.
+        l.on_window(w(50.0), 40.0);
+        l.on_window(w(50.0), 40.0);
+        for _ in 0..10 {
+            assert_eq!(l.on_window(w(20.0), 40.0), None);
+        }
     }
 
     #[test]

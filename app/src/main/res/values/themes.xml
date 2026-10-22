@@ -9,7 +9,7 @@
          condition; the Compose launch screen (ui/launch/LaunchScreen.kt) takes over immediately. -->
     <style name="Theme.Jellybeam.Starting" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/notte</item>
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_splash_foreground</item>
         <item name="postSplashScreenTheme">@style/Theme.Jellybeam</item>
     </style>
 

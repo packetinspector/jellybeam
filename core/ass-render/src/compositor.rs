@@ -1,6 +1,9 @@
 //! Blends the renderer's coverage bitmaps into one reused RGBA (premultiplied) canvas and reports the
 //! dirty rectangle, so a frame costs only the area that changed and never a fresh allocation.
 
+use std::collections::HashSet;
+use std::hash::{BuildHasherDefault, Hasher};
+
 /// Half-open pixel rectangle; empty when `x0 >= x1 || y0 >= y1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
@@ -243,14 +246,52 @@ fn div255_u16(v: u16) -> u16 {
     (t + (t >> 8)) >> 8
 }
 
+/// Hashes [`Shown`] keys word by word (Fx-style): both sets are rebuilt every frame over hundreds of
+/// images, where SipHash cost ~3% of a 32-bit TV's render thread, and the keys are mostly heap
+/// addresses, not script-chosen values.
+type ShownHash = BuildHasherDefault<WordHasher>;
+
+#[derive(Default)]
+struct WordHasher(u64);
+
+impl Hasher for WordHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.write_u64(u64::from_le_bytes(word));
+        }
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(u64::from(v));
+    }
+
+    fn write_i32(&mut self, v: i32) {
+        self.write_u64(u64::from(v.cast_unsigned()));
+    }
+
+    fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 /// The regions to repaint between two frames: where an image left or arrived, merged where they
 /// overlap; everything the frames span when the shared images changed order.
 fn changed_regions(before: &[Shown], after: &[Shown], w: i32, h: i32) -> Vec<Rect> {
     if before == after {
         return Vec::new();
     }
-    let was: std::collections::HashSet<&Shown> = before.iter().collect();
-    let is: std::collections::HashSet<&Shown> = after.iter().collect();
+    let was: HashSet<&Shown, ShownHash> = before.iter().collect();
+    let is: HashSet<&Shown, ShownHash> = after.iter().collect();
     let kept_before = before.iter().filter(|s| is.contains(s));
     let kept_after = after.iter().filter(|s| was.contains(s));
     let rects: Vec<Rect> = if kept_before.ne(kept_after) {

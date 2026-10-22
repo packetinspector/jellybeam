@@ -1,5 +1,4 @@
-//! Android output: CPU-locks the overlay `Surface`'s `ANativeWindow` and copies only the dirty
-//! rectangle; `Surface` copies the rest back from the previous buffer.
+//! Android output: CPU-locks the overlay `Surface`'s `ANativeWindow` and writes the whole canvas.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -54,6 +53,8 @@ impl FrameSink for NativeWindowSink {
         unsafe { ANativeWindow_setBuffersGeometry(self.window, width, height, RGBA_8888) == 0 }
     }
 
+    /// Writes the whole frame: locking only `dirty` makes `Surface` copy the rest back out of the
+    /// previous buffer, and reading graphics memory costs more than writing every pixel.
     fn present(&mut self, canvas: &Canvas, dirty: Rect) -> bool {
         if dirty.is_empty() {
             return true;
@@ -67,12 +68,12 @@ impl FrameSink for NativeWindowSink {
             reserved: [0; 6],
         };
         let mut rect = ARect {
-            left: dirty.x0,
-            top: dirty.y0,
-            right: dirty.x1,
-            bottom: dirty.y1,
+            left: 0,
+            top: 0,
+            right: canvas.width(),
+            bottom: canvas.height(),
         };
-        // SAFETY: live window; `rect` may grow to what this buffer needs redrawn.
+        // SAFETY: live window; the rect covers the whole buffer, so nothing is copied back.
         if unsafe { ANativeWindow_lock(self.window, &mut buf, &mut rect) } != 0
             || buf.bits.is_null()
         {
