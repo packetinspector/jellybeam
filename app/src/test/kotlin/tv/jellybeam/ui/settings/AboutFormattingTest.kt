@@ -111,15 +111,64 @@ class AboutFormattingTest {
         assertNull(AboutFormatting.hostOf("jellyfin.example.test"))
     }
 
+    /** Width in sp of [number] + gap + [unit] at [numberSp]. */
+    private fun lineSp(number: String, unit: String, numberSp: Float) =
+        number.length * 0.69f * numberSp + AboutFormatting.TILE_UNIT_GAP_SP + AboutFormatting.tileUnitWidthSp(unit.length)
+
+    private val episodes = { n: String -> LibraryTile(n, "EPISODES", "EPS") }
+    private val inner = 81f
+
+    /** The unit each tile shows at the shared size. */
+    private fun shown(vararg tiles: LibraryTile): List<String> {
+        val sp = AboutFormatting.inlineTileNumberSp(tiles.toList(), inner)
+        return tiles.map { AboutFormatting.inlineTileUnit(it, sp, inner) }
+    }
+
     @Test
-    fun `tile numbers keep full size until they outgrow the tile, then shrink to fit`() {
-        assertEquals(23f, AboutFormatting.fitMonoFontSp(chars = 5, availableSp = 82f, maxSp = 23f, minSp = 11f), 0.001f)
+    fun `short units keep full-size numbers`() {
+        assertEquals(15f, AboutFormatting.inlineTileNumberSp(listOf(LibraryTile("104", "MOVIES"), LibraryTile("4", "SERIES")), inner), 0.001f)
+    }
 
-        val millions = AboutFormatting.fitMonoFontSp(chars = "1,234,567".length, availableSp = 82f, maxSp = 23f, minSp = 11f)
-        assertTrue(millions < 23f)
-        assertTrue("1,234,567".length * 0.69f * millions <= 82f + 0.001f)
+    @Test
+    fun `a dev-sized library shows every full unit whole, singulars included`() {
+        val tiles = listOf(LibraryTile("104", "MOVIES"), LibraryTile("4", "SERIES"), episodes("507"), LibraryTile("1", "COLLECTION", "SET"))
+        val sp = AboutFormatting.inlineTileNumberSp(tiles, inner)
+        assertTrue(sp in 11f..15f)
+        tiles.forEach { assertEquals(it.unit, AboutFormatting.inlineTileUnit(it, sp, inner)) }
+        tiles.forEach { assertTrue(it.toString(), lineSp(it.number, it.unit, sp) <= inner + 0.001f) }
+        assertEquals(listOf("EPISODE"), shown(LibraryTile("1", "EPISODE", "EP")))
+    }
 
-        assertEquals(11f, AboutFormatting.fitMonoFontSp(chars = 40, availableSp = 82f, maxSp = 23f, minSp = 11f), 0.001f)
+    @Test
+    fun `a long unit falls back to its short form instead of ellipsizing`() {
+        assertEquals(listOf("EPS"), shown(episodes("12,345")))
+        assertEquals(listOf("VIDEOS"), shown(LibraryTile("21", "MUSIC VIDEOS", "VIDEOS")))
+        assertEquals(listOf("SETS"), shown(LibraryTile("1,234", "COLLECTIONS", "SETS")))
+        assertEquals(listOf("COLLECTIONS", "SONGS"), shown(LibraryTile("7", "COLLECTIONS", "SETS"), LibraryTile("12,345", "SONGS")))
+    }
+
+    @Test
+    fun `a short fallback sizes the numbers against itself, not the full unit`() {
+        val tiles = listOf(LibraryTile("104", "MOVIES"), episodes("12,345"))
+        val sp = AboutFormatting.inlineTileNumberSp(tiles, inner)
+        assertTrue(sp > 11f)
+        assertEquals(listOf("MOVIES", "EPS"), tiles.map { AboutFormatting.inlineTileUnit(it, sp, inner) })
+        tiles.forEach { assertTrue(lineSp(it.number, AboutFormatting.inlineTileUnit(it, sp, inner), sp) <= inner + 0.001f) }
+    }
+
+    @Test
+    fun `past the 11 sp floor the unit ellipsizes rather than clip the number`() {
+        val tile = LibraryTile("1,234,567", "COLLECTIONS", "SETS")
+        val sp = AboutFormatting.inlineTileNumberSp(listOf(tile), inner)
+        assertEquals(11f, sp, 0.001f)
+        assertEquals("SETS", AboutFormatting.inlineTileUnit(tile, sp, inner))
+        assertTrue(lineSp(tile.number, "SETS", sp) > inner)
+        assertTrue(tile.number.length * 0.69f * sp <= inner)
+    }
+
+    @Test
+    fun `no tiles keeps the full number size`() {
+        assertEquals(15f, AboutFormatting.inlineTileNumberSp(emptyList(), inner), 0.001f)
     }
 
     // ---- aboutSnapScrollTarget ---------------------------------------------

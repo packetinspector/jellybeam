@@ -405,9 +405,13 @@ stat cards, never option rows: a Server card with the server's own name and
 version, product / operating system / architecture when the account may read
 `/System/Info`, address and account, its running / restart-pending /
 update-available state in the card header, and the mirrored library's item
-counts as big-number Library tiles, one per non-empty type -- counted from the
-local mirror, so a multi-server proxy's merged library reads correctly, with
-one number size per page that shrinks to fit libraries in the millions; a Local Mirror card --
+counts as one-line Library tiles (number then a singular or plural unit, three
+to a row), one per non-empty type -- counted from the local mirror, so a
+multi-server proxy's merged library reads correctly, with one number size per
+page that shrinks so every unit shows whole; a long unit that still can't fit
+falls back to a short form (EPS, SETS, VIDEOS) and ellipsizes only if even that
+overflows at the number's floor, and the tiles are short
+enough that the focused Server card fits below the header; a Local Mirror card --
 items mirrored, database size, last full sync, last change check, sync state,
 with the live-events connection in its header; and a This Device card with the
 Android and Media3 versions and the device id; hairline-ruled label/value
@@ -486,12 +490,16 @@ public display.)*
   and Auto falls back to a transcode, the server re-encodes the track that
   failed rather than handing the same stream back, and your subtitle and
   audio choice carries over to the transcoded stream. Subtitles you turned
-  off are never burned into a transcode. While transcoding, subtitles that
-  can only be burned in (such as ASS) are still listed in the picker; the
-  one burned in shows selected, the tracks dot lights when it isn't the
-  file's default, and choosing Off or another track re-requests the stream
-  with the new choice; a paused video stays paused through the switch.
-  <!-- verified: core/jellyfin-core/src/device_profile.rs transcoding_profile(caps); core/ffi/src/object.rs fallback_options(); PlaybackViewModel choiceBeforeReload/armReapply/reapplyChoice -->
+  off are never burned into a transcode. Text subtitles (SRT and WebVTT,
+  embedded or as a file next to the media) are never burned in either: in
+  a transcode the player draws them, in your subtitle style and delay, and
+  switching between them is instant. The first one chosen after Off
+  re-requests the stream once. Subtitles that can only be burned in (such
+  as ASS) are still listed in the picker while transcoding; the one burned
+  in shows selected, the tracks dot lights when it isn't the file's
+  default, and choosing Off or another track re-requests the stream with
+  the new choice; a paused video stays paused through the switch.
+  <!-- verified: core/jellyfin-core/src/device_profile.rs transcoding_profile(caps) + android_subtitle_profiles (Hls before External); core/ffi/src/types.rs embedded_subtitles_of; core/ffi/src/object.rs fallback_options(); PlaybackViewModel choiceBeforeReload/armReapply/reapplyChoice, manifestTrackInfos + transcodeStreamRows -->
   <!-- verified: core/ffi/src/object.rs resolve_plan() (Direct Play mode: Transcode decision -> CoreError::WouldTranscode; Auto: up-front transcode only when tolerate_mislabeled_levels is off or the codec is outside android_direct_play_video_codecs, else attempt-anyway Direct Play; Cap: force_transcode negotiation); app/src/main/kotlin/tv/jellybeam/player/LocalPlayability.kt, SoftwareDecoder.kt + PlaybackViewModel.maybeFallBackToTranscode() are the runtime fallback triggers -->
 
 - Works with Jellyfin 10.11 through 12.x, including 12.0's default of
@@ -532,7 +540,8 @@ public display.)*
   <!-- verified live on-device (embedded ASS rendering during Direct Play); app/src/main/kotlin/tv/jellybeam/player/ass/AssMedia3.kt AssAwareSubtitleParserFactory declines raw SSA, PlainSsa.kt PlainSsaRenderer parses the chosen track with Media3's SsaParser; device_profile.rs declares ass/ssa (like PGS/VobSub) as Embed+Encode, since an Encode-only format makes the server refuse Direct Play whenever it is the default or selected track -->
 - External subtitle files (.srt/.vtt/.ttml/.ass/.ssa next to the media)
   appear in the subtitle picker beside the embedded tracks, tagged
-  External, without leaving Direct Play, and join auto-selection and
+  External, without leaving Direct Play (in a transcode, .srt and .vtt
+  files reach the player with the stream instead), and join auto-selection and
   per-series memory. An .ass file never costs a transcode to burn it in
   (nor a refusal in Direct Play mode): with full styling on it renders as
   authored through the styled overlay, otherwise as plain text. A

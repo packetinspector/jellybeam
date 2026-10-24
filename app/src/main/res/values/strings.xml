@@ -388,17 +388,62 @@
     <string name="settings_about_status_unavailable">Details unavailable</string>
     <string name="settings_about_library_group">Library</string>
     <string name="settings_about_media_none">No items</string>
-    <string name="settings_about_unit_movies">movies</string>
-    <string name="settings_about_unit_series">series</string>
-    <string name="settings_about_unit_episodes">episodes</string>
-    <string name="settings_about_unit_collections">collections</string>
-    <string name="settings_about_unit_albums">albums</string>
-    <string name="settings_about_unit_songs">songs</string>
-    <string name="settings_about_unit_artists">artists</string>
-    <string name="settings_about_unit_music_videos">music videos</string>
-    <string name="settings_about_unit_books">books</string>
-    <string name="settings_about_unit_trailers">trailers</string>
-    <string name="settings_about_unit_programs">programs</string>
+    <plurals name="settings_about_unit_movies">
+        <item quantity="one">movie</item>
+        <item quantity="other">movies</item>
+    </plurals>
+    <plurals name="settings_about_unit_series">
+        <item quantity="one">series</item>
+        <item quantity="other">series</item>
+    </plurals>
+    <plurals name="settings_about_unit_episodes">
+        <item quantity="one">episode</item>
+        <item quantity="other">episodes</item>
+    </plurals>
+    <plurals name="settings_about_unit_collections">
+        <item quantity="one">collection</item>
+        <item quantity="other">collections</item>
+    </plurals>
+    <plurals name="settings_about_unit_albums">
+        <item quantity="one">album</item>
+        <item quantity="other">albums</item>
+    </plurals>
+    <plurals name="settings_about_unit_songs">
+        <item quantity="one">song</item>
+        <item quantity="other">songs</item>
+    </plurals>
+    <plurals name="settings_about_unit_artists">
+        <item quantity="one">artist</item>
+        <item quantity="other">artists</item>
+    </plurals>
+    <plurals name="settings_about_unit_music_videos">
+        <item quantity="one">music video</item>
+        <item quantity="other">music videos</item>
+    </plurals>
+    <plurals name="settings_about_unit_books">
+        <item quantity="one">book</item>
+        <item quantity="other">books</item>
+    </plurals>
+    <plurals name="settings_about_unit_trailers">
+        <item quantity="one">trailer</item>
+        <item quantity="other">trailers</item>
+    </plurals>
+    <plurals name="settings_about_unit_programs">
+        <item quantity="one">program</item>
+        <item quantity="other">programs</item>
+    </plurals>
+    <plurals name="settings_about_unit_short_episodes">
+        <item quantity="one">ep</item>
+        <item quantity="other">eps</item>
+    </plurals>
+    <plurals name="settings_about_unit_short_collections">
+        <item quantity="one">set</item>
+        <item quantity="other">sets</item>
+    </plurals>
+    <plurals name="settings_about_unit_short_music_videos">
+        <item quantity="one">video</item>
+        <item quantity="other">videos</item>
+    </plurals>
 
     <string name="settings_about_mirror_group">Local Mirror</string>
     <string name="settings_about_row_items_mirrored">Items mirrored</string>

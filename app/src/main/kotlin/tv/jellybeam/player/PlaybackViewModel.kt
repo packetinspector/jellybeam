@@ -41,6 +41,7 @@ import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChapterInfoFfi
 import uniffi.jellybeam_core.CoreException
+import uniffi.jellybeam_core.EmbeddedSubtitleFfi
 import uniffi.jellybeam_core.ExternalSubtitleFfi
 import uniffi.jellybeam_core.FailedTrackFfi
 import uniffi.jellybeam_core.MediaSegment
@@ -53,6 +54,7 @@ import uniffi.jellybeam_core.PlayMethodFfi
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SubtitleActionFfi
+import uniffi.jellybeam_core.SubtitleDeliveryFfi
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
@@ -95,29 +97,68 @@ private const val ITEM_TYPE_EPISODE = "Episode"
  */
 const val TRACK_PICKER_SUBTITLE_OFF_ID: Long = -1L
 
-/** docs/18 §3.1: picker ids for a transcode's embedded streams that only burn-in can show, below
+/** docs/18 §3.1: picker ids for a transcode's streams that show only after a renegotiation, below
  * every real [TrackMapping] id and [TRACK_PICKER_SUBTITLE_OFF_ID].
  */
-private const val BURNABLE_ID_BASE = -1_000L
+private const val STREAM_ROW_ID_BASE = -1_000L
 
-internal fun burnableSubtitleId(index: Int): Long = BURNABLE_ID_BASE - index
+internal fun streamRowId(index: Int): Long = STREAM_ROW_ID_BASE - index
 
-private fun burnableIndexOf(id: Long): Int? = id.takeIf { it <= BURNABLE_ID_BASE }?.let { (BURNABLE_ID_BASE - it).toInt() }
+private fun streamRowIndexOf(id: Long): Int? = id.takeIf { it <= STREAM_ROW_ID_BASE }?.let { (STREAM_ROW_ID_BASE - it).toInt() }
 
 /** docs/18 §3.1: the policy takes the first match, so rows that need no renegotiation come first:
- * delivered tracks, the one burned in, sidecars, then streams only a new burn-in can show.
+ * delivered tracks, the one burned in, sidecars, then streams only a renegotiation can show.
  */
-internal fun policyTracks(embedded: List<TrackInfo>, sidecars: List<TrackInfo>, burnable: List<TrackInfo>): List<TrackInfo> {
-    val (burned, unburned) = burnable.partition { it.isSelected }
+internal fun policyTracks(embedded: List<TrackInfo>, sidecars: List<TrackInfo>, rows: List<TrackInfo>): List<TrackInfo> {
+    val (burned, unburned) = rows.partition { it.isSelected }
     return embedded + burned + sidecars + unburned
 }
 
-/** docs/18 §3.1: a decision naming a [burnable] stream keeps player text off and returns that
- * stream for the renegotiation to burn in; any other decision passes through.
+/** docs/18 §3.1: a decision naming a stream [rows] entry keeps player text off and returns that
+ * stream for the renegotiation to show; any other decision passes through.
  */
-internal fun routeBurnable(decision: TrackDecisionFfi, burnable: List<TrackInfo>): Pair<TrackDecisionFfi, TrackInfo?> {
-    val pick = decision.subtitleTrackId?.let { id -> burnable.firstOrNull { it.id == id } } ?: return decision to null
+internal fun routeStreamRow(decision: TrackDecisionFfi, rows: List<TrackInfo>): Pair<TrackDecisionFfi, TrackInfo?> {
+    val pick = decision.subtitleTrackId?.let { id -> rows.firstOrNull { it.id == id } } ?: return decision to null
     return decision.copy(subtitleAction = SubtitleActionFfi.OFF, subtitleTrackId = null) to pick
+}
+
+/** docs/18 §3.1: a transcode's manifest renditions, named by display title, take their stream's
+ * identity and flags so they match Direct Play's; copies of streams burned in instead are dropped.
+ */
+internal fun manifestTrackInfos(infos: List<TrackInfo>, streams: List<EmbeddedSubtitleFfi>): List<TrackInfo> {
+    val manifest = streams.filter { it.delivery == SubtitleDeliveryFfi.HLS && it.displayTitle != null }
+    if (manifest.isEmpty()) return infos
+    return infos.mapNotNull { info ->
+        if (info.kind != TrackKindFfi.SUBTITLE) return@mapNotNull info
+        // Same-named renditions are one group in Media3; the first stream of that name stands for it.
+        val stream = manifest.firstOrNull { it.displayTitle == info.title && normalizedLanguage(it.language) == normalizedLanguage(info.lang) }
+        stream?.let { info.copy(title = it.title, codec = it.codec, isDefault = it.default, isForced = it.forced) }
+    }
+}
+
+/** docs/18 §3.1: a transcode's streams only a renegotiation shows: manifest text while the
+ * manifest has none (it carries all or none), never burned in; burn-in streams always. [shown] reads selected.
+ */
+internal fun transcodeStreamRows(streams: List<EmbeddedSubtitleFfi>, delivered: List<TrackInfo>, shown: Int?): List<TrackInfo> {
+    val manifestDelivered = delivered.any { it.kind == TrackKindFfi.SUBTITLE }
+    return streams.filter {
+        when (it.delivery) {
+            SubtitleDeliveryFfi.HLS -> !manifestDelivered
+            SubtitleDeliveryFfi.ENCODE -> true
+            else -> false
+        }
+    }.map { stream ->
+        TrackInfo(
+            id = streamRowId(stream.index),
+            kind = TrackKindFfi.SUBTITLE,
+            title = stream.title,
+            lang = stream.language,
+            codec = stream.codec,
+            isDefault = stream.default,
+            isSelected = stream.index == shown,
+            isForced = stream.forced,
+        )
+    }
 }
 
 /** Embedded subtitles off, nothing else touched. */
@@ -1090,11 +1131,11 @@ class PlaybackViewModel(
         return true
     }
 
-    /** docs/18 §3.1: a transcode renegotiates when the choice needs a stream burned in that isn't,
-     * or moves off the one that is; no Media3 selection can do either. A no-op unless this owner is
-     * live.
+    /** docs/18 §3.1: a transcode renegotiates when the choice needs a stream only a renegotiation
+     * shows (burned in, or text a manifest without any lacks), or moves off the one burned in; no
+     * Media3 selection can do either. A no-op unless this owner is live.
      */
-    private fun renegotiateIfBurnedIn() {
+    private fun renegotiateForSubtitle() {
         val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return
         val request = currentRequest ?: return
         if (liveScope == null || !ownershipOpen(request)) return
@@ -1105,8 +1146,8 @@ class PlaybackViewModel(
         // One in flight already re-checks the choice when it lands.
         if (negotiation != null) return
         val tracks = playerHolder.currentTracks ?: Tracks.EMPTY
-        val needsBurnIn = burnableSubtitles(tracks).any { it.id == burnableSubtitleId(wanted) }
-        if (burned == null && !needsBurnIn) return
+        val needsRow = streamRows(tracks).any { it.id == streamRowId(wanted) }
+        if (burned == null && !needsRow) return
         negotiateTranscode(plan.transcodeReason.orEmpty(), from = plan)
     }
 
@@ -1990,20 +2031,20 @@ class PlaybackViewModel(
      */
     private fun resolveTrackSelectionOnce(tracks: Tracks) {
         if (trackSelectionApplied) return
-        val embedded = TrackMapping.toTrackInfos(tracks)
+        val embedded = deliveredTrackInfos(tracks)
         if (embedded.isEmpty()) return
         trackSelectionApplied = true
         val sidecarInfos = ExternalSubtitles.trackInfos(sidecars, activeSidecar)
         val trackInfos = embedded + sidecarInfos
-        // docs/18 §3.1: a transcode's burn-in-only streams are choices too, and one burned in shows.
-        val burnable = burnableSubtitles(tracks)
-        val embeddedTextSelected = (embedded + burnable).any { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }
+        // docs/18 §3.1: streams only a renegotiation shows are choices too, and one burned in shows.
+        val rows = streamRows(tracks)
+        val embeddedTextSelected = (embedded + rows).any { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }
         val seriesId = currentSeriesId
         if (liveScope == null) return
         resolutionPending = true
         trackSelectionJob = viewModelScope.launch {
             try {
-                resolveAndApply(seriesId, trackInfos, policyTracks(embedded, sidecarInfos, burnable), embedded, burnable, embeddedTextSelected, tracks)
+                resolveAndApply(seriesId, trackInfos, policyTracks(embedded, sidecarInfos, rows), embedded, rows, embeddedTextSelected, tracks)
             } finally {
                 if (isActive) resolutionPending = false // a cancelled job's canceller already cleared it
             }
@@ -2015,20 +2056,20 @@ class PlaybackViewModel(
         trackInfos: List<TrackInfo>,
         policyInput: List<TrackInfo>,
         embedded: List<TrackInfo>,
-        burnable: List<TrackInfo>,
+        rows: List<TrackInfo>,
         embeddedTextSelected: Boolean,
         tracks: Tracks,
     ) {
         val resolved = runCatchingCancellable { gateway.resolveTracks(seriesId, policyInput) }.getOrNull() ?: return
-        val (decision, burnPick) = routeBurnable(resolved, burnable)
+        val (decision, rowPick) = routeStreamRow(resolved, rows)
         val audio = decision.audioTrackId?.let { id -> embedded.firstOrNull { it.id == id } }
             ?: embedded.firstOrNull { it.kind == TrackKindFfi.AUDIO && it.isSelected }
         val (playerDecision, sidecar) = ExternalSubtitles.route(decision, sidecars, embeddedTextSelected, audio?.lang)
         playerHolder.applyTrackDecision(playerDecision, tracks)
         recordDecision(playerDecision, embedded)
-        burnPick?.let { recordedText = TextChoice.Embedded(it.identity()) }
+        rowPick?.let { recordedText = TextChoice.Embedded(it.identity(), streamRowIndexOf(it.id)) }
         resolutionPending = false // decided from here on, though this job is still running
-        renegotiateIfBurnedIn()
+        renegotiateForSubtitle()
         sidecar?.let { showSidecar(it) }
         // A routed sidecar is read back live: it may already have failed back to Off.
         val effective = if (sidecar != null) allTrackInfos(tracks) else applyDecisionToTrackInfos(trackInfos, decision)
@@ -2078,7 +2119,7 @@ class PlaybackViewModel(
      */
     private fun reapplyChoice(tracks: Tracks): Boolean {
         val pending = pendingReapply ?: return false
-        val infos = TrackMapping.toTrackInfos(tracks)
+        val infos = deliveredTrackInfos(tracks)
         val textAnnounced = pending.text != null && infos.any { it.kind == TrackKindFfi.SUBTITLE }
         val audioAnnounced = pending.audio != null && infos.any { it.kind == TrackKindFfi.AUDIO }
         if (!textAnnounced && !audioAnnounced) return false
@@ -2124,12 +2165,12 @@ class PlaybackViewModel(
      * so without this guard ordinary Direct Play would light the dot spuriously), OR a selected
      * subtitle isn't the default, OR no subtitle is selected despite one being marked default.
      * Subtitles need no guard: they start OFF by default, so any selection is a real deviation.
-     * A transcode's burn-in rows count as subtitles (docs/18 §3.1) and come first: what is burned
+     * A transcode's stream rows count as subtitles (docs/18 §3.1) and come first: what is burned
      * in is what shows.
      */
     private fun computeNonDefaultTrackActive(tracks: List<TrackInfo>): Boolean {
         val audioTracks = tracks.filter { it.kind == TrackKindFfi.AUDIO }
-        val subtitles = burnableSubtitles(playerHolder.currentTracks ?: Tracks.EMPTY) + tracks.filter { it.kind == TrackKindFfi.SUBTITLE }
+        val subtitles = streamRows(playerHolder.currentTracks ?: Tracks.EMPTY) + tracks.filter { it.kind == TrackKindFfi.SUBTITLE }
         val selectedAudio = audioTracks.firstOrNull { it.isSelected }
         val selectedSubtitle = subtitles.firstOrNull { it.isSelected }
         val audioNonDefault = selectedAudio != null && !selectedAudio.isDefault && audioTracks.any { it.isDefault }
@@ -2175,9 +2216,9 @@ class PlaybackViewModel(
     private fun subtitleChoices(tracks: Tracks): List<TrackChoice> {
         val subtitle = allTrackInfos(tracks).filter { it.kind == TrackKindFfi.SUBTITLE }
         return buildList {
-            val burnable = burnableSubtitles(tracks)
-            add(TrackChoice(id = TRACK_PICKER_SUBTITLE_OFF_ID, label = strings.get(R.string.player_track_off), selected = (subtitle + burnable).none { it.isSelected }))
-            burnable.forEachIndexed { index, info ->
+            val rows = streamRows(tracks)
+            add(TrackChoice(id = TRACK_PICKER_SUBTITLE_OFF_ID, label = strings.get(R.string.player_track_off), selected = (subtitle + rows).none { it.isSelected }))
+            rows.forEachIndexed { index, info ->
                 add(TrackChoice(id = info.id, label = TrackChoiceText.label(strings, info, index), selected = info.isSelected, meta = TrackChoiceText.meta(strings, info, external = false), isDefault = info.isDefault))
             }
             subtitle.forEachIndexed { index, info ->
@@ -2195,32 +2236,27 @@ class PlaybackViewModel(
         }
     }
 
-    /** docs/18 §3.1: a transcode's embedded streams that no Media3 track carries (only burn-in can
-     * show them), as picker rows; the one burned in now reads selected.
-     */
-    private fun burnableSubtitles(tracks: Tracks): List<TrackInfo> {
+    /** docs/18 §3.1: [transcodeStreamRows] for the live plan; the one burned in reads selected. */
+    private fun streamRows(tracks: Tracks): List<TrackInfo> {
         val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return emptyList()
-        val delivered = TrackMapping.toTrackInfos(tracks).filter { it.kind == TrackKindFfi.SUBTITLE }
         // While a renegotiation runs, the stream it asked for reads selected, not the outgoing one.
-        val burned = negotiation?.let { it.subtitleIndex ?: plan.burnedSubtitleIndex } ?: plan.burnedSubtitleIndex
-        return plan.embeddedSubtitles.map { stream ->
-            TrackInfo(
-                id = burnableSubtitleId(stream.index),
-                kind = TrackKindFfi.SUBTITLE,
-                title = stream.title,
-                lang = stream.language,
-                codec = stream.codec,
-                isDefault = stream.default,
-                isSelected = stream.index == burned,
-                isForced = stream.forced,
-            )
-        }.filter { burnableIndexOf(it.id) == plan.burnedSubtitleIndex || matchTrack(it.identity(), TrackKindFfi.SUBTITLE, delivered) == null }
+        val shown = negotiation?.let { it.subtitleIndex ?: plan.burnedSubtitleIndex } ?: plan.burnedSubtitleIndex
+        return transcodeStreamRows(plan.embeddedSubtitles, deliveredTrackInfos(tracks), shown)
+    }
+
+    /** docs/18 §3.1: [tracks] as the picker and the policy see them: a transcode's text is its
+     * manifest's ([manifestTrackInfos]).
+     */
+    private fun deliveredTrackInfos(tracks: Tracks): List<TrackInfo> {
+        val infos = TrackMapping.toTrackInfos(tracks)
+        val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return infos
+        return manifestTrackInfos(infos, plan.embeddedSubtitles)
     }
 
     /** docs/18 §3.2: [tracks]' rows plus the sidecars; a showing sidecar is the only selected subtitle. */
     private fun allTrackInfos(tracks: Tracks): List<TrackInfo> {
         val active = activeSidecar
-        val embedded = TrackMapping.toTrackInfos(tracks).map {
+        val embedded = deliveredTrackInfos(tracks).map {
             if (active != null && it.kind == TrackKindFfi.SUBTITLE) it.copy(isSelected = false) else it
         }
         return embedded + ExternalSubtitles.trackInfos(sidecars, active)
@@ -2394,7 +2430,7 @@ class PlaybackViewModel(
 
     /** docs/12 §16: a different subtitle track starts its own sync, so the item's stored delay returns to 0. */
     private fun resetDelayForNewSubtitle(tracks: Tracks, chosenId: Long) {
-        val shownId = (allTrackInfos(tracks) + burnableSubtitles(tracks)).firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }?.id ?: TRACK_PICKER_SUBTITLE_OFF_ID
+        val shownId = (allTrackInfos(tracks) + streamRows(tracks)).firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }?.id ?: TRACK_PICKER_SUBTITLE_OFF_ID
         if (chosenId == shownId || playerHolder.subtitleDelayMs == 0L) return
         playerHolder.setSubtitleDelayMs(0L)
         // An open picker's Delay row shows the reset at once, not after the next tracks change.
@@ -2442,7 +2478,7 @@ class PlaybackViewModel(
      */
     fun chooseSubtitle(id: Long) {
         val tracks = playerHolder.currentTracks ?: return
-        burnableIndexOf(id)?.let { return chooseBurnable(id, tracks) }
+        streamRowIndexOf(id)?.let { return chooseStreamRow(id, tracks) }
         val trackInfos = allTrackInfos(tracks)
         val info = trackInfos.firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.id == id }
         if (id != TRACK_PICKER_SUBTITLE_OFF_ID && info == null) return
@@ -2468,7 +2504,7 @@ class PlaybackViewModel(
             rememberTrackMemoryIfSeries(TrackKindFfi.SUBTITLE, memory)
         }
 
-        renegotiateIfBurnedIn() // first, so the burn-in rows below read what it asked for
+        renegotiateForSubtitle() // first, so the stream rows below read what it asked for
         // A sidecar pick reads live state (it may already have failed); an embedded one flips optimistically.
         val choices = subtitleChoices(tracks)
         val effective = decision?.let { applyDecisionToTrackInfos(trackInfos, it) } ?: allTrackInfos(tracks)
@@ -2479,11 +2515,11 @@ class PlaybackViewModel(
         }
     }
 
-    /** docs/18 §3.1: picks an embedded stream only burn-in can show: text stays off on the player and
-     * the transcode is renegotiated with it. Picking the one already burned in changes nothing.
+    /** docs/18 §3.1: picks a stream only a renegotiation can show: text stays off on the player and
+     * the transcode is renegotiated naming it. Picking the one already burned in changes nothing.
      */
-    private fun chooseBurnable(id: Long, tracks: Tracks) {
-        val info = burnableSubtitles(tracks).firstOrNull { it.id == id } ?: return
+    private fun chooseStreamRow(id: Long, tracks: Tracks) {
+        val info = streamRows(tracks).firstOrNull { it.id == id } ?: return
         // Already burned in and nothing negotiating; mid-negotiation the landing re-checks the choice.
         if (info.isSelected && negotiation == null) return
         resetDelayForNewSubtitle(tracks, id)
@@ -2492,9 +2528,9 @@ class PlaybackViewModel(
         manualTrackChoiceMade = true
         hideSidecar()
         playerHolder.applyTrackDecision(SUBTITLES_OFF, tracks)
-        recordedText = TextChoice.Embedded(info.identity())
+        recordedText = TextChoice.Embedded(info.identity(), streamRowIndexOf(info.id))
         rememberTrackMemoryIfSeries(TrackKindFfi.SUBTITLE, keyedMemory(gateway.trackPrefKeyOf(info)))
-        renegotiateIfBurnedIn()
+        renegotiateForSubtitle()
         _state.update { state ->
             state.copy(
                 nonDefaultTrackActive = computeNonDefaultTrackActive(applyDecisionToTrackInfos(allTrackInfos(tracks), SUBTITLES_OFF)),

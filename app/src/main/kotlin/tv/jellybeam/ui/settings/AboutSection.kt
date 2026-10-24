@@ -42,6 +42,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -73,7 +74,7 @@ private val CARD_HPADDING = 15.dp
 private val CARD_BOTTOM_PADDING = 13.dp
 private val CARD_HEADER_HEIGHT = 31.dp
 private val STAT_ROW_HEIGHT = 23.dp
-private val TILE_HEIGHT = 65.dp
+private val TILE_HEIGHT = 30.dp
 private val TILE_GAP = 6.dp
 private val TILE_HPADDING = 8.dp
 private const val TILES_PER_ROW = 3
@@ -344,24 +345,32 @@ private fun ServerAboutContent(snapshot: ServerInfoSnapshot, state: AboutUiState
 }
 
 /**
- * The mirror's item counts as big-number tiles, one per non-empty type, three to a row. Counted
+ * The mirror's item counts as one-line number-and-unit tiles, one per non-empty type, three to a
+ * row, short enough that the focused Server card fits below the header (docs/13). Counted
  * locally: a multi-server proxy answers `/Items/Counts` for one backend, not the merged library.
  */
 @Composable
 private fun LibraryTiles(counts: MirrorItemCounts, numberFormat: NumberFormat) {
     val tiles = listOf(
-        counts.movies to R.string.settings_about_unit_movies,
-        counts.series to R.string.settings_about_unit_series,
-        counts.episodes to R.string.settings_about_unit_episodes,
-        counts.boxSets to R.string.settings_about_unit_collections,
-        counts.albums to R.string.settings_about_unit_albums,
-        counts.songs to R.string.settings_about_unit_songs,
-        counts.artists to R.string.settings_about_unit_artists,
-        counts.musicVideos to R.string.settings_about_unit_music_videos,
-        counts.books to R.string.settings_about_unit_books,
-        counts.trailers to R.string.settings_about_unit_trailers,
-        counts.programs to R.string.settings_about_unit_programs,
-    ).filter { (count, _) -> count > 0 }.map { (count, unitRes) -> numberFormat.format(count) to unitRes }
+        Triple(counts.movies, R.plurals.settings_about_unit_movies, null),
+        Triple(counts.series, R.plurals.settings_about_unit_series, null),
+        Triple(counts.episodes, R.plurals.settings_about_unit_episodes, R.plurals.settings_about_unit_short_episodes),
+        Triple(counts.boxSets, R.plurals.settings_about_unit_collections, R.plurals.settings_about_unit_short_collections),
+        Triple(counts.albums, R.plurals.settings_about_unit_albums, null),
+        Triple(counts.songs, R.plurals.settings_about_unit_songs, null),
+        Triple(counts.artists, R.plurals.settings_about_unit_artists, null),
+        Triple(counts.musicVideos, R.plurals.settings_about_unit_music_videos, R.plurals.settings_about_unit_short_music_videos),
+        Triple(counts.books, R.plurals.settings_about_unit_books, null),
+        Triple(counts.trailers, R.plurals.settings_about_unit_trailers, null),
+        Triple(counts.programs, R.plurals.settings_about_unit_programs, null),
+    ).filter { (count, _, _) -> count > 0 }.map { (count, unitRes, shortRes) ->
+        val quantity = count.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        LibraryTile(
+            number = numberFormat.format(count),
+            unit = pluralStringResource(unitRes, quantity).uppercaseUi(),
+            shortUnit = shortRes?.let { pluralStringResource(it, quantity).uppercaseUi() },
+        )
+    }
 
     Spacer(Modifier.height(11.dp))
     Hairline()
@@ -373,46 +382,50 @@ private fun LibraryTiles(counts: MirrorItemCounts, numberFormat: NumberFormat) {
         return
     }
     BoxWithConstraints {
-        // One number size for every tile, set by the longest, so large libraries shrink together.
+        // One number size for every tile, set by the tightest, so large libraries shrink together.
         val tileInnerWidth = (maxWidth - TILE_GAP * (TILES_PER_ROW - 1)) / TILES_PER_ROW - TILE_HPADDING * 2
-        val numberSp = AboutFormatting.fitMonoFontSp(
-            chars = tiles.maxOf { (number, _) -> number.length },
-            availableSp = tileInnerWidth.value / LocalDensity.current.fontScale,
-            maxSp = 23f,
-            minSp = 11f,
-        )
-        LibraryTileRows(tiles, numberSp)
+        val tileInnerSp = tileInnerWidth.value / LocalDensity.current.fontScale
+        val numberSp = AboutFormatting.inlineTileNumberSp(tiles, tileInnerSp)
+        LibraryTileRows(tiles.map { it.number to AboutFormatting.inlineTileUnit(it, numberSp, tileInnerSp) }, numberSp)
     }
 }
 
 @Composable
-private fun LibraryTileRows(tiles: List<Pair<String, Int>>, numberSp: Float) {
+private fun LibraryTileRows(tiles: List<Pair<String, String>>, numberSp: Float) {
+    val unitGap = with(LocalDensity.current) { AboutFormatting.TILE_UNIT_GAP_SP.sp.toDp() }
     Column(verticalArrangement = Arrangement.spacedBy(TILE_GAP)) {
         tiles.chunked(TILES_PER_ROW).forEach { rowTiles ->
             Row(horizontalArrangement = Arrangement.spacedBy(TILE_GAP)) {
-                rowTiles.forEach { (number, unitRes) ->
-                    Column(
+                rowTiles.forEach { (number, unit) ->
+                    Box(
                         modifier = Modifier
                             .weight(1f)
                             .height(TILE_HEIGHT)
                             .background(JellybeamTheme.Notte, RoundedCornerShape(3.dp))
                             .border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(3.dp))
                             .padding(horizontal = TILE_HPADDING),
-                        verticalArrangement = Arrangement.Center,
+                        contentAlignment = Alignment.CenterStart,
                     ) {
-                        BasicText(
-                            text = number,
-                            maxLines = 1,
-                            softWrap = false,
-                            style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna, fontSize = numberSp.sp),
-                        )
-                        BasicText(
-                            text = stringResource(unitRes).uppercaseUi(),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(top = 3.dp),
-                            style = kickerStyle(JellybeamTheme.Grigio),
-                        )
+                        // The number is measured first at full width, so only the unit ever ellipsizes.
+                        Row(horizontalArrangement = Arrangement.spacedBy(unitGap)) {
+                            BasicText(
+                                text = number,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.alignByBaseline(),
+                                style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna, fontSize = numberSp.sp),
+                            )
+                            BasicText(
+                                text = unit,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false).alignByBaseline(),
+                                style = kickerStyle(JellybeamTheme.Grigio).copy(
+                                    fontSize = AboutFormatting.TILE_UNIT_SP.sp,
+                                    letterSpacing = AboutFormatting.TILE_UNIT_TRACKING_SP.sp,
+                                ),
+                            )
+                        }
                     }
                 }
                 // A short last row keeps the three-column tile width.

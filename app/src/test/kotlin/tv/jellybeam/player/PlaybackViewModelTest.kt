@@ -56,6 +56,7 @@ import uniffi.jellybeam_core.PlayMethodFfi
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SubtitleActionFfi
+import uniffi.jellybeam_core.SubtitleDeliveryFfi
 import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
 import uniffi.jellybeam_core.TrackDecisionFfi
@@ -528,7 +529,7 @@ class PlaybackViewModelTest {
      * took over, so that is the one reports name. */
     @Test
     fun `reports during a chained renegotiation name the session it took over`() = runTest(timeout = TEST_TIMEOUT) {
-        val french = EmbeddedSubtitleFfi(index = 3, language = "fre", title = null, forced = false, default = false, codec = "ass")
+        val french = EmbeddedSubtitleFfi(index = 3, language = "fre", title = null, forced = false, default = false, codec = "ass", delivery = SubtitleDeliveryFfi.ENCODE)
         val streams = listOf(assStream, french)
         fun transcode(id: String, burned: Int?) =
             samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = id, embeddedSubtitles = streams, burnedSubtitleIndex = burned)
@@ -545,7 +546,7 @@ class PlaybackViewModelTest {
             player.fireTracksChanged(tracksOf(enAudio to true))
             runCurrent()
             player.playbackState = Player.STATE_READY
-            viewModel.chooseSubtitle(burnableSubtitleId(3))
+            viewModel.chooseSubtitle(streamRowId(3))
             player.firePlayWhenReadyChanged(false)
             viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
             gates[0].complete(Unit)
@@ -5647,7 +5648,7 @@ class PlaybackViewModelTest {
             gateway.prepareTranscodeFallbackGatesByCall[1] = CompletableDeferred() // the burn-in renegotiation stays pending
             val french = format("text/vtt", "fre", "French") // delivered, so it hides no burn-in row
             player.fireTracksChanged(tracksOf(french to false))
-            viewModel.chooseSubtitle(burnableSubtitleId(2))
+            viewModel.chooseSubtitle(streamRowId(2))
             assertEquals("the pick renegotiates", 2, gateway.prepareTranscodeFallbackCalls.size)
 
             val full = tracksOf(french to false, enAudio to true, jaAudio to false)
@@ -5705,7 +5706,7 @@ class PlaybackViewModelTest {
         }
     // -- docs/18 §3.1 negotiated subtitle choice: never burn in what the viewer turned off ------
 
-    private val assStream = EmbeddedSubtitleFfi(index = 2, language = "eng", title = null, forced = false, default = true, codec = "ass")
+    private val assStream = EmbeddedSubtitleFfi(index = 2, language = "eng", title = null, forced = false, default = true, codec = "ass", delivery = SubtitleDeliveryFfi.ENCODE)
 
     @Test
     fun `a fallback names no subtitle stream when the viewer chose Off`() = runTest(timeout = TEST_TIMEOUT) {
@@ -5749,7 +5750,7 @@ class PlaybackViewModelTest {
      * contradicts it; burned-in pixels can't be turned off after the fact. */
     @Test
     fun `a choice changed during every renegotiation never loads a contradicting burn-in`() = runTest(timeout = TEST_TIMEOUT) {
-        val french = EmbeddedSubtitleFfi(index = 3, language = "fre", title = null, forced = false, default = false, codec = "ass")
+        val french = EmbeddedSubtitleFfi(index = 3, language = "fre", title = null, forced = false, default = false, codec = "ass", delivery = SubtitleDeliveryFfi.ENCODE)
         val streams = listOf(assStream, french)
         fun transcode(id: String, burned: Int?) =
             samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = id, embeddedSubtitles = streams, burnedSubtitleIndex = burned)
@@ -5765,11 +5766,11 @@ class PlaybackViewModelTest {
         withSession(viewModel) {
             player.fireTracksChanged(tracksOf(enAudio to true))
             runCurrent()
-            viewModel.chooseSubtitle(burnableSubtitleId(3))
+            viewModel.chooseSubtitle(streamRowId(3))
             viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
             gates[0].complete(Unit)
             runCurrent()
-            viewModel.chooseSubtitle(burnableSubtitleId(2))
+            viewModel.chooseSubtitle(streamRowId(2))
             gates[1].complete(Unit)
             runCurrent()
             viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
@@ -5800,9 +5801,9 @@ class PlaybackViewModelTest {
                 viewModel.openTrackPicker()
                 val rows = viewModel.state.value.trackPicker!!.subtitleTracks
                 assertEquals(listOf(false, true), rows.map { it.selected })
-                assertEquals(burnableSubtitleId(2), rows[1].id)
+                assertEquals(streamRowId(2), rows[1].id)
 
-                viewModel.chooseSubtitle(burnableSubtitleId(2))
+                viewModel.chooseSubtitle(streamRowId(2))
                 assertTrue("picking the burned row changes nothing", gateway.prepareTranscodeFallbackCalls.isEmpty())
 
                 viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
@@ -5849,7 +5850,7 @@ class PlaybackViewModelTest {
     @Test
     fun `automatic resolution sees burn-in-only streams and burns in the one it picks`() =
         runTest(timeout = TEST_TIMEOUT) {
-            val forced = EmbeddedSubtitleFfi(index = 3, language = "eng", title = null, forced = true, default = false, codec = "ass")
+            val forced = EmbeddedSubtitleFfi(index = 3, language = "eng", title = null, forced = true, default = false, codec = "ass", delivery = SubtitleDeliveryFfi.ENCODE)
             // (burned now, renegotiation expected): keeping a forced stream already burned in is a no-op.
             for ((burned, renegotiates) in listOf(3 to false, null to true)) {
                 val plan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(forced), burnedSubtitleIndex = burned)
@@ -5857,7 +5858,7 @@ class PlaybackViewModelTest {
                     preparePlaybackResult = Result.success(plan),
                     prepareTranscodeFallbackResult = Result.success(samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "forced", embeddedSubtitles = listOf(forced), burnedSubtitleIndex = 3)),
                 ).apply {
-                    resolveTracksResult = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = burnableSubtitleId(3))
+                    resolveTracksResult = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = streamRowId(3))
                 }
                 val resolved = CompletableDeferred<Unit>().also { gateway.resolveTracksGate = it }
                 val player = FakePlaybackPlayer()
@@ -5869,7 +5870,7 @@ class PlaybackViewModelTest {
                     runCurrent()
 
                     val offered = gateway.resolveTracksCalls.single().tracks.single { it.kind == TrackKindFfi.SUBTITLE }
-                    assertEquals(burnableSubtitleId(3), offered.id)
+                    assertEquals(streamRowId(3), offered.id)
                     assertTrue(offered.isForced)
                     assertEquals(subtitlesOff, player.applyTrackDecisionCalls.last().first)
                     val calls = gateway.prepareTranscodeFallbackCalls
@@ -5904,15 +5905,15 @@ class PlaybackViewModelTest {
 
     @Test
     fun `the accent dot reads a burned-in subtitle like any other`() = runTest(timeout = TEST_TIMEOUT) {
-        val french = EmbeddedSubtitleFfi(index = 3, language = "fre", title = null, forced = false, default = false, codec = "ass")
+        val french = EmbeddedSubtitleFfi(index = 3, language = "fre", title = null, forced = false, default = false, codec = "ass", delivery = SubtitleDeliveryFfi.ENCODE)
         // (pick, what the landed plan burns, dot once landed): a landing that burns something other
         // than what was asked is what the dot follows.
         val cases = listOf(
             Triple(null, 2, false),
             Triple(TRACK_PICKER_SUBTITLE_OFF_ID, null, true),
-            Triple(burnableSubtitleId(3), 3, true),
+            Triple(streamRowId(3), 3, true),
             Triple(TRACK_PICKER_SUBTITLE_OFF_ID, 2, false),
-            Triple(burnableSubtitleId(3), 2, false),
+            Triple(streamRowId(3), 2, false),
         )
         for ((pick, burnedAfter, dotAfter) in cases) {
             val streams = listOf(assStream, french)
@@ -5958,10 +5959,10 @@ class PlaybackViewModelTest {
                 runCurrent()
                 viewModel.openTrackPicker()
                 val rows = viewModel.state.value.trackPicker!!.subtitleTracks
-                assertEquals(listOf(TRACK_PICKER_SUBTITLE_OFF_ID, burnableSubtitleId(2)), rows.map { it.id })
+                assertEquals(listOf(TRACK_PICKER_SUBTITLE_OFF_ID, streamRowId(2)), rows.map { it.id })
                 assertEquals(listOf(true, false), rows.map { it.selected })
 
-                viewModel.chooseSubtitle(burnableSubtitleId(2))
+                viewModel.chooseSubtitle(streamRowId(2))
                 runCurrent()
 
                 assertEquals(2, gateway.prepareTranscodeFallbackCalls.single().subtitleStreamIndex)
@@ -5972,7 +5973,7 @@ class PlaybackViewModelTest {
 
     @Test
     fun `a delivered text track is not offered twice and picking it never renegotiates`() = runTest(timeout = TEST_TIMEOUT) {
-        val srt = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "English", forced = false, default = false, codec = "srt")
+        val srt = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "English", forced = false, default = false, codec = "srt", displayTitle = "English", delivery = SubtitleDeliveryFfi.HLS)
         val plan = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(srt))
         val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
         val player = FakePlaybackPlayer()
@@ -5987,6 +5988,43 @@ class PlaybackViewModelTest {
             runCurrent()
 
             assertTrue(gateway.prepareTranscodeFallbackCalls.isEmpty())
+        }
+    }
+
+    /** docs/18 §3.1: text a transcode's manifest lacks is a row whose pick renegotiates naming it;
+     * the landed manifest delivers it to the player, nothing is burned in. */
+    @Test
+    fun `text the manifest lacks is picked by renegotiating and lands as a player track`() = runTest(timeout = TEST_TIMEOUT) {
+        // Untitled like the ASS stream, so only the row's own index tells them apart.
+        val srt = EmbeddedSubtitleFfi(index = 3, language = "eng", title = null, forced = false, default = false, codec = "subrip", displayTitle = "English - SUBRIP", delivery = SubtitleDeliveryFfi.HLS)
+        val streams = listOf(assStream, srt)
+        val bare = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = streams)
+        val withText = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "text", embeddedSubtitles = streams)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(bare),
+            prepareTranscodeFallbackResult = Result.success(withText),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, bare.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            viewModel.openTrackPicker()
+            assertEquals(listOf(TRACK_PICKER_SUBTITLE_OFF_ID, streamRowId(2), streamRowId(3)), viewModel.state.value.trackPicker!!.subtitleTracks.map { it.id })
+
+            viewModel.chooseSubtitle(streamRowId(3))
+            runCurrent()
+            assertEquals(3, gateway.prepareTranscodeFallbackCalls.single().subtitleStreamIndex)
+            assertEquals(listOf(bare, withText), player.loadedPlans)
+
+            // Every subtitle is in the landed manifest; the ASS copy is not offered as text.
+            val assCopy = format("text/vtt", "eng", "English - ASS")
+            val srtRendition = format("text/vtt", "eng", "English - SUBRIP")
+            player.fireTracksChanged(tracksOf(enAudio to true, assCopy to false, srtRendition to false))
+            runCurrent()
+            assertEquals("the chosen stream shows as player text", TrackMapping.toId(2, 0), player.applyTrackDecisionCalls.last().first.subtitleTrackId)
+            viewModel.openTrackPicker()
+            assertEquals(listOf(TRACK_PICKER_SUBTITLE_OFF_ID, streamRowId(2), TrackMapping.toId(2, 0)), viewModel.state.value.trackPicker!!.subtitleTracks.map { it.id })
         }
     }
 
@@ -6009,7 +6047,7 @@ class PlaybackViewModelTest {
             runCurrent()
 
             viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
-            viewModel.chooseSubtitle(burnableSubtitleId(2)) // changed mind mid-negotiation
+            viewModel.chooseSubtitle(streamRowId(2)) // changed mind mid-negotiation
             player.fireError(PlaybackException("old stream died", null, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED))
             runCurrent()
             assertEquals("no second negotiation while one is in flight", 1, gateway.prepareTranscodeFallbackCalls.size)
@@ -6031,7 +6069,7 @@ class PlaybackViewModelTest {
 
     @Test
     fun `a second pick away from the burned stream waits for the renegotiation in flight`() = runTest(timeout = TEST_TIMEOUT) {
-        val signs = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "Signs", forced = true, default = false, codec = "ass")
+        val signs = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "Signs", forced = true, default = false, codec = "ass", delivery = SubtitleDeliveryFfi.ENCODE)
         val burned = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(assStream, signs), burnedSubtitleIndex = 2)
         val landed = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "signs", embeddedSubtitles = listOf(assStream, signs), burnedSubtitleIndex = 3)
         val gateway = FakeCoreGateway(
@@ -6045,11 +6083,11 @@ class PlaybackViewModelTest {
             player.fireTracksChanged(tracksOf(enAudio to true))
             runCurrent()
 
-            viewModel.chooseSubtitle(burnableSubtitleId(3))
+            viewModel.chooseSubtitle(streamRowId(3))
             viewModel.openTrackPicker()
             assertEquals(
                 "mid-negotiation the asked-for stream reads selected",
-                burnableSubtitleId(3),
+                streamRowId(3),
                 viewModel.state.value.trackPicker!!.subtitleTracks.single { it.selected }.id,
             )
             viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)

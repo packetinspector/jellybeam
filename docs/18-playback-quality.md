@@ -412,7 +412,10 @@ Session threading rules shared by every path above:
   negotiation names the stream the recorded choice wants
   (`subtitleStreamIndexFor`): Off or a sidecar names none (`-1`), an embedded
   choice names its matched stream from `PlaybackPlan.embedded_subtitles`
-  (same matching policy; ambiguous or missing names none), and an undecided
+  (same matching policy; ambiguous or missing names none; a pick from a
+  stream row below names that row's stream while it still carries the
+  picked identity, since two untitled same-language streams match alike),
+  and an undecided
   or default choice leaves the server's default, which is what the Direct
   Play player showed. JF12 honours `SubtitleStreamIndex` only with
   `MediaSourceId` (dev-server evidence: an ASS-default file burned in for
@@ -420,22 +423,51 @@ Session threading rules shared by every path above:
   `2` burns it in). `PlaybackPlan.burned_subtitle_index` is read from the
   transcode URL and needs both `SubtitleMethod=Encode` and an index (a `-1`
   negotiation still says Encode, with no index). While transcoding, the
-  picker also lists the plan's embedded streams no Media3 track carries
-  (ASS and bitmaps reach a transcode only burned in), the burned one
-  selected: picking another of them renegotiates with it burned in, and
-  moving off a burned one (Off, a sidecar, a delivered track) renegotiates
-  without it; picking the one already burned in is a no-op. A choice changed while a negotiation is
+  picker also lists the plan's streams no Media3 track carries
+  (`transcodeStreamRows`): ASS and bitmaps, which reach a transcode only
+  burned in, the burned one selected, and text the manifest lacks (below).
+  Picking an ASS or bitmap stream renegotiates with it burned in, picking
+  such text renegotiates naming it, and moving off a burned one (Off, a
+  sidecar, a delivered track) renegotiates without it; picking the one
+  already burned in is a no-op. A choice changed while a negotiation is
   in flight is renegotiated from the landed session before anything loads,
   as often as the choice keeps changing (a landing that contradicts it never
   loads: burned-in pixels can't be turned off), and every renegotiation
   resends the session's copy policy
   (§2), so a subtitle change never lets a failed stream be copied back.
+- **Text subtitles in a transcode are drawn by the player, never burned in.**
+  The profile lists `Hls` ahead of `External` for SRT and WebVTT, since the
+  server takes the first matching profile and reads `Hls` only in a
+  transcode, so Direct Play's answers are unchanged. Naming such a stream
+  (embedded or a sidecar file) makes the server convert it to a WebVTT
+  rendition in the HLS manifest (`SubtitleMethod=Hls`); the manifest then
+  carries every subtitle stream, ASS and bitmap copies included, or none
+  when no text stream is named (JF 10.11 and 12 alike).
+  `PlaybackPlan.embedded_subtitles` therefore holds the embedded streams
+  plus the sidecars the server delivers by `Hls`, each with its
+  `DeliveryMethod` and `DisplayTitle`. Each rendition is labelled with its
+  stream's `DisplayTitle`, so `manifestTrackInfos` gives a delivered
+  rendition its stream's title and flags (identities then match Direct
+  Play's for reapply, memory and negotiation) and drops renditions of
+  streams the server burns in instead, so an ASS copy is never offered as
+  plain text. The server pins every cue to the bottom line (Media3 reads
+  it as line -1), which would bypass the viewer's vertical position and
+  the lift over the OSD, so `unpinServerLine` leaves a bottom-line WebVTT
+  cue unpositioned; a cue placed elsewhere keeps its line. Switching
+  between delivered text is a Media3 selection; text the manifest lacks
+  needs one renegotiation. The first frame never waits on the server
+  extracting the stream (seconds on a large file): Media3 leaves text out
+  of the buffered position beside audio and video, and its text renderer
+  is always ready, so only the first cues arrive late. TTML keeps
+  `External`; no server here has a TTML stream to verify a rendition.
 
 ### 3.2 External subtitles
 
 The device profile advertises `External` delivery for SRT/WebVTT/TTML, and for
 ASS/SSA too whenever the server may answer Direct Play, so the server hands
-back sidecar files as `MediaStream`s with `DeliveryUrl`; without it an ASS
+back sidecar files as `MediaStream`s with `DeliveryUrl` (in a transcode an
+SRT or WebVTT sidecar is delivered by `Hls` instead, §3.1, so this fetch path
+serves Direct Play and TTML only); without it an ASS
 sidecar makes the server refuse Direct Play (Direct Play mode) or transcode to
 burn it in (Auto), though the player draws it itself. Offered ASS sidecars, a
 transcode would hand out even an embedded ASS track as a sidecar instead of

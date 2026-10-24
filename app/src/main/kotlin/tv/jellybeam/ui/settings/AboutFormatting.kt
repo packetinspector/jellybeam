@@ -53,14 +53,43 @@ object AboutFormatting {
     /** Martian Mono's advance width in em, measured on device. */
     private const val MONO_ADVANCE_EM = 0.69f
 
-    /** The largest size in [minSp]..[maxSp] at which [chars] monospace characters fit
-     * [availableSp] of width -- one size for a whole tile row, so a 1,234,567 library shrinks
-     * every number together instead of clipping one.
+    /** Gap between a Library tile's number and its unit, in sp. */
+    const val TILE_UNIT_GAP_SP = 5f
+
+    /** A Library tile's unit type: 8 sp Martian Mono with 0.5 sp tracking, a step under About's kicker. */
+    const val TILE_UNIT_SP = 8f
+    const val TILE_UNIT_TRACKING_SP = 0.5f
+
+    /** Width in sp of [chars] tile-unit characters. */
+    internal fun tileUnitWidthSp(chars: Int): Float = chars * (TILE_UNIT_SP * MONO_ADVANCE_EM + TILE_UNIT_TRACKING_SP)
+
+    /** Width in sp of [number] beside a [unit] in a tile drawn at [numberSp], gap included. */
+    private fun tileLineSp(number: String, unit: String, numberSp: Float): Float =
+        number.length * MONO_ADVANCE_EM * numberSp + TILE_UNIT_GAP_SP + tileUnitWidthSp(unit.length)
+
+    /** The shared number size for one-line Library tiles (docs/13 "About section"): the largest in
+     * 11..15 sp at which every tile's number fits [tileInnerSp] beside its whole unit, sized
+     * against the short unit for a tile whose full unit would push it under 11 sp.
      */
-    fun fitMonoFontSp(chars: Int, availableSp: Float, maxSp: Float, minSp: Float): Float {
-        if (chars <= 0) return maxSp
-        return (availableSp / (chars * MONO_ADVANCE_EM)).coerceIn(minSp, maxSp)
+    internal fun inlineTileNumberSp(tiles: List<LibraryTile>, tileInnerSp: Float): Float {
+        fun rawSp(tile: LibraryTile, unit: String) =
+            (tileInnerSp - TILE_UNIT_GAP_SP - tileUnitWidthSp(unit.length)) / (tile.number.length * MONO_ADVANCE_EM)
+        return tiles.filter { it.number.isNotEmpty() }.minOfOrNull { tile ->
+            val full = rawSp(tile, tile.unit)
+            if (full >= TILE_NUMBER_MIN_SP || tile.shortUnit == null) full else rawSp(tile, tile.shortUnit)
+        }?.coerceIn(TILE_NUMBER_MIN_SP, TILE_NUMBER_MAX_SP) ?: TILE_NUMBER_MAX_SP
     }
+
+    /** The unit [tile] shows at [numberSp]: the full one when it fits whole, else the short one;
+     * the layout ellipsizes whichever is left if even that overflows.
+     */
+    internal fun inlineTileUnit(tile: LibraryTile, numberSp: Float, tileInnerSp: Float): String = when {
+        tile.shortUnit == null || tileLineSp(tile.number, tile.unit, numberSp) <= tileInnerSp -> tile.unit
+        else -> tile.shortUnit
+    }
+
+    private const val TILE_NUMBER_MIN_SP = 11f
+    private const val TILE_NUMBER_MAX_SP = 15f
 
     /** `null` on anything that isn't a parseable RFC 3339 timestamp -- [MirrorStats.lastDeltaSync]
      * fails open to "Never" rather than crashing About.
@@ -84,6 +113,9 @@ object AboutFormatting {
         else -> false
     }
 }
+
+/** One Library tile's formatted count with its full unit and, for long units, a short fallback. */
+internal data class LibraryTile(val number: String, val unit: String, val shortUnit: String? = null)
 
 /**
  * The scroll position the About pane settles on for a focus request whose default target is

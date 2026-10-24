@@ -5,6 +5,8 @@ import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.text.Cue
+import androidx.media3.common.util.Consumer
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.BaseRenderer
 import androidx.media3.exoplayer.RendererCapabilities
@@ -16,8 +18,10 @@ import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.PositionHolder
 import androidx.media3.extractor.mkv.EbmlProcessor
 import androidx.media3.extractor.mkv.MatroskaExtractor
+import androidx.media3.extractor.text.CuesWithTiming
 import androidx.media3.extractor.text.DefaultSubtitleParserFactory
 import androidx.media3.extractor.text.SubtitleParser
+import kotlin.math.abs
 import tv.jellybeam.player.subtitleClockUs
 import uniffi.jellybeam_core.AssOverlay
 import uniffi.jellybeam_core.AssSample
@@ -75,7 +79,8 @@ class ItemScopedFontSink(
 
 /**
  * docs/13: declines SSA, so Media3 passes raw samples to [AssTextRenderer] or [PlainSsaRenderer]
- * instead of parsing every SSA track as the file is read, chosen or not; other formats are untouched.
+ * instead of parsing every SSA track as the file is read, chosen or not; WebVTT cues on the bottom
+ * line are unpositioned ([unpinServerLine]); other formats are untouched.
  */
 @OptIn(UnstableApi::class)
 class AssAwareSubtitleParserFactory(
@@ -85,7 +90,40 @@ class AssAwareSubtitleParserFactory(
 
     override fun getCueReplacementBehavior(format: Format): Int = delegate.getCueReplacementBehavior(format)
 
-    override fun create(format: Format): SubtitleParser = delegate.create(format)
+    override fun create(format: Format): SubtitleParser {
+        val parser = delegate.create(format)
+        return if (format.sampleMimeType == MimeTypes.TEXT_VTT) UnpinningVttParser(parser) else parser
+    }
+}
+
+/** The line the server gives every cue of the WebVTT it converts text to (docs/18 §3.1). */
+private const val SERVER_DEFAULT_LINE = 0.9f
+
+/**
+ * docs/18 §3.1: a WebVTT cue on the bottom line (Media3's line -1 for `auto`, or the server's
+ * `line:90%`) is unpositioned, so it follows the viewer's position and rises over the OSD like any
+ * subtitle; a cue placed anywhere else keeps its line.
+ */
+@OptIn(UnstableApi::class)
+internal fun unpinServerLine(cue: Cue): Cue {
+    val bottom = when (cue.lineType) {
+        Cue.LINE_TYPE_NUMBER -> cue.line == -1f
+        Cue.LINE_TYPE_FRACTION -> abs(cue.line - SERVER_DEFAULT_LINE) < 1e-3f
+        else -> false
+    }
+    return if (bottom) cue.buildUpon().setLine(Cue.DIMEN_UNSET, Cue.TYPE_UNSET).setLineAnchor(Cue.TYPE_UNSET).build() else cue
+}
+
+@OptIn(UnstableApi::class)
+private class UnpinningVttParser(private val delegate: SubtitleParser) : SubtitleParser {
+    override fun parse(data: ByteArray, offset: Int, length: Int, outputOptions: SubtitleParser.OutputOptions, output: Consumer<CuesWithTiming>) =
+        delegate.parse(data, offset, length, outputOptions) { cues ->
+            output.accept(CuesWithTiming(cues.cues.map(::unpinServerLine), cues.startTimeUs, cues.durationUs))
+        }
+
+    override fun reset() = delegate.reset()
+
+    override fun getCueReplacementBehavior(): Int = delegate.getCueReplacementBehavior()
 }
 
 /**

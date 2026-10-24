@@ -395,11 +395,12 @@ const ANDROID_DIRECT_PLAY_AUDIO_CODECS: &[&str] = &[
     "pcm_mulaw",
 ];
 
-/// Subtitle formats Media3 embeds/accepts as sidecar, never inside an HLS manifest (unlike WebVTT).
-const ANDROID_TEXT_SUBTITLE_FORMATS: &[&str] = &["srt", "subrip", "ttml"];
+/// Text formats the server converts into WebVTT renditions of a transcode's HLS manifest
+/// (docs/18 §3.1), under each name it may report.
+const ANDROID_MANIFEST_SUBTITLE_FORMATS: &[&str] = &["srt", "subrip", "vtt", "webvtt"];
 
-/// WebVTT under both format names the server may report; valid inside an HLS manifest too.
-const ANDROID_WEBVTT_SUBTITLE_FORMATS: &[&str] = &["vtt", "webvtt"];
+/// Text formats Media3 reads embedded or as a sidecar; not verified as manifest renditions.
+const ANDROID_SIDECAR_ONLY_SUBTITLE_FORMATS: &[&str] = &["ttml"];
 
 /// Bitmap subtitle formats: Media3 composites embedded, else needs server burn-in.
 const ANDROID_BITMAP_SUBTITLE_FORMATS: &[&str] = &["pgssub", "dvdsub"];
@@ -621,14 +622,16 @@ pub fn allow_ass_sidecars(profile: &mut RawDeviceProfile) {
 /// Android TV's subtitle matrix.
 fn android_subtitle_profiles() -> Vec<SubtitleProfile> {
     let mut profiles = Vec::new();
-    for format in ANDROID_TEXT_SUBTITLE_FORMATS {
+    for format in ANDROID_MANIFEST_SUBTITLE_FORMATS {
         profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::Embed));
+        // Before External: the server takes the first match, and only a transcode reads Hls
+        // (docs/18 §3.1), so Direct Play still gets the sidecar.
+        profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::Hls));
         profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::External));
     }
-    for format in ANDROID_WEBVTT_SUBTITLE_FORMATS {
+    for format in ANDROID_SIDECAR_ONLY_SUBTITLE_FORMATS {
         profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::Embed));
         profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::External));
-        profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::Hls));
     }
     for format in ANDROID_BITMAP_SUBTITLE_FORMATS
         .iter()
@@ -770,18 +773,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn android_webvtt_gets_hls_delivery_but_srt_does_not() {
-        let v = android_json(&AndroidTvCaps::default(), true);
-        let profiles = v["SubtitleProfiles"].as_array().expect("test assertion");
-        for f in ANDROID_WEBVTT_SUBTITLE_FORMATS {
-            assert!(profiles
-                .iter()
-                .any(|p| p["Format"] == *f && p["Method"] == "Hls"));
-        }
-        assert!(!profiles
+    fn methods_of(profile: &RawDeviceProfile, format: &str) -> Vec<String> {
+        let v = serde_json::to_value(profile).expect("profile always serializes");
+        v["SubtitleProfiles"]
+            .as_array()
+            .expect("test assertion")
             .iter()
-            .any(|p| p["Format"] == "srt" && p["Method"] == "Hls"));
+            .filter(|p| p["Format"] == format)
+            .map(|p| p["Method"].as_str().expect("test assertion").to_string())
+            .collect()
+    }
+
+    /// docs/18 §3.1: the server takes the first matching profile, so Hls must precede External
+    /// for a transcode to put text in its manifest; text is never burned in.
+    #[test]
+    fn android_text_subtitles_reach_the_manifest_before_any_sidecar_and_never_burn() {
+        let profile = android_tv_profile(&AndroidTvCaps::default(), true);
+        for format in ["srt", "subrip", "vtt", "webvtt"] {
+            assert_eq!(
+                methods_of(&profile, format),
+                ["Embed", "Hls", "External"],
+                "{format}"
+            );
+        }
+        assert_eq!(methods_of(&profile, "ttml"), ["Embed", "External"]);
     }
 
     #[test]

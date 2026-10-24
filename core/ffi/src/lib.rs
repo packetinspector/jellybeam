@@ -58,9 +58,9 @@ pub use types::{
     ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MediaSegmentKind, MediaStreamInfo,
     MediaStreamKind, MirrorItemCounts, MirrorLibrary, MirrorStats, PersonInfo, PlayMethodFfi,
     PlaybackOsdDetail, PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails,
-    ServerInfoSnapshot, SortOrder, StatusFilter, SubtitleActionFfi, TrackDecisionFfi, TrackInfo,
-    TrackKindFfi, TrackMemoryFfi, TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId,
-    ViewSnapshot, WatchedFilter,
+    ServerInfoSnapshot, SortOrder, StatusFilter, SubtitleActionFfi, SubtitleDeliveryFfi,
+    TrackDecisionFfi, TrackInfo, TrackKindFfi, TrackMemoryFfi, TrickplayMetaFfi, TrickplayTileFfi,
+    VideoCaps, VideoCodecId, ViewSnapshot, WatchedFilter,
 };
 
 /// docs/16 §2.7: the drawer's Favorites page as a library view; Kotlin recognises it by

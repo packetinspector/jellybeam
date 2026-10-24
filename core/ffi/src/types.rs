@@ -1453,7 +1453,7 @@ pub(crate) fn external_subtitles_of(
         .collect()
 }
 
-/// docs/18 §3.1: one embedded subtitle stream of the chosen source, by its server index.
+/// docs/18 §3.1: one subtitle stream a transcode can name, by its server index.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedSubtitleFfi {
     pub index: i32,
@@ -1463,17 +1463,42 @@ pub struct EmbeddedSubtitleFfi {
     /// The file's default flag: what the transcode burns in when no stream is named.
     pub default: bool,
     pub codec: Option<String>,
+    /// The server's label, which names the stream's rendition in an HLS manifest (docs/18 §3.1).
+    #[uniffi(default = None)]
+    pub display_title: Option<String>,
+    /// How the server delivers the stream under this plan; `None` when it said nothing known.
+    #[uniffi(default = None)]
+    pub delivery: Option<SubtitleDeliveryFfi>,
 }
 
-/// The source's embedded (not sidecar) subtitle streams.
+/// docs/18 §3.1: the server's `DeliveryMethod` for one subtitle stream.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtitleDeliveryFfi {
+    /// Inside the container the player reads.
+    Embed,
+    /// A WebVTT rendition in the transcode's HLS manifest.
+    Hls,
+    /// Burned into the transcoded video.
+    Encode,
+    /// A file fetched on its own (`DeliveryUrl`).
+    External,
+    /// Not delivered at all.
+    Drop,
+}
+
+/// The source's embedded streams, plus sidecars the transcode puts in its manifest: both are
+/// shown by naming their index in a negotiation (docs/18 §3.1).
 pub(crate) fn embedded_subtitles_of(
     source: &jellyfin_api::models::MediaSourceInfo,
 ) -> Vec<EmbeddedSubtitleFfi> {
-    use jellyfin_api::models::MediaStreamType;
+    use jellyfin_api::models::{MediaStreamType, SubtitleDeliveryMethod};
     source
         .media_streams
         .iter()
-        .filter(|s| s.type_ == Some(MediaStreamType::Subtitle) && s.is_external != Some(true))
+        .filter(|s| s.type_ == Some(MediaStreamType::Subtitle))
+        .filter(|s| {
+            s.is_external != Some(true) || s.delivery_method == Some(SubtitleDeliveryMethod::Hls)
+        })
         .filter_map(|s| {
             Some(EmbeddedSubtitleFfi {
                 index: s.index?,
@@ -1482,6 +1507,15 @@ pub(crate) fn embedded_subtitles_of(
                 forced: s.is_forced == Some(true),
                 default: s.is_default == Some(true),
                 codec: s.codec.clone(),
+                display_title: s.display_title.clone().filter(|t| !t.is_empty()),
+                delivery: s.delivery_method.and_then(|method| match method {
+                    SubtitleDeliveryMethod::Embed => Some(SubtitleDeliveryFfi::Embed),
+                    SubtitleDeliveryMethod::Hls => Some(SubtitleDeliveryFfi::Hls),
+                    SubtitleDeliveryMethod::Encode => Some(SubtitleDeliveryFfi::Encode),
+                    SubtitleDeliveryMethod::External => Some(SubtitleDeliveryFfi::External),
+                    SubtitleDeliveryMethod::Drop => Some(SubtitleDeliveryFfi::Drop),
+                    SubtitleDeliveryMethod::Unrecognized => None,
+                }),
             })
         })
         .collect()
@@ -1776,9 +1810,11 @@ mod tests {
     }
 
     #[test]
-    fn embedded_subtitles_exclude_sidecars_and_other_streams() {
-        use jellyfin_api::models::{MediaSourceInfo, MediaStream, MediaStreamType};
-        let stream = |index: i32, kind: MediaStreamType, external: bool| MediaStream {
+    fn embedded_subtitles_keep_manifest_sidecars_but_not_fetched_ones() {
+        use jellyfin_api::models::{
+            MediaSourceInfo, MediaStream, MediaStreamType, SubtitleDeliveryMethod,
+        };
+        let stream = |index: i32, kind: MediaStreamType, external: bool, method| MediaStream {
             index: Some(index),
             type_: Some(kind),
             is_external: Some(external),
@@ -1786,24 +1822,65 @@ mod tests {
             is_forced: Some(index == 3),
             is_default: Some(index == 2),
             codec: Some("ass".to_string()),
+            display_title: Some(format!("Stream {index}")),
+            delivery_method: method,
             ..Default::default()
         };
         let source = MediaSourceInfo {
             media_streams: vec![
-                stream(0, MediaStreamType::Video, false),
-                stream(2, MediaStreamType::Subtitle, false),
-                stream(3, MediaStreamType::Subtitle, false),
-                stream(4, MediaStreamType::Subtitle, true),
+                stream(0, MediaStreamType::Video, false, None),
+                stream(
+                    2,
+                    MediaStreamType::Subtitle,
+                    false,
+                    Some(SubtitleDeliveryMethod::Encode),
+                ),
+                stream(
+                    3,
+                    MediaStreamType::Subtitle,
+                    false,
+                    Some(SubtitleDeliveryMethod::Hls),
+                ),
+                stream(
+                    4,
+                    MediaStreamType::Subtitle,
+                    true,
+                    Some(SubtitleDeliveryMethod::External),
+                ),
+                stream(
+                    5,
+                    MediaStreamType::Subtitle,
+                    true,
+                    Some(SubtitleDeliveryMethod::Hls),
+                ),
+                stream(
+                    6,
+                    MediaStreamType::Subtitle,
+                    true,
+                    Some(SubtitleDeliveryMethod::Encode),
+                ),
+                stream(
+                    7,
+                    MediaStreamType::Subtitle,
+                    false,
+                    Some(SubtitleDeliveryMethod::Unrecognized),
+                ),
             ],
             ..Default::default()
         };
         let got = embedded_subtitles_of(&source);
         assert_eq!(
             got.iter()
-                .map(|s| (s.index, s.forced, s.default))
+                .map(|s| (s.index, s.forced, s.default, s.delivery))
                 .collect::<Vec<_>>(),
-            vec![(2, false, true), (3, true, false)]
+            vec![
+                (2, false, true, Some(SubtitleDeliveryFfi::Encode)),
+                (3, true, false, Some(SubtitleDeliveryFfi::Hls)),
+                (5, false, false, Some(SubtitleDeliveryFfi::Hls)),
+                (7, false, false, None),
+            ]
         );
+        assert_eq!(got[2].display_title.as_deref(), Some("Stream 5"));
     }
 
     use super::*;

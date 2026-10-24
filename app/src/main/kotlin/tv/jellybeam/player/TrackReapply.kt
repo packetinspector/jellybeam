@@ -43,7 +43,8 @@ internal sealed interface TextChoice {
     /** A sidecar is showing or loading; the sidecar adoption path restores it, text stays off. */
     data object Sidecar : TextChoice
 
-    data class Embedded(val identity: TrackIdentity) : TextChoice
+    /** [streamIndex]: the server stream a stream row named, which identity alone may not single out. */
+    data class Embedded(val identity: TrackIdentity, val streamIndex: Int? = null) : TextChoice
 }
 
 /** What a reload restores: the subtitle choice, and the selected audio track once one was decided. */
@@ -73,8 +74,9 @@ internal fun matchTrack(wanted: TrackIdentity, kind: TrackKindFfi, tracks: List<
 
 /**
  * docs/18 §3.1: the subtitle stream a transcode negotiation should name for [choice]. Off and a
- * sidecar name none (`-1`, so nothing is burned in); an embedded choice names its matched stream,
- * or none when ambiguous or missing; an undecided or default choice leaves the server's default.
+ * sidecar name none (`-1`, so nothing is burned in); an embedded choice names the stream its row
+ * named while that stream still carries its identity, else its matched stream, or none when
+ * ambiguous or missing; an undecided or default choice leaves the server's default.
  */
 internal fun subtitleStreamIndexFor(choice: TextChoice, embedded: List<EmbeddedSubtitleFfi>): Int? = when (choice) {
     TextChoice.Auto, TextChoice.Leave -> null
@@ -83,7 +85,8 @@ internal fun subtitleStreamIndexFor(choice: TextChoice, embedded: List<EmbeddedS
         val streams = embedded.map {
             TrackInfo(id = it.index.toLong(), kind = TrackKindFfi.SUBTITLE, title = it.title, lang = it.language, codec = it.codec, isDefault = false, isSelected = false, isForced = it.forced)
         }
-        matchTrack(choice.identity, TrackKindFfi.SUBTITLE, streams)?.id?.toInt() ?: NO_SUBTITLE_STREAM
+        val named = streams.firstOrNull { it.id == choice.streamIndex?.toLong() && it.identity() == choice.identity }
+        (named ?: matchTrack(choice.identity, TrackKindFfi.SUBTITLE, streams))?.id?.toInt() ?: NO_SUBTITLE_STREAM
     }
 }
 
