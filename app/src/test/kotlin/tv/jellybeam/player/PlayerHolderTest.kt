@@ -62,4 +62,41 @@ class PlayerHolderTest {
         // Media3 normalises "eng" -> "en"; compare against what the builder actually stored.
         assertEquals(withPreferredLanguage.preferredAudioLanguages, baseline.preferredAudioLanguages)
     }
+
+    @Test
+    fun `group loads never arm the keyframe resume`() {
+        // docs/28 §5 inv 11: a keyframe-snapped landing would make the server re-send Seek forever.
+        for (planStartTicks in listOf(0L, 420_000_000L)) {
+            for (transcode in listOf(false, true)) {
+                val opening = loadOpening(planStartTicks, transcode, LoadStart.GroupExactPaused(ticks = 300_000_000L))
+                assertFalse("start=$planStartTicks transcode=$transcode", opening.armResume)
+            }
+        }
+    }
+
+    @Test
+    fun `a group load starts paused at its exact position`() {
+        val opening = loadOpening(planStartTicks = 0L, transcode = false, LoadStart.GroupExactPaused(ticks = 123_456_789L))
+
+        assertEquals(12_345L, opening.startPositionMs)
+        assertFalse(opening.playWhenReady)
+    }
+
+    @Test
+    fun `a resume load still lands on the keyframe and plays, except a transcode`() {
+        assertEquals(LoadOpening(42_000L, armResume = true, playWhenReady = true), loadOpening(420_000_000L, false, LoadStart.Resume))
+        assertEquals(LoadOpening(42_000L, armResume = false, playWhenReady = true), loadOpening(420_000_000L, true, LoadStart.Resume))
+        assertEquals(LoadOpening(0L, armResume = false, playWhenReady = true), loadOpening(0L, false, LoadStart.Resume))
+    }
+
+    @Test
+    fun `play resumes a paused player`() {
+        // Pins the test player's contract the executor's view-model tests rely on.
+        val player = FakePlaybackPlayer()
+        player.pause()
+
+        player.play()
+
+        assertTrue(player.playWhenReady)
+    }
 }

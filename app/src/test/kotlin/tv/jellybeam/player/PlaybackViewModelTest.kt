@@ -22,9 +22,12 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -59,6 +62,17 @@ import uniffi.jellybeam_core.SubtitleActionFfi
 import uniffi.jellybeam_core.SubtitleDeliveryFfi
 import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
+import uniffi.jellybeam_core.SyncPlayDirective
+import uniffi.jellybeam_core.SyncPlayDirectiveAt
+import uniffi.jellybeam_core.SyncPlayGroup
+import uniffi.jellybeam_core.SyncPlayHost
+import uniffi.jellybeam_core.SyncPlayInput
+import uniffi.jellybeam_core.SyncPlayNotice
+import uniffi.jellybeam_core.SyncPlayPhase
+import uniffi.jellybeam_core.SyncPlayRole
+import uniffi.jellybeam_core.SyncPlaySeverity
+import uniffi.jellybeam_core.SyncPlayStage
+import uniffi.jellybeam_core.SyncPlayUpdate
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackKindFfi
 import uniffi.jellybeam_core.TrackMemoryFfi
@@ -209,6 +223,7 @@ class PlaybackViewModelTest {
         clock: Clock = Clock.SYSTEM,
         parseSidecar: suspend (String, String) -> SidecarCues? = { _, text -> sampleSidecarCues().takeIf { text == "ok" } },
         settingsStore: SettingsStore = SettingsStore(gateway, testReportScope()),
+        forGroup: Boolean = false,
     ): PlaybackViewModel =
         PlaybackViewModel(
             gateway,
@@ -220,6 +235,7 @@ class PlaybackViewModelTest {
             clock = clock,
             parseSidecar = parseSidecar,
             settingsStore = settingsStore,
+            forGroup = forGroup,
         ).also { viewModelsToClear += it }
 
     @After
@@ -7158,6 +7174,685 @@ class PlaybackViewModelTest {
             viewModel.openSubtitleDelay()
             viewModel.closeSubtitleDelay()
             assertEquals(OpenSurface.None, viewModel.state.value.openSurface)
+        }
+    }
+
+    // -- Watch Together (docs/28 §1, §4, §5) ----------------------------------------
+
+    /** A running membership over [gateway] whose port is [viewModel], as `PlaybackActivity`'s group launch attaches it. */
+    private class GroupRig(
+        private val scope: TestScope,
+        val gateway: FakeCoreGateway,
+        val player: FakePlaybackPlayer,
+        val viewModel: PlaybackViewModel,
+        val exec: SyncPlayExecutor,
+    ) {
+        val inputs: List<SyncPlayInput> get() = gateway.syncPlayInputs
+
+        fun step(update: SyncPlayUpdate) {
+            gateway.syncPlayListener!!.onStep(update)
+            scope.runCurrent()
+        }
+
+        fun directive(seq: ULong, directive: SyncPlayDirective) = step(SyncPlayUpdate(listOf(SyncPlayDirectiveAt(seq, directive)), emptyList(), false))
+
+        fun attach() {
+            exec.send(GroupEvent.PortAttached(viewModel.portFor(exec)))
+            scope.runCurrent()
+        }
+
+        /** The group's first item, [itemId] at [startTicks], loaded into the attached player and ready. */
+        fun loadAndLand(itemId: String, startTicks: Long = 0L) {
+            directive(1uL, SyncPlayDirective.Load(itemId, "entry-1", startTicks))
+            attach()
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            scope.runCurrent()
+        }
+    }
+
+    /** Runs [body] against a group-launched player; the membership ends after it, so the process slot is free for the next test. */
+    private fun groupTest(
+        gateway: FakeCoreGateway,
+        itemId: String = "item-g",
+        playerOf: (FakePlaybackPlayer) -> PlaybackPlayer = { it },
+        body: suspend TestScope.(GroupRig) -> Unit,
+    ) = runTest(timeout = TEST_TIMEOUT) {
+        gateway.syncPlayGroup = SyncPlayGroup.Starting(name = "member-a's group")
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, playerOf(player), itemId, forGroup = true)
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val entry = SyncPlayExecutor.create(gateway.accountEpoch, gateway) { epoch ->
+            SyncPlayExecutor(gateway, epoch, {}, backgroundScope, dispatcher) { 1_000_000L + testScheduler.currentTime }
+        }
+        val exec = (entry as GroupEntry.Started).executor
+        runCurrent()
+        try {
+            body(GroupRig(this, gateway, player, viewModel, exec))
+        } finally {
+            viewModel.stopPlaybackOnce()
+            exec.send(GroupEvent.EpochMoved)
+            runCurrent()
+        }
+    }
+
+    /** As ExoPlayer: a seek buffers, reported with whatever play intent the player has at that moment. */
+    private class SeekBuffersPlayer(private val fake: FakePlaybackPlayer) : PlaybackPlayer by fake {
+        override fun seekGroup(targetMs: Long, onLanded: ((landedTicks: Long, latencyMs: Long) -> Unit)?) {
+            fake.seekGroup(targetMs, onLanded)
+            fake.firePlaybackStateChanged(Player.STATE_BUFFERING)
+        }
+    }
+
+    private fun groupGateway(plan: PlaybackPlan, transcode: PlaybackPlan? = null) = FakeCoreGateway(
+        preparePlaybackResult = Result.success(plan),
+        prepareTranscodeFallbackResult = transcode?.let { Result.success(it) },
+    )
+
+    private val member = SyncPlayGroup.Member(
+        role = SyncPlayRole.HOST,
+        stage = SyncPlayStage.PLAYING,
+        host = SyncPlayHost.Me,
+        participants = listOf("member-a"),
+        phase = SyncPlayPhase.PLAYING,
+        connected = true,
+        promptShown = false,
+    )
+
+    /** docs/28 §8: a player that never joins a group pays nothing for Watch Together. */
+    @Test
+    fun `solo playback makes no watch together call`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 600_000_000L)
+        val intro = sampleSegment(MediaSegmentKind.INTRO, 100_000_000L, 200_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan), mediaSegmentsByItemId = mapOf(plan.itemId to listOf(intro)))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            player.firePlaybackStateChanged(Player.STATE_BUFFERING)
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            viewModel.togglePlayPause()
+            viewModel.seek(10_000L)
+            viewModel.tapSeek(10_000L)
+            viewModel.commitGlide(30_000L, endClamped = false)
+            viewModel.jumpToChapterStart(50_000_000L)
+            viewModel.skipSegment(intro)
+            viewModel.seekToPositionMs(5_000L)
+            viewModel.setPlaybackRate(1.5f)
+            advanceOneTick()
+            advanceOneTick()
+            player.fireError(PlaybackException("boom", UnknownHostException("boom"), PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED))
+            player.firePlaybackStateChanged(Player.STATE_ENDED)
+            runCurrent()
+
+            assertEquals(1, player.togglePlayPauseCallCount)
+            assertEquals(6, player.seekCalls.size)
+            assertEquals(0, gateway.syncPlayCalls)
+            assertNull(viewModel.state.value.syncPlay)
+        }
+    }
+
+    /** docs/28 §3.3: a final stop still on its way to the core holds a create back until the core has it. */
+    @Test
+    fun `create waits for a launched final stop`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan)).apply { syncPlayGroup = SyncPlayGroup.Starting(name = "member-a's group") }
+        val viewModel = buildViewModel(gateway, FakePlaybackPlayer(), plan.itemId)
+        val stopGate = CompletableDeferred<Unit>().also { gateway.stopPlaybackGate = it }
+        try {
+            viewModel.stopPlaybackOnce()
+            val entry = async { SyncPlayExecutor.create(1uL, gateway) { epoch -> SyncPlayExecutor(gateway, epoch, {}, backgroundScope, StandardTestDispatcher(testScheduler)) } }
+            runCurrent()
+            assertEquals("the final stop is on its way to the core", 1, gateway.stopPlaybackEntered)
+            assertEquals("no create while it is", 0, gateway.syncPlayCalls)
+
+            stopGate.complete(Unit)
+            runCurrent()
+            assertEquals("then the create goes out", listOf("member-a's group"), gateway.syncPlayCreatedNames)
+            assertTrue(entry.await() is GroupEntry.Started)
+        } finally {
+            stopGate.complete(Unit)
+            SyncPlayExecutor.onEpochMoved()
+            advanceUntilIdle()
+        }
+    }
+
+    /** docs/28 §5, design Q2: the group's Load replaces what plays, paused on exactly its frame, and its ready answers ItemLoaded. */
+    @Test
+    fun `a group load starts paused exactly and reports ItemLoaded on ready`() = groupTest(groupGateway(samplePlan(itemId = "item-g", startPositionTicks = 90_000_000L))) { rig ->
+        assertEquals("a group launch prepares nothing before the group's Load", emptyList<String>(), rig.gateway.preparePlaybackCalls)
+
+        rig.loadAndLand("item-g", startTicks = 300_000_000L)
+
+        assertEquals(listOf("item-g"), rig.gateway.preparePlaybackCalls)
+        assertEquals(listOf(true), rig.gateway.preparePlaybackStartFromBeginningCalls)
+        assertEquals(LoadStart.GroupExactPaused(300_000_000L), rig.player.lastLoadStart)
+        assertFalse(rig.player.playWhenReady)
+        assertEquals(300_000_000L, rig.viewModel.positionTicks.value)
+        assertEquals(listOf<SyncPlayInput>(SyncPlayInput.ItemLoaded("entry-1", 300_000_000L)), rig.inputs)
+    }
+
+    /** docs/28 §4, design Q7: the server moves the player, so a press is a request and the OSD waits for the directive. */
+    @Test
+    fun `in a group play pause and seek keys become requests and leave the player alone`() =
+        groupTest(groupGateway(samplePlan(itemId = "item-g", runtimeTicks = 6_000_000_000L))) { rig ->
+            rig.loadAndLand("item-g", startTicks = 300_000_000L)
+            val viewModel = rig.viewModel
+
+            viewModel.togglePlayPause() // loaded paused
+            rig.player.playWhenReady = true
+            viewModel.togglePlayPause()
+            viewModel.seek(10_000L)
+            viewModel.commitGlide(600_000L, endClamped = true)
+            viewModel.seekToPositionMs(120_000L)
+            viewModel.playNextEpisode()
+            viewModel.playPrevious()
+            runCurrent()
+
+            assertEquals(
+                listOf(
+                    SyncPlayInput.ItemLoaded("entry-1", 300_000_000L),
+                    SyncPlayInput.Unpause,
+                    SyncPlayInput.Pause,
+                    SyncPlayInput.Seek(400_000_000L),
+                    SyncPlayInput.Seek(6_000_000_000L),
+                    SyncPlayInput.Seek(1_200_000_000L),
+                    SyncPlayInput.Next,
+                    SyncPlayInput.Prev,
+                ),
+                rig.inputs,
+            )
+            assertEquals(0, rig.player.togglePlayPauseCallCount)
+            assertEquals(0, rig.player.pauseCallCount)
+            assertEquals(emptyList<Long>(), rig.player.seekCalls)
+            assertEquals(emptyList<Long>(), rig.player.groupSeekCalls)
+            assertEquals(300_000_000L, viewModel.positionTicks.value)
+        }
+
+    /** docs/28 §1: per-member auto-skip would cause seek storms, and the queue, not next-up, picks what follows. */
+    @Test
+    fun `in a group auto-skip next-up autoplay still-watching and speed stay off`() {
+        val plan = episodePlan("ep-g")
+        val commercial = sampleSegment(MediaSegmentKind.COMMERCIAL, 160_000_000L, 180_000_000L)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            mediaSegmentsByItemId = mapOf(plan.itemId to listOf(commercial)),
+            nextEpisodeByItemId = mapOf(plan.itemId to testCard(id = "ep-next", itemType = "Episode", name = "Next", indexNumber = 2)),
+        )
+        groupTest(gateway, itemId = plan.itemId) { rig ->
+            rig.loadAndLand(plan.itemId, startTicks = 170_000_000L)
+            rig.player.playWhenReady = true
+            advanceOneTick()
+            advanceOneTick()
+            rig.viewModel.setPlaybackRate(2f)
+            rig.viewModel.openSpeedMenu()
+
+            assertEquals(emptyList<Long>(), rig.player.seekCalls)
+            assertNull(rig.viewModel.state.value.nextUp)
+            assertNull(rig.viewModel.state.value.stillWatching)
+            assertNull(rig.viewModel.events.replayCache.firstOrNull())
+            assertEquals(listOf(plan.itemId), rig.gateway.preparePlaybackCalls)
+            assertEquals(listOf(1f), rig.player.setPlaybackRateCalls)
+            assertEquals(1f, rig.viewModel.state.value.playbackRate)
+            assertFalse(rig.viewModel.state.value.speedMenuOpen)
+            assertEquals(SyncPlayInput.PositionSample(170_000_000L), rig.inputs.last())
+        }
+    }
+
+    /** docs/28 §1: the end of an item is the group's to handle; the queue moves on or returns to the lobby. */
+    @Test
+    fun `in a group the natural end reports PlayerEnded and keeps the player`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        rig.player.firePlaybackStateChanged(Player.STATE_ENDED)
+        runCurrent()
+
+        assertEquals(SyncPlayInput.PlayerEnded, rig.inputs.last())
+        assertEquals(0, rig.player.stopAndClearCallCount)
+        assertEquals(emptyList<Long>(), rig.gateway.stopPlaybackCalls)
+        assertNull(rig.viewModel.events.replayCache.firstOrNull())
+    }
+
+    /** docs/28 §4: leaving the player leaves the group, once, however many exit paths run. */
+    @Test
+    fun `in a group Back reports PlayerClosed once`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        repeat(3) { rig.viewModel.stopPlaybackOnce() } // onStop, onDestroy, onCleared
+        runCurrent()
+
+        assertEquals(1, rig.inputs.count { it == SyncPlayInput.PlayerClosed })
+        assertEquals(1, rig.gateway.stopPlaybackCalls.size)
+        assertNull(rig.viewModel.state.value.syncPlay)
+    }
+
+    /** docs/28 §1: the end of the queue returns to the lobby and the viewer stays in the group. */
+    @Test
+    fun `return to lobby closes the player without a PlayerClosed`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        rig.directive(2uL, SyncPlayDirective.ReturnToLobby)
+        rig.viewModel.stopPlaybackOnce() // the closing Activity's onStop
+        runCurrent()
+
+        assertEquals(PlaybackEvent.Finish, rig.viewModel.events.replayCache.last())
+        assertEquals(1, rig.gateway.stopPlaybackCalls.size)
+        assertFalse(rig.inputs.contains(SyncPlayInput.PlayerClosed))
+    }
+
+    /** docs/28 §4: a fatal error leaves the group as a playback error, never as a closed player. */
+    @Test
+    fun `a fatal error in a group reports Fatal and no PlayerClosed`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        rig.player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+        rig.viewModel.stopPlaybackOnce()
+        runCurrent()
+
+        assertEquals(SyncPlayInput.PlaybackError(SyncPlaySeverity.FATAL), rig.inputs.last())
+        assertFalse(rig.inputs.contains(SyncPlayInput.PlayerClosed))
+        assertTrue(rig.viewModel.events.replayCache.last() is PlaybackEvent.FinishWithMessage)
+    }
+
+    @Test
+    fun `a failed prepare in a group reports Fatal and no PlayerClosed`() =
+        groupTest(FakeCoreGateway(preparePlaybackResult = CoreException.WouldTranscode("codec").asFailure())) { rig ->
+            rig.directive(1uL, SyncPlayDirective.Load("item-g", "entry-1", 0L))
+            rig.attach()
+            rig.viewModel.stopPlaybackOnce()
+            runCurrent()
+
+            assertEquals(listOf<SyncPlayInput>(SyncPlayInput.PlaybackError(SyncPlaySeverity.FATAL)), rig.inputs)
+            assertTrue(rig.viewModel.events.replayCache.last() is PlaybackEvent.FinishWithMessage)
+        }
+
+    /** docs/28 §4: an account change leaves the group, and a playing video keeps playing solo. */
+    @Test
+    fun `an epoch move in a group goes solo and keeps playing`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        rig.gateway.syncPlayGroup = member
+        rig.step(SyncPlayUpdate(emptyList(), emptyList(), true))
+        assertSame(rig.exec, rig.viewModel.state.value.syncPlay)
+        val before = rig.inputs.toList()
+
+        rig.gateway.setEpochs(epoch = 1uL, parked = 0uL)
+        runCurrent()
+        rig.viewModel.togglePlayPause()
+        runCurrent()
+
+        assertNull(rig.viewModel.state.value.syncPlay)
+        assertEquals(1, rig.player.togglePlayPauseCallCount)
+        assertEquals(0, rig.player.stopAndClearCallCount)
+        assertNull(rig.viewModel.events.replayCache.firstOrNull())
+        assertEquals(before, rig.inputs)
+    }
+
+    /** docs/28 §5: the server's Seek lands exactly, and its landing answers the directive that asked. */
+    @Test
+    fun `a group seek reports SeekLanded with its directive`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        rig.player.playWhenReady = true
+        rig.directive(2uL, SyncPlayDirective.Seek(450_000_000L))
+
+        assertEquals(listOf(45_000L), rig.player.groupSeekCalls)
+        assertFalse(rig.player.playWhenReady)
+        rig.player.groupLanded!!(450_000_000L, 120L)
+        runCurrent()
+        assertEquals(SyncPlayInput.SeekLanded(2uL, 450_000_000L), rig.inputs.last())
+    }
+
+    /** docs/28 §5: a pause or play moves the player onto the group's position only from 400 ms of drift, reporting no landing. */
+    @Test
+    fun `a group pause or play aligns the player only beyond the tolerance`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        val now = 1_000_000L + testScheduler.currentTime
+        rig.directive(2uL, SyncPlayDirective.Pause(freezeTicks = 3_000_000L, dueWallMs = now))
+        assertFalse(rig.player.playWhenReady)
+        rig.directive(3uL, SyncPlayDirective.Unpause(positionTicks = 50_000_000L, dueWallMs = now))
+
+        assertEquals(listOf(5_000L), rig.player.groupSeekCalls)
+        assertTrue(rig.player.playWhenReady)
+        assertNull(rig.player.groupLanded)
+    }
+
+    /** As PlayerHolder: group seeks go through the real [SeekSerializer] and move the position once issued; [land] is Media3's landing signal. */
+    private class SerializedSeekPlayer(private val fake: FakePlaybackPlayer) : PlaybackPlayer by fake {
+        private val seeks = SeekSerializer()
+
+        override fun seekGroup(targetMs: Long, onLanded: ((landedTicks: Long, latencyMs: Long) -> Unit)?) {
+            fake.seekGroup(targetMs, onLanded)
+            val report = onLanded?.let { { ms: Long, latencyMs: Long -> it(ms * 10_000L, latencyMs) } }
+            if (seeks.request(targetMs, nowMs = 0L, report) is SeekSerializer.Decision.Issue) fake.positionTicks = targetMs * 10_000L
+        }
+
+        fun land(nowMs: Long) {
+            seeks.landed(nowMs, positionMs = fake.positionTicks / 10_000L)?.let { fake.positionTicks = it * 10_000L }
+        }
+    }
+
+    /** docs/28 §5: a pause that aligns mid-correction keeps the correction's landing owed, so the member is never left silent. */
+    @Test
+    fun `a group pause during a drift correction still reports the correction's landing`() {
+        var player: SerializedSeekPlayer? = null
+        groupTest(groupGateway(samplePlan(itemId = "item-g", runtimeTicks = 6_000_000_000L)), playerOf = { SerializedSeekPlayer(it).also { p -> player = p } }) { rig ->
+            rig.loadAndLand("item-g")
+            rig.player.playWhenReady = true
+            rig.directive(2uL, SyncPlayDirective.Correct(300_000_000L))
+            rig.directive(3uL, SyncPlayDirective.Pause(freezeTicks = 100_000_000L, dueWallMs = 1_000_000L + testScheduler.currentTime))
+            assertEquals("the pause aligns behind the correction", listOf(30_000L, 10_000L), rig.player.groupSeekCalls)
+
+            player!!.land(nowMs = 200L)
+            player!!.land(nowMs = 450L)
+            runCurrent()
+            assertEquals(SyncPlayInput.SeekLanded(2uL, 100_000_000L), rig.inputs.last())
+
+            advanceOneTick()
+            advanceOneTick()
+            assertEquals("steady again, so drift is sampled", SyncPlayInput.PositionSample(100_000_000L), rig.inputs.last())
+        }
+    }
+
+    /** docs/28 §5: a play that must first land on the group's position lands while paused, so its buffering is no stall. */
+    @Test
+    fun `a group play aligns before it plays so the align is no stall`() =
+        groupTest(groupGateway(samplePlan(itemId = "item-g")), playerOf = ::SeekBuffersPlayer) { rig ->
+            rig.loadAndLand("item-g")
+            val now = 1_000_000L + testScheduler.currentTime
+            rig.directive(2uL, SyncPlayDirective.Unpause(positionTicks = 50_000_000L, dueWallMs = now))
+            rig.player.firePlaybackStateChanged(Player.STATE_READY)
+            runCurrent()
+
+            assertEquals(listOf(5_000L), rig.player.groupSeekCalls)
+            assertTrue(rig.player.playWhenReady)
+            assertEquals(listOf<SyncPlayInput>(SyncPlayInput.ItemLoaded("entry-1", 0L)), rig.inputs)
+        }
+
+    /** docs/28 §5: until the group's next Load reaches the player, a READY is the old item's and answers nothing. */
+    @Test
+    fun `an old item's ready during a group reload is not the new item's landing`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        val stopGate = CompletableDeferred<Unit>().also { rig.gateway.stopPlaybackGate = it }
+        try {
+            rig.player.positionTicks = 120_000_000L
+            rig.directive(2uL, SyncPlayDirective.Load("item-g", "entry-2", 300_000_000L))
+            rig.player.firePlaybackStateChanged(Player.STATE_BUFFERING)
+            rig.player.firePlaybackStateChanged(Player.STATE_READY)
+            runCurrent()
+            assertEquals("the old item's stop is still on its way", listOf<SyncPlayInput>(SyncPlayInput.ItemLoaded("entry-1", 0L)), rig.inputs)
+
+            stopGate.complete(Unit)
+            runCurrent()
+            rig.player.firePlaybackStateChanged(Player.STATE_READY)
+            runCurrent()
+            assertEquals(listOf(SyncPlayInput.ItemLoaded("entry-1", 0L), SyncPlayInput.ItemLoaded("entry-2", 300_000_000L)), rig.inputs)
+        } finally {
+            stopGate.complete(Unit)
+        }
+    }
+
+    /** docs/28 §4: a membership this player left reaches it no more, a late Load included. */
+    @Test
+    fun `a load from a group the player already left changes nothing`() {
+        val plan = samplePlan(itemId = "item-g", transcodeFallbackAllowed = true)
+        val transcode = samplePlan(itemId = "item-g", playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "session-t")
+        groupTest(groupGateway(plan, transcode)) { rig ->
+            rig.loadAndLand("item-g")
+            rig.player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            runCurrent()
+            rig.directive(2uL, SyncPlayDirective.Load("item-h", "entry-2", 0L))
+
+            assertEquals(listOf("item-g"), rig.gateway.preparePlaybackCalls)
+            assertEquals(transcode, rig.player.loadedPlan)
+            assertNull(rig.viewModel.state.value.syncPlay)
+        }
+    }
+
+    /** docs/28 §4: choosing other content is leaving the group, so the Leave goes before the solo replace. */
+    @Test
+    fun `playing another title from a group leaves the group first`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        rig.viewModel.replaceItem("item-other")
+        runCurrent()
+        rig.viewModel.togglePlayPause()
+        runCurrent()
+
+        assertEquals(listOf(SyncPlayInput.ItemLoaded("entry-1", 0L), SyncPlayInput.Leave), rig.inputs)
+        assertEquals(listOf("item-g", "item-other"), rig.gateway.preparePlaybackCalls)
+        assertEquals(LoadStart.Resume, rig.player.lastLoadStart)
+        assertEquals(1, rig.player.togglePlayPauseCallCount)
+    }
+
+    /** As ExoPlayer: a seek moves the reported position to its target at once. */
+    private class SeekMovesPlayer(private val fake: FakePlaybackPlayer) : PlaybackPlayer by fake {
+        override fun seekGroup(targetMs: Long, onLanded: ((landedTicks: Long, latencyMs: Long) -> Unit)?) {
+            fake.seekGroup(targetMs, onLanded)
+            fake.positionTicks = targetMs * 10_000L
+        }
+    }
+
+    /** docs/28 §4: taps add up from the newest ask still on its way, through the ticker and the server's answers to older asks. */
+    @Test
+    fun `seek taps in a playing group add up while earlier seeks are in flight`() =
+        groupTest(groupGateway(samplePlan(itemId = "item-g", runtimeTicks = 6_000_000_000L)), playerOf = ::SeekMovesPlayer) { rig ->
+            rig.loadAndLand("item-g", startTicks = 300_000_000L)
+            rig.player.playWhenReady = true
+            val tap = { rig.viewModel.seek(10_000L, resolveTrickplay = false) }
+
+            tap()
+            rig.player.positionTicks = 305_000_000L
+            advanceOneTick()
+            tap()
+            rig.directive(2uL, SyncPlayDirective.Seek(400_000_000L))
+            tap()
+            advanceOneTick()
+            rig.directive(3uL, SyncPlayDirective.Seek(600_000_000L))
+            tap()
+            runCurrent()
+
+            assertEquals(
+                "every tap is start + k x 10 s",
+                listOf(400_000_000L, 500_000_000L, 600_000_000L, 700_000_000L),
+                rig.inputs.filterIsInstance<SyncPlayInput.Seek>().map { it.ticks },
+            )
+        }
+
+    /** docs/28 §4: a group seek nobody here asked for starts the taps over from where it landed. */
+    @Test
+    fun `another member's seek starts group taps over from its target`() =
+        groupTest(groupGateway(samplePlan(itemId = "item-g", runtimeTicks = 6_000_000_000L)), playerOf = ::SeekMovesPlayer) { rig ->
+            rig.loadAndLand("item-g", startTicks = 300_000_000L)
+            repeat(2) { rig.viewModel.seek(10_000L, resolveTrickplay = false) }
+            rig.directive(2uL, SyncPlayDirective.Seek(2_000_000_000L))
+            rig.viewModel.seek(10_000L, resolveTrickplay = false)
+            runCurrent()
+
+            assertEquals(
+                listOf(400_000_000L, 500_000_000L, 2_100_000_000L),
+                rig.inputs.filterIsInstance<SyncPlayInput.Seek>().map { it.ticks },
+            )
+        }
+
+    /** docs/28 §5: a drift correction is nobody's ask, so taps keep adding to the ask on its way. */
+    @Test
+    fun `a group drift correction leaves the taps adding up`() =
+        groupTest(groupGateway(samplePlan(itemId = "item-g", runtimeTicks = 6_000_000_000L)), playerOf = ::SeekMovesPlayer) { rig ->
+            rig.loadAndLand("item-g", startTicks = 300_000_000L)
+            rig.player.playWhenReady = true
+            rig.viewModel.seek(10_000L, resolveTrickplay = false)
+            rig.directive(2uL, SyncPlayDirective.Correct(350_000_000L))
+            rig.viewModel.seek(10_000L, resolveTrickplay = false)
+            runCurrent()
+
+            assertEquals(listOf(400_000_000L, 500_000_000L), rig.inputs.filterIsInstance<SyncPlayInput.Seek>().map { it.ticks })
+        }
+
+    @Test
+    fun `a group seek retires our ask and older ones and anyone else's starts over`() {
+        val asked = listOf(400L, 500L, 600L)
+        assertEquals(listOf(500L, 600L), seeksAfterGroupSeek(asked, 400L))
+        assertEquals(emptyList<Long>(), seeksAfterGroupSeek(asked, 600L))
+        assertEquals(emptyList<Long>(), seeksAfterGroupSeek(asked, 900L))
+        assertEquals("the oldest matching ask is the one that ran", listOf(500L, 400L), seeksAfterGroupSeek(listOf(400L, 500L, 400L), 400L))
+    }
+
+    /** docs/28 §1, design Q4: a transcode needs its own stream, so the viewer leaves and falls back solo. */
+    @Test
+    fun `a transcode fallback in a group leaves then falls back solo`() {
+        val plan = samplePlan(itemId = "item-g", transcodeFallbackAllowed = true)
+        val transcode = samplePlan(itemId = "item-g", playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "session-t")
+        groupTest(groupGateway(plan, transcode)) { rig ->
+            rig.loadAndLand("item-g")
+            rig.player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            runCurrent()
+            rig.viewModel.togglePlayPause()
+            runCurrent()
+
+            assertEquals(listOf(SyncPlayInput.ItemLoaded("entry-1", 0L), SyncPlayInput.Leave), rig.inputs)
+            assertEquals(transcode, rig.player.loadedPlan)
+            assertNull(rig.viewModel.state.value.syncPlay)
+            assertEquals(1, rig.player.togglePlayPauseCallCount)
+        }
+    }
+
+    // -- docs/28 §5: a group never renegotiates a transcode for a subtitle -----------------------
+
+    private val groupBurnedPlan = samplePlan(itemId = "item-g", playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(assStream), burnedSubtitleIndex = 2)
+    private val groupCleanPlan = samplePlan(itemId = "item-g", playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "clean", embeddedSubtitles = listOf(assStream))
+
+    /** A group playing [plan] with its tracks reported and the picker open. */
+    private suspend fun TestScope.landWithPicker(rig: GroupRig, tracks: Tracks) {
+        rig.loadAndLand("item-g")
+        rig.player.fireTracksChanged(tracks)
+        runCurrent()
+        rig.viewModel.openTrackPicker()
+    }
+
+    /** Neither a renegotiation nor a reload, nor a leave, nor any change to the player or the picker. */
+    private suspend fun TestScope.assertRefused(rig: GroupRig, before: List<TrackChoice>, decisionsBefore: Int) {
+        runCurrent()
+        assertTrue("no renegotiation", rig.gateway.prepareTranscodeFallbackCalls.isEmpty())
+        assertEquals("nothing reloads", 1, rig.player.loadedPlans.size)
+        assertFalse("still in the group", rig.inputs.contains(SyncPlayInput.Leave))
+        assertEquals("the player's tracks are untouched", decisionsBefore, rig.player.applyTrackDecisionCalls.size)
+        assertEquals("the picker selection is unchanged", before, rig.viewModel.state.value.trackPicker!!.subtitleTracks)
+    }
+
+    @Test
+    fun `in a group a stream row pick is refused and nothing reloads`() =
+        groupTest(groupGateway(groupCleanPlan, groupBurnedPlan)) { rig ->
+            landWithPicker(rig, tracksOf(enAudio to true))
+            val before = rig.viewModel.state.value.trackPicker!!.subtitleTracks
+            assertEquals(listOf(TRACK_PICKER_SUBTITLE_OFF_ID, streamRowId(2)), before.map { it.id })
+            val decisions = rig.player.applyTrackDecisionCalls.size
+
+            rig.viewModel.chooseSubtitle(streamRowId(2))
+
+            assertRefused(rig, before, decisions)
+        }
+
+    @Test
+    fun `in a group turning off a burned-in subtitle is refused`() =
+        groupTest(groupGateway(groupBurnedPlan, groupCleanPlan)) { rig ->
+            landWithPicker(rig, tracksOf(enAudio to true))
+            val before = rig.viewModel.state.value.trackPicker!!.subtitleTracks
+            assertEquals("the burned row reads selected", listOf(false, true), before.map { it.selected })
+            val decisions = rig.player.applyTrackDecisionCalls.size
+
+            rig.viewModel.chooseSubtitle(TRACK_PICKER_SUBTITLE_OFF_ID)
+
+            assertRefused(rig, before, decisions)
+        }
+
+    @Test
+    fun `in a group switching delivered text tracks still works`() {
+        val en = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "English", forced = false, default = false, codec = "srt", displayTitle = "English", delivery = SubtitleDeliveryFfi.HLS)
+        val fr = EmbeddedSubtitleFfi(index = 4, language = "fre", title = "French", forced = false, default = false, codec = "srt", displayTitle = "French", delivery = SubtitleDeliveryFfi.HLS)
+        val plan = samplePlan(itemId = "item-g", playMethod = PlayMethodFfi.TRANSCODE, embeddedSubtitles = listOf(en, fr))
+        groupTest(groupGateway(plan, groupCleanPlan)) { rig ->
+            landWithPicker(rig, tracksOf(enAudio to true, enText to true, format("text/vtt", "fre", "French") to false))
+            val french = TrackMapping.toId(2, 0)
+
+            rig.viewModel.chooseSubtitle(french)
+            runCurrent()
+
+            assertEquals(french, rig.player.applyTrackDecisionCalls.last().first.subtitleTrackId)
+            assertEquals(french, rig.viewModel.state.value.trackPicker!!.subtitleTracks.single { it.selected }.id)
+            assertTrue(rig.gateway.prepareTranscodeFallbackCalls.isEmpty())
+            assertEquals(1, rig.player.loadedPlans.size)
+        }
+    }
+
+    @Test
+    fun `in a group automatic resolution never renegotiates`() {
+        val gateway = groupGateway(groupBurnedPlan, groupCleanPlan).apply { resolveTracksResult = subtitlesOff }
+        groupTest(gateway) { rig ->
+            rig.loadAndLand("item-g")
+            rig.player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+
+            assertEquals("resolution ran", 1, rig.gateway.resolveTracksCalls.size)
+            assertTrue("the server's burn-in stays", rig.gateway.prepareTranscodeFallbackCalls.isEmpty())
+            assertEquals(1, rig.player.loadedPlans.size)
+            assertFalse(rig.inputs.contains(SyncPlayInput.Leave))
+        }
+    }
+
+    /** docs/28 §1: the player names its membership from the group's load on, before the item lands, until it leaves. */
+    @Test
+    fun `a group load names the membership in the state and leaving clears it`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        assertNull(rig.viewModel.state.value.syncPlay)
+        rig.directive(1uL, SyncPlayDirective.Load("item-g", "entry-1", 0L))
+        rig.attach()
+
+        assertSame(rig.exec, rig.viewModel.state.value.syncPlay)
+        rig.viewModel.leaveGroup()
+        runCurrent()
+        assertNull(rig.viewModel.state.value.syncPlay)
+        assertTrue(rig.inputs.contains(SyncPlayInput.Leave))
+    }
+
+    /** docs/28 §1: a notice the player read leaves the executor's state once, and the player keeps no copy of it. */
+    @Test
+    fun `a notice the player read drops exactly one live notice`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        rig.step(SyncPlayUpdate(emptyList(), listOf(SyncPlayNotice.UserJoined("ana"), SyncPlayNotice.UserJoined("ana")), false))
+
+        rig.viewModel.syncPlayNoticesShown()
+        runCurrent()
+        assertEquals(listOf<SyncPlayNotice>(SyncPlayNotice.UserJoined("ana")), rig.exec.state.value.notices)
+        assertSame(rig.exec, rig.viewModel.state.value.syncPlay)
+    }
+
+    /** docs/28 §1: a subtitle pick the group refuses is shown once, and nothing reloads. */
+    @Test
+    fun `a refused subtitle pick in a group is shown once`() = groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+        rig.loadAndLand("item-g")
+        rig.player.fireTracksChanged(tracksOf(enAudio to true))
+        runCurrent()
+
+        rig.viewModel.chooseSubtitle(streamRowId(3))
+        assertTrue(rig.viewModel.state.value.subtitlePickRefused)
+        rig.viewModel.subtitlePickRefusedShown()
+        assertFalse(rig.viewModel.state.value.subtitlePickRefused)
+        assertTrue(rig.gateway.prepareTranscodeFallbackCalls.isEmpty())
+    }
+
+    /** docs/28 §5: every pick a group refuses, and only those. */
+    @Test
+    fun `a group refuses a stream row pick and any pick over a burn-in`() = runTest(timeout = TEST_TIMEOUT) {
+        val group = PlayerMode.Group(SyncPlayExecutor(FakeCoreGateway(), 1uL, {}, backgroundScope, StandardTestDispatcher(testScheduler)), loadSeq = 1uL)
+        val clean = samplePlan(playMethod = PlayMethodFfi.TRANSCODE)
+        val burned = clean.copy(burnedSubtitleIndex = 2)
+        val direct = samplePlan()
+        // (mode, plan, stream row) to refused
+        val cases = listOf(
+            Triple(group, burned, true) to true,
+            Triple(group, burned, false) to true,
+            Triple(group, clean, true) to true,
+            Triple(group, clean, false) to false,
+            Triple(group, direct, false) to false,
+            Triple(group, null, false) to false,
+            Triple(PlayerMode.Solo, burned, true) to false,
+            Triple(PlayerMode.Solo, burned, false) to false,
+        )
+        for ((input, refused) in cases) {
+            val (mode, plan, streamRow) = input
+            assertEquals("$mode $plan $streamRow", refused, groupRefusesSubtitlePick(mode, plan, streamRow))
         }
     }
 }

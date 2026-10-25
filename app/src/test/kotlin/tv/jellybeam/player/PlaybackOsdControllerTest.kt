@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.jellybeam_core.SyncPlayPhase
 
 /** A [Clock] a test can advance deterministically, instead of racing [System.currentTimeMillis].
  * Internal (not private) -- [PlaybackViewModelTest] reuses it too.
@@ -154,5 +155,59 @@ class PlaybackOsdControllerTest {
         clock.nowMs += 1L
         controller.tick()
         assertFalse(controller.isVisible)
+    }
+
+    @Test
+    fun `solo reveals on either edge and a group only on a member's pause`() {
+        val rows = listOf(
+            Triple(true, null, true),
+            Triple(false, null, true),
+            Triple(true, SyncPlayPhase.PAUSED, true),
+            Triple(true, SyncPlayPhase.WAITING, false),
+            Triple(true, SyncPlayPhase.PLAYING, false),
+            Triple(true, SyncPlayPhase.IDLE, false),
+        ) + SyncPlayPhase.entries.map { Triple(false, it, false) }
+        for ((paused, phase, reveals) in rows) {
+            assertEquals("paused=$paused phase=$phase", reveals, pauseRevealsOsd(paused, phase))
+        }
+    }
+
+    @Test
+    fun `hidden through a group seek's Waiting pause and its resume, then the stall prompt's pin reveals`() {
+        controller.hide()
+
+        controller.onPausedChanged(true, SyncPlayPhase.WAITING)
+        assertFalse("a group seek's Waiting hold must not reveal the OSD", controller.isVisible)
+
+        controller.onPausedChanged(false, SyncPlayPhase.PLAYING)
+        assertFalse("the group's resume after the seek must not reveal the OSD", controller.isVisible)
+
+        controller.setPinned(true)
+        assertTrue("the stall prompt's appearance must reveal the OSD", controller.isVisible)
+    }
+
+    @Test
+    fun `twenty-two hidden group seeks leave the OSD hidden throughout`() {
+        controller.hide()
+        repeat(22) { tap ->
+            controller.onPausedChanged(true, SyncPlayPhase.WAITING)
+            clock.nowMs += 250L
+            controller.tick()
+            controller.onPausedChanged(false, SyncPlayPhase.PLAYING)
+            clock.nowMs += 250L
+            controller.tick()
+            assertFalse("tap ${tap + 1}", controller.isVisible)
+        }
+    }
+
+    @Test
+    fun `a solo pause and a group member's pause still reveal a hidden OSD`() {
+        controller.hide()
+        controller.onPausedChanged(true)
+        assertTrue(controller.isVisible)
+
+        controller.hide()
+        controller.onPausedChanged(true, SyncPlayPhase.PAUSED)
+        assertTrue(controller.isVisible)
     }
 }

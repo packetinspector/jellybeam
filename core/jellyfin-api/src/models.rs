@@ -2792,6 +2792,69 @@ pub struct BaseItemPerson {
     )]
     pub type_: ::std::option::Option<PersonKind>,
 }
+#[doc = "Class BufferRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class BufferRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"IsPlaying\": {"]
+#[doc = "      \"description\": \"Gets or sets a value indicating whether the client playback is unpaused.\","]
+#[doc = "      \"type\": \"boolean\""]
+#[doc = "    },"]
+#[doc = "    \"PlaylistItemId\": {"]
+#[doc = "      \"description\": \"Gets or sets the playlist item identifier of the playing item.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    },"]
+#[doc = "    \"PositionTicks\": {"]
+#[doc = "      \"description\": \"Gets or sets the position ticks.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int64\""]
+#[doc = "    },"]
+#[doc = "    \"When\": {"]
+#[doc = "      \"description\": \"Gets or sets when the request has been made by the client.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"date-time\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct BufferRequestDto {
+    #[doc = "Gets or sets a value indicating whether the client playback is unpaused."]
+    #[serde(
+        rename = "IsPlaying",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub is_playing: ::std::option::Option<bool>,
+    #[doc = "Gets or sets the playlist item identifier of the playing item."]
+    #[serde(
+        rename = "PlaylistItemId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playlist_item_id: ::std::option::Option<::uuid::Uuid>,
+    #[doc = "Gets or sets the position ticks."]
+    #[serde(
+        rename = "PositionTicks",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub position_ticks: ::std::option::Option<i64>,
+    #[doc = "Gets or sets when the request has been made by the client."]
+    #[serde(
+        rename = "When",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub when: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+}
 #[doc = "Enum ChannelType."]
 #[doc = r""]
 #[doc = r" <details><summary>JSON schema</summary>"]
@@ -4411,6 +4474,468 @@ impl ::std::convert::TryFrom<::std::string::String> for GeneralCommandType {
         value.parse()
     }
 }
+#[doc = "Class GroupInfoDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class GroupInfoDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"GroupId\": {"]
+#[doc = "      \"description\": \"Gets the group identifier.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    },"]
+#[doc = "    \"GroupName\": {"]
+#[doc = "      \"description\": \"Gets the group name.\","]
+#[doc = "      \"type\": \"string\""]
+#[doc = "    },"]
+#[doc = "    \"LastUpdatedAt\": {"]
+#[doc = "      \"description\": \"Gets the date when this DTO has been created.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"date-time\""]
+#[doc = "    },"]
+#[doc = "    \"Participants\": {"]
+#[doc = "      \"description\": \"Gets the participants.\","]
+#[doc = "      \"type\": \"array\","]
+#[doc = "      \"items\": {"]
+#[doc = "        \"type\": \"string\""]
+#[doc = "      }"]
+#[doc = "    },"]
+#[doc = "    \"State\": {"]
+#[doc = "      \"description\": \"Gets the group state.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"Idle\","]
+#[doc = "        \"Waiting\","]
+#[doc = "        \"Paused\","]
+#[doc = "        \"Playing\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/GroupStateType\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct GroupInfoDto {
+    #[doc = "Gets the group identifier."]
+    #[serde(
+        rename = "GroupId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub group_id: ::std::option::Option<::uuid::Uuid>,
+    #[doc = "Gets the group name."]
+    #[serde(
+        rename = "GroupName",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub group_name: ::std::option::Option<::std::string::String>,
+    #[doc = "Gets the date when this DTO has been created."]
+    #[serde(
+        rename = "LastUpdatedAt",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub last_updated_at: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    #[doc = "Gets the participants."]
+    #[serde(
+        rename = "Participants",
+        default,
+        skip_serializing_if = "::std::vec::Vec::is_empty"
+    )]
+    pub participants: ::std::vec::Vec<::std::string::String>,
+    #[serde(
+        rename = "State",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub state: ::std::option::Option<GroupStateType>,
+}
+#[doc = "Enum GroupQueueMode."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Enum GroupQueueMode.\","]
+#[doc = "  \"type\": \"string\","]
+#[doc = "  \"enum\": ["]
+#[doc = "    \"Queue\","]
+#[doc = "    \"QueueNext\""]
+#[doc = "  ]"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum GroupQueueMode {
+    Queue,
+    QueueNext,
+    #[serde(other)]
+    Unrecognized,
+}
+impl ::std::fmt::Display for GroupQueueMode {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Queue => f.write_str("Queue"),
+            Self::QueueNext => f.write_str("QueueNext"),
+            Self::Unrecognized => f.write_str("Unrecognized"),
+        }
+    }
+}
+impl ::std::str::FromStr for GroupQueueMode {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "Queue" => Ok(Self::Queue),
+            "QueueNext" => Ok(Self::QueueNext),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for GroupQueueMode {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String> for GroupQueueMode {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for GroupQueueMode {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+#[doc = "Enum GroupRepeatMode."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Enum GroupRepeatMode.\","]
+#[doc = "  \"type\": \"string\","]
+#[doc = "  \"enum\": ["]
+#[doc = "    \"RepeatOne\","]
+#[doc = "    \"RepeatAll\","]
+#[doc = "    \"RepeatNone\""]
+#[doc = "  ]"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum GroupRepeatMode {
+    RepeatOne,
+    RepeatAll,
+    RepeatNone,
+    #[serde(other)]
+    Unrecognized,
+}
+impl ::std::fmt::Display for GroupRepeatMode {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::RepeatOne => f.write_str("RepeatOne"),
+            Self::RepeatAll => f.write_str("RepeatAll"),
+            Self::RepeatNone => f.write_str("RepeatNone"),
+            Self::Unrecognized => f.write_str("Unrecognized"),
+        }
+    }
+}
+impl ::std::str::FromStr for GroupRepeatMode {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "RepeatOne" => Ok(Self::RepeatOne),
+            "RepeatAll" => Ok(Self::RepeatAll),
+            "RepeatNone" => Ok(Self::RepeatNone),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for GroupRepeatMode {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String> for GroupRepeatMode {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for GroupRepeatMode {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+#[doc = "Enum GroupShuffleMode."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Enum GroupShuffleMode.\","]
+#[doc = "  \"type\": \"string\","]
+#[doc = "  \"enum\": ["]
+#[doc = "    \"Sorted\","]
+#[doc = "    \"Shuffle\""]
+#[doc = "  ]"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum GroupShuffleMode {
+    Sorted,
+    Shuffle,
+    #[serde(other)]
+    Unrecognized,
+}
+impl ::std::fmt::Display for GroupShuffleMode {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Sorted => f.write_str("Sorted"),
+            Self::Shuffle => f.write_str("Shuffle"),
+            Self::Unrecognized => f.write_str("Unrecognized"),
+        }
+    }
+}
+impl ::std::str::FromStr for GroupShuffleMode {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "Sorted" => Ok(Self::Sorted),
+            "Shuffle" => Ok(Self::Shuffle),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for GroupShuffleMode {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String> for GroupShuffleMode {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for GroupShuffleMode {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+#[doc = "Enum GroupState."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Enum GroupState.\","]
+#[doc = "  \"type\": \"string\","]
+#[doc = "  \"enum\": ["]
+#[doc = "    \"Idle\","]
+#[doc = "    \"Waiting\","]
+#[doc = "    \"Paused\","]
+#[doc = "    \"Playing\""]
+#[doc = "  ]"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum GroupStateType {
+    Idle,
+    Waiting,
+    Paused,
+    Playing,
+    #[serde(other)]
+    Unrecognized,
+}
+impl ::std::fmt::Display for GroupStateType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Idle => f.write_str("Idle"),
+            Self::Waiting => f.write_str("Waiting"),
+            Self::Paused => f.write_str("Paused"),
+            Self::Playing => f.write_str("Playing"),
+            Self::Unrecognized => f.write_str("Unrecognized"),
+        }
+    }
+}
+impl ::std::str::FromStr for GroupStateType {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "Idle" => Ok(Self::Idle),
+            "Waiting" => Ok(Self::Waiting),
+            "Paused" => Ok(Self::Paused),
+            "Playing" => Ok(Self::Playing),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for GroupStateType {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String> for GroupStateType {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for GroupStateType {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+#[doc = "Class GroupStateUpdate."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class GroupStateUpdate.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"Reason\": {"]
+#[doc = "      \"description\": \"Gets the reason of the state change.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"Play\","]
+#[doc = "        \"SetPlaylistItem\","]
+#[doc = "        \"RemoveFromPlaylist\","]
+#[doc = "        \"MovePlaylistItem\","]
+#[doc = "        \"Queue\","]
+#[doc = "        \"Unpause\","]
+#[doc = "        \"Pause\","]
+#[doc = "        \"Stop\","]
+#[doc = "        \"Seek\","]
+#[doc = "        \"Buffer\","]
+#[doc = "        \"Ready\","]
+#[doc = "        \"NextItem\","]
+#[doc = "        \"PreviousItem\","]
+#[doc = "        \"SetRepeatMode\","]
+#[doc = "        \"SetShuffleMode\","]
+#[doc = "        \"Ping\","]
+#[doc = "        \"IgnoreWait\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/PlaybackRequestType\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    },"]
+#[doc = "    \"State\": {"]
+#[doc = "      \"description\": \"Gets the state of the group.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"Idle\","]
+#[doc = "        \"Waiting\","]
+#[doc = "        \"Paused\","]
+#[doc = "        \"Playing\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/GroupStateType\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct GroupStateUpdate {
+    #[serde(
+        rename = "Reason",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub reason: ::std::option::Option<PlaybackRequestType>,
+    #[serde(
+        rename = "State",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub state: ::std::option::Option<GroupStateType>,
+}
 #[doc = "Enum containing hardware acceleration types."]
 #[doc = r""]
 #[doc = r" <details><summary>JSON schema</summary>"]
@@ -4516,6 +5041,33 @@ impl ::std::convert::TryFrom<::std::string::String> for HardwareAccelerationType
     ) -> ::std::result::Result<Self, self::error::ConversionError> {
         value.parse()
     }
+}
+#[doc = "Class IgnoreWaitRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class IgnoreWaitRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"IgnoreWait\": {"]
+#[doc = "      \"description\": \"Gets or sets a value indicating whether the client should be ignored.\","]
+#[doc = "      \"type\": \"boolean\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct IgnoreWaitRequestDto {
+    #[doc = "Gets or sets a value indicating whether the client should be ignored."]
+    #[serde(
+        rename = "IgnoreWait",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub ignore_wait: ::std::option::Option<bool>,
 }
 #[doc = "`ImageBlurHashes`"]
 #[doc = r""]
@@ -4872,6 +5424,34 @@ impl ::std::convert::TryFrom<::std::string::String> for IsoType {
     ) -> ::std::result::Result<Self, self::error::ConversionError> {
         value.parse()
     }
+}
+#[doc = "Class JoinGroupRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class JoinGroupRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"GroupId\": {"]
+#[doc = "      \"description\": \"Gets or sets the group identifier.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct JoinGroupRequestDto {
+    #[doc = "Gets or sets the group identifier."]
+    #[serde(
+        rename = "GroupId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub group_id: ::std::option::Option<::uuid::Uuid>,
 }
 #[doc = "Class LibraryUpdateInfo."]
 #[doc = r""]
@@ -7376,6 +7956,46 @@ impl ::std::convert::TryFrom<::std::string::String> for MetadataField {
         value.parse()
     }
 }
+#[doc = "Class MovePlaylistItemRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class MovePlaylistItemRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"NewIndex\": {"]
+#[doc = "      \"description\": \"Gets or sets the new position.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int32\""]
+#[doc = "    },"]
+#[doc = "    \"PlaylistItemId\": {"]
+#[doc = "      \"description\": \"Gets or sets the playlist identifier of the item.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct MovePlaylistItemRequestDto {
+    #[doc = "Gets or sets the new position."]
+    #[serde(
+        rename = "NewIndex",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub new_index: ::std::option::Option<i32>,
+    #[doc = "Gets or sets the playlist identifier of the item."]
+    #[serde(
+        rename = "PlaylistItemId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playlist_item_id: ::std::option::Option<::uuid::Uuid>,
+}
 #[doc = "`NameGuidPair`"]
 #[doc = r""]
 #[doc = r" <details><summary>JSON schema</summary>"]
@@ -7410,6 +8030,61 @@ pub struct NameGuidPair {
         skip_serializing_if = "::std::option::Option::is_none"
     )]
     pub name: ::std::option::Option<::std::string::String>,
+}
+#[doc = "Class NewGroupRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class NewGroupRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"GroupName\": {"]
+#[doc = "      \"description\": \"Gets or sets the group name.\","]
+#[doc = "      \"type\": \"string\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct NewGroupRequestDto {
+    #[doc = "Gets or sets the group name."]
+    #[serde(
+        rename = "GroupName",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub group_name: ::std::option::Option<::std::string::String>,
+}
+#[doc = "Class NextItemRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class NextItemRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"PlaylistItemId\": {"]
+#[doc = "      \"description\": \"Gets or sets the playing item identifier.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct NextItemRequestDto {
+    #[doc = "Gets or sets the playing item identifier."]
+    #[serde(
+        rename = "PlaylistItemId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playlist_item_id: ::std::option::Option<::uuid::Uuid>,
 }
 #[doc = "The person kind."]
 #[doc = r""]
@@ -7581,6 +8256,34 @@ impl ::std::convert::TryFrom<::std::string::String> for PersonKind {
         value.parse()
     }
 }
+#[doc = "Class PingRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class PingRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"Ping\": {"]
+#[doc = "      \"description\": \"Gets or sets the ping time.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int64\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct PingRequestDto {
+    #[doc = "Gets or sets the ping time."]
+    #[serde(
+        rename = "Ping",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub ping: ::std::option::Option<i64>,
+}
 #[doc = "The play access of an item."]
 #[doc = r""]
 #[doc = r" <details><summary>JSON schema</summary>"]
@@ -7732,6 +8435,307 @@ impl ::std::convert::TryFrom<::std::string::String> for PlayMethod {
     ) -> ::std::result::Result<Self, self::error::ConversionError> {
         value.parse()
     }
+}
+#[doc = "Class PlayQueueUpdate."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class PlayQueueUpdate.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"IsPlaying\": {"]
+#[doc = "      \"description\": \"Gets a value indicating whether the current item is playing.\","]
+#[doc = "      \"type\": \"boolean\""]
+#[doc = "    },"]
+#[doc = "    \"LastUpdate\": {"]
+#[doc = "      \"description\": \"Gets the UTC time of the last change to the playing queue.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"date-time\""]
+#[doc = "    },"]
+#[doc = "    \"PlayingItemIndex\": {"]
+#[doc = "      \"description\": \"Gets the playing item index in the playlist.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int32\""]
+#[doc = "    },"]
+#[doc = "    \"Playlist\": {"]
+#[doc = "      \"description\": \"Gets the playlist.\","]
+#[doc = "      \"type\": \"array\","]
+#[doc = "      \"items\": {"]
+#[doc = "        \"$ref\": \"#/$defs/SyncPlayQueueItem\""]
+#[doc = "      }"]
+#[doc = "    },"]
+#[doc = "    \"Reason\": {"]
+#[doc = "      \"description\": \"Gets the request type that originated this update.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"NewPlaylist\","]
+#[doc = "        \"SetCurrentItem\","]
+#[doc = "        \"RemoveItems\","]
+#[doc = "        \"MoveItem\","]
+#[doc = "        \"Queue\","]
+#[doc = "        \"QueueNext\","]
+#[doc = "        \"NextItem\","]
+#[doc = "        \"PreviousItem\","]
+#[doc = "        \"RepeatMode\","]
+#[doc = "        \"ShuffleMode\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/PlayQueueUpdateReason\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    },"]
+#[doc = "    \"RepeatMode\": {"]
+#[doc = "      \"description\": \"Gets the repeat mode.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"RepeatOne\","]
+#[doc = "        \"RepeatAll\","]
+#[doc = "        \"RepeatNone\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/GroupRepeatMode\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    },"]
+#[doc = "    \"ShuffleMode\": {"]
+#[doc = "      \"description\": \"Gets the shuffle mode.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"Sorted\","]
+#[doc = "        \"Shuffle\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/GroupShuffleMode\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    },"]
+#[doc = "    \"StartPositionTicks\": {"]
+#[doc = "      \"description\": \"Gets the start position ticks.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int64\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct PlayQueueUpdate {
+    #[doc = "Gets a value indicating whether the current item is playing."]
+    #[serde(
+        rename = "IsPlaying",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub is_playing: ::std::option::Option<bool>,
+    #[doc = "Gets the UTC time of the last change to the playing queue."]
+    #[serde(
+        rename = "LastUpdate",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub last_update: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    #[doc = "Gets the playing item index in the playlist."]
+    #[serde(
+        rename = "PlayingItemIndex",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playing_item_index: ::std::option::Option<i32>,
+    #[doc = "Gets the playlist."]
+    #[serde(
+        rename = "Playlist",
+        default,
+        skip_serializing_if = "::std::vec::Vec::is_empty"
+    )]
+    pub playlist: ::std::vec::Vec<SyncPlayQueueItem>,
+    #[serde(
+        rename = "Reason",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub reason: ::std::option::Option<PlayQueueUpdateReason>,
+    #[serde(
+        rename = "RepeatMode",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub repeat_mode: ::std::option::Option<GroupRepeatMode>,
+    #[serde(
+        rename = "ShuffleMode",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub shuffle_mode: ::std::option::Option<GroupShuffleMode>,
+    #[doc = "Gets the start position ticks."]
+    #[serde(
+        rename = "StartPositionTicks",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub start_position_ticks: ::std::option::Option<i64>,
+}
+#[doc = "Enum PlayQueueUpdateReason."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Enum PlayQueueUpdateReason.\","]
+#[doc = "  \"type\": \"string\","]
+#[doc = "  \"enum\": ["]
+#[doc = "    \"NewPlaylist\","]
+#[doc = "    \"SetCurrentItem\","]
+#[doc = "    \"RemoveItems\","]
+#[doc = "    \"MoveItem\","]
+#[doc = "    \"Queue\","]
+#[doc = "    \"QueueNext\","]
+#[doc = "    \"NextItem\","]
+#[doc = "    \"PreviousItem\","]
+#[doc = "    \"RepeatMode\","]
+#[doc = "    \"ShuffleMode\""]
+#[doc = "  ]"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum PlayQueueUpdateReason {
+    NewPlaylist,
+    SetCurrentItem,
+    RemoveItems,
+    MoveItem,
+    Queue,
+    QueueNext,
+    NextItem,
+    PreviousItem,
+    RepeatMode,
+    ShuffleMode,
+    #[serde(other)]
+    Unrecognized,
+}
+impl ::std::fmt::Display for PlayQueueUpdateReason {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::NewPlaylist => f.write_str("NewPlaylist"),
+            Self::SetCurrentItem => f.write_str("SetCurrentItem"),
+            Self::RemoveItems => f.write_str("RemoveItems"),
+            Self::MoveItem => f.write_str("MoveItem"),
+            Self::Queue => f.write_str("Queue"),
+            Self::QueueNext => f.write_str("QueueNext"),
+            Self::NextItem => f.write_str("NextItem"),
+            Self::PreviousItem => f.write_str("PreviousItem"),
+            Self::RepeatMode => f.write_str("RepeatMode"),
+            Self::ShuffleMode => f.write_str("ShuffleMode"),
+            Self::Unrecognized => f.write_str("Unrecognized"),
+        }
+    }
+}
+impl ::std::str::FromStr for PlayQueueUpdateReason {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "NewPlaylist" => Ok(Self::NewPlaylist),
+            "SetCurrentItem" => Ok(Self::SetCurrentItem),
+            "RemoveItems" => Ok(Self::RemoveItems),
+            "MoveItem" => Ok(Self::MoveItem),
+            "Queue" => Ok(Self::Queue),
+            "QueueNext" => Ok(Self::QueueNext),
+            "NextItem" => Ok(Self::NextItem),
+            "PreviousItem" => Ok(Self::PreviousItem),
+            "RepeatMode" => Ok(Self::RepeatMode),
+            "ShuffleMode" => Ok(Self::ShuffleMode),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for PlayQueueUpdateReason {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String> for PlayQueueUpdateReason {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PlayQueueUpdateReason {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+#[doc = "Class PlayRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class PlayRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"PlayingItemPosition\": {"]
+#[doc = "      \"description\": \"Gets or sets the position of the playing item in the queue.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int32\""]
+#[doc = "    },"]
+#[doc = "    \"PlayingQueue\": {"]
+#[doc = "      \"description\": \"Gets or sets the playing queue.\","]
+#[doc = "      \"type\": \"array\","]
+#[doc = "      \"items\": {"]
+#[doc = "        \"type\": \"string\","]
+#[doc = "        \"format\": \"uuid\""]
+#[doc = "      }"]
+#[doc = "    },"]
+#[doc = "    \"StartPositionTicks\": {"]
+#[doc = "      \"description\": \"Gets or sets the start position ticks.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int64\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct PlayRequestDto {
+    #[doc = "Gets or sets the position of the playing item in the queue."]
+    #[serde(
+        rename = "PlayingItemPosition",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playing_item_position: ::std::option::Option<i32>,
+    #[doc = "Gets or sets the playing queue."]
+    #[serde(
+        rename = "PlayingQueue",
+        default,
+        skip_serializing_if = "::std::vec::Vec::is_empty"
+    )]
+    pub playing_queue: ::std::vec::Vec<::uuid::Uuid>,
+    #[doc = "Gets or sets the start position ticks."]
+    #[serde(
+        rename = "StartPositionTicks",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub start_position_ticks: ::std::option::Option<i64>,
 }
 #[doc = "The playback error code."]
 #[doc = r""]
@@ -8165,6 +9169,140 @@ impl ::std::convert::TryFrom<::std::string::String> for PlaybackOrder {
         value.parse()
     }
 }
+#[doc = "Enum PlaybackRequestType."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Enum PlaybackRequestType.\","]
+#[doc = "  \"type\": \"string\","]
+#[doc = "  \"enum\": ["]
+#[doc = "    \"Play\","]
+#[doc = "    \"SetPlaylistItem\","]
+#[doc = "    \"RemoveFromPlaylist\","]
+#[doc = "    \"MovePlaylistItem\","]
+#[doc = "    \"Queue\","]
+#[doc = "    \"Unpause\","]
+#[doc = "    \"Pause\","]
+#[doc = "    \"Stop\","]
+#[doc = "    \"Seek\","]
+#[doc = "    \"Buffer\","]
+#[doc = "    \"Ready\","]
+#[doc = "    \"NextItem\","]
+#[doc = "    \"PreviousItem\","]
+#[doc = "    \"SetRepeatMode\","]
+#[doc = "    \"SetShuffleMode\","]
+#[doc = "    \"Ping\","]
+#[doc = "    \"IgnoreWait\""]
+#[doc = "  ]"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum PlaybackRequestType {
+    Play,
+    SetPlaylistItem,
+    RemoveFromPlaylist,
+    MovePlaylistItem,
+    Queue,
+    Unpause,
+    Pause,
+    Stop,
+    Seek,
+    Buffer,
+    Ready,
+    NextItem,
+    PreviousItem,
+    SetRepeatMode,
+    SetShuffleMode,
+    Ping,
+    IgnoreWait,
+    #[serde(other)]
+    Unrecognized,
+}
+impl ::std::fmt::Display for PlaybackRequestType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Play => f.write_str("Play"),
+            Self::SetPlaylistItem => f.write_str("SetPlaylistItem"),
+            Self::RemoveFromPlaylist => f.write_str("RemoveFromPlaylist"),
+            Self::MovePlaylistItem => f.write_str("MovePlaylistItem"),
+            Self::Queue => f.write_str("Queue"),
+            Self::Unpause => f.write_str("Unpause"),
+            Self::Pause => f.write_str("Pause"),
+            Self::Stop => f.write_str("Stop"),
+            Self::Seek => f.write_str("Seek"),
+            Self::Buffer => f.write_str("Buffer"),
+            Self::Ready => f.write_str("Ready"),
+            Self::NextItem => f.write_str("NextItem"),
+            Self::PreviousItem => f.write_str("PreviousItem"),
+            Self::SetRepeatMode => f.write_str("SetRepeatMode"),
+            Self::SetShuffleMode => f.write_str("SetShuffleMode"),
+            Self::Ping => f.write_str("Ping"),
+            Self::IgnoreWait => f.write_str("IgnoreWait"),
+            Self::Unrecognized => f.write_str("Unrecognized"),
+        }
+    }
+}
+impl ::std::str::FromStr for PlaybackRequestType {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "Play" => Ok(Self::Play),
+            "SetPlaylistItem" => Ok(Self::SetPlaylistItem),
+            "RemoveFromPlaylist" => Ok(Self::RemoveFromPlaylist),
+            "MovePlaylistItem" => Ok(Self::MovePlaylistItem),
+            "Queue" => Ok(Self::Queue),
+            "Unpause" => Ok(Self::Unpause),
+            "Pause" => Ok(Self::Pause),
+            "Stop" => Ok(Self::Stop),
+            "Seek" => Ok(Self::Seek),
+            "Buffer" => Ok(Self::Buffer),
+            "Ready" => Ok(Self::Ready),
+            "NextItem" => Ok(Self::NextItem),
+            "PreviousItem" => Ok(Self::PreviousItem),
+            "SetRepeatMode" => Ok(Self::SetRepeatMode),
+            "SetShuffleMode" => Ok(Self::SetShuffleMode),
+            "Ping" => Ok(Self::Ping),
+            "IgnoreWait" => Ok(Self::IgnoreWait),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for PlaybackRequestType {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String> for PlaybackRequestType {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PlaybackRequestType {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
 #[doc = "`PlayerStateInfo`"]
 #[doc = r""]
 #[doc = r" <details><summary>JSON schema</summary>"]
@@ -8345,6 +9483,34 @@ pub struct PlayerStateInfo {
         skip_serializing_if = "::std::option::Option::is_none"
     )]
     pub volume_level: ::std::option::Option<i32>,
+}
+#[doc = "Class PreviousItemRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class PreviousItemRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"PlaylistItemId\": {"]
+#[doc = "      \"description\": \"Gets or sets the playing item identifier.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct PreviousItemRequestDto {
+    #[doc = "Gets or sets the playing item identifier."]
+    #[serde(
+        rename = "PlaylistItemId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playlist_item_id: ::std::option::Option<::uuid::Uuid>,
 }
 #[doc = "`ProfileCondition`"]
 #[doc = r""]
@@ -8824,6 +9990,55 @@ pub struct QueueItem {
     )]
     pub playlist_item_id: ::std::option::Option<::std::string::String>,
 }
+#[doc = "Class QueueRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class QueueRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"ItemIds\": {"]
+#[doc = "      \"description\": \"Gets or sets the items to enqueue.\","]
+#[doc = "      \"type\": \"array\","]
+#[doc = "      \"items\": {"]
+#[doc = "        \"type\": \"string\","]
+#[doc = "        \"format\": \"uuid\""]
+#[doc = "      }"]
+#[doc = "    },"]
+#[doc = "    \"Mode\": {"]
+#[doc = "      \"description\": \"Gets or sets the mode in which to add the new items.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"Queue\","]
+#[doc = "        \"QueueNext\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/GroupQueueMode\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct QueueRequestDto {
+    #[doc = "Gets or sets the items to enqueue."]
+    #[serde(
+        rename = "ItemIds",
+        default,
+        skip_serializing_if = "::std::vec::Vec::is_empty"
+    )]
+    pub item_ids: ::std::vec::Vec<::uuid::Uuid>,
+    #[serde(
+        rename = "Mode",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub mode: ::std::option::Option<GroupQueueMode>,
+}
 #[doc = "The quick connect request body."]
 #[doc = r""]
 #[doc = r" <details><summary>JSON schema</summary>"]
@@ -9025,6 +10240,122 @@ pub struct QuickConnectResult {
     )]
     pub secret: ::std::option::Option<::std::string::String>,
 }
+#[doc = "Class ReadyRequest."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class ReadyRequest.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"IsPlaying\": {"]
+#[doc = "      \"description\": \"Gets or sets a value indicating whether the client playback is unpaused.\","]
+#[doc = "      \"type\": \"boolean\""]
+#[doc = "    },"]
+#[doc = "    \"PlaylistItemId\": {"]
+#[doc = "      \"description\": \"Gets or sets the playlist item identifier of the playing item.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    },"]
+#[doc = "    \"PositionTicks\": {"]
+#[doc = "      \"description\": \"Gets or sets the position ticks.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int64\""]
+#[doc = "    },"]
+#[doc = "    \"When\": {"]
+#[doc = "      \"description\": \"Gets or sets when the request has been made by the client.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"date-time\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct ReadyRequestDto {
+    #[doc = "Gets or sets a value indicating whether the client playback is unpaused."]
+    #[serde(
+        rename = "IsPlaying",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub is_playing: ::std::option::Option<bool>,
+    #[doc = "Gets or sets the playlist item identifier of the playing item."]
+    #[serde(
+        rename = "PlaylistItemId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playlist_item_id: ::std::option::Option<::uuid::Uuid>,
+    #[doc = "Gets or sets the position ticks."]
+    #[serde(
+        rename = "PositionTicks",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub position_ticks: ::std::option::Option<i64>,
+    #[doc = "Gets or sets when the request has been made by the client."]
+    #[serde(
+        rename = "When",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub when: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+}
+#[doc = "Class RemoveFromPlaylistRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class RemoveFromPlaylistRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"ClearPlayingItem\": {"]
+#[doc = "      \"description\": \"Gets or sets a value indicating whether the playing item should be removed as well. Used only when clearing the playlist.\","]
+#[doc = "      \"type\": \"boolean\""]
+#[doc = "    },"]
+#[doc = "    \"ClearPlaylist\": {"]
+#[doc = "      \"description\": \"Gets or sets a value indicating whether the entire playlist should be cleared.\","]
+#[doc = "      \"type\": \"boolean\""]
+#[doc = "    },"]
+#[doc = "    \"PlaylistItemIds\": {"]
+#[doc = "      \"description\": \"Gets or sets the playlist identifiers of the items. Ignored when clearing the playlist.\","]
+#[doc = "      \"type\": \"array\","]
+#[doc = "      \"items\": {"]
+#[doc = "        \"type\": \"string\","]
+#[doc = "        \"format\": \"uuid\""]
+#[doc = "      }"]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct RemoveFromPlaylistRequestDto {
+    #[doc = "Gets or sets a value indicating whether the playing item should be removed as well. Used only when clearing the playlist."]
+    #[serde(
+        rename = "ClearPlayingItem",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub clear_playing_item: ::std::option::Option<bool>,
+    #[doc = "Gets or sets a value indicating whether the entire playlist should be cleared."]
+    #[serde(
+        rename = "ClearPlaylist",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub clear_playlist: ::std::option::Option<bool>,
+    #[doc = "Gets or sets the playlist identifiers of the items. Ignored when clearing the playlist."]
+    #[serde(
+        rename = "PlaylistItemIds",
+        default,
+        skip_serializing_if = "::std::vec::Vec::is_empty"
+    )]
+    pub playlist_item_ids: ::std::vec::Vec<::uuid::Uuid>,
+}
 #[doc = "The repeat mode of a play queue."]
 #[doc = r""]
 #[doc = r" <details><summary>JSON schema</summary>"]
@@ -9096,6 +10427,213 @@ impl ::std::convert::TryFrom<&::std::string::String> for RepeatMode {
     }
 }
 impl ::std::convert::TryFrom<::std::string::String> for RepeatMode {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+#[doc = "Class SeekRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class SeekRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"PositionTicks\": {"]
+#[doc = "      \"description\": \"Gets or sets the position ticks.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int64\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct SeekRequestDto {
+    #[doc = "Gets or sets the position ticks."]
+    #[serde(
+        rename = "PositionTicks",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub position_ticks: ::std::option::Option<i64>,
+}
+#[doc = "Class SendCommand."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class SendCommand.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"Command\": {"]
+#[doc = "      \"description\": \"Gets the command.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"Unpause\","]
+#[doc = "        \"Pause\","]
+#[doc = "        \"Stop\","]
+#[doc = "        \"Seek\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/SendCommandType\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    },"]
+#[doc = "    \"EmittedAt\": {"]
+#[doc = "      \"description\": \"Gets the UTC time when this command has been emitted.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"date-time\""]
+#[doc = "    },"]
+#[doc = "    \"GroupId\": {"]
+#[doc = "      \"description\": \"Gets the group identifier.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    },"]
+#[doc = "    \"PlaylistItemId\": {"]
+#[doc = "      \"description\": \"Gets the playlist identifier of the playing item.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    },"]
+#[doc = "    \"PositionTicks\": {"]
+#[doc = "      \"description\": \"Gets the position ticks.\","]
+#[doc = "      \"type\": \"integer\","]
+#[doc = "      \"format\": \"int64\","]
+#[doc = "      \"nullable\": true"]
+#[doc = "    },"]
+#[doc = "    \"When\": {"]
+#[doc = "      \"description\": \"Gets or sets the UTC time when to execute the command.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"date-time\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct SendCommand {
+    #[serde(
+        rename = "Command",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub command: ::std::option::Option<SendCommandType>,
+    #[doc = "Gets the UTC time when this command has been emitted."]
+    #[serde(
+        rename = "EmittedAt",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub emitted_at: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    #[doc = "Gets the group identifier."]
+    #[serde(
+        rename = "GroupId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub group_id: ::std::option::Option<::uuid::Uuid>,
+    #[doc = "Gets the playlist identifier of the playing item."]
+    #[serde(
+        rename = "PlaylistItemId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playlist_item_id: ::std::option::Option<::uuid::Uuid>,
+    #[doc = "Gets the position ticks."]
+    #[serde(
+        rename = "PositionTicks",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub position_ticks: ::std::option::Option<i64>,
+    #[doc = "Gets or sets the UTC time when to execute the command."]
+    #[serde(
+        rename = "When",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub when: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+}
+#[doc = "Enum SendCommandType."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Enum SendCommandType.\","]
+#[doc = "  \"type\": \"string\","]
+#[doc = "  \"enum\": ["]
+#[doc = "    \"Unpause\","]
+#[doc = "    \"Pause\","]
+#[doc = "    \"Stop\","]
+#[doc = "    \"Seek\""]
+#[doc = "  ]"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum SendCommandType {
+    Unpause,
+    Pause,
+    Stop,
+    Seek,
+    #[serde(other)]
+    Unrecognized,
+}
+impl ::std::fmt::Display for SendCommandType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Unpause => f.write_str("Unpause"),
+            Self::Pause => f.write_str("Pause"),
+            Self::Stop => f.write_str("Stop"),
+            Self::Seek => f.write_str("Seek"),
+            Self::Unrecognized => f.write_str("Unrecognized"),
+        }
+    }
+}
+impl ::std::str::FromStr for SendCommandType {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "Unpause" => Ok(Self::Unpause),
+            "Pause" => Ok(Self::Pause),
+            "Stop" => Ok(Self::Stop),
+            "Seek" => Ok(Self::Seek),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for SendCommandType {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String> for SendCommandType {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for SendCommandType {
     type Error = self::error::ConversionError;
     fn try_from(
         value: ::std::string::String,
@@ -9522,6 +11060,103 @@ pub struct SessionUserInfo {
     )]
     pub user_name: ::std::option::Option<::std::string::String>,
 }
+#[doc = "Class SetPlaylistItemRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class SetPlaylistItemRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"PlaylistItemId\": {"]
+#[doc = "      \"description\": \"Gets or sets the playlist identifier of the playing item.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct SetPlaylistItemRequestDto {
+    #[doc = "Gets or sets the playlist identifier of the playing item."]
+    #[serde(
+        rename = "PlaylistItemId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playlist_item_id: ::std::option::Option<::uuid::Uuid>,
+}
+#[doc = "Class SetRepeatModeRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class SetRepeatModeRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"Mode\": {"]
+#[doc = "      \"description\": \"Gets or sets the repeat mode.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"RepeatOne\","]
+#[doc = "        \"RepeatAll\","]
+#[doc = "        \"RepeatNone\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/GroupRepeatMode\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct SetRepeatModeRequestDto {
+    #[serde(
+        rename = "Mode",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub mode: ::std::option::Option<GroupRepeatMode>,
+}
+#[doc = "Class SetShuffleModeRequestDto."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class SetShuffleModeRequestDto.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"Mode\": {"]
+#[doc = "      \"description\": \"Gets or sets the shuffle mode.\","]
+#[doc = "      \"enum\": ["]
+#[doc = "        \"Sorted\","]
+#[doc = "        \"Shuffle\""]
+#[doc = "      ],"]
+#[doc = "      \"allOf\": ["]
+#[doc = "        {"]
+#[doc = "          \"$ref\": \"#/$defs/GroupShuffleMode\""]
+#[doc = "        }"]
+#[doc = "      ]"]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct SetShuffleModeRequestDto {
+    #[serde(
+        rename = "Mode",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub mode: ::std::option::Option<GroupShuffleMode>,
+}
 #[doc = "Delivery method to use during playback of a specific subtitle format."]
 #[doc = r""]
 #[doc = r" <details><summary>JSON schema</summary>"]
@@ -9778,6 +11413,47 @@ pub struct SubtitleProfile {
         skip_serializing_if = "::std::option::Option::is_none"
     )]
     pub method: ::std::option::Option<SubtitleDeliveryMethod>,
+}
+#[doc = "Class QueueItem."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class QueueItem.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"ItemId\": {"]
+#[doc = "      \"description\": \"Gets the item identifier.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    },"]
+#[doc = "    \"PlaylistItemId\": {"]
+#[doc = "      \"description\": \"Gets the playlist identifier of the item.\","]
+#[doc = "      \"readOnly\": true,"]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"uuid\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct SyncPlayQueueItem {
+    #[doc = "Gets the item identifier."]
+    #[serde(
+        rename = "ItemId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub item_id: ::std::option::Option<::uuid::Uuid>,
+    #[doc = "Gets the playlist identifier of the item."]
+    #[serde(
+        rename = "PlaylistItemId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub playlist_item_id: ::std::option::Option<::uuid::Uuid>,
 }
 #[doc = "Enum SyncPlayUserAccessType."]
 #[doc = r""]
@@ -12030,6 +13706,47 @@ impl<'de> ::serde::Deserialize<'de> for UserPolicyPasswordResetProviderId {
                 <D::Error as ::serde::de::Error>::custom(e.to_string())
             })
     }
+}
+#[doc = "Class UtcTimeResponse."]
+#[doc = r""]
+#[doc = r" <details><summary>JSON schema</summary>"]
+#[doc = r""]
+#[doc = r" ```json"]
+#[doc = "{"]
+#[doc = "  \"description\": \"Class UtcTimeResponse.\","]
+#[doc = "  \"type\": \"object\","]
+#[doc = "  \"properties\": {"]
+#[doc = "    \"RequestReceptionTime\": {"]
+#[doc = "      \"description\": \"Gets the UTC time when request has been received.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"date-time\""]
+#[doc = "    },"]
+#[doc = "    \"ResponseTransmissionTime\": {"]
+#[doc = "      \"description\": \"Gets the UTC time when response has been sent.\","]
+#[doc = "      \"type\": \"string\","]
+#[doc = "      \"format\": \"date-time\""]
+#[doc = "    }"]
+#[doc = "  }"]
+#[doc = "}"]
+#[doc = r" ```"]
+#[doc = r" </details>"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct UtcTimeResponse {
+    #[doc = "Gets the UTC time when request has been received."]
+    #[serde(
+        rename = "RequestReceptionTime",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub request_reception_time: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    #[doc = "Gets the UTC time when response has been sent."]
+    #[serde(
+        rename = "ResponseTransmissionTime",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub response_transmission_time:
+        ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
 }
 #[doc = "`Video3DFormat`"]
 #[doc = r""]

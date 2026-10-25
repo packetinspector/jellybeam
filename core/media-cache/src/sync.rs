@@ -1342,7 +1342,7 @@ pub(crate) async fn apply_server_event(state: &MirrorState, event: ServerEvent) 
                 state.request_next_up_refresh();
             }
         }
-        ServerEvent::ForceKeepAlive | ServerEvent::Ignored(_) => {}
+        ServerEvent::ForceKeepAlive | ServerEvent::SyncPlay(_) | ServerEvent::Ignored(_) => {}
     }
 }
 

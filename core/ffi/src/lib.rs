@@ -25,6 +25,7 @@ mod session;
 mod settings;
 mod signin;
 mod still_watching;
+mod syncplay;
 mod track_prefs;
 mod types;
 mod updates;
@@ -51,6 +52,11 @@ pub use settings::{
     SubtitlePositionPreset,
 };
 pub use still_watching::StillWatchingDecision;
+pub use syncplay::{
+    SyncPlayDirective, SyncPlayDirectiveAt, SyncPlayEndCause, SyncPlayGroup, SyncPlayInput,
+    SyncPlayLeaveReason, SyncPlayListener, SyncPlayNotice, SyncPlayPhase, SyncPlayQueueMode,
+    SyncPlayRole, SyncPlaySeverity, SyncPlaySnapshot, SyncPlayUpdate,
+};
 pub use types::{
     AccountIdentity, AccountInfo, AudioSpatialKind, BrowseRead, Card, ChangeEvent, ChapterInfoFfi,
     Decade, DeviceCaps, EmbeddedSubtitleFfi, EpisodeNeighbors, ExternalSubtitleFfi, FailedTrackFfi,

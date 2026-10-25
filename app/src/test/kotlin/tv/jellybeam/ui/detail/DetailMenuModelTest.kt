@@ -491,4 +491,40 @@ class DetailMenuModelTest {
         assertEquals(listOf(MenuAction.AddFavorite, MenuAction.RefreshMetadata), admin)
         assertFalse(buildMenu(strings, boxSetInput(isAdministrator = false)).has(MenuGroup.LIBRARY))
     }
+
+    // -- docs/28 §1: Watch together -------------------------------------------------
+
+    private fun MenuModel.watchTogether(): MenuAction.WatchTogether? =
+        rowsOf(MenuGroup.PLAYBACK).map { it.action }.filterIsInstance<MenuAction.WatchTogether>().singleOrNull()
+
+    @Test
+    fun `watch together holds a playable movie or episode with its resume position`() {
+        val fresh = testCard(id = "movie-1", itemType = "Movie")
+        assertEquals(MenuAction.WatchTogether("movie-1", 0L), buildMenu(strings, movieInput(card = fresh)).watchTogether())
+        val resumed = testCard(id = "movie-2", itemType = "Movie", positionTicks = 9_000L)
+        assertEquals(MenuAction.WatchTogether("movie-2", 9_000L), buildMenu(strings, movieInput(card = resumed)).watchTogether())
+        val episode = testCard(id = "ep-1", itemType = "Episode", positionTicks = 7_000L)
+        assertEquals(MenuAction.WatchTogether("ep-1", 7_000L), buildMenu(strings, episodeInput(card = episode)).watchTogether())
+    }
+
+    @Test
+    fun `watch together on a series holds the episode its play action targets`() {
+        val episodes = listOf(
+            testCard(id = "e1", itemType = "Episode", played = true),
+            testCard(id = "e2", itemType = "Episode", positionTicks = 5_000L, parentIndexNumber = 1, indexNumber = 2),
+        )
+        assertEquals(MenuAction.WatchTogether("e2", 5_000L), buildMenu(strings, seriesInput(allEpisodes = episodes)).watchTogether())
+    }
+
+    @Test
+    fun `watch together is absent without a playable target and on a collection`() {
+        val virtual = testCard(itemType = "Movie", isVirtual = true)
+        assertNull(buildMenu(strings, movieInput(card = virtual, primaryAction = DetailFormatting.PrimaryAction.Unavailable("Coming soon"))).watchTogether())
+        assertNull(buildMenu(strings, movieInput(primaryAction = DetailFormatting.PrimaryAction.None)).watchTogether())
+        val watched = listOf(testCard(id = "e1", itemType = "Episode", played = true))
+        assertNull(buildMenu(strings, seriesInput(allEpisodes = watched)).watchTogether())
+        val boxSet = testCard(id = "set-1", itemType = "BoxSet")
+        val playable = DetailFormatting.PrimaryAction.Playable("Play", "member-1", hasProgress = false)
+        assertNull(buildMenu(strings, movieInput(card = boxSet, primaryAction = playable)).watchTogether())
+    }
 }

@@ -6,6 +6,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
+import uniffi.jellybeam_core.PlayMethodFfi
 import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.TrackDecisionFfi
 
@@ -120,8 +121,10 @@ class FakePlaybackPlayer : PlaybackPlayer {
         tolerateMislabeledLevels: Boolean,
         audioDecoderPreferences: AudioDecoderPreferences,
         fullAssStyling: Boolean,
+        start: LoadStart,
     ) {
         loadedPlan = plan
+        lastLoadStart = start
         lastFullAssStyling = fullAssStyling
         loadedPlans += plan
         delayMemory.load(plan.itemId)
@@ -130,7 +133,27 @@ class FakePlaybackPlayer : PlaybackPlayer {
         currentTracks = null
         lastTolerateMislabeledLevels = tolerateMislabeledLevels
         lastAudioDecoderPreferences = audioDecoderPreferences
-        playWhenReady = true // as PlayerHolder.load
+        // As PlayerHolder.load: a group start sets the position and the play intent.
+        val opening = loadOpening(plan.startPositionTicks, plan.playMethod == PlayMethodFfi.TRANSCODE, start)
+        if (start is LoadStart.GroupExactPaused) positionTicks = PlaybackTicks.msToTicks(opening.startPositionMs)
+        playWhenReady = opening.playWhenReady
+    }
+
+    /** The [LoadStart] the last [load] received. */
+    var lastLoadStart: LoadStart? = null
+        private set
+
+    /** Every [seekGroup] target, in order; [groupLanded] is the owed report, for a test to fire: a seek without one keeps it. */
+    val groupSeekCalls = mutableListOf<Long>()
+    var groupLanded: ((landedTicks: Long, latencyMs: Long) -> Unit)? = null
+
+    override fun seekGroup(targetMs: Long, onLanded: ((landedTicks: Long, latencyMs: Long) -> Unit)?) {
+        groupSeekCalls += targetMs
+        if (onLanded != null) groupLanded = onLanded
+    }
+
+    override fun play() {
+        playWhenReady = true
     }
 
     /** Runs on every [addListener], which is where the real holder first builds its lazy ExoPlayer. */

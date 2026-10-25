@@ -169,6 +169,8 @@ data class DetailUiState(
     val pendingPlayback: PendingPlayback? = null,
     /** A "Go to series" row's target, consumed once by [DetailScreen] to navigate. */
     val pendingSeriesNavigation: Card? = null,
+    /** docs/28 §1: a Watch together row's title, consumed once by [DetailScreen] to open the lobby. */
+    val pendingWatchTogether: MenuAction.WatchTogether? = null,
     /** True once the mirror dropped this Movie/Episode; [DetailScreen] then pops (docs/07 §5). */
     val itemRemoved: Boolean = false,
     /**
@@ -733,6 +735,7 @@ class DetailViewModel(
                 if (target != null) startPlayback(target.id, startFromBeginning = false) else closeMenu()
             }
             is MenuAction.GoToSeries -> _state.update { it.copy(menu = null, pendingSeriesNavigation = action.series) }
+            is MenuAction.WatchTogether -> _state.update { it.copy(menu = null, pendingWatchTogether = action) }
             MenuAction.AddToCollection -> enterCollections()
             MenuAction.RefreshMetadata -> refreshMetadata()
         }
@@ -803,6 +806,11 @@ class DetailViewModel(
     /** [DetailScreen] calls this once it has navigated for [pendingSeriesNavigation]. */
     fun consumePendingSeriesNavigation() {
         _state.update { it.copy(pendingSeriesNavigation = null) }
+    }
+
+    /** [DetailScreen] calls this once it has navigated for [pendingWatchTogether]. */
+    fun consumePendingWatchTogether() {
+        _state.update { it.copy(pendingWatchTogether = null) }
     }
 
     private fun markedWatched() = strings.get(R.string.detail_toast_marked_watched)

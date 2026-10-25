@@ -429,7 +429,8 @@ Session threading rules shared by every path above:
   Picking an ASS or bitmap stream renegotiates with it burned in, picking
   such text renegotiates naming it, and moving off a burned one (Off, a
   sidecar, a delivered track) renegotiates without it; picking the one
-  already burned in is a no-op. A choice changed while a negotiation is
+  already burned in is a no-op; in a watch-together group none of these
+  picks is allowed (docs/28 §1). A choice changed while a negotiation is
   in flight is renegotiated from the landed session before anything loads,
   as often as the choice keeps changing (a landing that contradicts it never
   loads: burned-in pixels can't be turned off), and every renegotiation

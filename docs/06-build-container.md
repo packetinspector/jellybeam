@@ -157,6 +157,12 @@ Repeatable session tooling under `tools/`; each takes `--help`. Device serials c
   the installed version, dexopt status and whether the app is in front. Read-only, no input sent.
 - `tools/emu-signin.sh [showcase|dev12]` — clears the app's data on the emulator and signs in with a
   password (showcase defaults, or `JB_SERVER`/`JB_USER`/`JB_PASS`), succeeding when Home shows.
+- `tools/sp-loop.sh [--server dev12|jswarrm] [--to N] [--skip L]` — the Watch Together device loop
+  (docs/28 §9): two emulators (host and guest, D-pad only) plus a REST/socket bot as the third
+  member, from snapshot load through create, join, start, pause, seeks, a 22-press seek burst, a
+  network drop, end of queue and leave. Drift comes from paired frame-counter captures read by
+  template match (`tools/sp-loop/frames.py`). PASS/FAIL per step and a summary; accounts from a
+  gitignored env file, screenshots and logs under `internal/syncplay/runs/`. Emulator serials only.
 
 ## Signing releases
 

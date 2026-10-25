@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.jellybeam_core.SyncPlayRole
 import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChapterInfoFfi
@@ -55,6 +56,8 @@ import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SubtitleActionFfi
 import uniffi.jellybeam_core.SubtitleDeliveryFfi
+import uniffi.jellybeam_core.SyncPlayInput
+import uniffi.jellybeam_core.SyncPlaySeverity
 import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
@@ -230,7 +233,8 @@ internal const val SKIP_UNDO_WINDOW_MS = 5_000L
  * row, [tv.jellybeam.player.NextUpCard]'s countdown) collect [PlaybackViewModel.positionTicks]
  * directly instead.
  */
-data class PlaybackUiState(
+@ConsistentCopyVisibility
+data class PlaybackUiState internal constructor(
     val phase: Phase = Phase.LOADING,
     val itemName: String = "",
     /** The playing item's `BaseItemKind` string (e.g. `"Movie"`, `"Episode"`), from
@@ -379,6 +383,10 @@ data class PlaybackUiState(
      * [DirectPlayLine] shows just the leading word/color.
      */
     val transcodeReason: String? = null,
+    /** docs/28 §1: the membership this player plays for, `null` while solo; the screen reads the group from its state. */
+    internal val syncPlay: SyncPlayExecutor? = null,
+    /** docs/28 §1: a subtitle pick the group refused, shown once as a notice ([PlaybackViewModel.subtitlePickRefusedShown]). */
+    val subtitlePickRefused: Boolean = false,
 ) {
     enum class Phase { LOADING, READY }
 
@@ -566,7 +574,7 @@ sealed interface PlaybackEvent {
  */
 class PlaybackViewModel(
     private val gateway: CoreGateway,
-    private val playerHolder: PlaybackPlayer,
+    internal val playerHolder: PlaybackPlayer,
     itemId: String,
     private val strings: UiStrings,
     private val reportScope: CoroutineScope = AppGraph.processScope,
@@ -590,6 +598,8 @@ class PlaybackViewModel(
     },
     /** docs/09: the one settings reader (single writer); tests inject a store over their fake. */
     private val settingsStore: SettingsStore = AppGraph.settingsStore,
+    /** docs/28 §4: a player launched for a group plays nothing until the group's Load. */
+    private val forGroup: Boolean = false,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(PlaybackUiState())
@@ -940,13 +950,37 @@ class PlaybackViewModel(
      */
     private var errorDuringNegotiation = false
 
+    /** docs/28 §5: read once per entry point; only [executePort] enters a group and [leaveGroupMode] leaves it. */
+    internal var mode: PlayerMode = PlayerMode.Solo
+        set(value) {
+            field = value
+            // docs/28 §1: the one writer of [PlaybackUiState.syncPlay], so it always names the mode's membership.
+            _state.update { it.copy(syncPlay = (value as? PlayerMode.Group)?.exec) }
+        }
+
+    /** The one port that may act on this player, cleared by [leaveGroupMode]. */
+    internal var attached: AttachedPort? = null
+
+    /** docs/28 §4: the port a group-launched Activity attaches to [exec]; the same membership gets the same port, so a recreated Activity re-attaching changes nothing. */
+    internal fun portFor(exec: SyncPlayExecutor): GroupPort =
+        attached?.takeIf { it.exec === exec } ?: AttachedPort(exec) { port, call -> executePort(port, call) }.also { attached = it }
+
+    /** docs/28 §1: the screen showed the refused-pick notice. */
+    fun subtitlePickRefusedShown() = _state.update { it.copy(subtitlePickRefused = false) }
+
+    /** docs/28 §1: the player read the oldest live notice, so the executor drops it. */
+    fun syncPlayNoticesShown() {
+        (mode as? PlayerMode.Group)?.exec?.send(GroupEvent.NoticesShown(NoticeSurface.Player))
+    }
+
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) = updatePlayState()
         override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = refreshSeekable()
         override fun onPlaybackStateChanged(playbackState: Int) {
             updatePlayState()
-            if (playbackState == Player.STATE_ENDED && playerHolder.playbackState == Player.STATE_ENDED) {
-                handlePlaybackEnded()
+            when (val group = mode) {
+                is PlayerMode.Group -> group.reportState(playbackState, playerHolder)
+                PlayerMode.Solo -> if (playbackState == Player.STATE_ENDED && playerHolder.playbackState == Player.STATE_ENDED) handlePlaybackEnded()
             }
         }
 
@@ -1010,6 +1044,7 @@ class PlaybackViewModel(
             // A network-ish SOURCE/IO error gets a reconnect episode; a
             // codec/renderer/parsing error falls straight to the fatal path.
             if (ReconnectPolicy.isRecoverable(error)) {
+                (mode as? PlayerMode.Group)?.send { GroupEvent.PlayerError(it, SyncPlaySeverity.RECOVERABLE) }
                 beginOrContinueReconnect()
             } else if (!maybeFallBackToTranscode("Playback error: ${error.errorCodeName}", LocalPlayability.failedTrack(error))) {
                 // docs/18 §1's first local-evidence signal (the other is
@@ -1124,6 +1159,7 @@ class PlaybackViewModel(
         if (request == null || liveScope == null) return true
         if (!ownershipOpen(request)) return false
         val plan = currentPlan!! // fallbackPossible() just confirmed this is non-null
+        leaveGroup() // docs/28 §1: a transcode needs a stream of its own
         transcodeFallbackAttempted = true
         sessionFailedTrack = failed
         clearReconnectState()
@@ -1136,6 +1172,7 @@ class PlaybackViewModel(
      * Media3 selection can do either. A no-op unless this owner is live.
      */
     private fun renegotiateForSubtitle() {
+        if (mode is PlayerMode.Group) return // docs/28 §5: the reload would land as a solo resume, not exactly
         val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return
         val request = currentRequest ?: return
         if (liveScope == null || !ownershipOpen(request)) return
@@ -1262,17 +1299,20 @@ class PlaybackViewModel(
         viewModelScope.launch { runCatchingCancellable { gateway.resetStillWatching(clock.nowMs().toULong()) } }
         // Minted at once, so a replacement minted later outranks it; if the launch restore was still
         // running, it is re-minted under the restored epoch -- unless stopped or replaced meanwhile.
-        val initialRequest = claimRequest(fresh = true)
+        val initialRequest = if (forGroup) null else claimRequest(fresh = true)
         viewModelScope.launch {
             gateway.awaitAccountRestored()
             // docs/18 §2.1: from here, leaving the account this owner plays on ends its playback; the
             // core already stopped it. Not before: the launch restore itself moves the epoch.
             viewModelScope.launch {
-                gateway.accountEpochs.collect {
+                gateway.accountEpochs.collect { epochs ->
+                    // docs/28 §4: another account leaves the group without closing the player.
+                    val group = mode as? PlayerMode.Group
+                    if (group != null && group.exec.accountEpoch != epochs.epoch) leaveGroupMode()
                     if (currentRequest?.let { request -> !ownershipOpen(request) } == true) closeForAccountChange()
                 }
             }
-            if (currentRequest != initialRequest) return@launch
+            if (initialRequest == null || currentRequest != initialRequest) return@launch
             start(itemId, remintIfRestored(initialRequest), startFromBeginning = startFromBeginning)
         }
     }
@@ -1333,6 +1373,7 @@ class PlaybackViewModel(
             FailureOutcome.REAUTHORIZE -> PlaybackEvent.ReauthorizationRequired((error as? CoreException.Unauthorized)?.account)
             FailureOutcome.FINISH_WITH_MESSAGE -> PlaybackEvent.FinishWithMessage(error.displayMessage(strings))
         }
+        failGroupMode()
         if (owner is SessionOwner.Playing) finishAfterFatalPlaybackError(error::class.simpleName ?: "CoreException")
         _events.tryEmit(event)
     }
@@ -1345,7 +1386,7 @@ class PlaybackViewModel(
         _events.tryEmit(PlaybackEvent.Finish)
     }
 
-    private suspend fun start(itemId: String, request: PlaybackRequest, startFromBeginning: Boolean = false) {
+    private suspend fun start(itemId: String, request: PlaybackRequest, startFromBeginning: Boolean = false, opening: LoadStart = LoadStart.Resume) {
         PerfLog.markPlayback("viewModel.start")
         // docs/21 §2.1: one line per negotiation attempt, before the network round trip.
         AppGraph.diag.event("playback.prepare") {
@@ -1475,12 +1516,17 @@ class PlaybackViewModel(
             tolerateMislabeledLevels = sessionTolerateMislabeledLevels,
             audioDecoderPreferences = sessionAudioDecoderPreferences,
             fullAssStyling = sessionFullAssStyling,
+            start = opening,
         )
         // The shared PlayerHolder singleton outlives any one session --
         // a previous session's rate must never leak into a freshly loaded item.
         playerHolder.setPlaybackRate(1f)
-        _positionTicks.value = plan.startPositionTicks
-        resumeNoticePending = plan.startPositionTicks > 0L
+        // docs/28 §5: from here a READY is this group load's landing, not the replaced item's.
+        if (opening is LoadStart.GroupExactPaused) (mode as? PlayerMode.Group)?.let { mode = it.copy(loadIssued = true) }
+        // docs/28 §5: a group load opens on the group's position and never resumes a saved one.
+        val startTicks = (opening as? LoadStart.GroupExactPaused)?.ticks ?: plan.startPositionTicks
+        _positionTicks.value = startTicks
+        resumeNoticePending = opening == LoadStart.Resume && startTicks > 0L
         _state.update {
             it.copy(
                 phase = PlaybackUiState.Phase.READY,
@@ -1680,12 +1726,19 @@ class PlaybackViewModel(
                     runCatchingCancellable { gateway.reportPosition(reportTo, ticks) }
                 }
                 if (!scope.isCurrent()) return@launch // docs/18 §2.1: a report held across a newer start evaluates nothing
-                // docs/12 §9: an end-clamped glide commit pauses without
-                // triggering autoplay/up-next/watched-state -- position
-                // reporting and stats above are unaffected.
-                if (!endClampHold) {
-                    evaluateNextUp(scope, ticks)
-                    evaluateAutoSkip(ticks)
+                when (val group = mode) {
+                    // docs/28 §1: in a group the position feeds drift correction; next-up is off and only the host auto-skips.
+                    is PlayerMode.Group -> {
+                        group.send { GroupEvent.Position(it, ticks) }
+                        if (groupRole(group) == SyncPlayRole.HOST) evaluateAutoSkip(ticks)
+                    }
+                    // docs/12 §9: an end-clamped glide commit pauses without
+                    // triggering autoplay/up-next/watched-state -- position
+                    // reporting and stats above are unaffected.
+                    PlayerMode.Solo -> if (!endClampHold) {
+                        evaluateNextUp(scope, ticks)
+                        evaluateAutoSkip(ticks)
+                    }
                 }
             }
         }
@@ -1923,6 +1976,9 @@ class PlaybackViewModel(
      * [PlaybackEvent.AutoSkipped] for the same Undo toast a manual skip shows. A no-op for
      * `PILL`/`NOTHING`, and, via [lastAutoSkipSegmentKey], for a segment already auto-skipped, and on an unseekable file.
      */
+    /** docs/28 §1: this player's role in its group, `null` solo; the skip pill reads it. */
+    internal fun groupRole(): SyncPlayRole? = groupRole(mode)
+
     private fun evaluateAutoSkip(positionTicks: Long) {
         // A transition this tick already started (the next-up countdown ran out at the
         // credits): nothing left to skip in a session being torn down.
@@ -1962,11 +2018,11 @@ class PlaybackViewModel(
      * JellybeamCore owns a single reporting session: the final stop must finish before
      * `preparePlayback` replaces it, and only the newest [request] gets that far (docs/18 §2.1).
      */
-    private suspend fun replaceWith(itemId: String, request: PlaybackRequest, startFromBeginning: Boolean = false) {
+    private suspend fun replaceWith(itemId: String, request: PlaybackRequest, startFromBeginning: Boolean = false, opening: LoadStart = LoadStart.Resume) {
         stopPlaybackAndAwait(keep = request)
         gateway.awaitAccountRestored()
         if (currentRequest != request) return
-        start(itemId, remintIfRestored(request), startFromBeginning)
+        start(itemId, remintIfRestored(request), startFromBeginning, opening)
     }
 
     /** docs/18 §2.1: a request minted before the launch restore moved the epoch is re-minted; any
@@ -1981,9 +2037,15 @@ class PlaybackViewModel(
      * included, is obsolete and its plan abandoned (docs/18 §2.1).
      */
     fun replaceItem(itemId: String, startFromBeginning: Boolean = false) {
+        leaveGroup() // docs/28 §4: picking other content leaves the group first
+        replace(itemId, startFromBeginning, LoadStart.Resume)
+    }
+
+    /** The newest request's stop-then-start, for an intent and for the group's Load. */
+    internal fun replace(itemId: String, startFromBeginning: Boolean, opening: LoadStart) {
         // Minted now, so an initial prepare still negotiating is already obsolete (docs/18 §2.1).
         val request = claimRequest(fresh = true)
-        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { replaceWith(itemId, request, startFromBeginning) } // as transitionTo
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { replaceWith(itemId, request, startFromBeginning, opening) } // as transitionTo
     }
 
     /** Autoplay/"Play now": advances to the next-up card's episode via [transitionTo]. A no-op if
@@ -1998,6 +2060,7 @@ class PlaybackViewModel(
      * [previousEpisode]. A no-op when none is known.
      */
     fun playPrevious() {
+        (mode as? PlayerMode.Group)?.let { return it.request(SyncPlayInput.Prev) } // docs/28 §4: the group's queue
         val previous = previousEpisode ?: return
         transitionTo(previous)
     }
@@ -2007,6 +2070,7 @@ class PlaybackViewModel(
      * when none is known.
      */
     fun playNextEpisode() {
+        (mode as? PlayerMode.Group)?.let { return it.request(SyncPlayInput.Next) } // docs/28 §4: the group's queue
         val next = nextEpisode ?: return
         transitionTo(next)
     }
@@ -2478,7 +2542,9 @@ class PlaybackViewModel(
      */
     fun chooseSubtitle(id: Long) {
         val tracks = playerHolder.currentTracks ?: return
-        streamRowIndexOf(id)?.let { return chooseStreamRow(id, tracks) }
+        val streamRow = streamRowIndexOf(id) != null
+        if (groupRefusesSubtitlePick(mode, currentPlan, streamRow)) return _state.update { it.copy(subtitlePickRefused = true) }
+        if (streamRow) return chooseStreamRow(id, tracks)
         val trackInfos = allTrackInfos(tracks)
         val info = trackInfos.firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.id == id }
         if (id != TRACK_PICKER_SUBTITLE_OFF_ID && info == null) return
@@ -2725,7 +2791,10 @@ class PlaybackViewModel(
         )
     }
 
-    fun togglePlayPause() = playerHolder.togglePlayPause()
+    fun togglePlayPause() {
+        val group = mode as? PlayerMode.Group ?: return playerHolder.togglePlayPause()
+        group.request(if (playerHolder.playWhenReady) SyncPlayInput.Pause else SyncPlayInput.Unpause)
+    }
 
     /** The play/pause intent, which [MediaKeyRouter] reads so a repeated Play or Pause never toggles. */
     val playWhenReady: Boolean get() = playerHolder.playWhenReady
@@ -2738,7 +2807,7 @@ class PlaybackViewModel(
     /** docs/17 §2: the one end the viewer asked for. [stopPlaybackOnce] is the exactly-once guard and
      * retires any pending request; with the still-watching card up it is that card's Stop, as Back.
      */
-    private fun finishAfterStop(reason: String) {
+    internal fun finishAfterStop(reason: String) {
         if (_state.value.stillWatching != null) return stillWatchingStop()
         stopPlaybackOnce(reason = reason)
         _events.tryEmit(PlaybackEvent.Finish)
@@ -2754,6 +2823,7 @@ class PlaybackViewModel(
      * [PlaybackUiState.speedMenuOpen] -- it stays open after a selection per spec.
      */
     fun setPlaybackRate(rate: Float) {
+        if (mode is PlayerMode.Group) return // docs/28 §1: a group plays at 1x
         playerHolder.setPlaybackRate(rate)
         _state.update { it.copy(playbackRate = rate) }
     }
@@ -2798,11 +2868,20 @@ class PlaybackViewModel(
      */
     private fun performSeek(deltaMs: Long, extraClampMs: Long? = null): Long? {
         if (!seekAllowed()) return null
-        val currentMs = PlaybackTicks.ticksToMs(_positionTicks.value)
+        val group = mode as? PlayerMode.Group
+        // docs/28 §4: a group tap adds to its newest ask still on its way, else to the player, which a group seek moves at once.
+        val currentMs = PlaybackTicks.ticksToMs(group?.let { it.pendingSeeks.lastOrNull() ?: playerHolder.currentPositionTicks() } ?: _positionTicks.value)
         val durationMs = _state.value.durationTicks?.let { PlaybackTicks.ticksToMs(it) }
         var targetMs = SeekMath.clampSeekTarget(currentMs, deltaMs, durationMs)
         val boundByExtraClamp = extraClampMs != null && targetMs > extraClampMs
         if (boundByExtraClamp) targetMs = extraClampMs
+        // docs/28 §4: the target goes to the group, and glide still tracks it while the player waits.
+        if (group != null) {
+            val targetTicks = PlaybackTicks.msToTicks(targetMs)
+            group.request(SyncPlayInput.Seek(targetTicks))
+            mode = group.copy(pendingSeeks = group.pendingSeeks + targetTicks)
+            return targetMs
+        }
 
         beginSeekBufferingGrace()
         // The player clamps a raw delta against its own exact live position; only re-derive the
@@ -2833,6 +2912,11 @@ class PlaybackViewModel(
      */
     fun commitGlide(targetMs: Long, endClamped: Boolean) {
         if (!seekAllowed()) return
+        // docs/28 §4: the group owns play state, so an end-clamped commit is a plain seek request.
+        if (mode is PlayerMode.Group) {
+            seekToAbsoluteTicks(PlaybackTicks.msToTicks(targetMs))
+            return
+        }
         if (endClamped) {
             // First entry captures where the viewer really was; a repeat end-clamp commit while
             // already holding keeps that.
@@ -2894,6 +2978,10 @@ class PlaybackViewModel(
         val currentMs = PlaybackTicks.ticksToMs(_positionTicks.value)
         val durationMs = _state.value.durationTicks?.let { PlaybackTicks.ticksToMs(it) }
         val targetMs = SeekMath.clampSeekTarget(currentMs, PlaybackTicks.ticksToMs(targetTicks) - currentMs, durationMs)
+        (mode as? PlayerMode.Group)?.let { group ->
+            group.request(SyncPlayInput.Seek(PlaybackTicks.msToTicks(targetMs)))
+            return true
+        }
         beginSeekBufferingGrace()
         playerHolder.seekBy(targetMs - currentMs)
         _positionTicks.value = PlaybackTicks.msToTicks(targetMs)
@@ -2951,6 +3039,7 @@ class PlaybackViewModel(
      * in-flight library-info request too, since its result would populate a panel nobody can see.
      */
     fun openSpeedMenu() {
+        if (mode is PlayerMode.Group) return // docs/28 §1: a group plays at 1x
         open(OpenSurface.Speed)
     }
 
@@ -3085,6 +3174,11 @@ class PlaybackViewModel(
      * free text.
      */
     fun stopPlaybackOnce(reason: String = "normal") {
+        // docs/28 §4: before the once-guard, so a player closed with no session left still leaves its group.
+        (mode as? PlayerMode.Group)?.let {
+            it.send(GroupEvent::PlayerClosed)
+            leaveGroupMode()
+        }
         val snapshot = endSessionForStop() ?: return
         recordPlaybackStop(snapshot, reason)
         launchFinalStop(snapshot)
@@ -3105,12 +3199,15 @@ class PlaybackViewModel(
      */
     private fun launchFinalStop(snapshot: StopSnapshot): CompletableDeferred<Unit> {
         val landing = CompletableDeferred<Unit>().also { stopLanding = it }
+        // docs/28 §3.3: counted before the launch, so a create never misses a stop not yet dispatched.
+        playbackActivityTracker.onFinalStopLaunched()
         // Survives teardown: once captured, this stop is the only thing that ends the session it
         // names, a landed fallback included (see adoptPlan).
         reportScope.launch {
             try {
                 withContext(NonCancellable) { runCatchingCancellable { gateway.stopPlayback(snapshot.playSessionId, snapshot.ticks) } }
             } finally {
+                playbackActivityTracker.onFinalStopHandedOff()
                 landing.complete(Unit)
             }
         }
@@ -3195,6 +3292,7 @@ class PlaybackViewModel(
             tag("code", errorCode)
             ms("posMs", PlaybackTicks.ticksToMs(_positionTicks.value))
         }
+        failGroupMode()
         if (playbackWasActive) stopPlaybackOnce(reason = "error") else abandonPlaybackOnce()
     }
 
@@ -3221,10 +3319,11 @@ class PlaybackViewModelFactory(
     private val startFromBeginning: Boolean = false,
     private val strings: UiStrings,
     private val sheetFetcher: SheetFetcher? = null,
+    private val forGroup: Boolean = false,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(PlaybackViewModel::class.java))
-        return PlaybackViewModel(gateway, playerHolder, itemId, strings, startFromBeginning = startFromBeginning, sheetFetcher = sheetFetcher) as T
+        return PlaybackViewModel(gateway, playerHolder, itemId, strings, startFromBeginning = startFromBeginning, sheetFetcher = sheetFetcher, forGroup = forGroup) as T
     }
 }

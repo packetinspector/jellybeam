@@ -35,4 +35,22 @@ class PlaybackActivityTrackerTest {
         runCurrent()
         assertTrue(idle.isCompleted)
     }
+
+    @Test
+    fun `final stops are awaited until each has reached the core`() = runTest {
+        val tracker = PlaybackActivityTracker()
+        tracker.onFinalStopLaunched()
+        tracker.onFinalStopLaunched()
+        val idle = async { tracker.awaitFinalStops() }
+        runCurrent()
+        assertFalse(idle.isCompleted)
+
+        tracker.onFinalStopHandedOff()
+        runCurrent()
+        assertFalse(idle.isCompleted)
+
+        tracker.onFinalStopHandedOff()
+        runCurrent()
+        assertTrue(idle.isCompleted)
+    }
 }

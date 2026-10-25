@@ -16,6 +16,7 @@ use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::models;
+use crate::syncplay::SyncPlayEvent;
 use crate::util::{describe_error_chain, percent_encode};
 use crate::{auth_header, ApiError, ClientIdentity, ServerEvent};
 
@@ -236,6 +237,20 @@ fn decode_frame(text: &str) -> Option<(ServerEvent, Option<u64>)> {
             keep_alive = value.get("Data").and_then(|d| d.as_u64());
             ServerEvent::ForceKeepAlive
         }
+        "SyncPlayCommand" | "SyncPlayGroupUpdate" => {
+            let data = value
+                .get("Data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            match SyncPlayEvent::decode(message_type, data) {
+                Some(event) => ServerEvent::SyncPlay(event),
+                None => {
+                    // No error text: serde quotes the offending value, which may be a user name.
+                    tracing::debug!(message_type, "failed to decode SyncPlay frame");
+                    ServerEvent::Ignored(message_type.to_string())
+                }
+            }
+        }
         other => ServerEvent::Ignored(other.to_string()),
     };
 
@@ -245,6 +260,7 @@ fn decode_frame(text: &str) -> Option<(ServerEvent, Option<u64>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syncplay::GroupUpdate;
 
     /// A 401 during the WS upgrade maps to `ApiError::Unauthorized`, not a generic
     /// `Transport` error.
@@ -382,6 +398,207 @@ mod tests {
         match decode_message(raw) {
             Some(ServerEvent::Ignored(name)) => assert_eq!(name, "LibraryChanged"),
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    const GROUP: &str = "00000000-0000-4000-8000-000000000001";
+    const ITEM: &str = "00000000-0000-4000-8000-000000000002";
+    const PLAYLIST_ITEM: &str = "00000000-0000-4000-8000-000000000003";
+
+    fn group_update_frame(kind: &str, data: &str) -> String {
+        format!(
+            r#"{{"MessageType":"SyncPlayGroupUpdate","Data":{{"GroupId":"{GROUP}","Data":{data},"Type":"{kind}"}}}}"#
+        )
+    }
+
+    fn command_frame(command: &str, position_ticks: &str) -> String {
+        format!(
+            r#"{{"MessageType":"SyncPlayCommand","Data":{{"GroupId":"{GROUP}","PlaylistItemId":"{PLAYLIST_ITEM}","When":"2026-01-01T00:00:01.5Z","PositionTicks":{position_ticks},"Command":"{command}","EmittedAt":"2026-01-01T00:00:01Z"}}}}"#
+        )
+    }
+
+    fn group_update(raw: &str) -> (Option<uuid::Uuid>, GroupUpdate) {
+        match decode_message(raw) {
+            Some(ServerEvent::SyncPlay(SyncPlayEvent::GroupUpdate { group_id, update })) => {
+                (group_id, update)
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// The first `Type` of `SyncPlayGroupUpdate`: a join carries the group, and the envelope's
+    /// `GroupId` is kept.
+    #[test]
+    fn decodes_sync_play_group_joined() {
+        let data = r#"{"GroupId":"00000000-0000-4000-8000-000000000001","GroupName":"ABC234","State":"Idle","Participants":["member-a"],"LastUpdatedAt":"2026-01-01T00:00:00Z"}"#;
+        let (group_id, update) = group_update(&group_update_frame("GroupJoined", data));
+        assert_eq!(group_id.map(|g| g.to_string()).as_deref(), Some(GROUP));
+        let GroupUpdate::GroupJoined(info) = update else {
+            panic!("expected GroupJoined, got {update:?}");
+        };
+        assert_eq!(info.group_name.as_deref(), Some("ABC234"));
+        assert_eq!(info.state, Some(models::GroupStateType::Idle));
+        assert_eq!(info.participants, vec!["member-a".to_string()]);
+    }
+
+    #[test]
+    fn decodes_every_sync_play_group_update_type() {
+        let queue = format!(
+            r#"{{"Reason":"NewPlaylist","LastUpdate":"2026-01-01T00:00:00Z","Playlist":[{{"ItemId":"{ITEM}","PlaylistItemId":"{PLAYLIST_ITEM}"}}],"PlayingItemIndex":0,"StartPositionTicks":0,"IsPlaying":false,"ShuffleMode":"Sorted","RepeatMode":"RepeatNone"}}"#
+        );
+        let cases: [(&str, &str); 9] = [
+            ("StateUpdate", r#"{"State":"Playing","Reason":"Unpause"}"#),
+            ("PlayQueue", &queue),
+            ("UserJoined", r#""member-b""#),
+            ("UserLeft", r#""member-b""#),
+            ("GroupLeft", r#""00000000-0000-4000-8000-000000000001""#),
+            ("NotInGroup", r#""00000000-0000-4000-8000-000000000001""#),
+            (
+                "GroupDoesNotExist",
+                r#""00000000-0000-4000-8000-000000000001""#,
+            ),
+            (
+                "LibraryAccessDenied",
+                r#""00000000-0000-4000-8000-000000000001""#,
+            ),
+            ("GroupJoined", r#"{"GroupName":"ABC234"}"#),
+        ];
+        for (kind, data) in cases {
+            let (_, update) = group_update(&group_update_frame(kind, data));
+            assert_eq!(format!("{update:?}"), kind, "Type {kind} decoded wrongly");
+        }
+
+        let (_, update) = group_update(&group_update_frame("PlayQueue", &queue));
+        let GroupUpdate::PlayQueue(q) = update else {
+            panic!("expected PlayQueue")
+        };
+        assert_eq!(q.reason, Some(models::PlayQueueUpdateReason::NewPlaylist));
+        assert_eq!(q.playlist.len(), 1);
+        assert_eq!(
+            q.playlist[0]
+                .playlist_item_id
+                .map(|i| i.to_string())
+                .as_deref(),
+            Some(PLAYLIST_ITEM)
+        );
+        assert_eq!(q.playing_item_index, Some(0));
+        assert_eq!(q.is_playing, Some(false));
+
+        let (_, update) = group_update(&group_update_frame("UserJoined", r#""member-b""#));
+        assert!(matches!(update, GroupUpdate::UserJoined(name) if name == "member-b"));
+        let (_, update) = group_update(&group_update_frame(
+            "StateUpdate",
+            r#"{"State":"Waiting","Reason":"Seek"}"#,
+        ));
+        let GroupUpdate::StateUpdate(state) = update else {
+            panic!("expected StateUpdate")
+        };
+        assert_eq!(state.state, Some(models::GroupStateType::Waiting));
+        assert_eq!(state.reason, Some(models::PlaybackRequestType::Seek));
+    }
+
+    #[test]
+    fn decodes_each_sync_play_command_kind() {
+        for (wire, want) in [
+            ("Unpause", models::SendCommandType::Unpause),
+            ("Pause", models::SendCommandType::Pause),
+            ("Stop", models::SendCommandType::Stop),
+            ("Seek", models::SendCommandType::Seek),
+        ] {
+            match decode_message(&command_frame(wire, "123")) {
+                Some(ServerEvent::SyncPlay(SyncPlayEvent::Command(cmd))) => {
+                    assert_eq!(cmd.command, Some(want), "{wire}");
+                    assert_eq!(cmd.position_ticks, Some(123));
+                    assert_eq!(cmd.group_id.map(|g| g.to_string()).as_deref(), Some(GROUP));
+                    assert_eq!(
+                        cmd.playlist_item_id.map(|i| i.to_string()).as_deref(),
+                        Some(PLAYLIST_ITEM)
+                    );
+                    assert!(cmd.when.is_some() && cmd.emitted_at.is_some());
+                }
+                other => panic!("{wire}: unexpected: {other:?}"),
+            }
+        }
+    }
+
+    /// Jellyfin's web client reads 0 as "no position"; here 0 stays a real position and an absent
+    /// one stays `None`.
+    #[test]
+    fn sync_play_command_position_zero_is_some_zero() {
+        let position = |raw: &str| match decode_message(raw) {
+            Some(ServerEvent::SyncPlay(SyncPlayEvent::Command(cmd))) => cmd.position_ticks,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(position(&command_frame("Stop", "0")), Some(0));
+        assert_eq!(position(&command_frame("Stop", "null")), None);
+    }
+
+    #[test]
+    fn unknown_sync_play_values_are_tolerated() {
+        let (_, update) = group_update(&group_update_frame("SomeFutureType", r#"{"x":1}"#));
+        assert!(matches!(update, GroupUpdate::Unknown(kind) if kind == "SomeFutureType"));
+
+        let (_, update) = group_update(&group_update_frame(
+            "StateUpdate",
+            r#"{"State":"FutureState","Reason":"FutureReason"}"#,
+        ));
+        let GroupUpdate::StateUpdate(state) = update else {
+            panic!("expected StateUpdate")
+        };
+        assert_eq!(state.state, Some(models::GroupStateType::Unrecognized));
+        assert_eq!(
+            state.reason,
+            Some(models::PlaybackRequestType::Unrecognized)
+        );
+
+        match decode_message(&command_frame("FutureCommand", "1")) {
+            Some(ServerEvent::SyncPlay(SyncPlayEvent::Command(cmd))) => {
+                assert_eq!(cmd.command, Some(models::SendCommandType::Unrecognized));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Same convention as `LibraryChanged`: a known message type whose `Data` has the wrong shape
+    /// still surfaces, as `Ignored` by name.
+    #[test]
+    fn sync_play_frames_with_missing_or_malformed_data_fall_back_to_ignored() {
+        let cases = [
+            (r#"{"MessageType":"SyncPlayCommand"}"#, "SyncPlayCommand"),
+            (
+                r#"{"MessageType":"SyncPlayCommand","Data":"unexpected-string"}"#,
+                "SyncPlayCommand",
+            ),
+            (
+                r#"{"MessageType":"SyncPlayGroupUpdate"}"#,
+                "SyncPlayGroupUpdate",
+            ),
+            (
+                r#"{"MessageType":"SyncPlayGroupUpdate","Data":"unexpected-string"}"#,
+                "SyncPlayGroupUpdate",
+            ),
+            (
+                r#"{"MessageType":"SyncPlayGroupUpdate","Data":{"GroupId":"00000000-0000-4000-8000-000000000001"}}"#,
+                "SyncPlayGroupUpdate",
+            ),
+        ];
+        for (raw, name) in cases {
+            match decode_message(raw) {
+                Some(ServerEvent::Ignored(got)) => assert_eq!(got, name, "{raw}"),
+                other => panic!("{raw}: unexpected: {other:?}"),
+            }
+        }
+        for (kind, data) in [
+            ("GroupJoined", "\"not-a-group\""),
+            ("StateUpdate", "5"),
+            ("PlayQueue", "null"),
+            ("UserJoined", "{}"),
+            ("GroupLeft", "null"),
+        ] {
+            match decode_message(&group_update_frame(kind, data)) {
+                Some(ServerEvent::Ignored(got)) => assert_eq!(got, "SyncPlayGroupUpdate", "{kind}"),
+                other => panic!("{kind}: unexpected: {other:?}"),
+            }
         }
     }
 

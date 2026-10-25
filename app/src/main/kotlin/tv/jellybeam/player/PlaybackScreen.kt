@@ -47,10 +47,12 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -118,6 +120,8 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import tv.jellybeam.AppGraph
+import tv.jellybeam.data.runCatchingCancellable
+import tv.jellybeam.ui.watchtogether.activeUserName
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
@@ -140,6 +144,7 @@ import uniffi.jellybeam_core.MediaStreamKind
 import uniffi.jellybeam_core.OsdDetailSetting
 import uniffi.jellybeam_core.PlaybackOsdDetail
 import uniffi.jellybeam_core.PlayMethodFfi
+import uniffi.jellybeam_core.SyncPlayGroup
 import uniffi.jellybeam_core.TrickplayMetaFfi
 import uniffi.jellybeam_core.TrickplayTileFfi
 
@@ -198,6 +203,9 @@ private object OsdColor {
 /** docs/12 §2's safe inset, for overlays that only need to clear the control zone. */
 private val OSD_MARGIN = Osd.SAFE_INSET
 
+/** docs/28 §1 (1f): the group readout's top inset. */
+private val GROUP_READOUT_TOP = 28.dp
+
 private const val IDLE_TICK_MS = 250L
 
 /** docs/12 §9: fixed cadence, one FFI call per tick. Independent of [IDLE_TICK_MS] since the glide
@@ -246,13 +254,15 @@ fun visibleControls(
     hasPrev: Boolean,
     hasNext: Boolean,
     hasChapters: Boolean,
+    group: Boolean,
 ): List<ControlButton> = buildList {
     if (isEpisode && hasPrev) add(ControlButton.PREV_EPISODE)
     add(ControlButton.SKIP_BACK)
     add(ControlButton.PLAY_PAUSE)
     add(ControlButton.SKIP_FORWARD)
     if (isEpisode && hasNext) add(ControlButton.NEXT_EPISODE)
-    if (osdDetail == OsdDetailSetting.FULL) add(ControlButton.SPEED)
+    // docs/28 §1: a group plays at one speed, so its menu is off.
+    if (osdDetail == OsdDetailSetting.FULL && !group) add(ControlButton.SPEED)
     add(ControlButton.TRACKS)
     if (hasChapters) add(ControlButton.CHAPTERS)
     add(ControlButton.LIBRARY_INFO)
@@ -701,6 +711,15 @@ fun PlaybackScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val previewTile by viewModel.previewTile.collectAsState()
+    // docs/28 §1, §8: only a group player reads its executor; a solo one collects and composes nothing for it.
+    val group = state.syncPlay?.let { exec ->
+        key(exec) {
+            val execState = exec.state.collectAsState()
+            // docs/28 §1: a host marks its own name "(host)", so a group player reads the account name once.
+            val ownName = produceState<String?>(null) { value = runCatchingCancellable { activeUserName(AppGraph.gateway) }.getOrNull() }
+            remember { derivedStateOf { groupOsd(execState.value, ownName.value) } }.value
+        }
+    }
     val context = LocalContext.current
     val strings = rememberUiStrings()
     val captioningManager = remember(context) { context.getSystemService(CaptioningManager::class.java) }
@@ -814,13 +833,14 @@ fun PlaybackScreen(
     // reorder), feeding the speed/chapters menu anchor.
     val buttonCentersPx = remember { mutableStateOf(emptyMap<ControlButton, Float>()) }
 
-    val visibleButtons = remember(state.osdDetail, state.itemType, state.hasPreviousEpisode, state.hasNextEpisode, state.chapters, state.seekability) {
+    val visibleButtons = remember(state.osdDetail, state.itemType, state.hasPreviousEpisode, state.hasNextEpisode, state.chapters, state.seekability, state.syncPlay) {
         visibleControls(
             osdDetail = state.osdDetail,
             isEpisode = state.itemType == "Episode",
             hasPrev = state.hasPreviousEpisode,
             hasNext = state.hasNextEpisode,
             hasChapters = SeekGuard.chaptersButtonVisible(state.chapters.isNotEmpty(), state.seekability),
+            group = state.syncPlay != null,
         )
     }
 
@@ -868,7 +888,12 @@ fun PlaybackScreen(
         hasPrev = state.hasPreviousEpisode,
         hasNext = state.hasNextEpisode,
         hasChapters = SeekGuard.chaptersButtonVisible(state.chapters.isNotEmpty(), state.seekability),
+        group = state.syncPlay != null,
     )
+
+    /** docs/28 §1: the waiting pill against [viewModel]'s current state, for the key handler. */
+    fun currentLeaveShown(state: PlaybackUiState = viewModel.state.value): Boolean =
+        state.leavePillVisible(state.syncPlay?.state?.value?.let { groupOsd(it, ownName = null) })
 
     /** docs/15 §4: every nested-surface close routes through here. Resolves [menuInvoker] against
      * the current button set via [resolveInvokerReturn], then consumes it. */
@@ -930,10 +955,8 @@ fun PlaybackScreen(
             activeSegment = if (viewModel.state.value.skipUndo == null) {
                 SkipSegment.activeSegment(state.mediaSegments, viewModel.positionTicks.value)
                     ?.takeIf {
-                        SeekGuard.segmentDecision(
-                            SkipSegment.decision(it.segmentType, state.skipSegmentActions),
-                            viewModel.state.value.seekability,
-                        ) == SegmentDecision.PILL
+                        val decision = SeekGuard.segmentDecision(SkipSegment.decision(it.segmentType, state.skipSegmentActions), viewModel.state.value.seekability)
+                        groupSegmentDecision(decision, viewModel.groupRole()) == SegmentDecision.PILL
                     }
             } else {
                 null
@@ -941,8 +964,10 @@ fun PlaybackScreen(
         }
     }
 
-    LaunchedEffect(state.isPaused) {
-        osd.onPausedChanged(state.isPaused)
+    // docs/28 §4: also keyed on the group's wait, since a group paused out of Waiting brings no new pause edge.
+    LaunchedEffect(state.isPaused, group?.waiting) {
+        // The phase is read at the edge, not from this composition, so a group seek's hold is seen as Waiting.
+        osd.onPausedChanged(state.isPaused, (viewModel.state.value.syncPlay?.state?.value?.group as? SyncPlayGroup.Member)?.phase)
         // docs/12 §16: pausing under the delay control does not bring the OSD back.
         if (viewModel.state.value.subtitleDelay != null) osd.hide()
         osdVisible = osd.isVisible
@@ -956,12 +981,14 @@ fun PlaybackScreen(
         }
     }
 
-    // docs/12 §9's "never auto-hide while..." list, minus paused (handled above).
+    // docs/12 §9's "never auto-hide while..." list, minus paused (handled above); docs/28 §6: the stall prompt's edge
+    // reveals the OSD, so a stuck group shows its pill and Leave while a seek's short Waiting stays hidden.
     val pinned = state.openSurface.pinsOsd ||
         state.nextUp != null ||
         state.stillWatching != null ||
         trickplayPreviewState != null ||
-        state.reconnecting != null
+        state.reconnecting != null ||
+        group?.prompt == true
     LaunchedEffect(pinned) {
         osd.setPinned(pinned)
         // docs/12 §16: a pin edge (e.g. reconnecting) under the delay strip keeps the OSD hidden.
@@ -1023,10 +1050,30 @@ fun PlaybackScreen(
         if (state.chaptersMenuOpen) chaptersMenuFocusIndex = Chapters.currentChapterIndex(state.chapters, viewModel.positionTicks.value) ?: 0
     }
 
-    // docs/12 §14: a pill that vanishes or an OSD that hides hands the ring back to the buttons.
-    val pillVisible = state.skipPillVisible(activeSegment)
+    // docs/12 §14: a pill that vanishes or an OSD that hides hands the ring back to the buttons; in a group
+    // the waiting pill takes the skip pill's place (docs/28 §1).
+    val leaveVisible = state.leavePillVisible(group)
+    val pillVisible = state.skipPillVisible(activeSegment) || leaveVisible
     LaunchedEffect(pillVisible, osdVisible) {
         pillFocused = SkipSelectRouting.pillStaysFocused(pillFocused, osdVisible, pillVisible)
+    }
+
+    // docs/28 §1: the group helper line shows on the first OSD reveal of a membership only.
+    val groupHelper = if (group != null) {
+        var helper by remember { mutableStateOf(HelperLine.Pending) }
+        LaunchedEffect(osdVisible) { helper = helperAfter(helper, osdVisible) }
+        helperShown(helper, osdVisible)
+    } else {
+        false
+    }
+
+    // docs/28 §1: a subtitle pick the group refused shows as a notice.
+    LaunchedEffect(state.subtitlePickRefused) {
+        if (state.subtitlePickRefused) {
+            noticeText = R.string.wt_subtitle_refused
+            noticeToken++
+            viewModel.subtitlePickRefusedShown()
+        }
     }
 
     LaunchedEffect(noticeToken) {
@@ -1384,10 +1431,11 @@ fun PlaybackScreen(
                 }
                 in SELECT_KEYS -> {
                     val segment = activeSegment
+                    val leaveShown = currentLeaveShown(current)
                     val route = SkipSelectRouting.resolveSelect(
                         osdVisible = true,
                         pillFocused = pillFocused,
-                        segmentShown = current.skipPillVisible(segment),
+                        segmentShown = current.skipPillVisible(segment) || leaveShown,
                         undoShown = viewModel.state.value.skipUndo != null,
                         nextUpShown = current.nextUp != null,
                         stillWatchingShown = current.stillWatching != null,
@@ -1397,6 +1445,10 @@ fun PlaybackScreen(
                         if (event.nativeKeyEvent.repeatCount == 0) viewModel.playNext()
                     } else if (route == SelectRoute.SKIP_SEGMENT && segment != null) {
                         skipSegmentNow(segment)
+                    } else if (route == SelectRoute.SKIP_SEGMENT && leaveShown) {
+                        // docs/28 §4: Leave on the waiting pill; the player plays on solo.
+                        pillFocused = false
+                        viewModel.leaveGroup()
                     } else {
                         val focused = focusedButton
                         if (focused != null) {
@@ -1447,7 +1499,7 @@ fun PlaybackScreen(
                 Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
                     osd.onKeyEvent()
                     osdVisible = true
-                    val move = SkipSelectRouting.pillFocusMove(event.key, osdVisible, pillFocused, current.skipPillVisible(activeSegment))
+                    val move = SkipSelectRouting.pillFocusMove(event.key, osdVisible, pillFocused, current.skipPillVisible(activeSegment) || currentLeaveShown(current))
                     if (move == PillFocusMove.FOCUS_PILL) {
                         pillFocused = true
                     } else if (move == PillFocusMove.RETURN_TO_BUTTONS) {
@@ -1596,6 +1648,7 @@ fun PlaybackScreen(
                 directPlayDetail = state.playbackStatsDetail,
                 visibleButtons = visibleButtons,
                 focusedButton = if (pillFocused) null else focusedButton,
+                groupHelper = groupHelper,
                 positionTicks = viewModel.positionTicks,
                 bufferedPositionTicks = viewModel.bufferedPositionTicks,
                 onButtonCentersMeasured = { buttonCentersPx.value = it },
@@ -1766,6 +1819,16 @@ fun PlaybackScreen(
                     )
                 }
             }
+            // docs/28 §1, §6: above the whole OSD block, which the helper line makes taller than the control zone.
+            if (leaveVisible && osdVisible && group != null) {
+                GroupWaitingPill(
+                    prompt = group.prompt,
+                    leaveFocused = pillFocused,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = OSD_MARGIN, bottom = with(density) { menuBottomPx(osdBlockHeightPx, state.osdDetail, density).toDp() } + 16.dp),
+                )
+            }
             // One top-centre slot. The notice (docs/12 §9: informational, no key route reads it)
             // outranks the Undo toast, which is drawn only while Select would undo, i.e. with the
             // OSD hidden (docs/12 §14); Select still undoes underneath a notice.
@@ -1787,15 +1850,19 @@ fun PlaybackScreen(
             }
         }
 
-        if (state.phase == PlaybackUiState.Phase.READY) {
-            state.bufferingInfo?.let { info ->
-                BufferingPill(info = info, modifier = Modifier.align(Alignment.TopEnd).padding(OSD_MARGIN))
-            }
-        }
-
-        if (state.phase == PlaybackUiState.Phase.READY) {
-            state.reconnecting?.let { reconnecting ->
-                ReconnectingPill(info = reconnecting, modifier = Modifier.align(Alignment.TopEnd).padding(OSD_MARGIN))
+        if (state.phase == PlaybackUiState.Phase.READY && (group != null || state.bufferingInfo != null || state.reconnecting != null)) {
+            // docs/28 §1: the group readout heads the top-right stack, so the status pills sit under it.
+            Column(
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = if (group != null) GROUP_READOUT_TOP else OSD_MARGIN, end = OSD_MARGIN),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                group?.let {
+                    val sheetOpen = state.statsSheetLive != null || state.libraryInfoOverlay != null
+                    GroupReadout(group = it, osdVisible = osdVisible, sheetOpen = sheetOpen, onNoticeRead = viewModel::syncPlayNoticesShown)
+                }
+                state.bufferingInfo?.let { BufferingPill(info = it) }
+                state.reconnecting?.let { ReconnectingPill(info = it) }
             }
         }
         }
@@ -1850,6 +1917,7 @@ private fun OsdBlock(
     directPlayDetail: PlaybackOsdDetail?,
     visibleButtons: List<ControlButton>,
     focusedButton: ControlButton?,
+    groupHelper: Boolean,
     positionTicks: StateFlow<Long>,
     bufferedPositionTicks: StateFlow<Long>,
     onButtonCentersMeasured: (Map<ControlButton, Float>) -> Unit,
@@ -1869,6 +1937,7 @@ private fun OsdBlock(
             positionTicks = positionTicks,
             bufferedPositionTicks = bufferedPositionTicks,
         )
+        if (groupHelper) GroupHelperLine()
         OsdButtonRow(
             state = state,
             visibleButtons = visibleButtons,
@@ -3219,6 +3288,9 @@ private val PlaybackUiState.playerMenuOpen: Boolean
 private fun PlaybackUiState.skipPillVisible(segment: MediaSegment?): Boolean =
     SkipSelectRouting.pillVisible(segment != null, nextUp != null || stillWatching != null, playerMenuOpen)
 
+/** docs/28 §1: the waiting pill shows while the group waits, under no player menu, in the skip pill's place. */
+private fun PlaybackUiState.leavePillVisible(group: GroupOsd?): Boolean = group?.waiting == true && !playerMenuOpen
+
 private val SKIP_PILL_RADIUS = 6.dp
 private val SKIP_UNDO_TOAST_RADIUS = 8.dp
 
@@ -3281,8 +3353,8 @@ private val DELAY_SCRIM_BRUSH = Brush.verticalGradient(
     1f to DELAY_SCRIM.copy(alpha = 0f),
 )
 
-/** docs/12 §16: a soft dark halo so the strip's text reads over bright video under a light scrim. */
-private val DELAY_TEXT_SHADOW = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset.Zero, blurRadius = 6f)
+/** docs/12 §16: a soft dark halo so the strip's text, and the group readout's, reads over bright video. */
+internal val DELAY_TEXT_SHADOW = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset.Zero, blurRadius = 6f)
 private val DELAY_STRIP_HEIGHT = 96.dp
 private val DELAY_SIDE_COLUMN = 150.dp
 private val DELAY_RULER_WIDTH = 320.dp

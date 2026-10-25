@@ -136,6 +136,7 @@
          reasoning as settings_chip/search_chip below (library entries use
          the server-configured name verbatim, not a string resource). -->
     <string name="drawer_home">Home</string>
+    <string name="drawer_watch_together">Watch together</string>
 
     <!-- Side-drawer entry point into Settings (docs/09-settings-plan.md). -->
     <string name="settings_chip">Settings</string>

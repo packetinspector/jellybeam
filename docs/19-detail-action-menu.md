@@ -48,7 +48,7 @@ Decisions, where the design was left open:
 | Group | Movie | Series | Season scope | Episode |
 |---|---|---|---|---|
 | This title | Mark as watched `NEVER PLAYED` *or* Mark as unwatched · Add to / Remove from favorites | Mark series as watched `N EPISODES` · Mark series as unwatched `N EPISODES` · favorite | Mark season as watched `N EPISODES` · Mark season as unwatched `N EPISODES` · favorite `SERIES` | Mark as watched `NEVER PLAYED` *or* unwatched · favorite |
-| Playback | Play from the beginning | Play next unwatched `E8`/`S2 E6` · Play from the beginning · Play something random `FROM N` | Play next unwatched `E{n}` · Play something random `FROM N` | Play from the beginning |
+| Playback | Play from the beginning · Watch together | Play next unwatched `E8`/`S2 E6` · Play from the beginning · Play something random `FROM N` · Watch together | Play next unwatched `E{n}` · Play something random `FROM N` · Watch together | Play from the beginning · Watch together |
 | Library | Add to collection `▸` · Refresh metadata | Add to collection `▸` · Refresh metadata | Refresh metadata `SERIES` | Go to series · Add to collection `▸` · Refresh metadata |
 
 `NEVER PLAYED` appears on the single-item Mark as watched row only when the
@@ -68,6 +68,7 @@ fetch on open):
 | Play from the beginning | movie/episode: `positionTicks > 0`. Series: the primary action is a Resume (an in-progress episode exists); restarts that episode. Absent in season scope. |
 | Play next unwatched | series: the primary action resolves to a Playable target (`DetailFormatting.resolvePrimaryAction`); the row plays that same target. Season scope: first in-progress else first unplayed non-virtual episode of the selected season. Subtext `E{n}` when the target is in the selected season, `S{s} E{n}` otherwise, nothing when either number is missing. |
 | Play something random | scope has at least one non-virtual episode. `N` = that count (all episodes, watched or not). Picks uniformly, plays it with normal autoplay after. One episode, no queue. |
+| Watch together | the primary action resolves to a Playable target (the same one Play would start); opens the host lobby holding it, with its resume position for the Start choice (docs/28 §1). |
 | Go to series | episode with a known `seriesId`; opens the series page (`DetailFormatting.seriesCardFrom`). Label `Go to series` with the series name as trailing subtext, verbatim, not re-cased. |
 | Add to collection | movie, series, episode; the session collections list is non-empty. Absent in season scope and while the list is unknown or empty. |
 | Refresh metadata | the signed-in user is an administrator (`isAdministrator()`, cached per session). |

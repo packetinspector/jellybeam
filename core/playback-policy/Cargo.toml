@@ -6,9 +6,11 @@ license.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-# Only for MediaSegmentDto/MediaSegmentType (pure data models) -- see
-# lib.rs's module doc for why this dependency is scoped to models only.
+# Only for plain-data models (MediaSegmentDto/MediaSegmentType and the SyncPlay
+# messages) -- see lib.rs's module doc for why this dependency is scoped to models only.
 jellyfin-api = { path = "../jellyfin-api" }
+uuid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 
 [dev-dependencies]
 serde_json.workspace = true

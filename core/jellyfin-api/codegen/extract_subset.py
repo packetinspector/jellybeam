@@ -48,6 +48,30 @@ ROOTS = [
     "LibraryUpdateInfo",  # WebSocket LibraryChanged event payload
     "UserDataChangeInfo",  # WebSocket UserDataChanged event payload
     "MediaSegmentDtoQueryResult",  # wraps GET /MediaSegments/{itemId}; pulls in MediaSegmentDto -> MediaSegmentType
+    # SyncPlay: socket payloads and REST bodies. The spec's GroupUpdate oneOf envelope is left out
+    # (untagged and ambiguous); ws.rs switches on its Type by hand.
+    "SendCommand",
+    "GroupInfoDto",
+    "PlayQueueUpdate",
+    "SyncPlayQueueItem",
+    "GroupStateUpdate",
+    "UtcTimeResponse",
+    "NewGroupRequestDto",
+    "JoinGroupRequestDto",
+    "PlayRequestDto",
+    "SetPlaylistItemRequestDto",
+    "RemoveFromPlaylistRequestDto",
+    "MovePlaylistItemRequestDto",
+    "QueueRequestDto",
+    "SeekRequestDto",
+    "BufferRequestDto",
+    "ReadyRequestDto",
+    "IgnoreWaitRequestDto",
+    "NextItemRequestDto",
+    "PreviousItemRequestDto",
+    "PingRequestDto",
+    "SetRepeatModeRequestDto",
+    "SetShuffleModeRequestDto",
 ]
 
 # Response-side fields the spec marks `required` that a real server can omit
@@ -80,6 +104,23 @@ def relax_required(schemas):
         schema["required"] = [f for f in schema["required"] if f not in fields]
         if not schema["required"]:
             del schema["required"]
+
+
+# String length bounds typify turns into a validating newtype (`minLength: 0` also emits a
+# `len < 0` comparison rustc warns on): callers pass a plain string and the server enforces the
+# bound with a 400. Keyed by schema name -> property names.
+DROP_STRING_BOUNDS = {
+    "NewGroupRequestDto": ["GroupName"],
+}
+
+
+def drop_string_bounds(schemas):
+    for name, props in DROP_STRING_BOUNDS.items():
+        for prop in props:
+            schema = schemas.get(name, {}).get("properties", {}).get(prop)
+            if schema is not None:
+                schema.pop("minLength", None)
+                schema.pop("maxLength", None)
 
 
 def share_image_blur_hashes(schemas):
@@ -148,6 +189,7 @@ def main():
         spec = json.load(f)
     schemas = spec["components"]["schemas"]
     relax_required(schemas)
+    drop_string_bounds(schemas)
     share_image_blur_hashes(schemas)
 
     if args.full:

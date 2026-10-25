@@ -16,6 +16,7 @@ use crate::error::CoreError;
 use crate::home::{HomeLayout, HomeSnapshot};
 use crate::library_prefs::LibraryGridPrefsFile;
 use crate::settings::{PlaybackQuality, Settings};
+use crate::syncplay::{rejoin_event, sync_play_feed, StepCtx, SyncPlayOwner};
 use crate::track_prefs::TrackPrefsFile;
 use crate::types::{
     AccountIdentity, AccountInfo, BrowseRead, Card, ChangeEvent, CollectionInfo, DeviceCaps,
@@ -26,6 +27,7 @@ use crate::types::{
     TrackDecisionFfi, TrackInfo, TrackKindFfi, TrackMemoryFfi, ViewSnapshot,
 };
 use crate::{device_id, library_prefs, session, settings, signin, track_prefs};
+use playback_policy::syncplay::Event as SyncPlayIn;
 
 /// Foreign-implemented sink for mirror change notifications. Kotlin hands an
 /// instance to [`JellybeamCore::set_change_listener`]; `on_change` is called from
@@ -107,14 +109,17 @@ struct PlaybackOwner {
     /// still carry (next-up included, which stops before it prepares); cleared when a playback on
     /// the current account installs or its own account is left.
     parked: Option<ParkedAccount>,
+    /// docs/28 §3.3: the Stopped reports `stop_playback` sent that may still be in flight,
+    /// until a create awaits them; each pending one is kept, since each lands on its own.
+    final_stops: Vec<FinalSettled>,
 }
 
 /// docs/18 §2.1: how long the logout waits for the account's final reports; a Stopped still
 /// retrying after this would be refused once the token is revoked anyway.
 #[cfg(not(test))]
-const FINAL_REPORT_SETTLE_BUDGET: Duration = Duration::from_secs(5);
+pub(crate) const FINAL_REPORT_SETTLE_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(test)]
-const FINAL_REPORT_SETTLE_BUDGET: Duration = Duration::from_secs(3);
+pub(crate) const FINAL_REPORT_SETTLE_BUDGET: Duration = Duration::from_secs(3);
 
 /// Resolves when one session's final Stopped report has landed, given up or been cancelled.
 type FinalSettled = tokio::sync::oneshot::Receiver<()>;
@@ -145,7 +150,7 @@ impl ParkedAccount {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PlaybackClaim {
+pub(crate) struct PlaybackClaim {
     seq: u64,
     /// The account epoch it was minted under, which names the account it installs on.
     epoch: u64,
@@ -248,7 +253,7 @@ impl AccountSlot {
 
     /// docs/18 §2.1: the installed account only while `epoch` is still current -- the one gate a
     /// result tagged with the epoch it was fetched under passes.
-    fn installed_mut(&mut self, epoch: u64) -> Option<&mut Installed> {
+    pub(crate) fn installed_mut(&mut self, epoch: u64) -> Option<&mut Installed> {
         self.installed.as_mut().filter(|_| self.epoch == epoch)
     }
 }
@@ -258,7 +263,7 @@ pub(crate) struct Installed {
     account: AccountInfo,
     device_id: String,
     mirror_dir: String,
-    client: jellyfin_api::JellyfinClient,
+    pub(crate) client: jellyfin_api::JellyfinClient,
     /// docs/13 Server compatibility: last-known version and name, seeded offline from the saved
     /// record; `None` is "unknown", never "old server".
     server_version: Option<jellyfin_api::ServerVersion>,
@@ -267,6 +272,8 @@ pub(crate) struct Installed {
     /// docs/18 §2.1: its open mirror and bus; `None` is Closed. Taken whole, never dropped under
     /// the state lock: [`JellybeamCore::stop_event_bus`] is its one teardown.
     bundle: Option<BusBundle>,
+    /// docs/28 §4: the account's Watch Together group; Idle holds no heap, task or listener.
+    pub(crate) syncplay: crate::syncplay::SyncPlayOwner,
 }
 
 impl Installed {
@@ -281,6 +288,7 @@ impl Installed {
             server_name: saved.server_name.clone(),
             caches: AccountCaches::default(),
             bundle: None,
+            syncplay: crate::syncplay::SyncPlayOwner::default(),
         }
     }
 
@@ -289,6 +297,11 @@ impl Installed {
             server_url: self.account.server_url.clone(),
             user_id: self.account.user_id.clone(),
         }
+    }
+
+    /// The account's user name as last saved; docs/28 §1 finds our own entry in a group by it.
+    pub(crate) fn user_name(&self) -> &str {
+        &self.account.user_name
     }
 }
 
@@ -312,7 +325,7 @@ pub struct AccountEpochs {
 pub(crate) struct SharedState(Mutex<State>);
 
 impl SharedState {
-    fn lock(&self) -> StateGuard<'_> {
+    pub(crate) fn lock(&self) -> StateGuard<'_> {
         StateGuard(self.0.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
@@ -413,6 +426,9 @@ struct AccountReset {
     /// docs/13 Server compatibility: the incoming account's epoch and client, whose facts are
     /// refreshed last.
     refresh: Option<(u64, jellyfin_api::JellyfinClient)>,
+    /// docs/28 §4: the outgoing account's epoch, its own client and its group, stepped out of
+    /// the lock; once taken nothing else reaches the group.
+    sync_play: Option<(u64, jellyfin_api::JellyfinClient, SyncPlayOwner)>,
 }
 
 /// One-slot cache of a focus-dwell preload's negotiation result. Only ever
@@ -2187,14 +2203,21 @@ impl JellybeamCore {
     /// *different* session became active; a `play_session_id` mismatch is a
     /// lost race, logged at `debug`, returning without touching state.
     pub fn stop_playback(&self, play_session_id: String, position_ticks: i64) {
-        let (session, account) = {
+        let (session, account, settled_tx) = {
             let mut state = self.lock_state();
             // A retired session is stopped here too: this is where the viewer actually left it.
             let session = match Self::take_session_or_revoke_locked(&mut state, &play_session_id) {
                 Some(Taken::Active(session) | Taken::Retired(session, _)) => session,
                 None => return,
             };
-            (session, Self::playback_account_locked(&state))
+            // Kept under the lock that took the session, so a create sees the playback or its stop;
+            // the stop's report task settles it.
+            let (settled_tx, settled_rx) = tokio::sync::oneshot::channel::<()>();
+            let finals = &mut state.playback_owner.final_stops;
+            let pending = Err(tokio::sync::oneshot::error::TryRecvError::Empty);
+            finals.retain_mut(|rx| rx.try_recv() == pending);
+            finals.push(settled_rx);
+            (session, Self::playback_account_locked(&state), settled_tx)
         };
 
         Self::stop_session_and_sync_mirror(
@@ -2203,6 +2226,7 @@ impl JellybeamCore {
             session,
             position_ticks,
             account,
+            Some(settled_tx),
         );
     }
 
@@ -2373,6 +2397,7 @@ impl JellybeamCore {
                     retiring.session,
                     ticks,
                     account,
+                    None,
                 );
             }
         }
@@ -2402,6 +2427,7 @@ impl JellybeamCore {
                     session,
                     ticks,
                     account,
+                    None,
                 );
             }
             None => {}
@@ -3059,10 +3085,14 @@ impl JellybeamCore {
                 account: Self::playback_account_locked(state),
                 bundle: None,
                 refresh: None,
+                sync_play: None,
             }
         };
         reset.preload_task = preload_task;
-        reset.bundle = state.account.installed.take().and_then(|old| old.bundle);
+        if let Some(old) = state.account.installed.take() {
+            reset.bundle = old.bundle;
+            reset.sync_play = Some((epoch, old.client, old.syncplay));
+        }
         state.account.epoch = epoch.wrapping_add(1);
         reset.refresh = next
             .as_ref()
@@ -3106,6 +3136,7 @@ impl JellybeamCore {
             account,
             bundle: None,
             refresh: None,
+            sync_play: None,
         }
     }
 
@@ -3117,7 +3148,7 @@ impl JellybeamCore {
 
     /// docs/18 §2.1: the epoch the newest playback plays on -- a negotiating claim's, else a live
     /// stream's (the parked account's while one is parked) -- so a stopped playback owns nothing.
-    fn playing_epoch_locked(state: &State) -> Option<u64> {
+    pub(crate) fn playing_epoch_locked(state: &State) -> Option<u64> {
         let owner = &state.playback_owner;
         owner.claim.as_ref().map(|claim| claim.epoch).or_else(|| {
             Self::playback_live_locked(state).then(|| {
@@ -3309,15 +3340,23 @@ impl JellybeamCore {
     fn dispose_account_reset(&self, reset: AccountReset) -> Vec<FinalSettled> {
         Self::abort_task(reset.preload_task);
         let end = |session, ticks| {
+            let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
             Self::stop_session_and_sync_mirror(
                 &self.runtime,
                 &self.playback_write,
                 session,
                 ticks,
                 reset.account.clone(),
-            )
+                Some(settled_tx),
+            );
+            settled_rx
         };
         let mut pending = Vec::new();
+        // docs/28 §4: the outgoing group leaves on its own account's client, never the playback's;
+        // a sign-out's logout waits for that Leave's answer.
+        if let Some((epoch, client, group)) = reset.sync_play {
+            pending.extend(group.take_for_reset(&self.sync_play_ctx(epoch, &client)));
+        }
         if let Some(retiring) = reset.retiring {
             let ticks = retiring.left_at();
             pending.push(end(retiring.session, ticks));
@@ -3463,6 +3502,17 @@ impl JellybeamCore {
         });
     }
 
+    /// docs/28 §3.3: waits, off the lock and at most [`FINAL_REPORT_SETTLE_BUDGET`], for the
+    /// Stopped reports `stop_playback` sent that are still in flight; called from Kotlin IO only.
+    pub(crate) fn await_final_stops(&self) {
+        let finals = std::mem::take(&mut self.lock_state().playback_owner.final_stops);
+        let finals = futures_util::future::join_all(finals);
+        // The timer is built inside the runtime, which owns the clock.
+        let _ = self
+            .runtime
+            .block_on(async { tokio::time::timeout(FINAL_REPORT_SETTLE_BUDGET, finals).await });
+    }
+
     /// Identity for a saved token: the `DeviceId` it was issued to, which for sessions saved
     /// before per-server ids is the install id itself.
     fn saved_identity(saved: &session::SessionFile) -> jellyfin_api::ClientIdentity {
@@ -3564,6 +3614,7 @@ impl JellybeamCore {
                 retired.session,
                 ticks,
                 account,
+                None,
             );
         }
         Ok(())
@@ -3606,14 +3657,16 @@ impl JellybeamCore {
     /// docs/18 §2.1: the one stop path of `stop_playback`, `abandon_playback`, a transcode
     /// fallback's retired session, a replaced claim and an account reset. Fires the session's
     /// final Stopped (not awaited) and commits the position to `account`'s mirror before
-    /// returning; the [`FinalSettled`] resolves once that report has landed or been given up.
+    /// returning; `settled_tx`, when a caller waits on that report, fires once it has landed or
+    /// been given up (`None`: nobody waits).
     fn stop_session_and_sync_mirror(
         runtime: &tokio::runtime::Runtime,
         playback_write: &Mutex<()>,
         session: jellyfin_core::ReportingSession,
         position_ticks: i64,
         account: SessionAccount,
-    ) -> FinalSettled {
+        settled_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    ) {
         let SessionAccount { mirror, .. } = account;
         let item_id = session.context().item_id.clone();
         // The server recounts an episode's season/series only once the
@@ -3634,12 +3687,13 @@ impl JellybeamCore {
         );
         let stop = session.stop(report_ticks);
         let scope_mirror = mirror.clone();
-        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
         runtime.spawn(async move {
             // Waits for the Stopped to land, retries included: a recount before it reads the old
             // counts. A delivery cancelled by a newer action is recounted by that action instead.
             let cancelled = stop.await.settled().await;
-            let _ = settled_tx.send(());
+            if let Some(settled_tx) = settled_tx {
+                let _ = settled_tx.send(());
+            }
             if cancelled {
                 return;
             }
@@ -3661,7 +3715,6 @@ impl JellybeamCore {
                 tracing::error!(item_id, "final playback state did not commit to the mirror");
             }
         }
-        settled_rx
     }
 
     /// Shared by [`Self::prepare_playback`] and [`Self::preload_playback`]:
@@ -4089,7 +4142,7 @@ impl JellybeamCore {
     /// [`Self::open_mirror`]'s first step: the epoch, client and directory it opens for, read
     /// under one lock, with an already open bundle (re-entry) taken and torn down here.
     fn open_begin(&self) -> Result<(u64, jellyfin_api::JellyfinClient, PathBuf), CoreError> {
-        let (opened, taken) = {
+        let (opened, taken, stepped) = {
             let mut state = self.lock_state();
             let epoch = state.account.epoch;
             let installed = state
@@ -4098,13 +4151,33 @@ impl JellybeamCore {
                 .as_mut()
                 .ok_or(CoreError::NotSignedIn)?;
             let dir = self.data_dir.join(&installed.mirror_dir);
-            (
-                (epoch, installed.client.clone(), dir),
-                installed.bundle.take(),
-            )
+            let taken = installed.bundle.take();
+            // docs/28 §4: the group loses the bus it follows, under the lock that takes it.
+            let stepped = taken.is_some().then(|| {
+                let ctx = self.sync_play_ctx(epoch, &installed.client);
+                installed
+                    .syncplay
+                    .step_locked(&ctx, SyncPlayIn::BusDisconnected)
+            });
+            ((epoch, installed.client.clone(), dir), taken, stepped)
         };
+        drop(stepped);
         self.stop_event_bus(taken);
         Ok(opened)
+    }
+
+    /// docs/28 §4: what a step of the group of the account installed under `epoch` runs with.
+    pub(crate) fn sync_play_ctx(
+        &self,
+        epoch: u64,
+        client: &jellyfin_api::JellyfinClient,
+    ) -> StepCtx {
+        StepCtx::new(
+            self.runtime.handle().clone(),
+            Arc::downgrade(&self.state),
+            epoch,
+            client.clone(),
+        )
     }
 
     /// Opens the mirror in `dir` and spawns its real bus, unlocked; the bus's receiver comes back
@@ -4251,8 +4324,10 @@ impl JellybeamCore {
     /// bundle (a lag becomes `NeedsReconcile`) until the bus closes; while its bundle is installed,
     /// each `Connected` refreshes the server version with that bus's `client`, tagged with the
     /// `epoch` the bundle was committed under, and the first
-    /// `Unauthorized` asks the listener to reauthorize. Holds the state `Weak`; aborting it
-    /// (`stop_event_bus`) cancels an in-flight refresh, and joining it waits out a running ask.
+    /// `Unauthorized` asks the listener to reauthorize. docs/28 §4: it also steps the group with
+    /// every SyncPlay frame, a lag, and the installed bus's connection changes. Holds the state
+    /// `Weak`; aborting it (`stop_event_bus`) cancels an in-flight refresh, and joining it waits
+    /// out a running ask.
     fn spawn_bus_forwarder(
         &self,
         mut real_bus_rx: tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>,
@@ -4279,27 +4354,44 @@ impl JellybeamCore {
                         let now = connection.borrow_and_update().clone();
                         match now {
                             jellyfin_core::BusConnection::Connected => {
-                                let Some(state) = state.upgrade() else { break };
+                                let Some(shared) = state.upgrade() else { break };
                                 let installed =
-                                    Self::installed_bus_locked(&state.lock(), &connection);
+                                    Self::installed_bus_locked(&shared.lock(), &connection);
                                 if installed {
                                     Self::refresh_server_version_once(
                                         epoch,
                                         client.clone(),
                                         data_dir.clone(),
-                                        state,
+                                        shared.clone(),
                                         session_lock.clone(),
                                     )
                                     .await;
+                                    // docs/28 §4: stepped once the refresh returns, so the group's
+                                    // snapshot window starts with the server's facts known, and
+                                    // only while this bus is still the one the group follows.
+                                    if Self::installed_bus_locked(&shared.lock(), &connection) {
+                                        sync_play_feed(&state, epoch, SyncPlayIn::BusConnected);
+                                    }
                                 }
                             }
-                            jellyfin_core::BusConnection::Disconnected => {}
+                            jellyfin_core::BusConnection::Disconnected => {
+                                let Some(shared) = state.upgrade() else { break };
+                                if Self::installed_bus_locked(&shared.lock(), &connection) {
+                                    sync_play_feed(&state, epoch, SyncPlayIn::BusDisconnected);
+                                }
+                            }
                             jellyfin_core::BusConnection::Unauthorized { .. } => {
                                 // Terminal: the supervisor stops, so this bus asks at most once.
                                 watching = false;
-                                let Some(state) = state.upgrade() else { break };
-                                let ask =
-                                    Self::bus_reauthorization_locked(&state.lock(), &connection, &now);
+                                let Some(shared) = state.upgrade() else { break };
+                                let installed = {
+                                    let guard = shared.lock();
+                                    Self::installed_bus_locked(&guard, &connection)
+                                        .then(|| Self::bus_reauthorization_locked(&guard, &now))
+                                };
+                                let Some(ask) = installed else { continue };
+                                // docs/28 §4: the group ends without a Leave, which would 401 too.
+                                sync_play_feed(&state, epoch, SyncPlayIn::BusUnauthorized);
                                 if let Some((listener, account)) = ask {
                                     if let Err(error) = listener.on_unauthorized(account) {
                                         tracing::warn!(
@@ -4311,8 +4403,24 @@ impl JellybeamCore {
                             }
                         }
                     }
-                    event = jellyfin_core::recv_bus(&mut real_bus_rx) => {
-                        let Some(event) = event else { break };
+                    // `recv_bus` unmerged: this lag rejoins, a connect's reconcile does not.
+                    event = real_bus_rx.recv() => {
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!(skipped, "bus forwarder lagged; relaying a reconcile");
+                                // docs/28 §4: a lost group frame is resynced by rejoining.
+                                sync_play_feed(&state, epoch, rejoin_event());
+                                jellyfin_core::BusEvent::NeedsReconcile
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        };
+                        if let jellyfin_core::BusEvent::Server(jellyfin_api::ServerEvent::SyncPlay(
+                            frame,
+                        )) = &event
+                        {
+                            sync_play_feed(&state, epoch, SyncPlayIn::Server(frame.clone()));
+                        }
                         let _ = bundle_tx.send(event);
                     }
                 }
@@ -4331,20 +4439,28 @@ impl JellybeamCore {
             .is_some_and(|installed| installed.connection.same_channel(bus))
     }
 
-    /// docs/18 §2.1: whom a socket rejection asks to reauthorize: the bound listener, naming the
-    /// rejected token's owner, only while `bus` is installed; an unnamed owner asks nobody.
+    /// docs/18 §2.1: whom a rejection on the installed bus asks to reauthorize: the bound
+    /// listener, naming the rejected token's owner; an unnamed owner asks nobody.
     fn bus_reauthorization_locked(
         state: &State,
-        bus: &tokio::sync::watch::Receiver<jellyfin_core::BusConnection>,
         now: &jellyfin_core::BusConnection,
     ) -> Option<(Arc<dyn ChangeListener>, AccountIdentity)> {
         let jellyfin_core::BusConnection::Unauthorized { owner: Some(owner) } = now else {
             return None;
         };
-        if !Self::installed_bus_locked(state, bus) {
-            return None;
-        }
         Some((state.listener.clone()?, owner.clone().into()))
+    }
+
+    /// docs/28 §3.3: whether the installed account's bus is connected, so a group can follow it.
+    pub(crate) fn sync_play_bus_locked(state: &State) -> playback_policy::syncplay::Bus {
+        let connected = state.account.bundle().is_some_and(|bundle| {
+            *bundle.connection.borrow() == jellyfin_core::BusConnection::Connected
+        });
+        if connected {
+            playback_policy::syncplay::Bus::Up
+        } else {
+            playback_policy::syncplay::Bus::Down
+        }
     }
 
     /// docs/18 §2.1: the one [`BusBundle`] teardown, never under the state lock: joins the
@@ -4610,13 +4726,14 @@ impl JellybeamCore {
 
 impl Drop for JellybeamCore {
     fn drop(&mut self) {
-        let (installed, preload_task, reporting, parked) = {
+        let (installed, preload_task, reporting, parked, epoch) = {
             let mut state = self.lock_state();
             (
                 state.account.installed.take(),
                 state.preload_task.take().map(|task| task.handle),
                 state.reporting.take(),
                 state.playback_owner.parked.take(),
+                state.account.epoch,
             )
         };
         drop(parked);
@@ -4629,7 +4746,11 @@ impl Drop for JellybeamCore {
         }
         Self::abort_task(preload_task);
         // Blocks on the runtime, which is still alive here (fields drop after this body).
-        self.stop_event_bus(installed.and_then(|i| i.bundle));
+        if let Some(installed) = installed {
+            let ctx = self.sync_play_ctx(epoch, &installed.client);
+            installed.syncplay.leave_on_shutdown(&ctx);
+            self.stop_event_bus(installed.bundle);
+        }
     }
 }
 
@@ -5096,7 +5217,7 @@ fn cap_transcode_reason(max_bps: u32) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     /// (highest admitted seq, current claim, account epoch).
     fn owner_view(core: &JellybeamCore) -> (u64, Option<PlaybackClaim>, u64) {
         let state = core.lock_state();
@@ -5105,7 +5226,7 @@ mod tests {
     }
 
     /// Admits the next request directly, as a prepare would before negotiating.
-    fn admit(core: &JellybeamCore) -> PlaybackClaim {
+    pub(crate) fn admit(core: &JellybeamCore) -> PlaybackClaim {
         let request = core.next_request();
         JellybeamCore::admit_playback_request(&mut core.lock_state(), request, None)
             .expect("the next request is admitted")
@@ -5132,7 +5253,7 @@ mod tests {
             }
         }
 
-        fn prepare_playback_now(
+        pub(crate) fn prepare_playback_now(
             &self,
             item_id: String,
             start_from_beginning: bool,
@@ -6854,7 +6975,18 @@ mod tests {
             updated: vec![],
             removed: vec![],
         });
-        for event in [user_data_event, library_event, BusEvent::NeedsReconcile] {
+        let frame = BusEvent::Server(jellyfin_api::ServerEvent::SyncPlay(
+            jellyfin_api::SyncPlayEvent::GroupUpdate {
+                group_id: None,
+                update: jellyfin_api::GroupUpdate::NotInGroup(String::new()),
+            },
+        ));
+        for event in [
+            user_data_event,
+            library_event,
+            frame,
+            BusEvent::NeedsReconcile,
+        ] {
             real_tx.send(event).expect("send to a fresh channel");
         }
         let mut next = || {
@@ -6873,6 +7005,13 @@ mod tests {
             next(),
             BusEvent::Server(jellyfin_api::ServerEvent::LibraryChanged { .. })
         ));
+        assert!(
+            matches!(
+                next(),
+                BusEvent::Server(jellyfin_api::ServerEvent::SyncPlay(_))
+            ),
+            "a group frame is relayed"
+        );
         assert!(matches!(next(), BusEvent::NeedsReconcile));
 
         drop(connection_tx);
@@ -7751,7 +7890,7 @@ mod tests {
     /// Direct Play cases, which never inspect codec facts), while
     /// `Some((None, None))` yields a codec-blind stream pair. `run_time_ticks`
     /// is only ever set when `supports_direct_play`, matching every caller.
-    fn playback_fixture(
+    pub(crate) fn playback_fixture(
         item_name: &str,
         media_source_id: &str,
         container: Option<&str>,
@@ -10899,13 +11038,15 @@ mod tests {
         /// ("METHOD path", `Authorization` header value) in arrival order, see
         /// [`RouteMockServer::authorizations`].
         auth_log: Mutex<Vec<(String, String)>>,
+        /// ("METHOD path", arrival time) in arrival order, see [`RouteMockServer::arrivals`].
+        arrivals: Mutex<Vec<(String, Instant)>>,
     }
 
     /// A held mock reply; see [`RouteMockServer::gate`].
-    struct Gate(Arc<tokio::sync::Semaphore>);
+    pub(crate) struct Gate(Arc<tokio::sync::Semaphore>);
 
     impl Gate {
-        fn open(&self) {
+        pub(crate) fn open(&self) {
             self.0.add_permits(1);
         }
     }
@@ -10914,7 +11055,7 @@ mod tests {
     /// tests and a fully synced mirror. Routes matched on "METHOD PATH"; an
     /// unregistered path gets a harmless default so sync's incidental calls
     /// never hang or fail unrelated tests.
-    struct RouteMockServer {
+    pub(crate) struct RouteMockServer {
         base_url: String,
         shared: Arc<MockShared>,
         _handle: tokio::task::JoinHandle<()>,
@@ -10945,7 +11086,7 @@ mod tests {
             }
         }
 
-        fn route(&self, method: &str, path: &str, status: u16, body: serde_json::Value) {
+        pub(crate) fn route(&self, method: &str, path: &str, status: u16, body: serde_json::Value) {
             unlock(&self.shared.routes)
                 .insert(format!("{method} {path}"), (status, body.to_string()));
         }
@@ -10955,7 +11096,7 @@ mod tests {
         /// [`Self::route`] for the same method+path so a caller can tell
         /// apart requests that share a path but differ in intent (e.g. a
         /// full-collection fetch vs. an id-scoped refresh).
-        fn route_with_query(
+        pub(crate) fn route_with_query(
             &self,
             method: &str,
             path: &str,
@@ -10998,7 +11139,7 @@ mod tests {
 
         /// Holds the `hit_index`-th (zero-based) scripted `method` arrival whose path contains
         /// `path_substring` until the returned gate is opened.
-        fn gate(&self, method: &str, path_substring: &str, hit_index: usize) -> Gate {
+        pub(crate) fn gate(&self, method: &str, path_substring: &str, hit_index: usize) -> Gate {
             self.gate_with_query(method, path_substring, "", hit_index)
         }
 
@@ -11025,7 +11166,7 @@ mod tests {
 
         /// Answers the first `count` `method` arrivals whose path contains `path_substring` with
         /// 500, whatever else is routed for them.
-        fn fail_first(&self, method: &str, path_substring: &str, count: usize) {
+        pub(crate) fn fail_first(&self, method: &str, path_substring: &str, count: usize) {
             unlock(&self.shared.failures).push((
                 method.to_string(),
                 path_substring.to_string(),
@@ -11034,7 +11175,7 @@ mod tests {
         }
 
         /// Every logged "METHOD target", in arrival order.
-        fn log_snapshot(&self) -> Vec<String> {
+        pub(crate) fn log_snapshot(&self) -> Vec<String> {
             unlock(&self.shared.log).clone()
         }
 
@@ -11054,8 +11195,18 @@ mod tests {
                 .expect("no request captured")
         }
 
+        /// When each `method path` request arrived, in arrival order.
+        pub(crate) fn arrivals(&self, method: &str, path: &str) -> Vec<Instant> {
+            let key = format!("{method} {path}");
+            unlock(&self.shared.arrivals)
+                .iter()
+                .filter(|(entry, _)| *entry == key)
+                .map(|(_, at)| *at)
+                .collect()
+        }
+
         /// The `Authorization` header of every "METHOD path" arrival, in arrival order.
-        fn authorizations(&self, method: &str, path: &str) -> Vec<String> {
+        pub(crate) fn authorizations(&self, method: &str, path: &str) -> Vec<String> {
             let key = format!("{method} {path}");
             unlock(&self.shared.auth_log)
                 .iter()
@@ -11064,7 +11215,7 @@ mod tests {
                 .collect()
         }
 
-        fn hit_count(&self, method: &str, path: &str) -> usize {
+        pub(crate) fn hit_count(&self, method: &str, path: &str) -> usize {
             *unlock(&self.shared.hits)
                 .get(&format!("{method} {path}"))
                 .unwrap_or(&0)
@@ -11073,7 +11224,7 @@ mod tests {
         /// Number of arrived `method` requests whose path contains `needle`;
         /// the [`Self::route_script`] counterpart to [`Self::hit_count`] for
         /// an endpoint whose path embeds a varying id.
-        fn hit_count_containing(&self, method: &str, needle: &str) -> usize {
+        pub(crate) fn hit_count_containing(&self, method: &str, needle: &str) -> usize {
             unlock(&self.shared.log)
                 .iter()
                 .filter(|entry| entry.starts_with(&format!("{method} ")) && entry.contains(needle))
@@ -11084,7 +11235,11 @@ mod tests {
         /// as JSON, in arrival order; the [`Self::route_script`] counterpart
         /// to a plain [`Self::route`], for an endpoint whose path embeds a
         /// varying id.
-        fn request_bodies_containing(&self, method: &str, needle: &str) -> Vec<serde_json::Value> {
+        pub(crate) fn request_bodies_containing(
+            &self,
+            method: &str,
+            needle: &str,
+        ) -> Vec<serde_json::Value> {
             unlock(&self.shared.bodies)
                 .iter()
                 .filter(|(key, _)| key.starts_with(&format!("{method} ")) && key.contains(needle))
@@ -11158,6 +11313,7 @@ mod tests {
             .map(|(.., gate)| gate.clone());
 
         *unlock(&shared.hits).entry(key.clone()).or_insert(0) += 1;
+        unlock(&shared.arrivals).push((key.clone(), Instant::now()));
         unlock(&shared.log).push(format!("{method} {target}"));
         let authorization = request
             .lines()
@@ -11243,12 +11399,12 @@ mod tests {
     }
 
     /// Polls `f` until `true` or ~2s elapse; panics with `what` on timeout.
-    fn wait_until(f: impl FnMut() -> bool, what: &str) {
+    pub(crate) fn wait_until(f: impl FnMut() -> bool, what: &str) {
         wait_until_for(Duration::from_secs(2), f, what);
     }
 
     /// [`wait_until`] with a caller-chosen timeout, for waits on a real retry backoff.
-    fn wait_until_for(timeout: Duration, mut f: impl FnMut() -> bool, what: &str) {
+    pub(crate) fn wait_until_for(timeout: Duration, mut f: impl FnMut() -> bool, what: &str) {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if f() {
@@ -11274,7 +11430,8 @@ mod tests {
     /// Signs `core` into a freshly started [`RouteMockServer`], no network
     /// round trip. Callers register routes before calling `open_mirror`
     /// themselves.
-    fn core_signed_in_against_routes() -> (tempfile::TempDir, Arc<JellybeamCore>, RouteMockServer) {
+    pub(crate) fn core_signed_in_against_routes(
+    ) -> (tempfile::TempDir, Arc<JellybeamCore>, RouteMockServer) {
         let (dir, core) = core_in_tempdir();
         let mock = core.runtime.block_on(RouteMockServer::start());
         let saved = session::SessionFile {
@@ -13173,7 +13330,7 @@ mod tests {
 
     /// Account B (index 0, token `tok-b`) then account A (index 1, token `tok-a`, active and
     /// restored), each on its own mock server.
-    fn two_accounts_on_mocks() -> (
+    pub(crate) fn two_accounts_on_mocks() -> (
         tempfile::TempDir,
         Arc<JellybeamCore>,
         RouteMockServer,
@@ -13951,7 +14108,7 @@ mod tests {
     /// Installs a hand-built bus whose connection the returned sender drives, since the mock has
     /// no websocket: an account (on an unreachable server unless one is installed) opens its
     /// mirror, and the bundle keeps that mirror while the bus it opened with is torn down.
-    fn install_test_bus(
+    pub(crate) fn install_test_bus(
         core: &JellybeamCore,
         bundle_tx: tokio::sync::broadcast::Sender<jellyfin_core::BusEvent>,
         forwarder: Option<tokio::task::JoinHandle<()>>,
@@ -13987,10 +14144,97 @@ mod tests {
         connection_tx
     }
 
+    /// A hand-driven bus whose real forwarder relays onto the mirror's own relay, so frames and
+    /// markers sent on `real_tx` reach both the account's group and its mirror.
+    pub(crate) struct RelayBus {
+        pub(crate) connection: tokio::sync::watch::Sender<jellyfin_core::BusConnection>,
+        pub(crate) real_tx: tokio::sync::broadcast::Sender<jellyfin_core::BusEvent>,
+    }
+
+    /// Installs a [`RelayBus`] on the installed account (opening its mirror if needed) resting at
+    /// `initial`, which the forwarder never sees as a change; the bundle owns the forwarder.
+    pub(crate) fn install_relaying_bus(
+        core: &JellybeamCore,
+        initial: jellyfin_core::BusConnection,
+    ) -> RelayBus {
+        if core.require_mirror().is_err() {
+            core.open_mirror().expect("opens local SQLite only");
+        }
+        let opened = take_bundle(core).expect("a mirror is open");
+        core.stop_task(opened.forwarder);
+        if let Some(handle) = opened.handle {
+            core.runtime.block_on(handle.shutdown());
+        }
+        let (connection_tx, connection) = tokio::sync::watch::channel(initial);
+        let (real_tx, real_rx) = tokio::sync::broadcast::channel(16);
+        let epoch = core.account_epoch();
+        let client = core.require_client().expect("signed in");
+        let forwarder = core.spawn_bus_forwarder(
+            real_rx,
+            opened.tx.clone(),
+            connection.clone(),
+            client,
+            epoch,
+        );
+        let bundle = BusBundle {
+            mirror: opened.mirror,
+            listener_task: opened.listener_task,
+            tx: opened.tx,
+            connection,
+            handle: None,
+            forwarder: Some(forwarder),
+        };
+        assert!(JellybeamCore::commit_bundle_locked(&mut core.lock_state(), epoch, bundle).is_ok());
+        RelayBus {
+            connection: connection_tx,
+            real_tx,
+        }
+    }
+
+    /// A forwarder over the installed bundle whose real bus queued `flood` events into a ring of
+    /// 256 before it ran, so its first receive lags; the bus is closed, so the handle ends once
+    /// the flood is relayed. Its connection watch starts seen, so only the lag reaches the group.
+    pub(crate) fn spawn_flooded_forwarder(
+        core: &JellybeamCore,
+        flood: usize,
+    ) -> tokio::task::JoinHandle<()> {
+        let (real_tx, real_rx) = tokio::sync::broadcast::channel(256);
+        for _ in 0..flood {
+            real_tx
+                .send(jellyfin_core::BusEvent::Server(
+                    jellyfin_api::ServerEvent::UserDataChanged {
+                        item_userdata: vec![],
+                    },
+                ))
+                .expect("send");
+        }
+        let (bundle_tx, mut connection) = {
+            let state = core.lock_state();
+            let bundle = state.account.bundle().expect("a test bus is installed");
+            (bundle.tx.clone(), bundle.connection.clone())
+        };
+        connection.borrow_and_update();
+        let client = core.require_client().expect("signed in");
+        core.spawn_bus_forwarder(real_rx, bundle_tx, connection, client, core.account_epoch())
+    }
+
     /// Takes the installed account's bundle, as a teardown would, for the caller to stop.
     fn take_bundle(core: &JellybeamCore) -> Option<BusBundle> {
         let mut state = core.lock_state();
         state.account.installed.as_mut()?.bundle.take()
+    }
+
+    /// Takes the installed bundle as a teardown does before it stops it, returning the forwarder
+    /// still running, for the caller to abort.
+    pub(crate) fn take_bundle_leaving_forwarder(
+        core: &JellybeamCore,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        take_bundle(core)?.forwarder
+    }
+
+    /// The core's state as the forwarder and group jobs hold it.
+    pub(crate) fn weak_state(core: &JellybeamCore) -> std::sync::Weak<SharedState> {
+        Arc::downgrade(&core.state)
     }
 
     /// The installed account's open mirror.
@@ -14453,7 +14697,9 @@ mod tests {
                 return None;
             }
             bus.watching = false;
-            JellybeamCore::bus_reauthorization_locked(state, &bus.rx, &now)
+            JellybeamCore::installed_bus_locked(state, &bus.rx)
+                .then(|| JellybeamCore::bus_reauthorization_locked(state, &now))
+                .flatten()
                 .map(|(_, account)| account)
         }
         fn install(state: &mut State, mirror: &media_cache::Mirror, id: usize) -> Bus {

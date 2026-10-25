@@ -34,6 +34,8 @@ sealed interface MenuAction {
     data class PlayNextUnwatched(val targetId: String, val subtext: String?) : MenuAction
     data class PlayFromBeginning(val targetId: String) : MenuAction
     data class PlayRandom(val count: Int) : MenuAction
+    /** docs/28 §1: opens the lobby holding [targetId], with its resume position for the host's Start choice. */
+    data class WatchTogether(val targetId: String, val resumeTicks: Long) : MenuAction
 
     data class GoToSeries(val series: Card) : MenuAction
     data object AddToCollection : MenuAction
@@ -202,6 +204,12 @@ private fun buildPlaybackRows(strings: UiStrings, input: MenuInput): List<MenuRo
         if (action is DetailFormatting.PrimaryAction.Playable && action.hasProgress) {
             rows += MenuRow(MenuAction.PlayFromBeginning(action.targetId), strings.get(R.string.detail_menu_play_from_beginning), null)
         }
+    }
+    // docs/28 §1: the group plays what Play would, so it exists only with a playable target.
+    val action = input.primaryAction
+    if (action is DetailFormatting.PrimaryAction.Playable) {
+        val target = if (action.targetId == input.card.id) input.card else input.allEpisodes.firstOrNull { it.id == action.targetId }
+        rows += MenuRow(MenuAction.WatchTogether(action.targetId, target?.positionTicks ?: 0L), strings.get(R.string.detail_menu_watch_together), null)
     }
     return rows
 }

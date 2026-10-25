@@ -1,6 +1,9 @@
 package tv.jellybeam.data
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -8,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
 import uniffi.jellybeam_core.AccountEpochs
 import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
@@ -76,6 +80,11 @@ import uniffi.jellybeam_core.SubtitleModeSetting
 import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.SubtitlePositionPreset
+import uniffi.jellybeam_core.SyncPlayGroup
+import uniffi.jellybeam_core.SyncPlayInput
+import uniffi.jellybeam_core.SyncPlayListener
+import uniffi.jellybeam_core.SyncPlayRooms
+import uniffi.jellybeam_core.SyncPlaySnapshot
 import uniffi.jellybeam_core.SyncStatus
 import uniffi.jellybeam_core.TitleTmdbRef
 import uniffi.jellybeam_core.TrackDecisionFfi
@@ -1315,6 +1324,101 @@ class FakeCoreGateway(
     override suspend fun collectionIdsContaining(itemId: String): List<String> {
         _collectionIdsContainingCalls.add(itemId)
         return collectionIdsByItemId[itemId].orEmpty()
+    }
+
+    // -- Watch Together (docs/28) ----------------------------------------------
+
+    /** Every syncPlay* call begun, of any kind: zero proves a path costs nothing (docs/28 §8). */
+    var syncPlayCalls: Int = 0
+        private set
+
+    /** The group every [syncPlaySnapshot], [syncPlayCreate] and [syncPlayInput] answers. */
+    var syncPlayGroup: SyncPlayGroup = SyncPlayGroup.Idle
+
+    /** [syncPlayListRooms]'s answer. */
+    var syncPlayRooms: SyncPlayRooms = SyncPlayRooms.Listed(emptyList())
+
+    /** When non-null, every syncPlay* call throws this after counting. */
+    var syncPlayError: CoreException? = null
+
+    /** The listener the last [syncPlayCreate]/[syncPlayJoinRoom] registered. */
+    var syncPlayListener: SyncPlayListener? = null
+        private set
+
+    /** When non-null, [syncPlayCreate] and [syncPlayJoinRoom] await this after registering the listener. */
+    var syncPlayEntryGate: CompletableDeferred<Unit>? = null
+
+    /** Inputs in the order they reached the core, recorded after any [syncPlayInputGatesByCall] gate. */
+    val syncPlayInputs = mutableListOf<SyncPlayInput>()
+
+    /** Holds the n-th (zero-based) [syncPlayInput] call until completed. */
+    val syncPlayInputGatesByCall = mutableMapOf<Int, CompletableDeferred<Unit>>()
+    private var syncPlayInputsBegun = 0
+
+    private fun syncPlayAnswer(): SyncPlaySnapshot {
+        syncPlayError?.let { throw it }
+        return SyncPlaySnapshot(group = syncPlayGroup)
+    }
+
+    override suspend fun syncPlaySnapshot(accountEpoch: ULong): SyncPlaySnapshot {
+        syncPlayCalls++
+        return syncPlayAnswer()
+    }
+
+    /** [syncPlayRoomName]'s answer. */
+    var syncPlayName: String = "member-a's group"
+
+    /** When non-null, [syncPlayRoomName] holds until completed, as the blocking FFI call does: cancellation lands only after it. */
+    var syncPlayRoomNameGate: CompletableDeferred<Unit>? = null
+
+    /** How many [syncPlayRoomName] calls began. */
+    var syncPlayRoomNameCalls: Int = 0
+        private set
+
+    override suspend fun syncPlayRoomName(accountEpoch: ULong): String {
+        syncPlayCalls++
+        syncPlayRoomNameCalls++
+        syncPlayRoomNameGate?.let { withContext(NonCancellable) { it.await() } }
+        // RealCoreGateway.ffi's withContext throws for a caller cancelled during the call.
+        currentCoroutineContext().ensureActive()
+        syncPlayError?.let { throw it }
+        return syncPlayName
+    }
+
+    /** Every name [syncPlayCreate] was called with, in order; joins are not here. */
+    val syncPlayCreatedNames = mutableListOf<String>()
+
+    override suspend fun syncPlayCreate(accountEpoch: ULong, name: String, listener: SyncPlayListener): SyncPlaySnapshot {
+        syncPlayCreatedNames += name
+        return syncPlayEntry(listener)
+    }
+
+    private suspend fun syncPlayEntry(listener: SyncPlayListener): SyncPlaySnapshot {
+        syncPlayCalls++
+        syncPlayListener = listener
+        syncPlayEntryGate?.await()
+        return syncPlayAnswer()
+    }
+
+    /** Every room id [syncPlayJoinRoom] was asked for, in order. */
+    val syncPlayRoomJoins = mutableListOf<String>()
+
+    override suspend fun syncPlayJoinRoom(accountEpoch: ULong, groupId: String, listener: SyncPlayListener): SyncPlaySnapshot {
+        syncPlayRoomJoins += groupId
+        return syncPlayEntry(listener)
+    }
+
+    override suspend fun syncPlayListRooms(accountEpoch: ULong): SyncPlayRooms {
+        syncPlayCalls++
+        syncPlayError?.let { throw it }
+        return syncPlayRooms
+    }
+
+    override suspend fun syncPlayInput(accountEpoch: ULong, input: SyncPlayInput): SyncPlaySnapshot {
+        syncPlayCalls++
+        syncPlayInputGatesByCall[syncPlayInputsBegun++]?.await()
+        syncPlayInputs.add(input)
+        return syncPlayAnswer()
     }
 }
 

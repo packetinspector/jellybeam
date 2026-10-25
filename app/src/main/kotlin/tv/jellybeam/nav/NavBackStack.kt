@@ -50,6 +50,10 @@ class NavBackStack private constructor(
     /** Pops only when the entry with [id] is the top; a screen that left or sits under another is left alone (docs/07 §5). */
     fun popIfTop(id: Int): NavBackStack = if (ids.last() == id) pop() else this
 
+    /** Drops every entry above [index] and puts [screen] there, keeping that entry's id. */
+    fun backTo(index: Int, screen: Screen = entries[index]): NavBackStack =
+        NavBackStack(entries.take(index) + screen, ids.take(index + 1), nextId)
+
     /** Clears the whole history down to a single fresh entry (sign-in success, sign-out). */
     fun reset(screen: Screen): NavBackStack = NavBackStack(listOf(screen), listOf(nextId), nextId + 1)
 
@@ -97,6 +101,8 @@ fun Screen.entryIdentity(): String = when (this) {
     Screen.DiscoverRequests -> "discover-requests"
     Screen.DiscoverSearch -> "discover-search"
     Screen.Report -> "report"
+    // docs/28 §1: one fixed identity, so a newly held title keeps the lobby's composition and view model.
+    is Screen.WatchTogether -> "watch-together"
 }
 
 /**
@@ -116,10 +122,23 @@ fun Screen.entryKey(id: Int): String = "$id:${entryIdentity()}"
 
 /**
  * A drawer pick's stack: Home resets to the root; anything else pushes one level above Home, or
- * replaces the top when already off Home, so hopping between libraries never piles up.
+ * replaces the top when already off Home, so hopping between libraries never piles up. The join
+ * row returns to a lobby already on the stack (docs/28 §1).
  */
 fun NavBackStack.forDrawerPick(screen: Screen): NavBackStack = when {
     screen == Screen.Home -> NavBackStack.of(Screen.Home)
-    current == Screen.Home -> push(screen)
-    else -> replace(screen)
+    screen is Screen.WatchTogether -> toWatchTogether(screen) { aboveHome(screen) }
+    else -> aboveHome(screen)
+}
+
+private fun NavBackStack.aboveHome(screen: Screen): NavBackStack = if (current == Screen.Home) push(screen) else replace(screen)
+
+/**
+ * docs/28 §1: the stack's one watch-together entry. Reaching it again pops back to it, taking a newly chosen
+ * title when [screen] holds one, so the lobby and its group survive; without one, [open] decides the stack.
+ */
+fun NavBackStack.toWatchTogether(screen: Screen.WatchTogether, open: NavBackStack.() -> NavBackStack): NavBackStack {
+    val lobby = entries.indexOfLast { it is Screen.WatchTogether }
+    if (lobby < 0) return open()
+    return if (screen.itemId == null) backTo(lobby) else backTo(lobby, screen)
 }

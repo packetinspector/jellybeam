@@ -41,6 +41,8 @@ sealed interface Screen {
     /** docs/21 §1.2: the LAN report page, opened from Settings › Troubleshooting or the
      * post-crash dialog. Singleton, like [Settings]. */
     data object Report : Screen
+    /** docs/28 §1: the code entry (no [itemId]) or the host's lobby holding [itemId] until Start; one per stack. */
+    data class WatchTogether(val itemId: String?, val resumeTicks: Long?) : Screen
 }
 
 /**
@@ -64,6 +66,7 @@ fun Screen.diagName(): String = when (this) {
     Screen.DiscoverRequests -> "DiscoverRequests"
     Screen.DiscoverSearch -> "DiscoverSearch"
     Screen.Report -> "Report"
+    is Screen.WatchTogether -> "WatchTogether"
 }
 
 /**

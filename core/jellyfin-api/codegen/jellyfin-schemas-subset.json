@@ -1291,6 +1291,31 @@
       },
       "description": "This is used by the api to get information about a Person within a BaseItem."
     },
+    "BufferRequestDto": {
+      "type": "object",
+      "properties": {
+        "When": {
+          "type": "string",
+          "description": "Gets or sets when the request has been made by the client.",
+          "format": "date-time"
+        },
+        "PositionTicks": {
+          "type": "integer",
+          "description": "Gets or sets the position ticks.",
+          "format": "int64"
+        },
+        "IsPlaying": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the client playback is unpaused."
+        },
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets or sets the playlist item identifier of the playing item.",
+          "format": "uuid"
+        }
+      },
+      "description": "Class BufferRequestDto."
+    },
     "ChannelType": {
       "enum": [
         "TV",
@@ -1727,6 +1752,129 @@
       "type": "string",
       "description": "This exists simply to identify a set of known commands."
     },
+    "GroupInfoDto": {
+      "type": "object",
+      "properties": {
+        "GroupId": {
+          "type": "string",
+          "description": "Gets the group identifier.",
+          "format": "uuid"
+        },
+        "GroupName": {
+          "type": "string",
+          "description": "Gets the group name."
+        },
+        "State": {
+          "enum": [
+            "Idle",
+            "Waiting",
+            "Paused",
+            "Playing"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/GroupStateType"
+            }
+          ],
+          "description": "Gets the group state."
+        },
+        "Participants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Gets the participants."
+        },
+        "LastUpdatedAt": {
+          "type": "string",
+          "description": "Gets the date when this DTO has been created.",
+          "format": "date-time"
+        }
+      },
+      "description": "Class GroupInfoDto."
+    },
+    "GroupQueueMode": {
+      "enum": [
+        "Queue",
+        "QueueNext"
+      ],
+      "type": "string",
+      "description": "Enum GroupQueueMode."
+    },
+    "GroupRepeatMode": {
+      "enum": [
+        "RepeatOne",
+        "RepeatAll",
+        "RepeatNone"
+      ],
+      "type": "string",
+      "description": "Enum GroupRepeatMode."
+    },
+    "GroupShuffleMode": {
+      "enum": [
+        "Sorted",
+        "Shuffle"
+      ],
+      "type": "string",
+      "description": "Enum GroupShuffleMode."
+    },
+    "GroupStateType": {
+      "enum": [
+        "Idle",
+        "Waiting",
+        "Paused",
+        "Playing"
+      ],
+      "type": "string",
+      "description": "Enum GroupState."
+    },
+    "GroupStateUpdate": {
+      "type": "object",
+      "properties": {
+        "State": {
+          "enum": [
+            "Idle",
+            "Waiting",
+            "Paused",
+            "Playing"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/GroupStateType"
+            }
+          ],
+          "description": "Gets the state of the group."
+        },
+        "Reason": {
+          "enum": [
+            "Play",
+            "SetPlaylistItem",
+            "RemoveFromPlaylist",
+            "MovePlaylistItem",
+            "Queue",
+            "Unpause",
+            "Pause",
+            "Stop",
+            "Seek",
+            "Buffer",
+            "Ready",
+            "NextItem",
+            "PreviousItem",
+            "SetRepeatMode",
+            "SetShuffleMode",
+            "Ping",
+            "IgnoreWait"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/PlaybackRequestType"
+            }
+          ],
+          "description": "Gets the reason of the state change."
+        }
+      },
+      "description": "Class GroupStateUpdate."
+    },
     "HardwareAccelerationType": {
       "enum": [
         "none",
@@ -1740,6 +1888,16 @@
       ],
       "type": "string",
       "description": "Enum containing hardware acceleration types."
+    },
+    "IgnoreWaitRequestDto": {
+      "type": "object",
+      "properties": {
+        "IgnoreWait": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the client should be ignored."
+        }
+      },
+      "description": "Class IgnoreWaitRequestDto."
     },
     "ImageBlurHashes": {
       "type": "object",
@@ -1858,6 +2016,17 @@
       ],
       "type": "string",
       "description": "Enum IsoType."
+    },
+    "JoinGroupRequestDto": {
+      "type": "object",
+      "properties": {
+        "GroupId": {
+          "type": "string",
+          "description": "Gets or sets the group identifier.",
+          "format": "uuid"
+        }
+      },
+      "description": "Class JoinGroupRequestDto."
     },
     "LibraryUpdateInfo": {
       "type": "object",
@@ -2801,6 +2970,22 @@
       "type": "string",
       "description": "Enum MetadataFields."
     },
+    "MovePlaylistItemRequestDto": {
+      "type": "object",
+      "properties": {
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets or sets the playlist identifier of the item.",
+          "format": "uuid"
+        },
+        "NewIndex": {
+          "type": "integer",
+          "description": "Gets or sets the new position.",
+          "format": "int32"
+        }
+      },
+      "description": "Class MovePlaylistItemRequestDto."
+    },
     "NameGuidPair": {
       "type": "object",
       "properties": {
@@ -2813,6 +2998,27 @@
           "format": "uuid"
         }
       }
+    },
+    "NewGroupRequestDto": {
+      "type": "object",
+      "properties": {
+        "GroupName": {
+          "type": "string",
+          "description": "Gets or sets the group name."
+        }
+      },
+      "description": "Class NewGroupRequestDto."
+    },
+    "NextItemRequestDto": {
+      "type": "object",
+      "properties": {
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets or sets the playing item identifier.",
+          "format": "uuid"
+        }
+      },
+      "description": "Class NextItemRequestDto."
     },
     "PersonKind": {
       "enum": [
@@ -2846,6 +3052,17 @@
       "type": "string",
       "description": "The person kind."
     },
+    "PingRequestDto": {
+      "type": "object",
+      "properties": {
+        "Ping": {
+          "type": "integer",
+          "description": "Gets or sets the ping time.",
+          "format": "int64"
+        }
+      },
+      "description": "Class PingRequestDto."
+    },
     "PlayAccess": {
       "enum": [
         "Full",
@@ -2862,6 +3079,123 @@
       ],
       "type": "string",
       "description": "The play method."
+    },
+    "PlayQueueUpdate": {
+      "type": "object",
+      "properties": {
+        "Reason": {
+          "enum": [
+            "NewPlaylist",
+            "SetCurrentItem",
+            "RemoveItems",
+            "MoveItem",
+            "Queue",
+            "QueueNext",
+            "NextItem",
+            "PreviousItem",
+            "RepeatMode",
+            "ShuffleMode"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/PlayQueueUpdateReason"
+            }
+          ],
+          "description": "Gets the request type that originated this update."
+        },
+        "LastUpdate": {
+          "type": "string",
+          "description": "Gets the UTC time of the last change to the playing queue.",
+          "format": "date-time"
+        },
+        "Playlist": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SyncPlayQueueItem"
+          },
+          "description": "Gets the playlist."
+        },
+        "PlayingItemIndex": {
+          "type": "integer",
+          "description": "Gets the playing item index in the playlist.",
+          "format": "int32"
+        },
+        "StartPositionTicks": {
+          "type": "integer",
+          "description": "Gets the start position ticks.",
+          "format": "int64"
+        },
+        "IsPlaying": {
+          "type": "boolean",
+          "description": "Gets a value indicating whether the current item is playing."
+        },
+        "ShuffleMode": {
+          "enum": [
+            "Sorted",
+            "Shuffle"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/GroupShuffleMode"
+            }
+          ],
+          "description": "Gets the shuffle mode."
+        },
+        "RepeatMode": {
+          "enum": [
+            "RepeatOne",
+            "RepeatAll",
+            "RepeatNone"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/GroupRepeatMode"
+            }
+          ],
+          "description": "Gets the repeat mode."
+        }
+      },
+      "description": "Class PlayQueueUpdate."
+    },
+    "PlayQueueUpdateReason": {
+      "enum": [
+        "NewPlaylist",
+        "SetCurrentItem",
+        "RemoveItems",
+        "MoveItem",
+        "Queue",
+        "QueueNext",
+        "NextItem",
+        "PreviousItem",
+        "RepeatMode",
+        "ShuffleMode"
+      ],
+      "type": "string",
+      "description": "Enum PlayQueueUpdateReason."
+    },
+    "PlayRequestDto": {
+      "type": "object",
+      "properties": {
+        "PlayingQueue": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "description": "Gets or sets the playing queue."
+        },
+        "PlayingItemPosition": {
+          "type": "integer",
+          "description": "Gets or sets the position of the playing item in the queue.",
+          "format": "int32"
+        },
+        "StartPositionTicks": {
+          "type": "integer",
+          "description": "Gets or sets the start position ticks.",
+          "format": "int64"
+        }
+      },
+      "description": "Class PlayRequestDto."
     },
     "PlaybackErrorCode": {
       "enum": [
@@ -3008,6 +3342,29 @@
       "type": "string",
       "description": "Enum PlaybackOrder."
     },
+    "PlaybackRequestType": {
+      "enum": [
+        "Play",
+        "SetPlaylistItem",
+        "RemoveFromPlaylist",
+        "MovePlaylistItem",
+        "Queue",
+        "Unpause",
+        "Pause",
+        "Stop",
+        "Seek",
+        "Buffer",
+        "Ready",
+        "NextItem",
+        "PreviousItem",
+        "SetRepeatMode",
+        "SetShuffleMode",
+        "Ping",
+        "IgnoreWait"
+      ],
+      "type": "string",
+      "description": "Enum PlaybackRequestType."
+    },
     "PlayerStateInfo": {
       "type": "object",
       "properties": {
@@ -3097,6 +3454,17 @@
           "nullable": true
         }
       }
+    },
+    "PreviousItemRequestDto": {
+      "type": "object",
+      "properties": {
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets or sets the playing item identifier.",
+          "format": "uuid"
+        }
+      },
+      "description": "Class PreviousItemRequestDto."
     },
     "ProfileCondition": {
       "type": "object",
@@ -3227,6 +3595,32 @@
       },
       "description": "An item in a play queue."
     },
+    "QueueRequestDto": {
+      "type": "object",
+      "properties": {
+        "ItemIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "description": "Gets or sets the items to enqueue."
+        },
+        "Mode": {
+          "enum": [
+            "Queue",
+            "QueueNext"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/GroupQueueMode"
+            }
+          ],
+          "description": "Gets or sets the mode in which to add the new items."
+        }
+      },
+      "description": "Class QueueRequestDto."
+    },
     "QuickConnectDto": {
       "required": [
         "Secret"
@@ -3280,6 +3674,53 @@
       },
       "description": "Stores the state of an quick connect request."
     },
+    "ReadyRequestDto": {
+      "type": "object",
+      "properties": {
+        "When": {
+          "type": "string",
+          "description": "Gets or sets when the request has been made by the client.",
+          "format": "date-time"
+        },
+        "PositionTicks": {
+          "type": "integer",
+          "description": "Gets or sets the position ticks.",
+          "format": "int64"
+        },
+        "IsPlaying": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the client playback is unpaused."
+        },
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets or sets the playlist item identifier of the playing item.",
+          "format": "uuid"
+        }
+      },
+      "description": "Class ReadyRequest."
+    },
+    "RemoveFromPlaylistRequestDto": {
+      "type": "object",
+      "properties": {
+        "PlaylistItemIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "description": "Gets or sets the playlist identifiers of the items. Ignored when clearing the playlist."
+        },
+        "ClearPlaylist": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the entire playlist should be cleared."
+        },
+        "ClearPlayingItem": {
+          "type": "boolean",
+          "description": "Gets or sets a value indicating whether the playing item should be removed as well. Used only when clearing the playlist."
+        }
+      },
+      "description": "Class RemoveFromPlaylistRequestDto."
+    },
     "RepeatMode": {
       "enum": [
         "RepeatNone",
@@ -3288,6 +3729,73 @@
       ],
       "type": "string",
       "description": "The repeat mode of a play queue."
+    },
+    "SeekRequestDto": {
+      "type": "object",
+      "properties": {
+        "PositionTicks": {
+          "type": "integer",
+          "description": "Gets or sets the position ticks.",
+          "format": "int64"
+        }
+      },
+      "description": "Class SeekRequestDto."
+    },
+    "SendCommand": {
+      "type": "object",
+      "properties": {
+        "GroupId": {
+          "type": "string",
+          "description": "Gets the group identifier.",
+          "format": "uuid"
+        },
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets the playlist identifier of the playing item.",
+          "format": "uuid"
+        },
+        "When": {
+          "type": "string",
+          "description": "Gets or sets the UTC time when to execute the command.",
+          "format": "date-time"
+        },
+        "PositionTicks": {
+          "type": "integer",
+          "description": "Gets the position ticks.",
+          "format": "int64",
+          "nullable": true
+        },
+        "Command": {
+          "enum": [
+            "Unpause",
+            "Pause",
+            "Stop",
+            "Seek"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/SendCommandType"
+            }
+          ],
+          "description": "Gets the command."
+        },
+        "EmittedAt": {
+          "type": "string",
+          "description": "Gets the UTC time when this command has been emitted.",
+          "format": "date-time"
+        }
+      },
+      "description": "Class SendCommand."
+    },
+    "SendCommandType": {
+      "enum": [
+        "Unpause",
+        "Pause",
+        "Stop",
+        "Seek"
+      ],
+      "type": "string",
+      "description": "Enum SendCommandType."
     },
     "SessionInfoDto": {
       "type": "object",
@@ -3478,6 +3986,54 @@
       },
       "description": "Class SessionUserInfo."
     },
+    "SetPlaylistItemRequestDto": {
+      "type": "object",
+      "properties": {
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets or sets the playlist identifier of the playing item.",
+          "format": "uuid"
+        }
+      },
+      "description": "Class SetPlaylistItemRequestDto."
+    },
+    "SetRepeatModeRequestDto": {
+      "type": "object",
+      "properties": {
+        "Mode": {
+          "enum": [
+            "RepeatOne",
+            "RepeatAll",
+            "RepeatNone"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/GroupRepeatMode"
+            }
+          ],
+          "description": "Gets or sets the repeat mode."
+        }
+      },
+      "description": "Class SetRepeatModeRequestDto."
+    },
+    "SetShuffleModeRequestDto": {
+      "type": "object",
+      "properties": {
+        "Mode": {
+          "enum": [
+            "Sorted",
+            "Shuffle"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/GroupShuffleMode"
+            }
+          ],
+          "description": "Gets or sets the shuffle mode."
+        }
+      },
+      "description": "Class SetShuffleModeRequestDto."
+    },
     "SubtitleDeliveryMethod": {
       "enum": [
         "Encode",
@@ -3540,6 +4096,23 @@
         }
       },
       "description": "A class for subtitle profile information."
+    },
+    "SyncPlayQueueItem": {
+      "type": "object",
+      "properties": {
+        "ItemId": {
+          "type": "string",
+          "description": "Gets the item identifier.",
+          "format": "uuid"
+        },
+        "PlaylistItemId": {
+          "type": "string",
+          "description": "Gets the playlist identifier of the item.",
+          "format": "uuid",
+          "readOnly": true
+        }
+      },
+      "description": "Class QueueItem."
     },
     "SyncPlayUserAccessType": {
       "enum": [
@@ -4344,6 +4917,22 @@
           "description": "Gets or sets a value indicating what SyncPlay features the user can access."
         }
       }
+    },
+    "UtcTimeResponse": {
+      "type": "object",
+      "properties": {
+        "RequestReceptionTime": {
+          "type": "string",
+          "description": "Gets the UTC time when request has been received.",
+          "format": "date-time"
+        },
+        "ResponseTransmissionTime": {
+          "type": "string",
+          "description": "Gets the UTC time when response has been sent.",
+          "format": "date-time"
+        }
+      },
+      "description": "Class UtcTimeResponse."
     },
     "Video3DFormat": {
       "enum": [

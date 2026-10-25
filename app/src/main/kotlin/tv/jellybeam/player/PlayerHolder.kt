@@ -97,14 +97,23 @@ interface PlaybackPlayer {
      * /[audioDecoderPreferences] are that session's settings snapshots, fetched once per session by
      * [PlaybackViewModel.start]. Per docs/18-playback-quality.md §3.1, since this is a process-wide
      * singleton, every implementation must reset the per-item track-selection baseline before any
-     * [applyTrackDecision] for [plan] runs, or a previous item's state silently survives.
+     * [applyTrackDecision] for [plan] runs, or a previous item's state silently survives. [start]
+     * picks where and how it starts ([loadOpening]).
      */
     fun load(
         plan: PlaybackPlan,
         tolerateMislabeledLevels: Boolean = true,
         audioDecoderPreferences: AudioDecoderPreferences = AudioDecoderPreferences(),
         fullAssStyling: Boolean = false,
+        start: LoadStart = LoadStart.Resume,
     )
+
+    /** docs/28 §5: seeks exactly to [targetMs] through the skip serializer; [onLanded] hears the landing (ticks, ms since
+     * issue) at most once, at the last landing of any newer seeks without a report; never once a newer report or a stop replaces it. */
+    fun seekGroup(targetMs: Long, onLanded: ((landedTicks: Long, latencyMs: Long) -> Unit)?)
+
+    /** Sets `playWhenReady = true`; a no-op if already playing. */
+    fun play()
 
     fun addListener(listener: Player.Listener)
     fun removeListener(listener: Player.Listener)
@@ -330,6 +339,27 @@ internal fun reserveResumeSeek(gate: ResumeSeekGate, seeks: SeekSerializer, gene
         is SeekSerializer.Decision.Issue -> target
         is SeekSerializer.Decision.Hold -> null
     }
+}
+
+/** Where and how [PlaybackPlayer.load] starts an item. */
+sealed interface LoadStart {
+    /** The plan's saved position, landed on the keyframe before it (docs/18 §5.2), then playing. */
+    data object Resume : LoadStart
+
+    /** docs/28 §5: paused at exactly [ticks], since the server re-sends Seek for a landing over 500 ms off. */
+    data class GroupExactPaused(val ticks: Long) : LoadStart
+}
+
+/** [loadOpening]'s answer: the start position, whether the keyframe resume is armed, and the play intent. */
+internal data class LoadOpening(val startPositionMs: Long, val armResume: Boolean, val playWhenReady: Boolean)
+
+/** docs/18 §5.2, docs/28 §5: a Transcode (HLS) plan's segments already govern its landing, so it never arms. */
+internal fun loadOpening(planStartTicks: Long, transcode: Boolean, start: LoadStart): LoadOpening = when (start) {
+    LoadStart.Resume -> PlaybackTicks.ticksToMs(planStartTicks).coerceAtLeast(0L).let { ms ->
+        LoadOpening(ms, armResume = ms > 0L && !transcode, playWhenReady = true)
+    }
+    is LoadStart.GroupExactPaused ->
+        LoadOpening(PlaybackTicks.ticksToMs(start.ticks).coerceAtLeast(0L), armResume = false, playWhenReady = false)
 }
 
 /** The resume target to hand to the player once tracks are known, or `null` when a user seek
@@ -772,6 +802,7 @@ class PlayerHolder(
         tolerateMislabeledLevels: Boolean,
         audioDecoderPreferences: AudioDecoderPreferences,
         fullAssStyling: Boolean,
+        start: LoadStart,
     ) {
         loadErrorHandlingPolicy.resetForNewPlayback()
         this.fullAssStyling = fullAssStyling
@@ -819,14 +850,13 @@ class PlayerHolder(
             mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
         }
         val mediaItem = mediaItemBuilder.build()
-        val startPositionMs = PlaybackTicks.ticksToMs(plan.startPositionTicks).coerceAtLeast(0L)
+        val opening = loadOpening(plan.startPositionTicks, plan.playMethod == PlayMethodFfi.TRANSCODE, start)
+        val startPositionMs = opening.startPositionMs
         // docs/18 §5.2: a resume's saved position is applied exactly by setMediaItem, decoding
         // through every frame back to the last keyframe; land there instead by biasing the one
-        // extra seekTo() this arms in onTracksChanged toward the preceding sync sample. A
-        // Transcode (HLS) plan is left untouched -- its own segment boundaries already govern this.
-        val isResume = startPositionMs > 0L && plan.playMethod != PlayMethodFfi.TRANSCODE
-        currentLoadIsResume = isResume
-        if (isResume) {
+        // extra seekTo() this arms in onTracksChanged toward the preceding sync sample.
+        currentLoadIsResume = opening.armResume
+        if (opening.armResume) {
             player.setSeekParameters(SeekParameters.PREVIOUS_SYNC)
             resumeSeekGate.arm(generation, startPositionMs)
         } else {
@@ -840,7 +870,7 @@ class PlayerHolder(
         }
         PerfLog.markPlayback("exo.prepare")
         player.prepare()
-        player.playWhenReady = true
+        player.playWhenReady = opening.playWhenReady
     }
 
     /** docs/18 §5.2: restores normal seek semantics once the resume seek has landed (or
@@ -1178,6 +1208,10 @@ class PlayerHolder(
         player.pause()
     }
 
+    override fun play() {
+        player.play()
+    }
+
     override fun setPlaybackRate(rate: Float) {
         player.setPlaybackSpeed(rate)
     }
@@ -1256,8 +1290,15 @@ class PlayerHolder(
         }
     }
 
+    /** Seek parameters are already EXACT here: Media3's DEFAULT is EXACT and a group load never arms the resume. */
+    override fun seekGroup(targetMs: Long, onLanded: ((landedTicks: Long, latencyMs: Long) -> Unit)?) {
+        val report = onLanded?.let { { ms: Long, latencyMs: Long -> it(PlaybackTicks.msToTicks(ms), latencyMs) } }
+        val decision = seeks.request(targetMs.coerceAtLeast(0L), SystemClock.uptimeMillis(), report)
+        if (decision is SeekSerializer.Decision.Issue) issue(decision.targetMs)
+    }
+
     /** Issues [target] against the real player -- the only place [ExoPlayer.seekTo] is called for a
-     * dpad skip. */
+     * dpad skip or group seek. */
     private fun issue(target: Long, held: Boolean = false) {
         val from = player.currentPosition
         val edge = player.bufferedPosition
@@ -1271,7 +1312,7 @@ class PlayerHolder(
         val now = SystemClock.uptimeMillis()
         val since = seeks.inFlightSinceMs
         val pending = seeks.pendingTargetMs
-        val held = seeks.landed(now)
+        val held = seeks.landed(now, positionMs = player.currentPosition)
         if (since != null) {
             Log.i(
                 SEEK_LOG_TAG,
@@ -1294,7 +1335,7 @@ class PlayerHolder(
         val pending = seeks.pendingTargetMs
         Log.w(SEEK_LOG_TAG, "stall inflight=$inFlight after=${now - since} pending=${pending ?: "none"}")
         // A held target fires as the recovery seek; otherwise the in-flight state clears.
-        seeks.landed(now)?.let { issue(it, held = true) }
+        seeks.stalled(now, positionMs = player.currentPosition)?.let { issue(it, held = true) }
     }
 
     private fun scheduleSeekTimeout() {

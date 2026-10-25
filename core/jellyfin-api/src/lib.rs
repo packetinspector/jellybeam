@@ -17,8 +17,11 @@ pub mod dns;
 // impls clippy flags. Allowed here so the waiver survives regeneration.
 #[allow(clippy::derivable_impls)]
 pub mod models;
+mod syncplay;
 mod util;
 mod ws;
+
+pub use syncplay::{GroupUpdate, SyncPlayEvent};
 
 /// Fuzzing-only re-exports. `cargo fuzz` builds with `--cfg fuzzing`, so
 /// normal builds never see this and the private decode surface stays
@@ -1484,6 +1487,7 @@ pub enum ServerEvent {
         item_userdata: Vec<(String, UserItemDataDto)>,
     },
     ForceKeepAlive,
+    SyncPlay(SyncPlayEvent),
     Ignored(String),
 }
 
@@ -1555,6 +1559,67 @@ fn stop_body(report: &PlaybackReport) -> StopBody<'_> {
         media_source_id: &report.media_source_id,
         position_ticks: report.position_ticks,
         play_session_id: &report.play_session_id,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_server {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One-shot local server (127.0.0.1, ephemeral port): answers its first request with
+    /// `status_line` and `body` as JSON, and hands back the whole request read to `Content-Length`.
+    pub(crate) async fn capturing_server(
+        status_line: &str,
+        body: impl Into<String>,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let response = {
+            let body = body.into();
+            format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut chunk).await.unwrap_or(0);
+                buf.extend_from_slice(&chunk[..n]);
+                if n == 0 || request_complete(&buf) {
+                    break;
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&buf).to_string());
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// Headers are in and the body has reached `Content-Length` (0 when absent).
+    fn request_complete(buf: &[u8]) -> bool {
+        let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let wanted = String::from_utf8_lossy(&buf[..head_end])
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")?
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            })
+            .unwrap_or(0);
+        buf.len() - (head_end + 4) >= wanted
     }
 }
 
@@ -2082,7 +2147,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_delivery_text_returns_the_body_and_refuses_off_server_urls() {
-        let (base_url, _rx) = capturing_json_server("1\nhello".to_string()).await;
+        let (base_url, _rx) = test_server::capturing_server("200 OK", "1\nhello".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let text = client
             .fetch_delivery_text("/Videos/x/s/0.srt", 1024)
@@ -2297,94 +2362,6 @@ mod tests {
 
     // --- mock-server helpers ------------------------------------------
 
-    /// One-shot local HTTP server that captures the raw request and
-    /// responds `200 OK` with `body` as JSON. Returns the base URL and a
-    /// receiver yielding the captured request text. Local-only (127.0.0.1,
-    /// ephemeral port).
-    async fn capturing_json_server(
-        body: String,
-    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind local listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                loop {
-                    let n = stream.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let request_text = String::from_utf8_lossy(&buf).to_string();
-                let _ = tx.send(request_text);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            }
-        });
-        (format!("http://{addr}"), rx)
-    }
-
-    /// Like `capturing_json_server` but with an arbitrary `status_line`
-    /// (e.g. `"404 Not Found"`), for tests driving a specific non-2xx status
-    /// through the real HTTP path.
-    async fn capturing_status_server(
-        status_line: &str,
-        body: String,
-    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind local listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let status_line = status_line.to_string();
-        tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                loop {
-                    let n = stream.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let request_text = String::from_utf8_lossy(&buf).to_string();
-                let _ = tx.send(request_text);
-                let response = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    status_line,
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            }
-        });
-        (format!("http://{addr}"), rx)
-    }
-
     // --- MediaSegments (skip-intro/credits) -----------------------------
 
     /// A recorded `/MediaSegments/{itemId}` fixture with an Intro and Outro
@@ -2411,7 +2388,7 @@ mod tests {
     #[tokio::test]
     async fn get_media_segments_builds_expected_path_and_query() {
         let raw = include_str!("../tests/fixtures/media_segments_result.json");
-        let (base_url, rx) = capturing_json_server(raw.to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", raw.to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let segments = client
@@ -2435,7 +2412,7 @@ mod tests {
     #[tokio::test]
     async fn get_media_segments_omits_query_when_include_types_empty() {
         let raw = include_str!("../tests/fixtures/media_segments_result.json");
-        let (base_url, rx) = capturing_json_server(raw.to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", raw.to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         client
@@ -2461,7 +2438,8 @@ mod tests {
     #[tokio::test]
     async fn get_media_segments_returns_empty_on_404() {
         let (base_url, _rx) =
-            capturing_status_server("404 Not Found", r#"{"title":"Not Found"}"#.to_string()).await;
+            test_server::capturing_server("404 Not Found", r#"{"title":"Not Found"}"#.to_string())
+                .await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let segments = client
@@ -2477,7 +2455,7 @@ mod tests {
     #[tokio::test]
     async fn get_media_segments_surfaces_non_404_errors() {
         let (base_url, _rx) =
-            capturing_status_server("500 Internal Server Error", "boom".to_string()).await;
+            test_server::capturing_server("500 Internal Server Error", "boom".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let err = client
@@ -2494,7 +2472,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_items_sends_sort_order_when_set() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery {
             sort_by: Some("SortName".to_string()),
@@ -2519,7 +2497,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_items_sends_person_ids_only_when_set() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery {
             person_ids: vec!["person-1".to_string()],
@@ -2536,7 +2514,7 @@ mod tests {
             "request line missing personIds: {request_line}"
         );
 
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         client
             .get_items(&ItemQuery::new())
@@ -2549,7 +2527,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_item_by_id_is_user_scoped_when_the_user_id_is_known() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client =
             JellyfinClient::from_token(&base_url, sample_identity(), "tok").with_user_id("user-1");
         client
@@ -2567,7 +2545,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_item_by_id_without_a_user_id_uses_the_plain_route() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         client
             .get_item_by_id("person-1", &[])
@@ -2583,7 +2561,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_items_omits_sort_order_when_unset() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery {
             sort_by: Some("SortName".to_string()),
@@ -2605,7 +2583,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_resume_items_sends_fields_when_set() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         client
             .get_resume_items(&["Overview".to_string(), "SeriesName".to_string()])
@@ -2625,7 +2603,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_resume_items_omits_fields_when_empty() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         client
             .get_resume_items(&[])
@@ -2641,7 +2619,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_items_sends_is_favorite_when_set() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery {
             is_favorite: Some(true),
@@ -2663,7 +2641,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_items_sends_is_missing_when_set() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery {
             is_missing: Some(true),
@@ -2683,7 +2661,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_items_omits_is_missing_when_unset() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery::new();
         client
@@ -2705,7 +2683,7 @@ mod tests {
     /// item's image tags and blurhashes back into a 1,000-item page.
     #[tokio::test]
     async fn get_items_sends_enable_images_and_user_data_when_set() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery {
             enable_images: Some(false),
@@ -2732,7 +2710,7 @@ mod tests {
     /// sending exactly the bytes it always did.
     #[tokio::test]
     async fn get_items_omits_enable_images_and_user_data_when_unset() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         client
             .get_items(&ItemQuery::new())
@@ -2756,7 +2734,7 @@ mod tests {
             (Some(true), "isPlayed=true"),
             (Some(false), "isPlayed=false"),
         ] {
-            let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+            let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
             let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
             let query = ItemQuery {
                 is_played: value,
@@ -2767,7 +2745,7 @@ mod tests {
             let line = request.lines().next().unwrap_or_default();
             assert!(line.contains(expected), "{line}");
         }
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         client
             .get_items(&ItemQuery::new())
@@ -2781,7 +2759,7 @@ mod tests {
     /// The id-only sweep's shape: empty `fields` sends no `fields` param at all.
     #[tokio::test]
     async fn get_items_id_only_sweep_query_omits_fields() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery {
             enable_images: Some(false),
@@ -2888,7 +2866,7 @@ mod tests {
 
     #[tokio::test]
     async fn warm_stream_head_requests_identity_encoding() {
-        let (base_url, rx) = capturing_json_server("x".repeat(16)).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "x".repeat(16)).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         client
             .warm_stream_head("item-1", 16)
@@ -2912,7 +2890,7 @@ mod tests {
     /// before it 500s in the field.
     #[tokio::test]
     async fn get_items_sends_both_min_date_last_saved_params_when_set() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery {
             min_date_last_saved: Some("2026-08-17T07:45:12Z".to_string()),
@@ -2937,7 +2915,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_items_omits_min_date_last_saved_when_unset() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let query = ItemQuery::new();
         client
@@ -2957,7 +2935,7 @@ mod tests {
     #[tokio::test]
     async fn get_similar_deserializes_items_from_the_fixture() {
         let raw = include_str!("../tests/fixtures/similar_items_result.json");
-        let (base_url, rx) = capturing_json_server(raw.to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", raw.to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let items = client
@@ -2973,7 +2951,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_episodes_uses_the_dedicated_series_endpoint_and_bounded_query() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client =
             JellyfinClient::from_token(&base_url, sample_identity(), "tok").with_user_id("user-9");
 
@@ -2994,7 +2972,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_adjacent_episodes_sends_the_current_item_without_a_series_sized_limit() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client =
             JellyfinClient::from_token(&base_url, sample_identity(), "tok").with_user_id("user-9");
 
@@ -3015,7 +2993,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_similar_builds_expected_path_and_limit_query() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         client
@@ -3041,7 +3019,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_similar_sends_user_id_when_known() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client =
             JellyfinClient::from_token(&base_url, sample_identity(), "tok").with_user_id("user-9");
 
@@ -3061,7 +3039,7 @@ mod tests {
     #[tokio::test]
     async fn get_similar_surfaces_non_2xx_errors() {
         let (base_url, _rx) =
-            capturing_status_server("500 Internal Server Error", "boom".to_string()).await;
+            test_server::capturing_server("500 Internal Server Error", "boom".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let err = client
@@ -3092,7 +3070,7 @@ mod tests {
         // Drives the recorded fixture through the real HTTP path rather than only unit-testing
         // extraction.
         let raw = include_str!("../tests/fixtures/authentication_result.json");
-        let (base_url, _rx) = capturing_json_server(raw.to_string()).await;
+        let (base_url, _rx) = test_server::capturing_server("200 OK", raw.to_string()).await;
         let (client, result) = JellyfinClient::authenticate_by_name(
             &build_http_client(),
             &base_url,
@@ -3130,7 +3108,7 @@ mod tests {
     #[tokio::test]
     async fn quick_connect_initiate_returns_code_and_secret_from_fixture() {
         let raw = include_str!("../tests/fixtures/quick_connect_result.json");
-        let (base_url, rx) = capturing_json_server(raw.to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", raw.to_string()).await;
         let result = JellyfinClient::quick_connect_initiate(
             &build_http_client(),
             &base_url,
@@ -3165,7 +3143,8 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/quick_connect_result.json"))
                 .expect("valid json");
         authenticated_raw["Authenticated"] = serde_json::Value::Bool(true);
-        let (base_url, rx) = capturing_json_server(authenticated_raw.to_string()).await;
+        let (base_url, rx) =
+            test_server::capturing_server("200 OK", authenticated_raw.to_string()).await;
 
         let result = JellyfinClient::quick_connect_poll(
             &build_http_client(),
@@ -3192,9 +3171,11 @@ mod tests {
     async fn quick_connect_poll_surfaces_404_as_unknown_secret_error() {
         // Unlike get_media_segments's 404-as-empty, an expired secret is a
         // real error the poll loop should stop on.
-        let (base_url, _rx) =
-            capturing_status_server("404 Not Found", r#"{"title":"unknown secret"}"#.to_string())
-                .await;
+        let (base_url, _rx) = test_server::capturing_server(
+            "404 Not Found",
+            r#"{"title":"unknown secret"}"#.to_string(),
+        )
+        .await;
         let result = JellyfinClient::quick_connect_poll(
             &build_http_client(),
             &base_url,
@@ -3211,7 +3192,7 @@ mod tests {
     #[tokio::test]
     async fn authenticate_with_quick_connect_posts_secret_and_captures_token() {
         let raw = include_str!("../tests/fixtures/authentication_result.json");
-        let (base_url, rx) = capturing_json_server(raw.to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", raw.to_string()).await;
         let (client, result) = JellyfinClient::authenticate_with_quick_connect(
             &build_http_client(),
             &base_url,
@@ -3335,7 +3316,7 @@ mod tests {
             "SomeFutureField": {"nested": true},
         })
         .to_string();
-        let (base_url, rx) = capturing_json_server(body).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", body).await;
 
         let info =
             JellyfinClient::public_system_info(&build_http_client(), &base_url, &sample_identity())
@@ -3365,7 +3346,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_public_system_info_uses_the_client_own_authenticated_header() {
         let body = serde_json::json!({"Version": "12.0.0"}).to_string();
-        let (base_url, rx) = capturing_json_server(body).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", body).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let info = client
@@ -3392,7 +3373,7 @@ mod tests {
             "SomeFutureField": {"nested": true},
         })
         .to_string();
-        let (base_url, rx) = capturing_json_server(body).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", body).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let info = client
@@ -3430,7 +3411,7 @@ mod tests {
             "SomeFutureField": {"nested": true},
         })
         .to_string();
-        let (base_url, rx) = capturing_json_server(body).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", body).await;
         let client =
             JellyfinClient::from_token(&base_url, sample_identity(), "tok").with_user_id("user-9");
 
@@ -3460,7 +3441,7 @@ mod tests {
 
     #[tokio::test]
     async fn item_counts_omits_user_id_when_unknown() {
-        let (base_url, rx) = capturing_json_server("{}".to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         client
@@ -3547,7 +3528,7 @@ mod tests {
     #[tokio::test]
     async fn an_ordinary_same_scheme_redirect_is_still_followed() {
         let raw = include_str!("../tests/fixtures/similar_items_result.json");
-        let (target, _rx) = capturing_json_server(raw.to_string()).await;
+        let (target, _rx) = test_server::capturing_server("200 OK", raw.to_string()).await;
         let base_url = redirecting_server(format!("{target}/UserViews")).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
         let views = client
@@ -3560,7 +3541,7 @@ mod tests {
     /// A body under the cap is read and decoded exactly as before.
     #[tokio::test]
     async fn read_capped_body_returns_a_body_that_fits() {
-        let (base_url, _rx) = capturing_json_server("[1,2,3]".to_string()).await;
+        let (base_url, _rx) = test_server::capturing_server("200 OK", "[1,2,3]".to_string()).await;
         let resp = reqwest::get(&base_url).await.expect("request");
         let body = read_capped_body(resp, 1024, "/test")
             .await
@@ -3572,7 +3553,7 @@ mod tests {
     /// allocation -- the read stops at the ceiling with a clean `ApiError::Decode`.
     #[tokio::test]
     async fn read_capped_body_refuses_a_body_over_the_cap() {
-        let (base_url, _rx) = capturing_json_server("x".repeat(64 * 1024)).await;
+        let (base_url, _rx) = test_server::capturing_server("200 OK", "x".repeat(64 * 1024)).await;
         let resp = reqwest::get(&base_url).await.expect("request");
         let err = read_capped_body(resp, 1024, "/test")
             .await
@@ -3588,7 +3569,7 @@ mod tests {
     #[tokio::test]
     async fn read_capped_body_accepts_a_body_exactly_at_the_cap() {
         const CAP: usize = 4096;
-        let (base_url, _rx) = capturing_json_server("x".repeat(CAP)).await;
+        let (base_url, _rx) = test_server::capturing_server("200 OK", "x".repeat(CAP)).await;
         let resp = reqwest::get(&base_url).await.expect("request");
         let body = read_capped_body(resp, CAP, "/test")
             .await
@@ -3600,7 +3581,7 @@ mod tests {
     #[tokio::test]
     async fn read_capped_body_refuses_a_body_one_byte_over_the_cap() {
         const CAP: usize = 4096;
-        let (base_url, _rx) = capturing_json_server("x".repeat(CAP + 1)).await;
+        let (base_url, _rx) = test_server::capturing_server("200 OK", "x".repeat(CAP + 1)).await;
         let resp = reqwest::get(&base_url).await.expect("request");
         let err = read_capped_body(resp, CAP, "/test")
             .await
@@ -3624,7 +3605,8 @@ mod tests {
 
     #[tokio::test]
     async fn mark_played_posts_to_user_played_items_and_decodes_response() {
-        let (base_url, rx) = capturing_json_server(sample_user_item_data_json().to_string()).await;
+        let (base_url, rx) =
+            test_server::capturing_server("200 OK", sample_user_item_data_json().to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let data = client
@@ -3647,7 +3629,8 @@ mod tests {
 
     #[tokio::test]
     async fn mark_played_sends_user_id_when_known() {
-        let (base_url, rx) = capturing_json_server(sample_user_item_data_json().to_string()).await;
+        let (base_url, rx) =
+            test_server::capturing_server("200 OK", sample_user_item_data_json().to_string()).await;
         let client =
             JellyfinClient::from_token(&base_url, sample_identity(), "tok").with_user_id("user-9");
 
@@ -3666,7 +3649,8 @@ mod tests {
 
     #[tokio::test]
     async fn mark_unplayed_sends_delete_to_user_played_items() {
-        let (base_url, rx) = capturing_json_server(sample_user_item_data_json().to_string()).await;
+        let (base_url, rx) =
+            test_server::capturing_server("200 OK", sample_user_item_data_json().to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         client
@@ -3684,7 +3668,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_favorite_true_posts_to_user_favorite_items() {
-        let (base_url, rx) = capturing_json_server(sample_user_item_data_json().to_string()).await;
+        let (base_url, rx) =
+            test_server::capturing_server("200 OK", sample_user_item_data_json().to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let data = client
@@ -3703,7 +3688,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_favorite_false_deletes_user_favorite_items() {
-        let (base_url, rx) = capturing_json_server(sample_user_item_data_json().to_string()).await;
+        let (base_url, rx) =
+            test_server::capturing_server("200 OK", sample_user_item_data_json().to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         client
@@ -3722,7 +3708,7 @@ mod tests {
     #[tokio::test]
     async fn list_collections_sends_expected_boxset_query() {
         let raw = include_str!("../tests/fixtures/similar_items_result.json");
-        let (base_url, rx) = capturing_json_server(raw.to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", raw.to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let items = client
@@ -3746,7 +3732,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_to_collection_posts_ids_as_a_query_param() {
-        let (base_url, rx) = capturing_json_server(String::new()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", String::new()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         client
@@ -3771,7 +3757,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_item_posts_with_fixed_refresh_parameters() {
-        let (base_url, rx) = capturing_json_server(String::new()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", String::new()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         client
@@ -3799,7 +3785,7 @@ mod tests {
             .get("User")
             .cloned()
             .expect("fixture has a User");
-        let (base_url, rx) = capturing_json_server(user_json.to_string()).await;
+        let (base_url, rx) = test_server::capturing_server("200 OK", user_json.to_string()).await;
         let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
 
         let user = client

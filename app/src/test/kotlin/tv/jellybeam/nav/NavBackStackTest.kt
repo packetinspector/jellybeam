@@ -352,4 +352,38 @@ class NavBackStackTest {
 
         assertEquals(stack.entries, stack.popIfTop(stack.ids.last()).entries)
     }
+
+    // -- docs/28 §1: one watch-together entry per stack -------------------------------
+
+    private val lobby = Screen.WatchTogether("item-a", 0L)
+
+    @Test
+    fun `watch together opens normally while no lobby is on the stack`() {
+        val stack = NavBackStack.of(Screen.Home).push(Screen.Search)
+        assertEquals(stack.push(lobby), stack.toWatchTogether(lobby) { push(lobby) })
+    }
+
+    @Test
+    fun `a title chosen above the lobby returns to it holding that title, keeping its entry`() {
+        val withLobby = NavBackStack.of(Screen.Home).push(lobby)
+        val browsing = withLobby.push(Screen.Search).push(Screen.Settings)
+        val back = browsing.toWatchTogether(Screen.WatchTogether("item-b", 9_000L)) { push(Screen.Report) }
+        assertEquals(listOf(Screen.Home, Screen.WatchTogether("item-b", 9_000L)), back.entries)
+        assertEquals(withLobby.entryKeys(), back.entryKeys())
+    }
+
+    @Test
+    fun `the drawer row returns to a lobby on the stack and keeps its title`() {
+        val withLobby = NavBackStack.of(Screen.Home).push(lobby).push(Screen.Search)
+        val back = withLobby.forDrawerPick(Screen.WatchTogether(null, null))
+        assertEquals(listOf(Screen.Home, lobby), back.entries)
+        assertEquals(1, back.entries.count { it is Screen.WatchTogether })
+    }
+
+    @Test
+    fun `the drawer row opens the code entry like any drawer pick without a lobby`() {
+        val join = Screen.WatchTogether(null, null)
+        assertEquals(listOf(Screen.Home, join), NavBackStack.of(Screen.Home).forDrawerPick(join).entries)
+        assertEquals(listOf(Screen.Home, join), NavBackStack.of(Screen.Home).push(Screen.Settings).forDrawerPick(join).entries)
+    }
 }

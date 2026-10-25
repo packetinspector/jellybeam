@@ -79,6 +79,10 @@ import uniffi.jellybeam_core.ServerInfoSnapshot
 import uniffi.jellybeam_core.Settings
 import uniffi.jellybeam_core.SortOrder
 import uniffi.jellybeam_core.StillWatchingDecision
+import uniffi.jellybeam_core.SyncPlayInput
+import uniffi.jellybeam_core.SyncPlayListener
+import uniffi.jellybeam_core.SyncPlayRooms
+import uniffi.jellybeam_core.SyncPlaySnapshot
 import uniffi.jellybeam_core.SyncStatus
 import uniffi.jellybeam_core.TitleTmdbRef
 import uniffi.jellybeam_core.TrackDecisionFfi
@@ -678,6 +682,32 @@ interface CoreGateway {
 
     /** Bumps after every Seerr request, cancel, connect and disconnect that changed the server (a landed change with an unreadable detail included); the drawer's Discover entry follows it (docs/14). */
     val seerrRevision: StateFlow<Long>
+
+    // -- Watch Together (docs/28) ----------------------------------------------
+
+    /** docs/28 §1: the group of the account installed under [accountEpoch]. */
+    @Throws(CoreException::class)
+    suspend fun syncPlaySnapshot(accountEpoch: ULong): SyncPlaySnapshot
+
+    /** docs/28 §1: the name a create posts, "{user}'s group" suffixed past the listed ones; a list read that steps nothing. */
+    @Throws(CoreException::class)
+    suspend fun syncPlayRoomName(accountEpoch: ULong): String
+
+    /** docs/28 §3.3: creates a group named [name]; [listener] gets every step until Idle, unless one already exists. */
+    @Throws(CoreException::class)
+    suspend fun syncPlayCreate(accountEpoch: ULong, name: String, listener: SyncPlayListener): SyncPlaySnapshot
+
+    /** docs/28 §1: joins the room [groupId] from [syncPlayListRooms]; [listener] as [syncPlayCreate]. */
+    @Throws(CoreException::class)
+    suspend fun syncPlayJoinRoom(accountEpoch: ULong, groupId: String, listener: SyncPlayListener): SyncPlaySnapshot
+
+    /** docs/28 §3.1: the groups the server lists to this account; a plain read. */
+    @Throws(CoreException::class)
+    suspend fun syncPlayListRooms(accountEpoch: ULong): SyncPlayRooms
+
+    /** docs/28 §4: one player report or user action into the group. */
+    @Throws(CoreException::class)
+    suspend fun syncPlayInput(accountEpoch: ULong, input: SyncPlayInput): SyncPlaySnapshot
 }
 
 /**
@@ -1283,6 +1313,26 @@ internal class RealCoreGateway(
             bumpSeerrRevision()
             throw e
         }
+
+    // -- Watch Together (docs/28) ----------------------------------------------
+
+    override suspend fun syncPlaySnapshot(accountEpoch: ULong): SyncPlaySnapshot =
+        ffi("ffi.syncPlaySnapshot") { syncPlaySnapshot(accountEpoch) }
+
+    override suspend fun syncPlayRoomName(accountEpoch: ULong): String =
+        ffi("ffi.syncPlayRoomName") { syncPlayRoomName(accountEpoch) }
+
+    override suspend fun syncPlayCreate(accountEpoch: ULong, name: String, listener: SyncPlayListener): SyncPlaySnapshot =
+        ffi("ffi.syncPlayCreate") { syncPlayCreate(accountEpoch, name, listener) }
+
+    override suspend fun syncPlayJoinRoom(accountEpoch: ULong, groupId: String, listener: SyncPlayListener): SyncPlaySnapshot =
+        ffi("ffi.syncPlayJoinRoom") { syncPlayJoinRoom(accountEpoch, groupId, listener) }
+
+    override suspend fun syncPlayListRooms(accountEpoch: ULong): SyncPlayRooms =
+        ffi("ffi.syncPlayListRooms") { syncPlayListRooms(accountEpoch) }
+
+    override suspend fun syncPlayInput(accountEpoch: ULong, input: SyncPlayInput): SyncPlaySnapshot =
+        ffi("ffi.syncPlayInput") { syncPlayInput(accountEpoch, input) }
 }
 
 /** docs/07 §5: a merged [ChangeEvent.Refresh] may carry a views change, so it re-reads the list too. */

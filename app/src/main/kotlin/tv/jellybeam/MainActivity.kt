@@ -80,12 +80,14 @@ import tv.jellybeam.nav.forDrawerPick
 import tv.jellybeam.nav.isHomeRooted
 import tv.jellybeam.nav.resolveStartupView
 import tv.jellybeam.nav.screenForLibraryCard
+import tv.jellybeam.nav.toWatchTogether
 import tv.jellybeam.perf.FrameStatsHistogram
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.perf.ProfileStatus
 import tv.jellybeam.player.ExternalPlaybackContract
 import tv.jellybeam.player.ExternalPlaybackIntentResult
 import tv.jellybeam.player.PlaybackActivity
+import tv.jellybeam.player.SyncPlayExecutor
 import tv.jellybeam.player.authorizationRecoveryCoordinator
 import tv.jellybeam.player.pipController
 import tv.jellybeam.player.playbackActivityTracker
@@ -111,6 +113,7 @@ import tv.jellybeam.ui.launch.LaunchScreen
 import tv.jellybeam.ui.library.LibraryScreen
 import tv.jellybeam.ui.nav.NavDrawerHost
 import tv.jellybeam.ui.report.ReportScreen
+import tv.jellybeam.ui.watchtogether.WatchTogetherScreen
 import tv.jellybeam.ui.search.SearchScreen
 import tv.jellybeam.ui.server.ServerManagementScreen
 import tv.jellybeam.ui.server.indexOfAccount
@@ -303,6 +306,7 @@ class MainActivity : ComponentActivity() {
      * this Activity itself actually finishes.
      */
     override fun finish() {
+        SyncPlayExecutor.onAppExit()
         if (pipController.isInPip.value) pipController.stopPlayback()
         super.finish()
     }
@@ -558,6 +562,8 @@ private fun Screen.viewModelStoreKey(id: Int): String? = when (this) {
     is Screen.Library, is Screen.Detail, is Screen.Person -> entryKey(id)
     // docs/14-seerr-discover.md: same per-entry reasoning as Library/Detail above.
     is Screen.DiscoverGrid, is Screen.DiscoverDetail, is Screen.DiscoverPerson -> entryKey(id)
+    // docs/28 §1: popping the screen clears its view model, which cancels an entry still in flight.
+    is Screen.WatchTogether -> entryKey(id)
     Screen.SignIn, Screen.Home, Screen.Search, Screen.Settings,
     Screen.Discover, Screen.DiscoverRequests, Screen.DiscoverSearch, Screen.Report -> null
 }
@@ -727,6 +733,7 @@ private fun JellybeamRoot(
 
     /** docs/18 §2.1: the account tree's one reset per account change; blanks [backStack] first so nothing on screen races a cleared ViewModel. */
     fun resetSessionState() {
+        SyncPlayExecutor.onEpochMoved()
         // An account change drops a pending external request, even one not yet composed, so it never runs against the next account (docs/18 §2.1).
         onExternalPlaybackConsumed(null)
         focusManager.clearFocus(force = true)
@@ -1309,6 +1316,10 @@ private fun JellybeamRoot(
                                             onOpenPerson = { person ->
                                                 person.id?.let { personId -> go { it.push(Screen.Person(personId, person.name.orEmpty())) } }
                                             },
+                                            onWatchTogether = { itemId, resumeTicks ->
+                                                val lobby = Screen.WatchTogether(itemId, resumeTicks)
+                                                go { it.toWatchTogether(lobby) { push(lobby) } }
+                                            },
                                         )
                                     }
                                 }
@@ -1487,6 +1498,19 @@ private fun JellybeamRoot(
                                 // pops, no library rail); pushed from Settings › Troubleshooting
                                 // or the post-crash dialog.
                                 Screen.Report -> ReportScreen(onExit = { go { it.pop() } }, isTop = isTop)
+
+                                // docs/28 §1: drawer-less like Report; the screen's own Back leaves the group before it pops.
+                                is Screen.WatchTogether -> CompositionLocalProvider(
+                                    LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
+                                ) {
+                                    WatchTogetherScreen(
+                                        itemId = entry.itemId,
+                                        resumeTicks = entry.resumeTicks,
+                                        isTop = isTop,
+                                        onExit = { go { it.popIfTop(stack.ids[index]) } },
+                                        onChooseTitle = { go { it.push(Screen.Search) } },
+                                    )
+                                }
 
                                 // Unreachable: SignIn never appears on a Home-rooted stack.
                                 Screen.SignIn -> Unit

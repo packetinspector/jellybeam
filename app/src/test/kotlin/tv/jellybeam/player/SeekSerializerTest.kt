@@ -106,4 +106,84 @@ class SeekSerializerTest {
         // Idle again -- the next request issues rather than holds.
         assertEquals(SeekSerializer.Decision.Issue(30_000L), seeks.request(targetMs = 30_000L, nowMs = 500L))
     }
+
+    @Test
+    fun `a group seek reports its landing once with position and latency`() {
+        val seeks = SeekSerializer()
+        val reports = mutableListOf<Pair<Long, Long>>()
+        seeks.request(targetMs = 90_000L, nowMs = 1_000L) { landedMs, latencyMs -> reports += landedMs to latencyMs }
+
+        seeks.landed(nowMs = 1_350L, positionMs = 90_002L) // firstFrame
+        seeks.landed(nowMs = 1_400L, positionMs = 90_040L) // STATE_READY after it
+
+        assertEquals(listOf(90_002L to 350L), reports)
+    }
+
+    @Test
+    fun `a group seek superseded by a held seek reports only the last landing`() {
+        val seeks = SeekSerializer()
+        val reports = mutableListOf<Triple<String, Long, Long>>()
+        seeks.request(targetMs = 90_000L, nowMs = 0L) { landedMs, latencyMs -> reports += Triple("first", landedMs, latencyMs) }
+        seeks.request(targetMs = 95_000L, nowMs = 100L) { landedMs, latencyMs -> reports += Triple("second", landedMs, latencyMs) }
+
+        assertEquals(95_000L, seeks.landed(nowMs = 300L, positionMs = 90_000L))
+        seeks.landed(nowMs = 700L, positionMs = 95_001L)
+
+        assertEquals(listOf(Triple("second", 95_001L, 400L)), reports)
+    }
+
+    @Test
+    fun `a seek without a report keeps the owed one and it fires at the newer landing`() {
+        // docs/28 §5: an owed landing report that never fires leaves the member silent.
+        val seeks = SeekSerializer()
+        val reports = mutableListOf<Pair<Long, Long>>()
+        seeks.request(targetMs = 90_000L, nowMs = 0L) { landedMs, latencyMs -> reports += landedMs to latencyMs }
+        seeks.request(targetMs = 70_000L, nowMs = 100L) // a silent align, no report of its own
+
+        assertEquals(70_000L, seeks.landed(nowMs = 300L, positionMs = 90_000L))
+        seeks.landed(nowMs = 650L, positionMs = 70_001L)
+
+        assertEquals(listOf(70_001L to 350L), reports)
+    }
+
+    @Test
+    fun `a group seek that never lands still reports at the stall timeout`() {
+        // docs/28 §5: an owed Ready that never goes out stalls the group; one off target is re-sent a Seek.
+        val seeks = SeekSerializer()
+        val reports = mutableListOf<Pair<Long, Long>>()
+        seeks.request(targetMs = 90_000L, nowMs = 0L) { landedMs, latencyMs -> reports += landedMs to latencyMs }
+
+        assertNull(seeks.stalled(nowMs = 2_000L, positionMs = 88_000L)) // not due yet
+        assertNull(seeks.stalled(nowMs = 2_500L, positionMs = 88_500L))
+        seeks.landed(nowMs = 2_600L, positionMs = 90_000L) // a late landing signal reports nothing more
+
+        assertEquals(listOf(88_500L to 2_500L), reports)
+    }
+
+    @Test
+    fun `a reset drops a group report without firing it`() {
+        val seeks = SeekSerializer()
+        val reports = mutableListOf<Long>()
+        seeks.request(targetMs = 91_000L, nowMs = 0L) { landedMs, _ -> reports += landedMs }
+        seeks.reset()
+        seeks.request(targetMs = 92_000L, nowMs = 1_000L)
+
+        seeks.landed(nowMs = 1_300L, positionMs = 92_000L)
+
+        assertTrue(reports.isEmpty())
+    }
+
+    @Test
+    fun `a group seek requested from a landing report keeps its own report`() {
+        val seeks = SeekSerializer()
+        val reports = mutableListOf<Long>()
+        seeks.request(targetMs = 90_000L, nowMs = 0L) { _, _ ->
+            seeks.request(targetMs = 96_000L, nowMs = 300L) { landedMs, _ -> reports += landedMs }
+        }
+
+        seeks.landed(nowMs = 300L, positionMs = 90_000L)
+        seeks.landed(nowMs = 600L, positionMs = 96_000L)
+
+        assertEquals(listOf(96_000L), reports)
+    }
 }

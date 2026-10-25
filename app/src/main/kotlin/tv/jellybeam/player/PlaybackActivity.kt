@@ -46,6 +46,13 @@ internal class PlaybackActivityTracker {
     fun onCreated() = activeCount.update { it + 1 }
     fun onDestroyed() = activeCount.update { (it - 1).coerceAtLeast(0) }
     suspend fun awaitIdle() = activeCount.first { it == 0 }
+
+    /** docs/28 §3.3: final stops launched whose core call hasn't returned; from then on the core holds each. */
+    private val finalStops = MutableStateFlow(0)
+
+    fun onFinalStopLaunched() = finalStops.update { it + 1 }
+    fun onFinalStopHandedOff() = finalStops.update { (it - 1).coerceAtLeast(0) }
+    suspend fun awaitFinalStops() = finalStops.first { it == 0 }
 }
 
 internal val playbackActivityTracker = PlaybackActivityTracker()
@@ -199,12 +206,15 @@ class PlaybackActivity : ComponentActivity() {
         itemId = intent.getStringExtra(EXTRA_ITEM_ID)
             ?: error("PlaybackActivity requires $EXTRA_ITEM_ID")
         val startFromBeginning = intent.getBooleanExtra(EXTRA_START_FROM_BEGINNING, false)
+        val forGroup = intent.getBooleanExtra(EXTRA_GROUP, false)
 
         // Obtained here, not in the Composable, so onStop/onDestroy reach the same instance.
         viewModel = ViewModelProvider(
             this,
-            PlaybackViewModelFactory(AppGraph.gateway, AppGraph.playerHolder, itemId, startFromBeginning, AppGraph.strings, AppGraph.trickplayFetcher),
+            PlaybackViewModelFactory(AppGraph.gateway, AppGraph.playerHolder, itemId, startFromBeginning, AppGraph.strings, AppGraph.trickplayFetcher, forGroup),
         )[PlaybackViewModel::class.java]
+        // docs/28 §4: a recreated Activity keeps its view model's port, or its solo playback once it left the group.
+        if (forGroup && savedInstanceState == null) attachToGroup()
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -364,7 +374,13 @@ class PlaybackActivity : ComponentActivity() {
         // An expected PiP exit (fullscreen expand), not a user dismissal.
         if (inPip()) expandViaIntent = true
         itemId = newItemId
+        if (intent.getBooleanExtra(EXTRA_GROUP, false)) return attachToGroup()
         viewModel.replaceItem(newItemId, intent.getBooleanExtra(EXTRA_START_FROM_BEGINNING, false))
+    }
+
+    /** docs/28 §4: the group's Load decides what plays; a group that already ended closes the player quietly. */
+    private fun attachToGroup() {
+        SyncPlayExecutor.current.value?.let { it.send(GroupEvent.PortAttached(viewModel.portFor(it))) } ?: closePlayer()
     }
 
     override fun onUserLeaveHint() {
@@ -434,8 +450,18 @@ class PlaybackActivity : ComponentActivity() {
          * restarts the item when `true`. */
         private const val EXTRA_RESUME_SESSION = "tv.jellybeam.player.EXTRA_RESUME_SESSION"
 
+        /** docs/28 §4: the player was launched for the running Watch Together group, which loads it. */
+        private const val EXTRA_GROUP = "tv.jellybeam.player.EXTRA_GROUP"
+
         fun launch(context: Context, itemId: String, startFromBeginning: Boolean = false) {
             AppGraph.beforePlayback { context.startActivity(intent(context, itemId, startFromBeginning)) }
+        }
+
+        /** docs/28 §4: the executor's launch, from a context that may not be an Activity. */
+        internal fun launchForGroup(context: Context, itemId: String) {
+            AppGraph.beforePlayback {
+                context.startActivity(intent(context, itemId).putExtra(EXTRA_GROUP, true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
         }
 
         fun intent(context: Context, itemId: String, startFromBeginning: Boolean = false): Intent =

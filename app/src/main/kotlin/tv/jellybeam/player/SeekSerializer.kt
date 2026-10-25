@@ -30,8 +30,15 @@ internal class SeekSerializer(private val landingTimeoutMs: Long = LANDING_TIMEO
     var inFlightSinceMs: Long? = null
         private set
 
+    /**
+     * docs/28 §5: the owed landing report (position ms, ms since issue); a newer request's report replaces it, and a
+     * request without one keeps it for its own landing, since an owed report that never fires leaves the member silent.
+     */
+    private var onLanded: ((Long, Long) -> Unit)? = null
+
     /** Idle -> [Decision.Issue]; in flight -> [Decision.Hold], replacing any held target. */
-    fun request(targetMs: Long, nowMs: Long): Decision {
+    fun request(targetMs: Long, nowMs: Long, onLanded: ((landedMs: Long, latencyMs: Long) -> Unit)? = null): Decision {
+        if (onLanded != null) this.onLanded = onLanded
         if (inFlightTargetMs == null) {
             inFlightTargetMs = targetMs
             inFlightSinceMs = nowMs
@@ -44,18 +51,31 @@ internal class SeekSerializer(private val landingTimeoutMs: Long = LANDING_TIMEO
     /**
      * Returns `null` when nothing was in flight. Otherwise clears in-flight state and, if a target
      * was held, promotes it to in-flight and returns it -- even when equal to the one that just
-     * landed, since that repeat is the deliberate recovery re-seek.
+     * landed, since that repeat is the deliberate recovery re-seek. With nothing held, the report
+     * hears [positionMs], the player position; null (no position known) reports nothing.
      */
-    fun landed(nowMs: Long): Long? {
-        if (inFlightTargetMs == null) return null
+    fun landed(nowMs: Long, positionMs: Long? = null): Long? {
+        val since = inFlightSinceMs ?: return null
         val pending = pendingTargetMs
         inFlightTargetMs = null
         inFlightSinceMs = null
         pendingTargetMs = null
-        if (pending == null) return null
+        if (pending == null) {
+            // Taken before it runs, so a report that requests a new seek keeps that seek's report.
+            val report = onLanded.also { onLanded = null }
+            positionMs?.let { report?.invoke(it, nowMs - since) }
+            return null
+        }
         inFlightTargetMs = pending
         inFlightSinceMs = nowMs
         return pending
+    }
+
+    /** The landing timeout's recovery: once [timeoutDue], lands as [landed] does, report included, since
+     * an owed report that never fires stalls the group and one off target is re-sent a Seek (docs/28 §5). */
+    fun stalled(nowMs: Long, positionMs: Long): Long? {
+        if (!timeoutDue(nowMs)) return null
+        return landed(nowMs, positionMs)
     }
 
     /** `true` once the in-flight seek has been in flight for at least [landingTimeoutMs]. */
@@ -68,6 +88,7 @@ internal class SeekSerializer(private val landingTimeoutMs: Long = LANDING_TIMEO
         inFlightTargetMs = null
         pendingTargetMs = null
         inFlightSinceMs = null
+        onLanded = null
     }
 
     companion object {

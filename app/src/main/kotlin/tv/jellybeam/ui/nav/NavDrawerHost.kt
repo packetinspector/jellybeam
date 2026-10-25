@@ -206,6 +206,7 @@ fun NavDrawerHost(
     val homeLabel = stringResource(R.string.drawer_home)
     val discoverLabel = stringResource(R.string.drawer_discover)
     val searchLabel = stringResource(R.string.search_chip)
+    val togetherLabel = stringResource(R.string.drawer_watch_together)
     val updateAvailable by tv.jellybeam.AppGraph.updateAvailable.collectAsState()
     val settingsChip = stringResource(R.string.settings_chip)
     val settingsLabel = if (updateAvailable) stringResource(R.string.settings_chip_with_update, settingsChip) else settingsChip
@@ -216,7 +217,7 @@ fun NavDrawerHost(
     // Independently-remembered lists so a library add/remove never rebuilds the Servers section's
     // [FocusRequester]s and vice versa; concatenated via its own `remember` for referential
     // stability.
-    val navEntries = remember(libraries, currentScreen, homeLabel, discoverLabel, discoverConfigured, searchLabel, settingsLabel) {
+    val navEntries = remember(libraries, currentScreen, homeLabel, discoverLabel, discoverConfigured, searchLabel, togetherLabel, settingsLabel) {
         buildList {
             add(DrawerEntry(homeLabel, matchesCurrentScreen(Screen.Home, currentScreen)) { onNavigate(Screen.Home) })
             libraries.forEach { view ->
@@ -227,6 +228,8 @@ fun NavDrawerHost(
                 add(DrawerEntry(discoverLabel, matchesCurrentScreen(Screen.Discover, currentScreen), onOpenDiscover))
             }
             add(DrawerEntry(searchLabel, matchesCurrentScreen(Screen.Search, currentScreen)) { onNavigate(Screen.Search) })
+            // docs/28 §1: a plain entry to the room list; nothing about a group runs until the screen opens.
+            add(DrawerEntry(togetherLabel, isCurrent = false) { onNavigate(Screen.WatchTogether(null, null)) })
             add(DrawerEntry(settingsLabel, matchesCurrentScreen(Screen.Settings, currentScreen)) { onNavigate(Screen.Settings) })
         }
     }

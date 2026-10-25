@@ -67,6 +67,7 @@
     <string name="detail_menu_play_random">Play something random</string>
     <string name="detail_menu_play_random_from">FROM %d</string>
     <string name="detail_menu_go_to_series">Go to series</string>
+    <string name="detail_menu_watch_together">Watch together</string>
     <string name="detail_menu_add_to_collection">Add to collection</string>
     <string name="detail_menu_refresh_metadata">Refresh metadata</string>
 

@@ -274,6 +274,8 @@ fun DetailScreen(
     isTop: Boolean = true,
     /** Called once when the mirror drops this page's item while it is on screen (docs/07 §5). */
     onRemoved: () -> Unit = {},
+    /** docs/28 §1: opens the lobby holding this item id from that resume position. */
+    onWatchTogether: (String, Long) -> Unit = { _, _ -> },
     viewModel: DetailViewModel = viewModel(
         key = "detail-${card.id}",
         factory = DetailViewModelFactory(AppGraph.gateway, card, AppGraph.strings),
@@ -345,6 +347,13 @@ fun DetailScreen(
             dropPanelForNavigation()
             onOpenDetail(series)
             viewModel.consumePendingSeriesNavigation()
+        }
+    }
+    LaunchedEffect(state.pendingWatchTogether) {
+        state.pendingWatchTogether?.let { pending ->
+            dropPanelForNavigation()
+            onWatchTogether(pending.targetId, pending.resumeTicks)
+            viewModel.consumePendingWatchTogether()
         }
     }
 

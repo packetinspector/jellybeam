@@ -71,8 +71,17 @@ object JellybeamTheme {
     /** Lighter-than-[Hairline] border; the hero secondary button's outline. */
     val HairlineStrong = Color(0xFF4A3E33)
 
+    /** The watch-together lobby's ground and scrim colour, a step below [Notte] (docs/28 §1). */
+    val LobbyGround = Color(0xFF0B0908)
+
+    /** The faint rule between rows of a list on [LobbyGround]. */
+    val RuleFaint = Color(0xFF241E19)
+
     /** [Panna] at 45% opacity -- eyebrow/label text over artwork, where [Grigio] is invisible. */
     val PannaTertiary = Panna.copy(alpha = 0.45f)
+
+    /** The watch-together key-hint line on [LobbyGround], dimmer than [Grigio]. */
+    val GrigioDim = Color(0xFF6E665B)
 
     // -- Type ramp -----------------------------------------------------
 

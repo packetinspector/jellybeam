@@ -254,14 +254,21 @@ fun ArtBox(
  * [color] defaults to [JellybeamTheme.Pistacchio], overridable (e.g. [JellybeamTheme.Sheen] on an
  * already-Pistacchio control). Prepends `zIndex(1f)` while focused (docs/15 §0.3) so the ring,
  * drawn outside the element's layout bounds, paints after siblings regardless of paint order.
+ * [width] and [gap] default to the shared 3 dp ring; a thinner ring passes both.
  */
-fun Modifier.focusRing(isFocused: Boolean, cornerRadius: Dp = ART_RADIUS, color: Color = JellybeamTheme.Pistacchio): Modifier = this
+fun Modifier.focusRing(
+    isFocused: Boolean,
+    cornerRadius: Dp = ART_RADIUS,
+    color: Color = JellybeamTheme.Pistacchio,
+    width: Dp = RING_WIDTH,
+    gap: Dp = RING_GAP,
+): Modifier = this
     .zIndex(if (isFocused) 1f else 0f)
     .drawWithContent {
     drawContent()
     if (!isFocused) return@drawWithContent
-    val strokeWidthPx = RING_WIDTH.toPx()
-    val outset = strokeWidthPx / 2f + RING_GAP.toPx()
+    val strokeWidthPx = width.toPx()
+    val outset = strokeWidthPx / 2f + gap.toPx()
     drawRoundRect(
         color = color,
         topLeft = Offset(-outset, -outset),

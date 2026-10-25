@@ -1,5 +1,7 @@
 package tv.jellybeam.player
 
+import uniffi.jellybeam_core.SyncPlayPhase
+
 /** Injectable time source so [PlaybackOsdController] is deterministically unit-testable. */
 fun interface Clock {
     fun nowMs(): Long
@@ -15,7 +17,7 @@ fun interface Clock {
  * events and a periodic [tick].
  *
  * Enter is two-stage: the first press while hidden only reveals; a second while visible toggles
- * play/pause. Paused pins the OSD visible, since a TV remote has no pointer to wake the screen.
+ * play/pause. A pause reveals and pins the OSD, since a TV remote has no pointer to wake the screen.
  * [setPinned] pins it visible for the track picker, next-up card, or a trickplay seek preview, so
  * the main chrome doesn't vanish mid-interaction.
  */
@@ -60,10 +62,10 @@ class PlaybackOsdController(
         }
     }
 
-    /** Pause/resume edge from the player; resets the idle clock either way for a fresh window. */
-    fun onPausedChanged(paused: Boolean) {
+    /** Pause/resume edge from the player; resets the idle clock either way, and reveals per [pauseRevealsOsd]. */
+    fun onPausedChanged(paused: Boolean, groupPhase: SyncPlayPhase? = null) {
         isPaused = paused
-        isVisible = true
+        if (pauseRevealsOsd(paused, groupPhase)) isVisible = true
         lastInputAtMs = clock.nowMs()
     }
 
@@ -87,3 +89,10 @@ class PlaybackOsdController(
         }
     }
 }
+
+/**
+ * docs/12 §9, docs/28 §4: solo ([groupPhase] null) reveals on either edge; in a group only a member's Pause does, so a
+ * seek's Waiting hold or a drift hold keeps hidden Left/Right as seeks.
+ */
+fun pauseRevealsOsd(paused: Boolean, groupPhase: SyncPlayPhase?): Boolean =
+    groupPhase == null || (paused && groupPhase == SyncPlayPhase.PAUSED)

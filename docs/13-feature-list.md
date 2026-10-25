@@ -473,6 +473,21 @@ server), never in a text field, and Sign in and Remove stay focused while
 they run.
 <!-- verified: app/src/main/kotlin/tv/jellybeam/ui/focus/FocusOwner.kt, FocusMemory.kt, LayerReentry.kt, RingClearance.kt; MainActivity.kt RetainedScreenLayer/rememberSaveableStateHolder; ui/cards/CardArt.kt focusRing zIndex; ui/detail/DetailScreen.kt, ui/settings/SettingsScreen.kt, ui/search/SearchScreen.kt FocusRestorer call sites; player/PlaybackScreen.kt restoreInvokerFocus/OsdRowLeading -->
 
+**Watch Together** (docs/28) -- watch with other accounts on the same server
+through its own SyncPlay, no plugin. The menu's Watch together opens a live room
+list (each room's name, members as the server names them, head count, In lobby
+/ Playing / Paused / Waiting), refreshed every 5 s only while it shows; one press
+joins, and a playing room drops you into the player at the group's position. A
+title's ⋯ menu starts a room named "<you>'s group" (with " 2" and on if that name is
+taken): a lobby with the name every member sees, members as they join, and Start (from the beginning or
+your resume point); with a title playing in the mini player, Stop ends it and opens the room. In the player everyone's pause and seek moves the whole
+group, everyone gets the skip-intro pill and the host's own auto-skip setting skips
+for the group, a readout shows the room name, the members and the latest join or leave, a
+stall offers "press Play to start without them" and Leave, and each viewer keeps their own audio, subtitles and
+quality. When the host leaves the lobby, guests are told and leave too. An
+account without access sees one plain screen and the list makes no requests.
+<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/watchtogether/RoomsPane.kt, WatchTogetherViewModel.kt, WatchTogetherScreen.kt, LobbyFormat.kt; app/src/main/kotlin/tv/jellybeam/player/SyncPlayExecutor.kt, GroupOsd.kt, SyncPlayView.kt; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailMenuModel.kt; core/playback-policy/src/syncplay.rs; core/ffi/src/syncplay.rs -->
+
 ## Why Jellybeam — differentiators
 
 *(For marketing-site use. Every bullet below is verified against the current

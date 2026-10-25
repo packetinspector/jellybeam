@@ -84,6 +84,27 @@ the entry named here is the one to extend.
 - **Seerr** has its own counter, `CoreGateway.seerrRevision`, moved only by
   `RealCoreGateway.bumpSeerrRevision`.
 
+### Watch Together group events
+
+- **Enters (core):** `syncplay.rs` `sync_play_feed`, called by `object.rs`
+  `JellybeamCore::spawn_bus_forwarder` for the installed bus (SyncPlay frames, `BusConnected`
+  once the server-version refresh returns, `BusDisconnected`, `BusUnauthorized`, and a bus lag
+  as a rejoin) and by the owner's own runner and jobs; the `sync_play_*` exports; `open_begin`
+  re-entry (the taken bus steps `BusDisconnected` under its lock); `dispose_account_reset` (the
+  outgoing group's `AccountReset`, on its own client); `Drop for JellybeamCore` (one bounded
+  best-effort Leave).
+- **Fans out:** `SyncPlayOwner::step_locked` → `playback_policy::syncplay::SyncPlay::step`; a
+  Leave runs detached, other requests through the group's serial runner, and each step's update
+  goes to the group's `SyncPlayListener`. Nothing reaches `ChangeListener`.
+- **Enters (Kotlin):** `SyncPlayExecutor.listener.onStep` only queues; one Main consumer runs
+  `reduce` for each event, also fed by the player through its `AttachedPort`
+  (`PlaybackViewModel.mode = PlayerMode.Group`) and by two lifecycle hooks:
+  `SyncPlayExecutor.onAppExit` from `MainActivity.finish` (best-effort Leave) and
+  `onEpochMoved` from `resetSessionState`. No root-level collector.
+- **Fans out (Kotlin):** `reduce`'s effects, in order: core inputs through one serial queue,
+  `PlaybackActivity.launchForGroup` for a Load before a player exists, and `PortCall`s to the
+  attached player.
+
 ### Playback session start / transition / stop
 
 - **Start:** `PlaybackActivity.onCreate` builds `PlaybackViewModel`; its `init` mints the first
@@ -97,7 +118,8 @@ the entry named here is the one to extend.
   (no report) move `owner` to `SessionOwner.Ended` exactly once; `launchFinalStop` runs on
   `AppGraph.processScope` so teardown cannot cancel it. Callers: `finishAfterStop` (Back, remote
   Stop), `finishAfterFatalPlaybackError`, `PlaybackActivity.onStop` / `onDestroy`,
-  `PlaybackViewModel.onCleared`.
+  `PlaybackViewModel.onCleared`. Each final stop is counted on `playbackActivityTracker` from
+  its launch until `stopPlayback` returns; `SyncPlayExecutor.create` waits for zero (docs/28 §3).
 - **Core side:** `JellybeamCore::prepare_playback` admits the request against its epoch;
   `stop_playback` / `abandon_playback` end the reporting session.
 - **Also notified:** `UpdateCoordinator.playbackChanged` from `PlaybackActivity.onCreate` /
@@ -132,6 +154,8 @@ the entry named here is the one to extend.
 |---|---|---|---|
 | Account epoch pair | `object.rs` `AccountSlot.epoch` / `PlaybackOwner::parked`; Kotlin copy `RealCoreGateway.epochs`, written only in `accountChange` | `AccountTreeOwner`, `PlaybackViewModel`, `RealCoreGateway.currentUrlBase` | never cleared; advanced by `reset_account_state_locked` |
 | Installed account (client, server facts, mirror, bus, listener task) | `object.rs` `AccountSlot.installed`, replaced only by `reset_account_state_locked`; the bus bundle is opened by `open_mirror` through `installed_mut(epoch)` and stopped only by `stop_event_bus` | every core export via `AccountSlot::installed`; `server_info_snapshot` | — / stale results dropped by epoch / replaced in the same step |
+| Watch Together group | `syncplay.rs` `Installed.syncplay` (`SyncPlayOwner`), changed only by `SyncPlayOwner::step_locked` under the state lock | `sync_play_snapshot`, the group's `SyncPlayListener` | results for a replaced epoch dropped / Idle releases jobs and listener / the outgoing group leaves in `dispose_account_reset` |
+| Watch Together membership (Kotlin) | `SyncPlayExecutor.current`, written only by `create`/`join` and the executor's End; its state only by `reduce` on the executor's Main consumer; the player's side is `PlaybackViewModel.mode` (`PlayerMode`) | `MainActivity` hooks, `PlaybackViewModel` through `AttachedPort` | a cancelled entry ends and leaves / Idle or Detach ends it, the player back to solo / `onEpochMoved` or `AccountChanged` ends it |
 | Per-account caches (Seerr handle, collections, admin) | `object.rs` `Installed.caches` via `store_if_epoch` | `read_if_epoch`, `require_seerr_handle` | late stores dropped / — / replaced wholesale |
 | Library list | `RealCoreGateway._viewsState` (`refreshViews`; emptied when `openMirror` fails) | `JellybeamRoot`, `HomeFeed`, `LaunchWarmup` | stale read dropped by epoch / — / re-read by the next `openMirror` |
 | Change events | `RealCoreGateway._changeEvents` (`DROP_OLDEST`, no replay) | every `ChangeRefreshScheduler` | — / — / the core rebinds the listener to the new mirror |
