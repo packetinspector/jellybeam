@@ -2,7 +2,7 @@
 <resources>
     <string name="press_back_again_to_exit">Press Back again to exit Jellybeam</string>
     <string name="app_name">Jellybeam</string>
-    <string name="external_playback_invalid">Unable to play: the external item ID is invalid</string>
+    <string name="external_playback_invalid">Unable to play: the external request is invalid</string>
     <string name="external_playback_sign_in_required">Sign in to Jellybeam before starting external playback</string>
 
     <!-- Home shelf titles: must match docs/07-home-browse-behavior.md

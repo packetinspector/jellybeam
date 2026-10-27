@@ -120,9 +120,9 @@ class WatchTogetherReduceTest {
                     val entered = next.effects.count { it is TogetherEffect.Enter && !it.afterPip }
                     val newLeaves = leaves.toMutableMap().apply { next.effects.mapNotNull { it.leaveOf() }.forEach { merge(it, 1, Int::plus) } }
                     val newWatches = watches.toMutableMap().apply { next.effects.filterIsInstance<TogetherEffect.Watch>().forEach { merge(it.exec, 1, Int::plus) } }
-                    ensure(seed == null || enters + entered <= 1, "6 a create screen enters once", now)
-                    ensure(newLeaves.values.all { it <= 1 }, "6 at most one leave per membership", now)
-                    ensure(newWatches.values.all { it <= 1 }, "6 one watch per membership", now)
+                    ensure(seed == null || enters + entered <= 1, "a create screen enters once", now)
+                    ensure(newLeaves.values.all { it <= 1 }, "at most one leave per membership", now)
+                    ensure(newWatches.values.all { it <= 1 }, "one watch per membership", now)
                     val nextWorld = if (entered > 0) world.copy(entries = world.entries + exec()) else world
                     walk(next.state, nextWorld, now, enters + entered, newLeaves, newWatches)
                 }
@@ -134,7 +134,7 @@ class WatchTogetherReduceTest {
 
     private fun check(seed: HeldItem?, before: TogetherState, event: TogetherEvent, next: TogetherStep, path: List<String>) {
         val after = next.state
-        // 3: the held item reaches the group only through the host's Start, never from a join screen.
+        // The held item reaches the group only through the host's Start, never from a join screen.
         next.effects.filterIsInstance<TogetherEffect.Send>().filter { it.event is GroupEvent.UserPick }.forEach { send ->
             val pick = send.event as GroupEvent.UserPick
             val held = when (val origin = (before as? TogetherState.Member)?.origin) {
@@ -142,46 +142,46 @@ class WatchTogetherReduceTest {
                 is Origin.Adopted -> origin.held
                 is Origin.Joined, null -> null
             }
-            ensure(event is TogetherEvent.Start && held != null, "3 pick only at the host's Start", path)
-            ensure(pick.itemId == held!!.itemId && pick.startTicks == (event as TogetherEvent.Start).ticks, "3 pick is the held item", path)
-            ensure(send.exec === (before as TogetherState.Member).exec, "3 pick goes to the screen's group", path)
+            ensure(event is TogetherEvent.Start && held != null, "pick only at the host's Start", path)
+            ensure(pick.itemId == held!!.itemId && pick.startTicks == (event as TogetherEvent.Start).ticks, "pick is the held item", path)
+            ensure(send.exec === (before as TogetherState.Member).exec, "pick goes to the screen's group", path)
         }
-        // 4: every Started ends in a member screen watching it, or in its Leave.
+        // Every Started ends in a member screen watching it, or in its Leave.
         val started = ((event as? TogetherEvent.EntryDone)?.result as? EntryResult.Started)?.exec
         if (started != null) {
             val adopted = after is TogetherState.Member && after.exec === started && TogetherEffect.Watch(started) in next.effects
             val left = next.effects.any { it.leaveOf() === started }
-            ensure(adopted != left, "4 started ends in member or leave", path)
+            ensure(adopted != left, "started ends in member or leave", path)
         }
-        // 5: an end or sighting of another membership is inert; Done is terminal.
+        // An end or sighting of another membership is inert; Done is terminal.
         val named = (event as? TogetherEvent.ExecEnded)?.exec ?: (event as? TogetherEvent.Observed)?.exec
         if (named != null && (before as? TogetherState.Member)?.exec !== named) {
-            ensure(next == TogetherStep(before), "5 stale end or sighting inert", path)
+            ensure(next == TogetherStep(before), "stale end or sighting inert", path)
         }
-        // 7: a sighting only updates the member screen's memory, with no effect.
+        // A sighting only updates the member screen's memory, with no effect.
         if (event is TogetherEvent.Observed && before is TogetherState.Member && before.exec === event.exec) {
-            ensure(next.effects.isEmpty() && after is TogetherState.Member && after.exec === before.exec && after.origin == before.origin, "7 sighting is memory only", path)
+            ensure(next.effects.isEmpty() && after is TogetherState.Member && after.exec === before.exec && after.origin == before.origin, "sighting is memory only", path)
             val memory = (after as TogetherState.Member).memory
-            ensure(memory.live == event.live, "7 the last sighting's notice is remembered", path)
-            ensure(event.loadItem == null || (memory.lastPlayed == event.loadItem && memory.log == null), "7 a load clears the log", path)
+            ensure(memory.live == event.live, "the last sighting's notice is remembered", path)
+            ensure(event.loadItem == null || (memory.lastPlayed == event.loadItem && memory.log == null), "a load clears the log", path)
         }
         if (before is TogetherState.Done) {
-            ensure(after is TogetherState.Done && after.line == before.line, "5 done terminal", path)
-            ensure(next.effects.all { it.leaveOf() != null }, "5 done only leaves a late group", path)
+            ensure(after is TogetherState.Done && after.line == before.line, "done terminal", path)
+            ensure(next.effects.all { it.leaveOf() != null }, "done only leaves a late group", path)
         }
-        // 6: a retry after the PiP player stops comes only from that refusal's Stop.
+        // A retry after the PiP player stops comes only from that refusal's Stop.
         if (next.effects.any { it is TogetherEffect.Enter && it.afterPip }) {
-            ensure(before is TogetherState.CreateRefused && event == TogetherEvent.Stop, "6 a PiP retry only from the refusal's Stop", path)
+            ensure(before is TogetherState.CreateRefused && event == TogetherEvent.Stop, "a PiP retry only from the refusal's Stop", path)
         }
-        // 6: an entry starts only from the room list or the first activation, never over one in flight.
+        // An entry starts only from the room list or the first activation, never over one in flight.
         if (next.effects.any { it is TogetherEffect.Enter }) {
-            ensure(before !is TogetherState.Entering && after is TogetherState.Entering, "6 one entry in flight", path)
+            ensure(before !is TogetherState.Entering && after is TogetherState.Entering, "one entry in flight", path)
         }
-        // R1-B1: Back in a group only asks to leave; the screen moves on at the group's end.
+        // Back in a group only asks to leave; the screen moves on at the group's end.
         if (before is TogetherState.Member && event == TogetherEvent.Back) {
-            // R2-B1: a second Back while leaving gives up waiting and closes the screen, sending nothing.
-            if (before.leaving) ensure(after == TogetherState.Done(GroupOutcome.Silent) && next.effects.isEmpty(), "R2-B1 a second back closes without a second leave", path)
-            else ensure(after is TogetherState.Member && after.exec === before.exec, "R1-B1 back keeps the membership until it ends", path)
+            // A second Back while leaving gives up waiting and closes the screen, sending nothing.
+            if (before.leaving) ensure(after == TogetherState.Done(GroupOutcome.Silent) && next.effects.isEmpty(), "a second back closes without a second leave", path)
+            else ensure(after is TogetherState.Member && after.exec === before.exec, "back keeps the membership until it ends", path)
         }
     }
 

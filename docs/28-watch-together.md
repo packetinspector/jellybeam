@@ -40,8 +40,8 @@ SyncPlay. It needs no server change, no new port, and no plugin.
 - **Each viewer keeps their own audio, subtitles, subtitle delay and
   quality.** SyncPlay carries item ids, positions and play state only.
 - **Refusals:** starting while anything plays (PiP included) is refused
-  with a Stop action; Stop ends that player, waits up to 10 s for it to
-  close, then starts the room for the same title. An account without SyncPlay access sees "Your
+  with a Stop action; Stop ends that player, waits until it has closed and
+  its final report is on its way, then starts the room for the same title. An account without SyncPlay access sees "Your
   account can't use watch-together".
 - **In a group,** next-up, autoplay and the playback speed menu are off.
   A segment skip is one seek for the whole group: every member sees the
@@ -146,6 +146,12 @@ a pure reducer over states Idle, Creating, Joining, Member and Leaving.
   that Ready, because its own landing reports one.
 - **A recreated player stays in the group.** A player screen the system
   recreates re-attaches as the same player; only a different one is closed.
+- **A group load opens the player** through the same request slot as any
+  Play (docs/17 §3). While Jellybeam is in the background, the mini player
+  over another app included, the load waits until Jellybeam is opened. A
+  load interrupted while expanding the mini player is dropped, since the
+  group's next Load opens it again; a Play of anything else that replaces a
+  waiting load leaves the group.
 - **Exits.** Leaving the player, sign-out, account switch or a fatal
   playback error leaves the group. Every exit returns the player to solo
   controls, and a playing video keeps playing solo.

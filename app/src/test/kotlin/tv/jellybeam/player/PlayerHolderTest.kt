@@ -83,6 +83,43 @@ class PlayerHolderTest {
     }
 
     @Test
+    fun `an external start lands exactly, plays, and never arms the keyframe resume`() {
+        // docs/05 external: START_MS is an absolute position, direct play and transcode alike.
+        for (transcode in listOf(false, true)) {
+            assertEquals(
+                LoadOpening(12_345L, armResume = false, playWhenReady = true),
+                loadOpening(planStartTicks = 420_000_000L, transcode = transcode, LoadStart.At(ticks = 123_456_789L)),
+            )
+        }
+        assertEquals(LoadOpening(0L, armResume = false, playWhenReady = true), loadOpening(420_000_000L, false, LoadStart.At(0L)))
+    }
+
+    @Test
+    fun `an external start clamps past the end to ten seconds before it`() {
+        val runtime = 72_000_000_000L
+        assertEquals(1_000L, externalStartTicks(1_000L, runtime))
+        assertEquals(runtime - 100_000_001L, externalStartTicks(runtime - 100_000_001L, runtime))
+        assertEquals(runtime - 50_000_000L, externalStartTicks(runtime - 50_000_000L, runtime))
+        assertEquals(runtime - 100_000_000L, externalStartTicks(runtime, runtime))
+        assertEquals(runtime - 100_000_000L, externalStartTicks(Long.MAX_VALUE, runtime))
+        assertEquals(0L, externalStartTicks(60_000_000L, 60_000_000L))
+        assertEquals(0L, externalStartTicks(70_000_000L, 60_000_000L))
+    }
+
+    @Test
+    fun `an external start with an unknown runtime is taken as requested`() {
+        assertEquals(5_000_000_000L, externalStartTicks(5_000_000_000L, null))
+        assertEquals(5_000_000_000L, externalStartTicks(5_000_000_000L, 0L))
+    }
+
+    @Test
+    fun `startAt saturates instead of overflowing and leaves null to resume`() {
+        assertEquals(LoadStart.Resume, startAt(null))
+        assertEquals(LoadStart.At(900_000_000L), startAt(90_000L))
+        assertEquals(LoadStart.At(Long.MAX_VALUE / 10_000L * 10_000L), startAt(Long.MAX_VALUE))
+    }
+
+    @Test
     fun `a resume load still lands on the keyframe and plays, except a transcode`() {
         assertEquals(LoadOpening(42_000L, armResume = true, playWhenReady = true), loadOpening(420_000_000L, false, LoadStart.Resume))
         assertEquals(LoadOpening(42_000L, armResume = false, playWhenReady = true), loadOpening(420_000_000L, true, LoadStart.Resume))

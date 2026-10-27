@@ -135,7 +135,7 @@ class FakePlaybackPlayer : PlaybackPlayer {
         lastAudioDecoderPreferences = audioDecoderPreferences
         // As PlayerHolder.load: a group start sets the position and the play intent.
         val opening = loadOpening(plan.startPositionTicks, plan.playMethod == PlayMethodFfi.TRANSCODE, start)
-        if (start is LoadStart.GroupExactPaused) positionTicks = PlaybackTicks.msToTicks(opening.startPositionMs)
+        if (start !is LoadStart.Resume) positionTicks = PlaybackTicks.msToTicks(opening.startPositionMs)
         playWhenReady = opening.playWhenReady
     }
 

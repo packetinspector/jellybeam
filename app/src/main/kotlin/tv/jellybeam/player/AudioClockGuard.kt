@@ -36,10 +36,17 @@ internal class AudioClockGuard(
     private var playedBeforeUs = 0L
     private var lastReportedUs = C.TIME_UNSET
 
+    /** Set by [onStop]: the position freezes at the last frame while play time runs on, so it measures no latency. */
+    private var drained = false
+
     val isPlaying: Boolean get() = playingSinceUs != C.TIME_UNSET
 
     /** `play time - reported` seen on this output after [LEARN_AFTER_PLAYED_US] of play, healthy only; [C.TIME_UNSET] until then. */
     var learnedLagUs: Long = C.TIME_UNSET
+        private set
+
+    /** What [learnedLagUs] would read without the [onStop] cut-off, for the release log only; [C.TIME_UNSET] until learnt. */
+    var unstoppedLagUs: Long = C.TIME_UNSET
         private set
 
     /** Total clamps applied since the last [onFlush]; the largest excess the output claimed. */
@@ -59,13 +66,20 @@ internal class AudioClockGuard(
         }
     }
 
+    /** No more data will be written; the frames already written still play out truthfully. */
+    fun onStop() {
+        drained = true
+    }
+
     fun onFlush() {
+        drained = false
         playingSinceUs = C.TIME_UNSET
         playedBeforeUs = 0L
         lastReportedUs = C.TIME_UNSET
         clampCount = 0
         maxExcessUs = 0
         learnedLagUs = C.TIME_UNSET
+        unstoppedLagUs = C.TIME_UNSET
     }
 
     /** The position to report for [reportedUs] at [nowUs]; a lie becomes `play time - lag`, and nothing goes backwards. */
@@ -77,7 +91,8 @@ internal class AudioClockGuard(
             maxExcessUs = max(maxExcessUs, positionUs - playedUs)
             positionUs = max(0L, playedUs - lagUs)
         } else if (clampCount == 0 && playingSinceUs != C.TIME_UNSET && playedUs >= LEARN_AFTER_PLAYED_US) {
-            learnedLagUs = max(0L, playedUs - positionUs)
+            unstoppedLagUs = max(0L, playedUs - positionUs)
+            if (!drained) learnedLagUs = unstoppedLagUs
         }
         if (lastReportedUs != C.TIME_UNSET) positionUs = max(positionUs, lastReportedUs)
         lastReportedUs = positionUs
@@ -124,6 +139,11 @@ internal class PlausibleClockAudioOutput(
         guard.onFlush()
     }
 
+    override fun stop() {
+        super.stop()
+        guard.onStop()
+    }
+
     override fun getPositionUs(): Long {
         val reportedUs = super.getPositionUs()
         if (reportedUs < 0) return reportedUs
@@ -140,6 +160,7 @@ internal class PlausibleClockAudioOutput(
         if (guard.clampCount > 0) {
             Log.i(SEEK_LOG_TAG, "clock clamps=${guard.clampCount} maxExcess=${guard.maxExcessUs / 1000}")
         } else if (guard.learnedLagUs != C.TIME_UNSET) {
+            Log.i(SEEK_LOG_TAG, "clock lag=${guard.learnedLagUs / 1000} unstopped=${guard.unstoppedLagUs / 1000}")
             onLagLearned(guard.learnedLagUs)
         }
         super.release()

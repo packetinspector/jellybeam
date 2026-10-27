@@ -104,7 +104,7 @@ internal fun WatchTogetherScreen(
     val context = LocalContext.current
     val strings = rememberUiStrings()
     val held = itemId?.let { HeldItem(it, resumeTicks ?: 0L) }
-    val factory = remember { WatchTogetherViewModel.factory(held, context) }
+    val factory = remember { WatchTogetherViewModel.factory(held) }
     val viewModel: WatchTogetherViewModel = viewModel(factory = factory)
     val state by viewModel.state.collectAsState()
     val latestExit by rememberUpdatedState(onExit)

@@ -11,12 +11,13 @@ import org.junit.Test
 import tv.jellybeam.data.FakeCoreGateway
 import tv.jellybeam.nav.NavBackStack
 import tv.jellybeam.nav.Screen
+import tv.jellybeam.player.Req
 import tv.jellybeam.ui.cards.testCard
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class HandleOpenDetailTest {
 
-    private fun detailRequest(itemId: String) = ExternalPlaybackRequest(1L, itemId, ExternalPlaybackRequestKind.OPEN_DETAIL)
+    private fun detailRequest(itemId: String) = Req(1L, Req.Kind.OpenDetail(itemId), Req.Origin.External)
 
     @Test
     fun `opening a detail pushes it on a home-rooted stack and consumes the request after navigating`() = runTest {
@@ -112,7 +113,7 @@ class HandleOpenDetailTest {
             cardByIdGate = gate
         }
         val request = detailRequest("movie-1")
-        var pending: ExternalPlaybackRequest? = request
+        var pending: Req<Req.Kind.OpenDetail>? = request
         val events = mutableListOf<String>()
         val caller = launch {
             handleOpenDetail(

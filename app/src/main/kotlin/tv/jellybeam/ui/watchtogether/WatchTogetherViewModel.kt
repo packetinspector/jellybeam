@@ -1,6 +1,5 @@
 package tv.jellybeam.ui.watchtogether
 
-import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -12,7 +11,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import tv.jellybeam.AppGraph
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.runCatchingCancellable
@@ -27,7 +25,7 @@ import tv.jellybeam.player.SyncPlayExecutor
 import tv.jellybeam.player.liveNotice
 import tv.jellybeam.player.noticeSurface
 import tv.jellybeam.player.outcome
-import tv.jellybeam.player.pipController
+import tv.jellybeam.player.playbackActivityTracker
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.SyncPlayNotice
@@ -133,7 +131,7 @@ internal sealed interface TogetherEvent {
     data class ExecEnded(val exec: SyncPlayExecutor, val notices: List<SyncPlayNotice>, val shown: Boolean = true) : TogetherEvent
     /** The host's Start, from [ticks]. */
     data class Start(val ticks: Long) : TogetherEvent
-    /** docs/28 §1 (Q6): a title chosen above the lobby replaces the held one. */
+    /** docs/28 §1: a title chosen above the lobby replaces the held one. */
     data class Hold(val item: HeldItem) : TogetherEvent
     /** [exec]'s state seen at [atMs]: its live lobby notice and the item a launch or load names. */
     data class Observed(val exec: SyncPlayExecutor, val live: SyncPlayNotice?, val loadItem: String?, val atMs: Long) : TogetherEvent
@@ -156,9 +154,6 @@ internal sealed interface TogetherEffect {
     data class Poll(val tag: PollTag, val epoch: ULong, val delayMs: Long) : TogetherEffect
     data object StopPoll : TogetherEffect
 }
-
-/** docs/28 §1: how long Stop waits for the PiP player to close before hosting is tried anyway. */
-private const val PIP_CLOSE_WAIT_MS = 10_000L
 
 /** docs/28 §8: the room list refreshes this often, and only while it shows. */
 internal const val ROOMS_POLL_MS = 5_000L
@@ -227,7 +222,7 @@ private fun rooms(state: TogetherState.Rooms, event: TogetherEvent): TogetherSte
         // A Select clears the line, so the list behind a join keeps none.
         is TogetherEvent.PickRoom ->
             enter(Entry.Join(JoinTarget(event.groupId, event.name), state.copy(poll = RoomsPoll.Off, line = null)), state.epoch, stop)
-        // docs/28 §1 (Q4): a title's Watch together reaching this screen starts hosting it.
+        // docs/28 §1: a title's Watch together reaching this screen starts hosting it.
         is TogetherEvent.Hold -> enter(Entry.Create(event.item), state.epoch, stop)
         TogetherEvent.LineExpired -> TogetherStep(state.copy(line = null))
         TogetherEvent.Back -> TogetherStep(TogetherState.Done(GroupOutcome.Silent), listOf(stop))
@@ -360,7 +355,7 @@ internal class WatchTogetherViewModel(
     private val enter: suspend (Entry, ULong) -> GroupEntry,
     private val listRooms: suspend (ULong) -> SyncPlayRooms,
     private val inPip: () -> Boolean,
-    /** Stops the PiP player and returns once it closed or gave up waiting. */
+    /** Stops the PiP player and returns once it is destroyed. */
     private val stopPip: suspend () -> Unit,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val cardById: suspend (String) -> Card? = { null },
@@ -459,8 +454,8 @@ internal class WatchTogetherViewModel(
 
     companion object {
         /** The app's seams: the process slot, the account epoch, the executor's entries and the PiP player. */
-        fun factory(held: HeldItem?, context: Context): ViewModelProvider.Factory {
-            val build = SyncPlayExecutor.forApp(context)
+        fun factory(held: HeldItem?): ViewModelProvider.Factory {
+            val build = SyncPlayExecutor.forApp()
             return object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T = WatchTogetherViewModel(
@@ -474,11 +469,8 @@ internal class WatchTogetherViewModel(
                         }
                     },
                     listRooms = { AppGraph.gateway.syncPlayListRooms(it) },
-                    inPip = { pipController.isInPip.value },
-                    stopPip = {
-                        pipController.stopPlayback()
-                        withTimeoutOrNull(PIP_CLOSE_WAIT_MS) { pipController.isInPip.first { !it } }
-                    },
+                    inPip = { playbackActivityTracker.inPip },
+                    stopPip = playbackActivityTracker::stopForGroup,
                     cardById = { AppGraph.gateway.cardById(it) },
                     seriesEpisodes = { AppGraph.gateway.seriesEpisodes(it) },
                     accountName = { activeUserName(AppGraph.gateway) },

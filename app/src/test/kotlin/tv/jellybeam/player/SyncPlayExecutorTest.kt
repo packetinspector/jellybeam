@@ -94,7 +94,7 @@ class SyncPlayExecutorTest {
         assertTrue(groupSeekNeeded(400 * TICKS_PER_MS, 0L))
     }
 
-    // -- Table rows (S4 design §4 with §11 amendments) --------------------------
+    // -- Table rows (docs/28 §4, §5) --------------------------------------------
 
     @Test
     fun `a directive at or below the last seq changes nothing`() {
@@ -379,7 +379,7 @@ class SyncPlayExecutorTest {
         assertEquals(emptyList<GroupEffect>(), second.effects)
     }
 
-    // -- S5 executor extensions (S5 UI design, Owners E1-E4) ----------------------
+    // -- Lobby and notices (docs/28 §1) --------------------------------------------
 
     @Test
     fun `the player showing a notice drops only the oldest live one and nothing else changes`() {
@@ -561,66 +561,66 @@ class SyncPlayExecutorTest {
         if (!ok) throw AssertionError("invariant $rule broken after: ${path.joinToString(" ")}")
     }
 
-    /** S4 design §5 invariants 1-8 and 10 for one step; 9's ordering half is the owner test's. S5 7, 8 and 3 last. */
+    /** docs/28 §4, §5: the executor's rules for one step; the end's ordering is the owner test's. */
     private fun checkInvariants(before: GroupExec, event: GroupEvent, step: Step, solos: Int, path: List<String>) {
         val inert = step == Step(before)
         val portBefore = portOf(before.stage)
-        ensure(before.name == null || step.state.name == before.name, "S5-7 name never changes once set", path)
+        ensure(before.name == null || step.state.name == before.name, "name never changes once set", path)
         // docs/28 §1: the core decides host-left, so a snapshot never sends an input.
         ensure(event !is GroupEvent.SnapshotRead || step.effects.none { it is GroupEffect.Input }, "a snapshot sends nothing", path)
         if (event is GroupEvent.NoticesShown) {
             val dropped = before.notices.size - step.state.notices.size
-            ensure(step.effects.isEmpty() && step.state.copy(notices = before.notices, dropped = before.dropped) == before, "S5-8 only notices change", path)
-            ensure(step.state.dropped == before.dropped + dropped, "R1-B2 the drop count rises by the notices dropped", path)
-            ensure(step.state.notices.filter(::isTerminal) == before.notices.filter(::isTerminal), "S5-8 terminal kept", path)
-            ensure(dropped == 0 || (dropped == 1 && noticeSurface(before.stage) == event.by), "S5-8 one live notice by its surface", path)
-            ensure(dropped == 1 || liveNotice(before.notices) == null || noticeSurface(before.stage) != event.by, "S5-8 a live notice is dropped", path)
+            ensure(step.effects.isEmpty() && step.state.copy(notices = before.notices, dropped = before.dropped) == before, "only notices change", path)
+            ensure(step.state.dropped == before.dropped + dropped, "the drop count rises by the notices dropped", path)
+            ensure(step.state.notices.filter(::isTerminal) == before.notices.filter(::isTerminal), "terminal kept", path)
+            ensure(dropped == 0 || (dropped == 1 && noticeSurface(before.stage) == event.by), "one live notice by its surface", path)
+            ensure(dropped == 1 || liveNotice(before.notices) == null || noticeSurface(before.stage) != event.by, "a live notice is dropped", path)
         } else {
-            ensure(step.state.dropped == before.dropped, "R1-B2 only a notice shown counts a drop", path)
-            ensure(before.notices.filter(::isTerminal).let { it == step.state.notices.filter(::isTerminal).take(it.size) }, "S5-8 terminal kept", path)
+            ensure(step.state.dropped == before.dropped, "only a notice shown counts a drop", path)
+            ensure(before.notices.filter(::isTerminal).let { it == step.state.notices.filter(::isTerminal).take(it.size) }, "terminal kept", path)
         }
         val picks = step.effects.count { it is GroupEffect.Input && it.input is SyncPlayInput.PickItem }
-        ensure(picks == 0 || (event is GroupEvent.UserPick && before.stage == Stage.Lobby && startAllowed(before.group)), "S5-3 pick only by a host in the lobby", path)
-        ensure(before.stage != Stage.Gone || inert, "2 gone is terminal", path)
-        ensure(event !is GroupEvent.Dir || event.seq > before.lastSeq || inert, "1 old seq inert", path)
-        ensure(step.state.lastSeq >= before.lastSeq, "1 lastSeq monotone", path)
-        ensure(event !is GroupEvent.Tagged || event.tag == tagOf(before.stage) || inert, "3 stale tag inert", path)
-        ensure(event !is GroupEvent.Due || event.seq == timedSeq(before.stage) || inert, "3 stale timer inert", path)
+        ensure(picks == 0 || (event is GroupEvent.UserPick && before.stage == Stage.Lobby && startAllowed(before.group)), "pick only by a host in the lobby", path)
+        ensure(before.stage != Stage.Gone || inert, "gone is terminal", path)
+        ensure(event !is GroupEvent.Dir || event.seq > before.lastSeq || inert, "old seq inert", path)
+        ensure(step.state.lastSeq >= before.lastSeq, "lastSeq monotone", path)
+        ensure(event !is GroupEvent.Tagged || event.tag == tagOf(before.stage) || inert, "stale tag inert", path)
+        ensure(event !is GroupEvent.Due || event.seq == timedSeq(before.stage) || inert, "stale timer inert", path)
         val timing = event is GroupEvent.Dir && event.seq > before.lastSeq && step.state.stage is Stage.Attached &&
             (event.directive is SyncPlayDirective.Pause || event.directive is SyncPlayDirective.Unpause || event.directive is SyncPlayDirective.HoldFor)
-        ensure(!timing || timedSeq(step.state.stage).let { it == null || it == event.seq }, "11 timer belongs to the latest timing directive", path)
+        ensure(!timing || timedSeq(step.state.stage).let { it == null || it == event.seq }, "timer belongs to the latest timing directive", path)
         val seek = event is GroupEvent.Dir && event.seq > before.lastSeq && event.directive is SyncPlayDirective.Seek && step.state.stage is Stage.Attached
-        ensure(!seek || timedSeq(step.state.stage) == null, "12 a seek voids any armed timer", path)
+        ensure(!seek || timedSeq(step.state.stage) == null, "a seek voids any armed timer", path)
         step.effects.forEach { effect ->
             if (effect is GroupEffect.Input) {
                 when (val i = effect.input) {
                     SyncPlayInput.PlayerClosed ->
-                        ensure(event is GroupEvent.PlayerClosed && event.tag == tagOf(before.stage), "4 closed from current", path)
-                    is SyncPlayInput.ItemLoaded -> ensure(before.stage is Stage.Loading, "5 ItemLoaded owed", path)
+                        ensure(event is GroupEvent.PlayerClosed && event.tag == tagOf(before.stage), "closed from current", path)
+                    is SyncPlayInput.ItemLoaded -> ensure(before.stage is Stage.Loading, "ItemLoaded owed", path)
                     is SyncPlayInput.SeekLanded ->
-                        ensure((before.stage as? Stage.Attached)?.motion == Motion.Seeking(i.seq), "5 SeekLanded owed", path)
+                        ensure((before.stage as? Stage.Attached)?.motion == Motion.Seeking(i.seq), "SeekLanded owed", path)
                     else -> Unit
                 }
             }
             if (effect is GroupEffect.Port) {
                 val foreignClose = event is GroupEvent.PortAttached && event.port === effect.port && effect.port !== portBefore
                 val own = effect.port === portBefore || effect.port === portOf(step.state.stage)
-                ensure(if (effect.call == PortCall.Close) foreignClose else own, "6 own port", path)
+                ensure(if (effect.call == PortCall.Close) foreignClose else own, "own port", path)
             }
-            ensure(effect !is GroupEffect.Arm || step.state.stage is Stage.Attached, "10 only attached arms", path)
+            ensure(effect !is GroupEffect.Arm || step.state.stage is Stage.Attached, "only attached arms", path)
             ensure(effect !is GroupEffect.Launch || before.stage == Stage.Lobby || before.stage is Stage.Launching, "launch only from lobby or launching", path)
         }
-        ensure(event !is GroupEvent.Tagged || step.effects.all { it is GroupEffect.Input }, "7 player emits inputs", path)
-        ensure(event !is GroupEvent.PortAttached || step.effects.all { it is GroupEffect.Port }, "7 attach emits port calls", path)
+        ensure(event !is GroupEvent.Tagged || step.effects.all { it is GroupEffect.Input }, "player emits inputs", path)
+        ensure(event !is GroupEvent.PortAttached || step.effects.all { it is GroupEffect.Port }, "attach emits port calls", path)
         val ended = step.effects.count { it == GroupEffect.End }
         if (before.stage != Stage.Gone && step.state.stage == Stage.Gone) {
-            ensure(ended == 1 && step.effects.last() == GroupEffect.End, "9 ends once and last", path)
+            ensure(ended == 1 && step.effects.last() == GroupEffect.End, "ends once and last", path)
             val solo = step.effects.count { it is GroupEffect.Port && it.call == PortCall.Solo }
-            ensure(solo == if (portBefore != null) 1 else 0, "8 one solo per port", path)
+            ensure(solo == if (portBefore != null) 1 else 0, "one solo per port", path)
         } else {
-            ensure(ended == 0, "9 end only into gone", path)
+            ensure(ended == 0, "end only into gone", path)
         }
-        ensure(solos <= 1, "8 solo at most once", path)
+        ensure(solos <= 1, "solo at most once", path)
     }
 
     // -- Owner (docs/28 §4) -------------------------------------------------------
@@ -883,14 +883,14 @@ class SyncPlayExecutorTest {
     @Test
     fun `app exit sends one Leave in a group and none when idle`() = runTest {
         val rig = Rig(this)
-        SyncPlayExecutor.onAppExit()
+        SyncPlayExecutor.leave()
         runCurrent()
         assertEquals("no group, no call", 0, rig.gateway.syncPlayCalls)
 
         val executor = SyncPlayExecutor.create(1uL, rig.gateway, rig.build).executor()
         try {
             advanceUntilIdle()
-            SyncPlayExecutor.onAppExit()
+            SyncPlayExecutor.leave()
             advanceUntilIdle()
             runCurrent()
             assertEquals(listOf<SyncPlayInput>(SyncPlayInput.Leave), rig.gateway.syncPlayInputs)
@@ -908,7 +908,7 @@ class SyncPlayExecutorTest {
         rig.gateway.syncPlayInputGatesByCall[0] = held
         executor.send(GroupEvent.UserTransport(1uL, SyncPlayInput.Pause))
         runCurrent()
-        SyncPlayExecutor.onAppExit()
+        SyncPlayExecutor.leave()
         runCurrent()
         held.complete(Unit)
         advanceUntilIdle()

@@ -27,35 +27,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.update
 import tv.jellybeam.AppGraph
 import tv.jellybeam.MainActivity
 import tv.jellybeam.perf.PerfLog
 import uniffi.jellybeam_core.AccountIdentity
-
-/**
- * Barrier for externally replacing an active player Activity: Android can resume the singleTask
- * MainActivity before the outgoing PlaybackActivity finishes onStop/onDestroy, so [awaitIdle] lets
- * the old teardown clear the singleton player before a replacement starts.
- */
-internal class PlaybackActivityTracker {
-    private val activeCount = MutableStateFlow(0)
-
-    val isActive: Boolean get() = activeCount.value > 0
-
-    fun onCreated() = activeCount.update { it + 1 }
-    fun onDestroyed() = activeCount.update { (it - 1).coerceAtLeast(0) }
-    suspend fun awaitIdle() = activeCount.first { it == 0 }
-
-    /** docs/28 §3.3: final stops launched whose core call hasn't returned; from then on the core holds each. */
-    private val finalStops = MutableStateFlow(0)
-
-    fun onFinalStopLaunched() = finalStops.update { it + 1 }
-    fun onFinalStopHandedOff() = finalStops.update { (it - 1).coerceAtLeast(0) }
-    suspend fun awaitFinalStops() = finalStops.first { it == 0 }
-}
-
-internal val playbackActivityTracker = PlaybackActivityTracker()
 
 /**
  * Handoff from any core call rejected with HTTP 401 (playback, or
@@ -114,6 +89,28 @@ internal data class AuthorizationRequest(val id: Long, val account: AccountIdent
 
 internal val authorizationRecoveryCoordinator = AuthorizationRecoveryCoordinator()
 
+/** What [PlaybackActivity.onNewIntent] does with an intent: bring forward only, swap the item, or hand it to the Watch Together group. */
+internal enum class NewIntentAction { Expand, Replace, Group }
+
+/**
+ * docs/05 external, docs/17 §2: the same item as the live session with no start extra just expands;
+ * [currentItemId] is the view model's live session (`null` once ended), compared in canonical form.
+ */
+internal fun newIntentAction(currentItemId: String?, newItemId: String, startFromBeginning: Boolean, startMs: Long?, group: Boolean): NewIntentAction = when {
+    group -> NewIntentAction.Group
+    currentItemId != null && !startFromBeginning && startMs == null &&
+        ExternalPlaybackContract.canonicalItemId(currentItemId) == ExternalPlaybackContract.canonicalItemId(newItemId) -> NewIntentAction.Expand
+    else -> NewIntentAction.Replace
+}
+
+/** What a player intent carries for an owner request (docs/17 §3); [group] marks a Watch Together load, which the group positions (docs/28 §4). */
+internal data class PlayerLaunch(val item: String, val fromBeginning: Boolean, val startMs: Long?, val group: Boolean)
+
+internal fun playerLaunch(req: Req<Req.Kind.Play>): PlayerLaunch {
+    val start = req.kind.start
+    return PlayerLaunch(req.kind.item, start == Req.Start.Beginning, (start as? Req.Start.At)?.ms, req.origin == Req.Origin.Group)
+}
+
 /**
  * The playback surface: hosts [PlaybackScreen] but owns none of the actual playback state, which
  * lives in [PlaybackViewModel] and the process-wide [AppGraph.playerHolder]. Its real
@@ -130,6 +127,9 @@ class PlaybackActivity : ComponentActivity() {
 
     /** Kept as a field so [ensureMediaSession] and a later [onNewIntent] swap reach the item. */
     private lateinit var itemId: String
+
+    /** docs/17 §3: this instance's tag on every [playbackActivityTracker] event, minted in [onCreate]. */
+    private var generation = 0L
 
     /**
      * Scoped to this Activity instance, not [AppGraph.playerHolder]'s process-wide lifetime.
@@ -153,13 +153,6 @@ class PlaybackActivity : ComponentActivity() {
     /** docs/17 §2/§3: Compose-visible mirror of `isInPictureInPictureMode`; [PlaybackScreen] gates
      * every overlay but the bare video surface on this. */
     private var inPictureInPicture by mutableStateOf(false)
-
-    /**
-     * Set just before an [onNewIntent]-driven item swap while already in PiP: Android's fullscreen
-     * expand fires [onPictureInPictureModeChanged] with `false`, indistinguishable from a genuine
-     * dismissal without this flag. Cleared there and defensively in [onResume].
-     */
-    private var expandViaIntent = false
 
     /** Set for the "Still watching?" Stop/timeout detail-page routing so [tryEnterPip] never fires
      * while routing to [MainActivity]'s detail page instead of finishing. */
@@ -189,15 +182,18 @@ class PlaybackActivity : ComponentActivity() {
     /** docs/17 §3: mini player on and supported, not already exiting, and the first frame already
      * rendered (else PiP would shrink a black window). */
     private fun tryEnterPip(): Boolean =
-        miniPlayerEnabled() &&
-            !isFinishing &&
-            !leavingForDetail &&
-            viewModel.state.value.hasRenderedFirstFrame &&
-            pipController.enter(this)
+        (
+            miniPlayerEnabled() &&
+                !isFinishing &&
+                !leavingForDetail &&
+                viewModel.state.value.hasRenderedFirstFrame &&
+                pipController.enter(this)
+            ).also { if (it) playbackActivityTracker.send(PlayerEvent.PipRequested(generation)) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        playbackActivityTracker.onCreated()
+        // docs/17 §3: the handle is read only after onCreate returns, by which time viewModel is set.
+        generation = playbackActivityTracker.created(PlayerHandle(finishAndRemoveTask = ::finishAndRemoveTask, liveItemId = { viewModel.liveItemId }))
         AppGraph.updateOwnerIfStarted()?.playbackChanged(true)
         // Isolates the cold-Activity-launch phase from ffi.preparePlayback that follows (docs/10).
         PerfLog.markStartup("playback.activityCreate")
@@ -207,20 +203,17 @@ class PlaybackActivity : ComponentActivity() {
             ?: error("PlaybackActivity requires $EXTRA_ITEM_ID")
         val startFromBeginning = intent.getBooleanExtra(EXTRA_START_FROM_BEGINNING, false)
         val forGroup = intent.getBooleanExtra(EXTRA_GROUP, false)
+        val startMs = startMsOf(intent)
 
         // Obtained here, not in the Composable, so onStop/onDestroy reach the same instance.
         viewModel = ViewModelProvider(
             this,
-            PlaybackViewModelFactory(AppGraph.gateway, AppGraph.playerHolder, itemId, startFromBeginning, AppGraph.strings, AppGraph.trickplayFetcher, forGroup),
+            PlaybackViewModelFactory(AppGraph.gateway, AppGraph.playerHolder, itemId, startFromBeginning, AppGraph.strings, AppGraph.trickplayFetcher, forGroup, startMs),
         )[PlaybackViewModel::class.java]
         // docs/28 §4: a recreated Activity keeps its view model's port, or its solo playback once it left the group.
         if (forGroup && savedInstanceState == null) attachToGroup()
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        // docs/17 §2/§3: teardown callback for MainActivity's app-exit cleanup; singleInstance
-        // makes finishAndRemoveTask always safe, and it removes the task record too.
-        pipController.finishPlayback = { finishAndRemoveTask() }
 
         // Feeds PipController's clamped aspect from every reported video size; removed in onDestroy
         AppGraph.playerHolder.addListener(videoSizeListener)
@@ -371,11 +364,13 @@ class PlaybackActivity : ComponentActivity() {
         // docs/17 §2: this extra means a system tap brought this forward; never restart the item
         if (intent.getBooleanExtra(EXTRA_RESUME_SESSION, false)) return
         val newItemId = intent.getStringExtra(EXTRA_ITEM_ID) ?: return
-        // An expected PiP exit (fullscreen expand), not a user dismissal.
-        if (inPip()) expandViaIntent = true
+        val startFromBeginning = intent.getBooleanExtra(EXTRA_START_FROM_BEGINNING, false)
+        val startMs = startMsOf(intent)
+        val action = newIntentAction(viewModel.liveItemId, newItemId, startFromBeginning, startMs, intent.getBooleanExtra(EXTRA_GROUP, false))
+        if (action == NewIntentAction.Expand) return
         itemId = newItemId
-        if (intent.getBooleanExtra(EXTRA_GROUP, false)) return attachToGroup()
-        viewModel.replaceItem(newItemId, intent.getBooleanExtra(EXTRA_START_FROM_BEGINNING, false))
+        if (action == NewIntentAction.Group) return attachToGroup()
+        viewModel.replaceItem(newItemId, startFromBeginning, startMs)
     }
 
     /** docs/28 §4: the group's Load decides what plays; a group that already ended closes the player quietly. */
@@ -392,27 +387,32 @@ class PlaybackActivity : ComponentActivity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         inPictureInPicture = isInPictureInPictureMode
-        pipController.setInPip(isInPictureInPictureMode)
 
         if (isInPictureInPictureMode) {
+            playbackActivityTracker.send(PlayerEvent.PipEntered(generation))
             // Entering PiP (docs/17 §3): free memory for the browsing UI by clearing Coil's cache.
             Coil.imageLoader(applicationContext).memoryCache?.clear()
         } else {
-            // Exiting PiP (docs/17 §3): an expand (intent-driven or lifecycle reaching STARTED)
-            // does nothing; a dismissal (lifecycle stays below STARTED) finishes.
-            if (expandViaIntent) {
-                expandViaIntent = false
-            } else if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                finishAndRemoveTask()
-            }
+            // docs/17 §3: a lifecycle at STARTED is an expand, the tracker closes a dismissal; an intent's expand is already Expanding there.
+            playbackActivityTracker.send(PlayerEvent.PipExited(generation, lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)))
         }
     }
 
     override fun onResume() {
         super.onResume()
-        // Any pending intent-driven PiP exit has fully completed once we're resumed.
-        expandViaIntent = false
+        playbackActivityTracker.send(PlayerEvent.Resumed(generation))
         viewModel.refreshSubtitleStyle()
+    }
+
+    /** docs/17 §3: every exit reaches the tracker as Leaving, whichever finish the caller chose. */
+    override fun finish() {
+        playbackActivityTracker.send(PlayerEvent.Leaving(generation))
+        super.finish()
+    }
+
+    override fun finishAndRemoveTask() {
+        playbackActivityTracker.send(PlayerEvent.Leaving(generation))
+        super.finishAndRemoveTask()
     }
 
     /**
@@ -432,11 +432,8 @@ class PlaybackActivity : ComponentActivity() {
         mediaSessionHolder = null
         // A Player.Listener on the process-wide playerHolder must never outlive this Activity.
         AppGraph.playerHolder.removeListener(videoSizeListener)
-        // docs/17 §3: clear PiP state before the tracker barrier below opens, so a replacement
-        // Activity's onCreate never sees this instance's stale state.
-        pipController.onActivityDestroyed()
-        // Last: a replacement waiting in MainActivity may launch the instant this reaches zero.
-        playbackActivityTracker.onDestroyed()
+        // Last, tagged (docs/17 §3): it detaches only this instance's handle, and a waiting replacement may launch once it empties the slot.
+        playbackActivityTracker.destroyed(generation)
         AppGraph.updateOwnerIfStarted()?.playbackChanged(playbackActivityTracker.isActive)
     }
 
@@ -446,6 +443,11 @@ class PlaybackActivity : ComponentActivity() {
         /** docs/11's "Start from beginning" override; absent/`false` preserves resume behavior. */
         private const val EXTRA_START_FROM_BEGINNING = "tv.jellybeam.player.EXTRA_START_FROM_BEGINNING"
 
+        /** docs/05 external: START_MS; absent means no explicit position. */
+        private const val EXTRA_START_MS = "tv.jellybeam.player.EXTRA_START_MS"
+
+        private fun startMsOf(intent: Intent): Long? = if (intent.hasExtra(EXTRA_START_MS)) intent.getLongExtra(EXTRA_START_MS, 0L) else null
+
         /** docs/17 §2: marks an Intent as "bring this Activity forward"; [onNewIntent] never
          * restarts the item when `true`. */
         private const val EXTRA_RESUME_SESSION = "tv.jellybeam.player.EXTRA_RESUME_SESSION"
@@ -453,20 +455,15 @@ class PlaybackActivity : ComponentActivity() {
         /** docs/28 §4: the player was launched for the running Watch Together group, which loads it. */
         private const val EXTRA_GROUP = "tv.jellybeam.player.EXTRA_GROUP"
 
-        fun launch(context: Context, itemId: String, startFromBeginning: Boolean = false) {
-            AppGraph.beforePlayback { context.startActivity(intent(context, itemId, startFromBeginning)) }
-        }
+        /** docs/17 §3: an in-app play is a request to the owner, which starts or hands it to the player once the slot allows. */
+        internal fun launch(itemId: String, startFromBeginning: Boolean = false, tracker: PlaybackActivityTracker = playbackActivityTracker) =
+            tracker.arrive(Req.Kind.Play(itemId, if (startFromBeginning) Req.Start.Beginning else Req.Start.Resume), Req.Origin.InApp)
 
-        /** docs/28 §4: the executor's launch, from a context that may not be an Activity. */
-        internal fun launchForGroup(context: Context, itemId: String) {
-            AppGraph.beforePlayback {
-                context.startActivity(intent(context, itemId).putExtra(EXTRA_GROUP, true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
-        }
-
-        fun intent(context: Context, itemId: String, startFromBeginning: Boolean = false): Intent =
+        fun intent(context: Context, itemId: String, startFromBeginning: Boolean = false, startMs: Long? = null, group: Boolean = false): Intent =
             Intent(context, PlaybackActivity::class.java)
                 .putExtra(EXTRA_ITEM_ID, itemId)
                 .putExtra(EXTRA_START_FROM_BEGINNING, startFromBeginning)
+                .putExtra(EXTRA_GROUP, group)
+                .also { if (startMs != null) it.putExtra(EXTRA_START_MS, startMs) }
     }
 }

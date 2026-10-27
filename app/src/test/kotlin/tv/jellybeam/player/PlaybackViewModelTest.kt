@@ -224,6 +224,7 @@ class PlaybackViewModelTest {
         parseSidecar: suspend (String, String) -> SidecarCues? = { _, text -> sampleSidecarCues().takeIf { text == "ok" } },
         settingsStore: SettingsStore = SettingsStore(gateway, testReportScope()),
         forGroup: Boolean = false,
+        startMs: Long? = null,
     ): PlaybackViewModel =
         PlaybackViewModel(
             gateway,
@@ -236,6 +237,7 @@ class PlaybackViewModelTest {
             parseSidecar = parseSidecar,
             settingsStore = settingsStore,
             forGroup = forGroup,
+            startMs = startMs,
         ).also { viewModelsToClear += it }
 
     @After
@@ -875,6 +877,85 @@ class PlaybackViewModelTest {
 
             assertEquals(listOf("item-1", "item-2"), gateway.preparePlaybackCalls)
             assertEquals(listOf(false, true), gateway.preparePlaybackStartFromBeginningCalls)
+        }
+    }
+
+    @Test
+    fun `replaceItem with startMs prepares from the beginning and opens at that position`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan1 = samplePlan(itemId = "item-1")
+        val plan2 = samplePlan(itemId = "item-2", startPositionTicks = 1_800_000_000L)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("item-1" to Result.success(plan1), "item-2" to Result.success(plan2)),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan1.itemId)
+        withSession(viewModel) {
+            viewModel.replaceItem("item-2", startMs = 90_000L)
+
+            assertEquals(listOf(false, true), gateway.preparePlaybackStartFromBeginningCalls)
+            assertEquals(LoadStart.At(900_000_000L), player.lastLoadStart)
+            assertEquals(900_000_000L, viewModel.positionTicks.value)
+        }
+    }
+
+    @Test
+    fun `a first start with startMs past the end opens ten seconds before it`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 72_000_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId, startMs = Long.MAX_VALUE)
+        withSession(viewModel) {
+            assertEquals(listOf(true), gateway.preparePlaybackStartFromBeginningCalls)
+            assertEquals(LoadStart.At(71_900_000_000L), player.lastLoadStart)
+            assertEquals(71_900_000_000L, viewModel.positionTicks.value)
+        }
+    }
+
+    @Test
+    fun `an external start never raises the resume notice`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(startPositionTicks = 1_800_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer().apply { seekabilityValue = Seekability.UNKNOWN }
+        val viewModel = buildViewModel(gateway, player, plan.itemId, startMs = 5_000L)
+        withSession(viewModel) {
+            player.seekabilityValue = Seekability.UNSEEKABLE
+            player.fireTimelineChanged()
+
+            assertEquals(Seekability.UNSEEKABLE, viewModel.state.value.seekability)
+            assertTrue(viewModel.events.replayCache.isEmpty())
+        }
+    }
+
+    @Test
+    fun `liveItemId is the playing session's item, null once it ends`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan1 = samplePlan(itemId = "item-1")
+        val plan2 = samplePlan(itemId = "item-2")
+        val gateway = FakeCoreGateway(
+            preparePlaybackResultsByItemId = mapOf("item-1" to Result.success(plan1), "item-2" to Result.success(plan2)),
+        )
+        val viewModel = buildViewModel(gateway, FakePlaybackPlayer(), plan1.itemId)
+        withSession(viewModel) {
+            assertEquals("item-1", viewModel.liveItemId)
+            viewModel.replaceItem("item-2")
+            assertEquals("item-2", viewModel.liveItemId)
+            viewModel.stopPlaybackOnce()
+            assertNull(viewModel.liveItemId)
+        }
+    }
+
+    /** docs/05 external: a session parked on another account is not "already playing" for the browsed one, so its PLAY replaces. */
+    @Test
+    fun `liveItemId is null while the session plays on a parked account`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(itemId = "item-1")
+        val gateway = FakeCoreGateway(preparePlaybackResultsByItemId = mapOf("item-1" to Result.success(plan)))
+        val viewModel = buildViewModel(gateway, FakePlaybackPlayer(), plan.itemId)
+        withSession(viewModel) {
+            assertEquals("item-1", viewModel.liveItemId)
+            gateway.setEpochs(epoch = 1uL, parked = 0uL)
+            assertNull(viewModel.liveItemId)
+            // Switching back mints a new epoch, so the session stays "not here" and a PLAY reloads it (docs/05 external).
+            gateway.setEpochs(epoch = 2uL, parked = 0uL)
+            assertNull(viewModel.liveItemId)
         }
     }
 

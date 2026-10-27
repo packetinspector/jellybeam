@@ -17,6 +17,9 @@ import tv.jellybeam.MainDispatcherRule
 import tv.jellybeam.data.FakeCoreGateway
 import tv.jellybeam.player.GroupEvent
 import tv.jellybeam.player.GroupOutcome
+import tv.jellybeam.player.PlaybackActivityTracker
+import tv.jellybeam.player.PlayerEvent
+import tv.jellybeam.player.PlayerHandle
 import tv.jellybeam.player.SyncPlayExecutor
 import uniffi.jellybeam_core.SyncPlayGroup
 import uniffi.jellybeam_core.SyncPlayHost
@@ -108,23 +111,36 @@ class WatchTogetherViewModelTest {
         assertEquals(listOf(SyncPlayInput.PickItem(listOf("item-b"), 0, 9_000L)), rig.gateway.syncPlayInputs.filterIsInstance<SyncPlayInput.PickItem>())
     }
 
+    /** docs/28 §1: the stopped player's final stop is counted at its destroy, so the create waits for that, not its PiP exit. */
     @Test
-    fun `stop on a PiP refusal stops the player first, then hosts the held title`() {
-        var pip = true
-        val order = mutableListOf<String>()
-        lateinit var gateway: FakeCoreGateway
+    fun `stop on a PiP refusal hosts the held title only after the stopped player is destroyed`() {
+        val tracker = PlaybackActivityTracker()
+        var g = 0L
+        var closes = 0
+        // A stand-in player: its finishAndRemoveTask reaches the tracker as Leaving, as the real override does.
+        g = tracker.created(PlayerHandle(finishAndRemoveTask = { closes++; tracker.send(PlayerEvent.Leaving(g)) }, liveItemId = { "item-b" }))
+        tracker.send(PlayerEvent.PipRequested(g))
+        tracker.send(PlayerEvent.PipEntered(g))
         vmTest({ scope ->
-            Rig(scope, inPip = { pip }, stopPip = { order += "stop"; pip = false; gateway.syncPlayGroup = SyncPlayGroup.Starting(name = "member-a's group") })
-                .also { gateway = it.gateway; it.gateway.syncPlayGroup = SyncPlayGroup.Idle }
+            Rig(scope, inPip = { tracker.inPip }, stopPip = tracker::stopForGroup).also { it.gateway.syncPlayGroup = SyncPlayGroup.Idle }
         }) { rig ->
             rig.viewModel.setActive(true)
             advanceUntilIdle()
             assertEquals(TogetherState.CreateRefused(HeldItem("item-a", 0L), 1uL), rig.viewModel.state.value)
 
+            rig.gateway.syncPlayGroup = SyncPlayGroup.Starting(name = "member-a's group")
             rig.viewModel.send(TogetherEvent.Stop)
             advanceUntilIdle()
+            assertEquals(1, closes)
+            assertEquals(1, rig.creates)
 
-            assertEquals(listOf("stop"), order)
+            tracker.send(PlayerEvent.PipExited(g, started = false))
+            advanceUntilIdle()
+            assertEquals("the PiP exit closes nothing more", 1, closes)
+            assertEquals("no create before the destroy", 1, rig.creates)
+
+            tracker.destroyed(g)
+            advanceUntilIdle()
             assertEquals(2, rig.creates)
             assertTrue(rig.viewModel.state.value is TogetherState.Member)
         }

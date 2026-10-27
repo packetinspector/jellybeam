@@ -10,27 +10,11 @@ import android.os.Process
 import android.util.Log
 import android.util.Rational
 import androidx.annotation.RequiresApi
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 private const val TAG = "JellybeamPip"
 
-/**
- * Process-local PiP state (docs/17 §2), one instance backing whichever `singleInstance`
- * [tv.jellybeam.player.PlaybackActivity] is alive, so [tv.jellybeam.MainActivity]'s app-exit cleanup
- * (docs/17 §3) can reach an active PiP session without a direct Activity reference.
- */
+/** The device side of PiP (docs/17 §2): support, aspect, params and entry; whether a player is in PiP is [playbackActivityTracker]'s. */
 internal class PipController {
-    private val _isInPip = MutableStateFlow(false)
-
-    /** Mirrors [tv.jellybeam.player.PlaybackActivity]'s own `onPictureInPictureModeChanged` state. */
-    val isInPip: StateFlow<Boolean> = _isInPip.asStateFlow()
-
-    fun setInPip(value: Boolean) {
-        _isInPip.value = value
-    }
-
     /**
      * Current video aspect, clamped via [PipAspect.clamp]; fed by `onVideoSizeChanged`, read by
      * [params]. `@Volatile` since it's written from a player-listener callback.
@@ -41,26 +25,6 @@ internal class PipController {
 
     fun updateVideoSize(width: Int, height: Int) {
         aspect = PipAspect.clamp(width, height)
-    }
-
-    /**
-     * Teardown callback for [tv.jellybeam.MainActivity]'s app-exit cleanup; set on create, cleared on
-     * [onActivityDestroyed]. `singleInstance` routes new playback via `onNewIntent` instead.
-     */
-    var finishPlayback: (() -> Unit)? = null
-
-    /** Stops active PiP playback (docs/17 §3) to avoid an orphan headless window. */
-    fun stopPlayback() {
-        if (_isInPip.value) {
-            Log.i(TAG, "Stopping PiP playback via callback")
-            finishPlayback?.invoke()
-        }
-    }
-
-    /** Clears all state on [tv.jellybeam.player.PlaybackActivity.onDestroy] so nothing outlives it. */
-    fun onActivityDestroyed() {
-        _isInPip.value = false
-        finishPlayback = null
     }
 
     /** API 26+, [PackageManager.FEATURE_PICTURE_IN_PICTURE], and the AppOps grant must all hold. */

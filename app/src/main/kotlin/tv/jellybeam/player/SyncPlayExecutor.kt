@@ -1,6 +1,5 @@
 package tv.jellybeam.player
 
-import android.content.Context
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -226,7 +225,7 @@ private fun directive(state: GroupExec, dir: GroupEvent.Dir, nowMs: Long): Step 
         is SyncPlayDirective.Load -> {
             val load = GroupLoad(dir.seq, d.itemId, d.playlistItemId, d.startTicks)
             when (stage) {
-                // A launch can be lost (a background start is blocked), so a Load before any attach launches again.
+                // docs/28 §4: a Load while Jellybeam is hidden waits until it is opened, and an interrupted launch is dropped, so a Load before any attach launches again.
                 Stage.Lobby, is Stage.Launching -> Step(state.copy(stage = Stage.Launching(load)), listOf(GroupEffect.Launch(load)))
                 is Stage.Loading -> Step(state.copy(stage = Stage.Loading(load, stage.port)), listOf(stage.port.call(PortCall.Load(load))))
                 is Stage.Attached -> Step(state.copy(stage = Stage.Loading(load, stage.port)), listOf(stage.port.call(PortCall.Load(load))))
@@ -427,8 +426,8 @@ internal class SyncPlayExecutor(
         /** docs/28 §8: the process's one membership; written only by an entry and by End. */
         val current: StateFlow<SyncPlayExecutor?> = slot.asStateFlow()
 
-        /** docs/28 §4: the app-exit funnel leaves the group, after every input already queued; nothing without a group. */
-        fun onAppExit() { slot.value?.send(GroupEvent.UserLeave) }
+        /** docs/28 §4: the app-exit funnel, and a request replacing the group's waiting load, leave after every input already queued; nothing without a group. */
+        fun leave() { slot.value?.send(GroupEvent.UserLeave) }
 
         /** docs/18 §2.1: an account epoch move ends the running membership. */
         fun onEpochMoved() { slot.value?.send(GroupEvent.EpochMoved) }
@@ -451,10 +450,8 @@ internal class SyncPlayExecutor(
         }
 
         /** docs/28 §8: the app's [create]/[join] builder; nothing is built until an entry starts a fresh membership. */
-        fun forApp(context: Context): (ULong) -> SyncPlayExecutor {
-            val app = context.applicationContext
-            return { epoch -> SyncPlayExecutor(AppGraph.gateway, epoch, { PlaybackActivity.launchForGroup(app, it.itemId) }) }
-        }
+        fun forApp(): (ULong) -> SyncPlayExecutor =
+            { epoch -> SyncPlayExecutor(AppGraph.gateway, epoch, { playbackActivityTracker.arrive(Req.Kind.Play(it.itemId), Req.Origin.Group) }) }
 
         /** docs/28 §1, §3.1: as [create], joining [target]. */
         suspend fun join(accountEpoch: ULong, target: JoinTarget, build: (ULong) -> SyncPlayExecutor): GroupEntry =

@@ -283,7 +283,6 @@ fun DetailScreen(
 ) {
     val focusGate = LocalFocusGate.current
     val state by viewModel.state.collectAsState()
-    val context = LocalContext.current
     // docs/19 §3.4: one [FocusMemory] shared by whichever per-type screen is active, hoisted here
     // so the panel (rendered once, above the `when`) and the door capture/restore focus by the
     // same key regardless of item type.
@@ -338,7 +337,7 @@ fun DetailScreen(
         state.pendingPlayback?.let { pending ->
             dropPanelForNavigation()
             PerfLog.markStartup("playback.click")
-            PlaybackActivity.launch(context, pending.targetId, startFromBeginning = pending.startFromBeginning)
+            PlaybackActivity.launch(pending.targetId, startFromBeginning = pending.startFromBeginning)
             viewModel.consumePendingPlayback()
         }
     }
@@ -463,7 +462,6 @@ private fun EpisodeDetailScreen(
     val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
-    val context = LocalContext.current
     val detail = state.itemDetail
     val strings = rememberUiStrings()
     // Computed inline, not remembered: a refreshed Card with the same id must recompute rather
@@ -688,7 +686,6 @@ private fun EpisodeDetailScreen(
                             focusRequester = initialFocusRequester,
                             doorFocusRequester = doorFocusRequester,
                             memory = memory,
-                            context = context,
                             onOpenMenu = { memory.captureInvoker(); viewModel.openMenu() },
                         )
                     }
@@ -792,7 +789,6 @@ private fun EpisodeActionRow(
     focusRequester: FocusRequester,
     doorFocusRequester: FocusRequester,
     memory: FocusMemory,
-    context: android.content.Context,
     onOpenMenu: () -> Unit,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -808,7 +804,7 @@ private fun EpisodeActionRow(
                 onClick = {
                     if (action is DetailFormatting.PrimaryAction.Playable) {
                         PerfLog.markStartup("playback.click")
-                        PlaybackActivity.launch(context, action.targetId)
+                        PlaybackActivity.launch(action.targetId)
                     }
                 },
                 memory = memory,
@@ -930,7 +926,6 @@ private fun SeriesDetailScreen(
     val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
-    val context = LocalContext.current
     val detail = state.itemDetail
     val seasons = state.seasons // already index-number sorted; Specials (index 0) sorts first, matching the chip row.
     val selectedSeason = remember(seasons, state.selectedSeasonId) { seasons.firstOrNull { it.id == state.selectedSeasonId } }
@@ -1176,7 +1171,6 @@ private fun SeriesDetailScreen(
                             focusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.PRIMARY) initialFocusRequester else null,
                             doorFocusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.NONE) doorFocusRequester else null,
                             memory = memory,
-                            context = context,
                             onOpenMenu = { memory.captureInvoker(); viewModel.openMenu() },
                         )
                         // Same order as Movie/Episode: actions then overview, so Down from the
@@ -1335,7 +1329,6 @@ private fun SeriesActionRow(
     focusRequester: FocusRequester?,
     doorFocusRequester: FocusRequester?,
     memory: FocusMemory,
-    context: android.content.Context,
     onOpenMenu: () -> Unit,
 ) {
     // No vertical margin (unlike Episode's row): the hero column's 11dp gap already clears the ring
@@ -1365,7 +1358,7 @@ private fun SeriesActionRow(
                 onClick = {
                     if (action is DetailFormatting.PrimaryAction.Playable) {
                         PerfLog.markStartup("playback.click")
-                        PlaybackActivity.launch(context, action.targetId)
+                        PlaybackActivity.launch(action.targetId)
                     }
                 },
                 memory = memory,
@@ -1718,7 +1711,6 @@ private fun MovieDetailScreen(
     val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
-    val context = LocalContext.current
     val detail = state.itemDetail
     val strings = rememberUiStrings()
     // Computed inline, not remembered, so a refreshed Card recomputes instead of staying stale.
@@ -1925,7 +1917,6 @@ private fun MovieDetailScreen(
                                     focusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.PRIMARY) initialFocusRequester else null,
                                     doorFocusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.SECONDARY) doorFocusRequester else null,
                                     memory = memory,
-                                    context = context,
                                     onOpenMenu = { memory.captureInvoker(); viewModel.openMenu() },
                                 )
                                 OverviewBlock(
@@ -2110,7 +2101,6 @@ private fun MovieActionRow(
     focusRequester: FocusRequester?,
     doorFocusRequester: FocusRequester?,
     memory: FocusMemory,
-    context: android.content.Context,
     onOpenMenu: () -> Unit,
 ) {
     Row(
@@ -2129,7 +2119,7 @@ private fun MovieActionRow(
                 onClick = {
                     if (action is DetailFormatting.PrimaryAction.Playable) {
                         PerfLog.markStartup("playback.click")
-                        PlaybackActivity.launch(context, action.targetId)
+                        PlaybackActivity.launch(action.targetId)
                     }
                 },
                 memory = memory,

@@ -99,10 +99,10 @@ the entry named here is the one to extend.
 - **Enters (Kotlin):** `SyncPlayExecutor.listener.onStep` only queues; one Main consumer runs
   `reduce` for each event, also fed by the player through its `AttachedPort`
   (`PlaybackViewModel.mode = PlayerMode.Group`) and by two lifecycle hooks:
-  `SyncPlayExecutor.onAppExit` from `MainActivity.finish` (best-effort Leave) and
+  `SyncPlayExecutor.leave` from `MainActivity.finish` (best-effort Leave) and
   `onEpochMoved` from `resetSessionState`. No root-level collector.
 - **Fans out (Kotlin):** `reduce`'s effects, in order: core inputs through one serial queue,
-  `PlaybackActivity.launchForGroup` for a Load before a player exists, and `PortCall`s to the
+  a group Load as a request to `playbackActivityTracker` (docs/17 §3), and `PortCall`s to the
   attached player.
 
 ### Playback session start / transition / stop
@@ -123,18 +123,17 @@ the entry named here is the one to extend.
 - **Core side:** `JellybeamCore::prepare_playback` admits the request against its epoch;
   `stop_playback` / `abandon_playback` end the reporting session.
 - **Also notified:** `UpdateCoordinator.playbackChanged` from `PlaybackActivity.onCreate` /
-  `onDestroy`; `PlaybackActivityTracker` counts live player Activities for the external-Play
-  barrier (`awaitIdle`).
+  `onDestroy` and from a player start that doesn't run; `PlaybackActivityTracker` gets each instance's create and destroy, tagged with
+  its generation (docs/17 §3).
 
 ### PiP enter / exit
 
 - **Enters:** `PlaybackActivity.onPictureInPictureModeChanged` (entry is requested by
   `tryEnterPip` from `onUserLeaveHint` and the OSD's exit request).
 - **Fans out:** `inPictureInPicture` (gates every overlay in `PlaybackScreen`),
-  `PipController.setInPip` (read by `MainActivity.finish` and the external-Play barrier),
-  Coil memory-cache clear on enter, `finishAndRemoveTask` on a dismissal.
+  `PipEntered` / `PipExited` to `playbackActivityTracker` (its `reduce` closes a dismissal once
+  and settles a waiting request), Coil memory-cache clear on enter.
   `sessionShouldSurviveStop` keeps the `MediaSessionHolder` and the session across a PiP stop.
-  `PipController.onActivityDestroyed` clears it before `PlaybackActivityTracker.onDestroyed`.
 
 ### Re-authorization (401)
 
@@ -167,7 +166,7 @@ the entry named here is the one to extend.
 | Core reporting session | `object.rs` `State.reporting`, `PlaybackOwner::claim` | `report_position`, `stop_playback` | `release_claim` / `stop_playback`, `abandon_playback` / `end_playback_locked` (leave) or parked |
 | Warm-up results | `LaunchWarmup` slots | `JellybeamRoot`, `HomeFeed` | — / taken once / `LaunchWarmup.discard` |
 | Back stack, per-screen view models | `JellybeamRoot.navigate`; the epoch-keyed restore effect sets the first stack; `resetSessionState` blanks it | `RetainedScreenLayer` | — / — / `resetSessionState` clears stores and stack |
-| PiP flag | `PlaybackActivity.onPictureInPictureModeChanged` → `PipController.setInPip` | `MainActivity`, `PlaybackScreen` | — / `PipController.onActivityDestroyed` / — |
+| Player presence and play requests (slot, generations, waiting request) | `PlaybackActivityTracker`, written only by `send` → `reduce` on Main | `MainActivity`, `JellybeamRoot`, `UpdateCoordinator`, `WatchTogetherViewModel` | a newer request replaces it / the player's own `Destroyed` / `AccountReset` drops the request, never closes a player |
 | Focus record | `FocusMemory` (`lastKey`, `invokerKey`; `frozen` derived) | `FocusRestorer`, `reenterNow` | `withPlacement` token released / — / stores cleared |
 | Refresh-restore job | `RefreshRestoreOwner` | screen restore effects | `ownershipLost` / — / composition left |
 | Root re-entry seat | `RetainedScreenLayer` → `RootFocus.seat` | `MainActivity.dispatchKeyEvent` | disposed with the layer |

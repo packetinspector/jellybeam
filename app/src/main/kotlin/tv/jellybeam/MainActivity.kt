@@ -1,5 +1,6 @@
 package tv.jellybeam
 
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -38,6 +39,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
@@ -86,11 +88,15 @@ import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.perf.ProfileStatus
 import tv.jellybeam.player.ExternalPlaybackContract
 import tv.jellybeam.player.ExternalPlaybackIntentResult
+import tv.jellybeam.player.HostEvent
 import tv.jellybeam.player.PlaybackActivity
 import tv.jellybeam.player.SyncPlayExecutor
 import tv.jellybeam.player.authorizationRecoveryCoordinator
-import tv.jellybeam.player.pipController
+import tv.jellybeam.player.PlayerFlow
+import tv.jellybeam.player.Req
+import tv.jellybeam.player.RequestHost
 import tv.jellybeam.player.playbackActivityTracker
+import tv.jellybeam.player.playerLaunch
 import tv.jellybeam.ui.common.serverHostLabel
 import tv.jellybeam.ui.detail.DetailScreen
 import tv.jellybeam.ui.detail.PersonScreen
@@ -153,18 +159,6 @@ class MainActivity : ComponentActivity() {
      */
     private var frameMetricsListener: Any? = null
 
-    /**
-     * External PLAY intents are parsed only once this Activity is resumed. With `singleTask`,
-     * Android first removes a currently running PlaybackActivity above it, unless it's in PiP
-     * (docs/17-mini-player.md §3) -- the external-PLAY `LaunchedEffect` below skips
-     * [playbackActivityTracker.awaitIdle] in that case and delivers straight to the live
-     * instance. [playbackActivityTracker] is the barrier that keeps Compose from launching a
-     * replacement until the old (non-PiP) player's teardown has actually completed.
-     */
-    private var externalIntentAwaitingResume: Intent? = null
-    private var pendingExternalPlayback by mutableStateOf<ExternalPlaybackRequest?>(null)
-    private var nextExternalPlaybackRequestId = 0L
-
     /** [SystemClock.elapsedRealtime] at first frame, `null` until then -- lets [JellybeamRoot] gate
      * the cold-start `validateSession` call until slightly after the startup window instead of
      * racing it (docs/10-perf-logging.md). Set from [markFirstFrame], unconditionally. */
@@ -185,19 +179,22 @@ class MainActivity : ComponentActivity() {
         val createStartElapsedMs = SystemClock.elapsedRealtime()
         super.onCreate(savedInstanceState)
         PerfLog.markStartup("activity.onCreate")
-        externalIntentAwaitingResume = intent
+        val app = applicationContext
+        playbackActivityTracker.attachHost(
+            RequestHost(
+                start = { startPlayer(app, it) },
+                signInRequired = { Toast.makeText(app, R.string.external_playback_sign_in_required, Toast.LENGTH_LONG).show() },
+                leaveGroup = SyncPlayExecutor::leave,
+            ),
+        )
+        arrive(createArrival(restored = savedInstanceState != null, parseExternalIntent(intent)))
         // docs/21 §1.3: the crash dialog never appears on a launch headed straight into
-        // playback/detail -- computed once from this Activity's own launch intent (not the
-        // live, soon-consumed pendingExternalPlayback state) so it can't race consumption.
+        // playback/detail -- computed once from this Activity's own launch intent, not the owner's
+        // soon-settled request, so it can't race settling.
         val launchedForExternalPlayback = isExternalPlaybackIntent(intent)
         setContent {
             JellybeamRoot(
                 onExitApp = ::finish,
-                externalPlaybackRequest = pendingExternalPlayback,
-                currentExternalPlayback = { pendingExternalPlayback },
-                onExternalPlaybackConsumed = { consumed ->
-                    pendingExternalPlayback = pendingAfterConsume(pendingExternalPlayback, consumed)
-                },
                 launchedForExternalPlayback = launchedForExternalPlayback,
                 firstFrameAtMs = firstFrameElapsedMs,
                 rootFocus = rootFocus,
@@ -209,13 +206,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        externalIntentAwaitingResume = intent
-        // Already-resumed singleTask Activity: consume immediately (no onResume() follows).
-        // Otherwise retain until onResume so the old player's onStop/report wins first.
-        if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-            acceptExternalPlaybackIntent(intent)
-            externalIntentAwaitingResume = null
-        }
+        arrive(parseExternalIntent(intent))
     }
 
     /**
@@ -228,8 +219,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         AppGraph.updateOwnerIfStarted()?.resume(this)
-        externalIntentAwaitingResume?.let(::acceptExternalPlaybackIntent)
-        externalIntentAwaitingResume = null
+        playbackActivityTracker.send(HostEvent.MainShown)
         PerfLog.refresh()
         if (PerfLog.enabled) startFrameMetrics() else stopFrameMetrics()
         if (PerfLog.enabled) logProfileStatusOnce()
@@ -268,25 +258,30 @@ class MainActivity : ComponentActivity() {
     }
 
     /** docs/21 §1.3: whether [intent] is a play-deep-link/OPEN_DETAIL launch, computed with the
-     * same parse [acceptExternalPlaybackIntent] uses -- the crash dialog's gate. */
+     * same parse [arrive] gets -- the crash dialog's gate. */
     private fun isExternalPlaybackIntent(intent: Intent): Boolean =
-        when (ExternalPlaybackContract.parse(intent.action, intent.getStringExtra(ExternalPlaybackContract.EXTRA_ITEM_ID), intent.dataString)) {
+        when (parseExternalIntent(intent)) {
             is ExternalPlaybackIntentResult.Play, is ExternalPlaybackIntentResult.OpenDetail -> true
             ExternalPlaybackIntentResult.NotExternal, ExternalPlaybackIntentResult.Invalid -> false
         }
 
-    private fun acceptExternalPlaybackIntent(intent: Intent) {
-        when (val parsed = ExternalPlaybackContract.parse(intent.action, intent.getStringExtra(ExternalPlaybackContract.EXTRA_ITEM_ID), intent.dataString)) {
+    /** The raw start extras go to the parse untyped, so a wrongly typed one is rejected rather than read as absent. */
+    @Suppress("DEPRECATION") // Bundle.get(String) is the only type-agnostic read
+    private fun parseExternalIntent(intent: Intent): ExternalPlaybackIntentResult = ExternalPlaybackContract.parse(
+        intent.action,
+        intent.getStringExtra(ExternalPlaybackContract.EXTRA_ITEM_ID),
+        intent.dataString,
+        startMsExtra = intent.extras?.get(ExternalPlaybackContract.EXTRA_START_MS),
+        startFromBeginningExtra = intent.extras?.get(ExternalPlaybackContract.EXTRA_START_FROM_BEGINNING),
+    )
+
+    /** docs/05 "external": a request goes to the owner, which settles it against the player and account tree. */
+    private fun arrive(parsed: ExternalPlaybackIntentResult) {
+        when (parsed) {
             ExternalPlaybackIntentResult.NotExternal -> Unit
             ExternalPlaybackIntentResult.Invalid -> Toast.makeText(this, R.string.external_playback_invalid, Toast.LENGTH_LONG).show()
-            is ExternalPlaybackIntentResult.Play -> {
-                pendingExternalPlayback =
-                    ExternalPlaybackRequest(++nextExternalPlaybackRequestId, parsed.itemId, ExternalPlaybackRequestKind.PLAY)
-            }
-            is ExternalPlaybackIntentResult.OpenDetail -> {
-                pendingExternalPlayback =
-                    ExternalPlaybackRequest(++nextExternalPlaybackRequestId, parsed.itemId, ExternalPlaybackRequestKind.OPEN_DETAIL)
-            }
+            is ExternalPlaybackIntentResult.Play -> playbackActivityTracker.arrive(parsed.kind(), Req.Origin.External)
+            is ExternalPlaybackIntentResult.OpenDetail -> playbackActivityTracker.arrive(Req.Kind.OpenDetail(parsed.itemId), Req.Origin.External)
         }
     }
 
@@ -297,17 +292,24 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onStop() {
+        super.onStop()
+        playbackActivityTracker.send(HostEvent.MainHidden)
+    }
+
     /**
-     * docs/17-mini-player.md §3, app-exit orphan cleanup: double-Back at
-     * the Home root (or any other path that finishes this Activity) must
-     * not leave an active PiP window playing headless once nothing else
-     * in the app remains -- stop it first, via [pipController]'s
-     * callback into the live [tv.jellybeam.player.PlaybackActivity], before
-     * this Activity itself actually finishes.
+     * docs/17 §3: the account tree goes with this instance, so requests wait for the next one's stack. A finish already
+     * sent that in [finish], and its destroy may land after a newer instance resolved its root.
      */
+    override fun onDestroy() {
+        if (!isFinishing) playbackActivityTracker.send(HostEvent.RootChanged(PlayerFlow.Root.Pending))
+        super.onDestroy()
+    }
+
+    /** docs/17 §3: any path that finishes this Activity closes a player in, or headed for, PiP before it goes, so none plays headless. */
     override fun finish() {
-        SyncPlayExecutor.onAppExit()
-        if (pipController.isInPip.value) pipController.stopPlayback()
+        SyncPlayExecutor.leave()
+        playbackActivityTracker.send(HostEvent.AppExit)
         super.finish()
     }
 
@@ -379,18 +381,44 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-internal data class ExternalPlaybackRequest(val requestId: Long, val itemId: String, val kind: ExternalPlaybackRequestKind)
+/** The owner's waiting OPEN_DETAIL request, which JellybeamRoot runs and answers with [HostEvent.DetailDone] (docs/05 "external"). */
+internal fun PlayerFlow.waitingDetail(): Req<Req.Kind.OpenDetail>? {
+    val req = (request as? PlayerFlow.Request.Waiting)?.req ?: return null
+    return Req(req.id, req.kind as? Req.Kind.OpenDetail ?: return null, req.origin)
+}
+
+/** docs/17 §3: a recreated Activity's intent was handled before the recreate, so only a fresh create's intent arrives. */
+internal fun createArrival(restored: Boolean, parsed: ExternalPlaybackIntentResult): ExternalPlaybackIntentResult =
+    if (restored) ExternalPlaybackIntentResult.NotExternal else parsed
+
+/** The account tree's root as the owner gates requests on it: resolving, Home-rooted, or sign-in. */
+internal fun rootOf(stack: NavBackStack?): PlayerFlow.Root = when {
+    stack == null -> PlayerFlow.Root.Pending
+    stack.isHomeRooted -> PlayerFlow.Root.Home
+    else -> PlayerFlow.Root.SignedOut
+}
 
 /**
- * [ExternalPlaybackRequest.kind]: [PLAY] is the "start PlaybackActivity" request (external PLAY
- * intent / `jellybeam://play` deep link); [OPEN_DETAIL] is Feature A's "still watching? -> Stop"
- * routing (docs/feature-dev/spec-still-watching-and-lan-discovery.md), never exported/deep-linked.
+ * docs/17 §3: Launch and Deliver are this one call; singleInstance routes it to a live player's onNewIntent.
+ * The app context needs NEW_TASK; [AppGraph.beforePlayback] may run it later, so it runs only if the owner still
+ * confirms it, and a throw is reported from inside. A start that doesn't run tells the update owner playback may be over.
  */
-internal enum class ExternalPlaybackRequestKind { PLAY, OPEN_DETAIL }
-
-/** What stays pending after [consumed] is handled: null clears all; a stale id keeps the newer request (docs/18 §2.1). */
-internal fun pendingAfterConsume(pending: ExternalPlaybackRequest?, consumed: ExternalPlaybackRequest?): ExternalPlaybackRequest? =
-    if (consumed == null || pending == consumed) null else pending
+private fun startPlayer(app: Context, req: Req<Req.Kind.Play>) {
+    val launch = playerLaunch(req)
+    AppGraph.beforePlayback {
+        val started = playbackActivityTracker.confirmStart(req.id) && try {
+            app.startActivity(
+                PlaybackActivity.intent(app, launch.item, launch.fromBeginning, launch.startMs, launch.group).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+            true
+        } catch (e: Exception) {
+            Log.w("JellybeamPlay", "Player start failed", e)
+            playbackActivityTracker.send(HostEvent.LaunchFailed(req.id))
+            false
+        }
+        if (!started) AppGraph.updateOwnerIfStarted()?.playbackChanged(playbackActivityTracker.isActive)
+    }
+}
 
 /** [MainActivity.startFrameMetrics]'s periodic-summary tick -- never per-frame. */
 private const val FRAME_SUMMARY_INTERVAL_MS = 10_000L
@@ -440,15 +468,15 @@ private class FrameMetricsReporter(private val handler: Handler) : Window.OnFram
  * while the lookup ran must neither navigate nor consume (docs/18 §2.1).
  */
 internal suspend fun handleOpenDetail(
-    request: ExternalPlaybackRequest,
+    request: Req<Req.Kind.OpenDetail>,
     readyStack: NavBackStack,
     gateway: CoreGateway,
-    stillPending: () -> ExternalPlaybackRequest?,
+    stillPending: () -> Req<Req.Kind.OpenDetail>?,
     consume: () -> Unit,
     navigate: (NavBackStack) -> Unit,
 ) {
     if (readyStack.isHomeRooted) {
-        val card = resolveLibraryCard(gateway, request.itemId)
+        val card = resolveLibraryCard(gateway, request.kind.item)
         if (stillPending() != request) return
         if (card != null) {
             val current = readyStack.current
@@ -461,32 +489,6 @@ internal suspend fun handleOpenDetail(
         }
     }
     consume()
-}
-
-/**
- * The PLAY branch of the external-request effect: [consume] runs after the launch, because consuming
- * clears the effect key and cancels this coroutine; a signed-out launch is consumed with [signInRequired]
- * feedback instead. [stillPending] says whether [request] survived the wait for [awaitIdle].
- */
-internal suspend fun handleExternalPlay(
-    request: ExternalPlaybackRequest,
-    readyStackHomeRooted: Boolean,
-    awaitIdle: suspend () -> Unit,
-    stillPending: () -> ExternalPlaybackRequest?,
-    launch: (String) -> Unit,
-    consume: () -> Unit,
-    signInRequired: () -> Unit,
-) {
-    if (readyStackHomeRooted) {
-        awaitIdle()
-        // An account change consumed the request while waiting; launching it now would play on the next account.
-        if (stillPending() != request) return
-        launch(request.itemId)
-        consume()
-    } else {
-        consume()
-        signInRequired()
-    }
 }
 
 private const val EPISODE_ITEM_TYPE = "Episode"
@@ -639,13 +641,8 @@ private fun RetainedScreenLayer(
 @Composable
 private fun JellybeamRoot(
     onExitApp: () -> Unit,
-    externalPlaybackRequest: ExternalPlaybackRequest?,
-    /** Reads the pending request live, so a coroutine sees a reset's drop before the next recomposition. */
-    currentExternalPlayback: () -> ExternalPlaybackRequest?,
-    /** Consumes that request; null drops whichever one is pending. */
-    onExternalPlaybackConsumed: (ExternalPlaybackRequest?) -> Unit,
-    /** docs/21 §1.3: this Activity's own launch intent, not the live (soon-consumed)
-     * [externalPlaybackRequest] state -- see [MainActivity.isExternalPlaybackIntent]. */
+    /** docs/21 §1.3: this Activity's own launch intent, not the owner's (soon-settled) request
+     * -- see [MainActivity.isExternalPlaybackIntent]. */
     launchedForExternalPlayback: Boolean = false,
     /** [MainActivity.firstFrameElapsedMs] -- `null` until first frame, then gates the cold-start
      * `validateSession` call below (docs/10). */
@@ -734,8 +731,8 @@ private fun JellybeamRoot(
     /** docs/18 §2.1: the account tree's one reset per account change; blanks [backStack] first so nothing on screen races a cleared ViewModel. */
     fun resetSessionState() {
         SyncPlayExecutor.onEpochMoved()
-        // An account change drops a pending external request, even one not yet composed, so it never runs against the next account (docs/18 §2.1).
-        onExternalPlaybackConsumed(null)
+        // docs/18 §2.1: the waiting request drops before the stack blanks, so it never settles against the next account.
+        playbackActivityTracker.send(HostEvent.AccountReset)
         focusManager.clearFocus(force = true)
         exitConfirmationGate.reset()
         backStack?.entryKeys()?.forEach(entryStates::removeState)
@@ -971,37 +968,24 @@ private fun JellybeamRoot(
 
     val stack = backStack
 
-    // A cold external launch waits here until restoreSession/openMirror completes, so
-    // preparePlayback can resolve the item. A signed-out launch is consumed with explicit
-    // feedback instead of opening a player guaranteed to fail.
-    LaunchedEffect(externalPlaybackRequest, stack) {
-        val request = externalPlaybackRequest ?: return@LaunchedEffect
+    // docs/17 §3: the owner gates waiting requests on the stack's root; a cold external launch waits while it resolves.
+    val root = rootOf(stack)
+    LaunchedEffect(root) { playbackActivityTracker.send(HostEvent.RootChanged(root)) }
+
+    // docs/05 "external": the owner holds an OPEN_DETAIL on Home until it navigates here.
+    val trackerState = playbackActivityTracker.state.collectAsState()
+    val detailRequest by remember { derivedStateOf { trackerState.value.waitingDetail() } }
+    LaunchedEffect(detailRequest, stack) {
+        val request = detailRequest ?: return@LaunchedEffect
         val readyStack = stack ?: return@LaunchedEffect
-        when (request.kind) {
-            ExternalPlaybackRequestKind.PLAY ->
-                handleExternalPlay(
-                    request = request,
-                    readyStackHomeRooted = readyStack.isHomeRooted,
-                    // docs/17 §3: a PiP'd player never reaches idle, so the launch must instead be
-                    // delivered straight to it via onNewIntent.
-                    awaitIdle = { if (!pipController.isInPip.value) playbackActivityTracker.awaitIdle() },
-                    stillPending = currentExternalPlayback,
-                    launch = { PlaybackActivity.launch(context, it) },
-                    consume = { onExternalPlaybackConsumed(request) },
-                    signInRequired = {
-                        Toast.makeText(context, R.string.external_playback_sign_in_required, Toast.LENGTH_LONG).show()
-                    },
-                )
-            ExternalPlaybackRequestKind.OPEN_DETAIL ->
-                handleOpenDetail(
-                    request = request,
-                    readyStack = readyStack,
-                    gateway = gateway,
-                    stillPending = currentExternalPlayback,
-                    consume = { onExternalPlaybackConsumed(request) },
-                    navigate = { navigate(it) },
-                )
-        }
+        handleOpenDetail(
+            request = request,
+            readyStack = readyStack,
+            gateway = gateway,
+            stillPending = { playbackActivityTracker.state.value.waitingDetail() },
+            consume = { playbackActivityTracker.send(HostEvent.DetailDone(request.id)) },
+            navigate = { navigate(it) },
+        )
     }
 
     BackHandler(enabled = stack?.canGoBack == true) {

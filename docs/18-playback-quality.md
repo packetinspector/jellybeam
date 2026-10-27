@@ -639,8 +639,10 @@ skip. Read from logcat, AudioFlinger and the Media3 1.9.0 source:
 Rule: **an output's reported position can never lead the time it has
 actually spent playing.** A lead of more than 100 ms is a lie, and a lie is
 replaced by `play time - latency`, where latency is `play time - position`
-as measured on the last healthy output after its first second (0 until one
-has been measured); nothing ever goes backwards. `player/AudioClockGuard.kt`
+as measured on the last healthy output after its first second and before
+its `stop()` (once the last frame is written the position freezes at the
+end while play time runs on, which would teach the next item a lag as long
+as the silence; 0 until one has been measured); nothing ever goes backwards. `player/AudioClockGuard.kt`
 applies it in a `ForwardingAudioOutput` installed through
 `DefaultAudioSink.Builder.setAudioOutputProvider`, the extension point
 Media3 documents for wrapping the AudioTrack output. Healthy tracks always

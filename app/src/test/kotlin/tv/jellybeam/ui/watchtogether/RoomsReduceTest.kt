@@ -157,9 +157,9 @@ class RoomsReduceTest {
         }
         if (before is TogetherState.Done) ensure(after is TogetherState.Done, "done is terminal", path)
         if (before is TogetherState.Member && event == TogetherEvent.Back) {
-            // R2-B1: a second Back while leaving gives up waiting and closes the screen, sending nothing.
-            if (before.leaving) ensure(after == TogetherState.Done(GroupOutcome.Silent) && next.effects.isEmpty(), "R2-B1 a second back closes without a second leave", path)
-            else ensure(after is TogetherState.Member && after.exec === before.exec, "R1-B1 back keeps the membership until it ends", path)
+            // A second Back while leaving gives up waiting and closes the screen, sending nothing.
+            if (before.leaving) ensure(after == TogetherState.Done(GroupOutcome.Silent) && next.effects.isEmpty(), "a second back closes without a second leave", path)
+            else ensure(after is TogetherState.Member && after.exec === before.exec, "back keeps the membership until it ends", path)
         }
         val started = ((event as? TogetherEvent.EntryDone)?.result as? EntryResult.Started)?.exec
         if (started != null) {

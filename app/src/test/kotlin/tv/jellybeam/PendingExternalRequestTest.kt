@@ -1,68 +1,47 @@
 package tv.jellybeam
 
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.runCurrent
-import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Test
+import tv.jellybeam.player.HostEvent
+import tv.jellybeam.player.PlaybackActivityTracker
+import tv.jellybeam.player.PlayerFlow
+import tv.jellybeam.player.Req
+import tv.jellybeam.player.RequestHost
 
-/** docs/18 §2.1: an account change drops a pending external request, so it never navigates on the new account. */
-@OptIn(ExperimentalCoroutinesApi::class)
+/** docs/18 §2.1: an account change drops a waiting external request, so it never runs on the new account. */
 class PendingExternalRequestTest {
+    private val tracker = PlaybackActivityTracker()
+    private val started = mutableListOf<Req<*>>()
 
-    private val play = ExternalPlaybackRequest(1L, "item-1", ExternalPlaybackRequestKind.PLAY)
-    private val openDetail = ExternalPlaybackRequest(2L, "item-2", ExternalPlaybackRequestKind.OPEN_DETAIL)
-
-    private var pending: ExternalPlaybackRequest? = null
-
-    /** Only the request handler appends here, so a non-empty list means a stale request navigated. */
-    private val navigated = mutableListOf<ExternalPlaybackRequest>()
-
-    private val coreEpoch = epochsFlow()
-    private val owner = AccountTreeOwner(coreEpoch) { pending = pendingAfterConsume(pending, null) }
-
-    /** The request handler: navigates for whatever is pending once the new account tree runs. */
-    private fun runRequestHandler() {
-        pending?.let { navigated += it }
-    }
-
-    private fun TestScope.startFollowing() {
-        backgroundScope.launch { owner.follow { } }
-        runCurrent()
+    init {
+        tracker.attachHost(RequestHost(start = { started += it }, signInRequired = {}, leaveGroup = {}))
     }
 
     @Test
-    fun `every account change drops a pending request of either kind`() = runTest {
-        startFollowing()
-        val changes: List<Pair<String, TestScope.() -> Unit>> = listOf(
-            "switch, remove active, reauthentication or add server" to { coreEpoch.epoch = coreEpoch.epoch + 1uL },
-        )
+    fun `an account change drops a waiting request of either kind`() {
+        listOf(Req.Kind.Play("item-1"), Req.Kind.OpenDetail("item-2")).forEach { kind ->
+            tracker.send(HostEvent.RootChanged(PlayerFlow.Root.Pending))
+            tracker.arrive(kind, Req.Origin.External)
 
-        for ((event, change) in changes) {
-            for (request in listOf(play, openDetail)) {
-                pending = request
-                navigated.clear()
+            tracker.send(HostEvent.AccountReset)
+            tracker.send(HostEvent.RootChanged(PlayerFlow.Root.Home))
+            tracker.send(HostEvent.MainShown)
 
-                change()
-                runCurrent()
-                runRequestHandler()
-
-                assertNull("$event drops a pending ${request.kind} request", pending)
-                assertEquals("$event: a ${request.kind} request never navigates", emptyList<ExternalPlaybackRequest>(), navigated)
-            }
+            assertEquals("$kind never starts", emptyList<Req<*>>(), started)
+            assertNull("$kind is not left for the detail handler", tracker.state.value.waitingDetail())
+            tracker.send(HostEvent.MainHidden)
         }
     }
 
     @Test
-    fun `consuming leaves only a newer pending request`() {
-        assertNull("null drops a play request", pendingAfterConsume(play, null))
-        assertNull("null drops a detail request", pendingAfterConsume(openDetail, null))
-        assertNull("consuming the pending request clears it", pendingAfterConsume(play, play))
-        assertSame("a different request keeps the pending one", openDetail, pendingAfterConsume(openDetail, play))
-        assertNull("nothing pending stays nothing", pendingAfterConsume(null, play))
+    fun `a detail request waits on Home for the detail handler until it is done`() {
+        tracker.send(HostEvent.RootChanged(PlayerFlow.Root.Home))
+        tracker.arrive(Req.Kind.OpenDetail("item-2"), Req.Origin.External)
+
+        val waiting = tracker.state.value.waitingDetail()
+        assertEquals(Req(1, Req.Kind.OpenDetail("item-2"), Req.Origin.External), waiting)
+        tracker.send(HostEvent.DetailDone(waiting!!.id))
+        assertNull(tracker.state.value.waitingDetail())
     }
 }

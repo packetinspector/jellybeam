@@ -348,7 +348,22 @@ sealed interface LoadStart {
 
     /** docs/28 §5: paused at exactly [ticks], since the server re-sends Seek for a landing over 500 ms off. */
     data class GroupExactPaused(val ticks: Long) : LoadStart
+
+    /** docs/05 external: playing from exactly [ticks] (already clamped, [externalStartTicks]), never the saved position. */
+    data class At(val ticks: Long) : LoadStart
 }
+
+/** An external START_MS as a [LoadStart]; `null` is the default resume. Saturates so a huge value can't wrap negative before the clamp. */
+internal fun startAt(startMs: Long?): LoadStart =
+    if (startMs == null) LoadStart.Resume else LoadStart.At(PlaybackTicks.msToTicks(startMs.coerceAtMost(Long.MAX_VALUE / 10_000L)))
+
+/** docs/05 external: a start at or past the end opens 10 s before it (floor 0); an unknown runtime takes it as asked. */
+internal fun externalStartTicks(requestedTicks: Long, runtimeTicks: Long?): Long =
+    if (runtimeTicks == null || runtimeTicks <= 0L || requestedTicks < runtimeTicks) {
+        requestedTicks
+    } else {
+        (runtimeTicks - 100_000_000L).coerceAtLeast(0L)
+    }
 
 /** [loadOpening]'s answer: the start position, whether the keyframe resume is armed, and the play intent. */
 internal data class LoadOpening(val startPositionMs: Long, val armResume: Boolean, val playWhenReady: Boolean)
@@ -360,6 +375,8 @@ internal fun loadOpening(planStartTicks: Long, transcode: Boolean, start: LoadSt
     }
     is LoadStart.GroupExactPaused ->
         LoadOpening(PlaybackTicks.ticksToMs(start.ticks).coerceAtLeast(0L), armResume = false, playWhenReady = false)
+    is LoadStart.At ->
+        LoadOpening(PlaybackTicks.ticksToMs(start.ticks).coerceAtLeast(0L), armResume = false, playWhenReady = true)
 }
 
 /** The resume target to hand to the player once tracks are known, or `null` when a user seek

@@ -71,7 +71,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -1001,7 +1000,6 @@ private fun HeroBanner(
      */
     primaryFocusRequester: FocusRequester,
 ) {
-    val context = LocalContext.current
     val density = LocalDensity.current
     // Computed inline rather than remembered so a refreshed Card with the same id recomputes
     // instead of
@@ -1139,7 +1137,7 @@ private fun HeroBanner(
                 HeroButton(
                     label = primaryLabel,
                     isPrimary = true,
-                    onClick = { PlaybackActivity.launch(context, card.id) },
+                    onClick = { PlaybackActivity.launch(card.id) },
                     // docs/15-focus-and-selection.md §5: the key doubles as §2 rule 3's fallback
                     // via the
                     // plain [primaryFocusRequester] -- FocusRestorer needs a direct requester since

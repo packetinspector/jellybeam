@@ -132,7 +132,9 @@ The small things, learned from a lot of evenings on the couch with a lot of clie
 Grab the APK from [Releases](https://github.com/packetinspector/jellybeam/releases) and sideload it: `adb install jellybeam-tv-<version>.apk`, or a file manager on the TV. Type a server address or let LAN discovery find it, then pair with Quick Connect or a password.
 
 <details>
-<summary><strong>Play an item from outside the app</strong></summary>
+<summary><strong>Control Jellybeam from adb</strong></summary>
+
+Play an item (resumes where you left off):
 
 ```sh
 adb shell am start -a tv.jellybeam.action.PLAY \
@@ -144,7 +146,45 @@ adb shell am start -a android.intent.action.VIEW \
   -p tv.jellybeam -d 'jellybeam://play/<item-id>'
 ```
 
-Both take only a Jellyfin item id. The active account plays it.
+Start from the beginning, or at a time (milliseconds for the extra, seconds for the link):
+
+```sh
+adb shell am start -a tv.jellybeam.action.PLAY -p tv.jellybeam \
+  --es tv.jellybeam.extra.ITEM_ID '<item-id>' --ez tv.jellybeam.extra.START_FROM_BEGINNING true
+```
+
+```sh
+adb shell am start -a tv.jellybeam.action.PLAY -p tv.jellybeam \
+  --es tv.jellybeam.extra.ITEM_ID '<item-id>' --el tv.jellybeam.extra.START_MS 1500000
+```
+
+```sh
+adb shell am start -a android.intent.action.VIEW -p tv.jellybeam -d 'jellybeam://play/<item-id>?t=1500'
+```
+
+```sh
+adb shell am start -a android.intent.action.VIEW -p tv.jellybeam -d 'jellybeam://play/<item-id>?from=start'
+```
+
+Sending PLAY for the item in the mini player brings it back fullscreen; add a start time to jump there instead. Sent while that item plays fullscreen, the same PLAY shrinks it into the mini player like Home does; send it again to expand.
+
+Open an item's detail page:
+
+```sh
+adb shell am start -a android.intent.action.VIEW -p tv.jellybeam -d 'jellybeam://item/<item-id>'
+```
+
+Pause, play, stop or skip the video that's playing, and read where it is:
+
+```sh
+adb shell input keyevent KEYCODE_MEDIA_PAUSE
+```
+
+```sh
+adb shell dumpsys media_session
+```
+
+`KEYCODE_MEDIA_PLAY`, `_STOP`, `_FAST_FORWARD` and `_REWIND` work the same way. Everything takes only a Jellyfin item id; the active account plays it.
 
 </details>
 

@@ -600,6 +600,8 @@ class PlaybackViewModel(
     private val settingsStore: SettingsStore = AppGraph.settingsStore,
     /** docs/28 §4: a player launched for a group plays nothing until the group's Load. */
     private val forGroup: Boolean = false,
+    /** docs/05 external: START_MS for the constructor's initial [start] only; implies [startFromBeginning]. */
+    private val startMs: Long? = null,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(PlaybackUiState())
@@ -637,6 +639,10 @@ class PlaybackViewModel(
      * only while its scope is still this one.
      */
     private val liveScope: SessionScope? get() = (owner as? SessionOwner.Playing)?.scope
+
+    /** The item the live session plays on the browsed account, else `null`: the Activity's own id goes stale after autoplay,
+     * and a parked account's session must be replaced, not expanded (docs/05 external, docs/17 §2). */
+    internal val liveItemId: String? get() = liveScope?.takeIf { it.accountEpoch == gateway.accountEpochs.value.epoch }?.itemId
 
     private fun SessionScope.isCurrent(): Boolean = liveScope?.generation == generation
 
@@ -1313,7 +1319,7 @@ class PlaybackViewModel(
                 }
             }
             if (initialRequest == null || currentRequest != initialRequest) return@launch
-            start(itemId, remintIfRestored(initialRequest), startFromBeginning = startFromBeginning)
+            start(itemId, remintIfRestored(initialRequest), startFromBeginning = startFromBeginning, opening = startAt(startMs))
         }
     }
 
@@ -1414,7 +1420,8 @@ class PlaybackViewModel(
                         null
                     }
                 }
-                val plan = gateway.preparePlayback(itemId, startFromBeginning, request)
+                // docs/05 external: an explicit start position is never overruled by the server's saved one.
+                val plan = gateway.preparePlayback(itemId, startFromBeginning || opening is LoadStart.At, request)
                 PerfLog.markPlayback("plan.ready")
                 plan to runCatching { settingsDeferred.await() }.getOrNull()
             }
@@ -1434,6 +1441,7 @@ class PlaybackViewModel(
         }
         val (plan, settings) = startup
         if (!adoptPlan(request, plan)) return
+        val loadStart = if (opening is LoadStart.At) LoadStart.At(externalStartTicks(opening.ticks, plan.runtimeTicks)) else opening
         wirePlayer()
 
         // Per-session reset (see the class doc's autoplay paragraph): every
@@ -1516,7 +1524,7 @@ class PlaybackViewModel(
             tolerateMislabeledLevels = sessionTolerateMislabeledLevels,
             audioDecoderPreferences = sessionAudioDecoderPreferences,
             fullAssStyling = sessionFullAssStyling,
-            start = opening,
+            start = loadStart,
         )
         // The shared PlayerHolder singleton outlives any one session --
         // a previous session's rate must never leak into a freshly loaded item.
@@ -1524,9 +1532,13 @@ class PlaybackViewModel(
         // docs/28 §5: from here a READY is this group load's landing, not the replaced item's.
         if (opening is LoadStart.GroupExactPaused) (mode as? PlayerMode.Group)?.let { mode = it.copy(loadIssued = true) }
         // docs/28 §5: a group load opens on the group's position and never resumes a saved one.
-        val startTicks = (opening as? LoadStart.GroupExactPaused)?.ticks ?: plan.startPositionTicks
+        val startTicks = when (loadStart) {
+            is LoadStart.GroupExactPaused -> loadStart.ticks
+            is LoadStart.At -> loadStart.ticks
+            LoadStart.Resume -> plan.startPositionTicks
+        }
         _positionTicks.value = startTicks
-        resumeNoticePending = opening == LoadStart.Resume && startTicks > 0L
+        resumeNoticePending = loadStart == LoadStart.Resume && startTicks > 0L
         _state.update {
             it.copy(
                 phase = PlaybackUiState.Phase.READY,
@@ -2036,9 +2048,9 @@ class PlaybackViewModel(
      * keyed by raw item id. Always the newest request: one still negotiating, an autoplay's
      * included, is obsolete and its plan abandoned (docs/18 §2.1).
      */
-    fun replaceItem(itemId: String, startFromBeginning: Boolean = false) {
+    fun replaceItem(itemId: String, startFromBeginning: Boolean = false, startMs: Long? = null) {
         leaveGroup() // docs/28 §4: picking other content leaves the group first
-        replace(itemId, startFromBeginning, LoadStart.Resume)
+        replace(itemId, startFromBeginning, startAt(startMs))
     }
 
     /** The newest request's stop-then-start, for an intent and for the group's Load. */
@@ -3320,10 +3332,11 @@ class PlaybackViewModelFactory(
     private val strings: UiStrings,
     private val sheetFetcher: SheetFetcher? = null,
     private val forGroup: Boolean = false,
+    private val startMs: Long? = null,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(PlaybackViewModel::class.java))
-        return PlaybackViewModel(gateway, playerHolder, itemId, strings, startFromBeginning = startFromBeginning, sheetFetcher = sheetFetcher, forGroup = forGroup) as T
+        return PlaybackViewModel(gateway, playerHolder, itemId, strings, startFromBeginning = startFromBeginning, sheetFetcher = sheetFetcher, forGroup = forGroup, startMs = startMs) as T
     }
 }

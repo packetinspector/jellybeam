@@ -77,6 +77,36 @@ adb shell am start -a android.intent.action.VIEW \
   -p tv.jellybeam -d 'jellybeam://play/<item-id>'
 ```
 
+Start options, each optional and mutually exclusive:
+
+| Option | PLAY extra | Deep-link query |
+|---|---|---|
+| From the beginning, ignoring the saved position | `--ez tv.jellybeam.extra.START_FROM_BEGINNING true` | `?from=start` |
+| At a position (plays there; past the end lands 10 s before it) | `--el tv.jellybeam.extra.START_MS <ms>` | `?t=<seconds>` |
+
+Both options together, a negative or non-numeric position, or any other query
+key is refused with the "invalid" toast.
+
+**Same item.** While the mini player shows an item started on the active
+account with no account switch since (switching away and back counts), PLAY
+for that item (from adb or the app) with no start option only expands it,
+without reloading or leaving a Watch Together group; with a start option it
+reloads at that position, which works as an absolute seek. An external intent
+counts as leaving a fullscreen player: with the mini player on it shrinks,
+and a PLAY for that same item with no start option leaves it in the mini
+player (send it again to expand); with it off playback stops, so PLAY
+restarts the item (at its saved position, or the start option). A mini
+player floating over another app behaves the same way.
+
+**Detail page.** `tv.jellybeam.action.OPEN_DETAIL` with the same `ITEM_ID`
+extra, or `jellybeam://item/<item-id>`, opens the item's detail page.
+
+**Transport on a live session** needs no intent: the MediaSession
+(docs/17 §2) answers `adb shell input keyevent
+KEYCODE_MEDIA_PLAY|PAUSE|STOP|FAST_FORWARD|REWIND`, and `adb shell dumpsys
+media_session` shows its state and position, from the first frame until
+playback ends.
+
 The exported entry point accepts only path-safe Jellyfin item identifiers; a
 UUID in any spelling (undashed, upper case) is canonicalized to the dashed
 lowercase form, so it plays exactly as the same item started from the UI. It

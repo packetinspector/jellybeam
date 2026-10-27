@@ -40,12 +40,16 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <intent-filter>
+                <action android:name="tv.jellybeam.action.OPEN_DETAIL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data
-                    android:host="play"
-                    android:scheme="jellybeam" />
+                <data android:scheme="jellybeam" />
+                <data android:host="play" />
+                <data android:host="item" />
             </intent-filter>
         </activity>
 

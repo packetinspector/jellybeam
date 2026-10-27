@@ -244,7 +244,11 @@ audio/subtitle picker;
 external playback orchestration through an exported PLAY intent or
 `jellybeam://play/&lt;item-id&gt;` deep link (active server/account, resume semantics,
 any UUID spelling treated as the same item the UI plays,
-with an on-demand server lookup when the mirror has not cached the item yet);
+with an on-demand server lookup when the mirror has not cached the item yet),
+optionally from the beginning or at a given time (`?from=start`, `?t=&lt;seconds&gt;` or the
+matching extras); the same intent for the item in the mini player just brings it
+back fullscreen (sent over the fullscreen player, it shrinks into the mini player like Home); an exported OPEN_DETAIL intent or `jellybeam://item/&lt;item-id&gt;` opens
+an item's detail page (docs/05); a request still waiting (server not reached yet) when you leave the app is dropped, never played on a later return;
 focus-dwell preload: sustained focus on a playable Home/hero/library-grid/episode
 card—or reaching its high-intent Play/Resume action—prefetches the playback
 handshake, trimming press-Play latency, and re-arms itself while focus stays put
