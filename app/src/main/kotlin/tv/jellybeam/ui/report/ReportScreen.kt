@@ -58,6 +58,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.runCatchingCancellable
@@ -117,6 +118,7 @@ fun ReportScreen(
     var noNetwork by remember { mutableStateOf(false) }
     var logDownloaded by remember { mutableStateOf(false) }
     var showLoggingOffDialog by remember { mutableStateOf(false) }
+    val accent = LocalAccent.current
     val serverHolder = remember { arrayOfNulls<ReportServer>(1) }
 
     // docs/21 §1.2 step 3: the report screen holds the display awake for as long as it's visible.
@@ -234,7 +236,7 @@ fun ReportScreen(
                     }
                     BasicText(
                         text = stringResource(reportStatusLabel(status)),
-                        style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Pistacchio, fontSize = 15.sp),
+                        style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = accent.accentInk, fontSize = 15.sp),
                     )
                 }
                 BasicText(
@@ -355,12 +357,13 @@ private fun LoggingOffDialog(isTop: Boolean, onTurnOff: () -> Unit, onKeepLoggin
 private fun LoggingOffDialogButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier, primary: Boolean = false) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
     Box(
         modifier = modifier
-            .background(if (isFocused) JellybeamTheme.Pistacchio else Color.Transparent, RoundedCornerShape(50))
+            .background(if (isFocused) accent.accent else Color.Transparent, RoundedCornerShape(50))
             .let {
                 if (!isFocused) {
-                    it.border(1.dp, if (primary) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline, RoundedCornerShape(50))
+                    it.border(1.dp, if (primary) accent.accentInk else JellybeamTheme.Hairline, RoundedCornerShape(50))
                 } else {
                     it
                 }
@@ -373,7 +376,7 @@ private fun LoggingOffDialogButton(label: String, onClick: () -> Unit, modifier:
             style = TextStyle(
                 fontFamily = JellybeamTheme.Archivo,
                 fontWeight = FontWeight.SemiBold,
-                color = if (isFocused) JellybeamTheme.Notte else JellybeamTheme.Panna,
+                color = if (isFocused) accent.onAccent else JellybeamTheme.Panna,
                 fontSize = 14.sp,
             ),
         )

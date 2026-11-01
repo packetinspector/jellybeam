@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.ui.focus.FocusMemory
@@ -188,14 +189,15 @@ private fun RoomRow(room: SyncPlayRoom, ruled: Boolean, joining: Boolean, modifi
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
     val filled = focused || joining
-    val ink = JellybeamTheme.Notte
+    val accent = LocalAccent.current
+    val ink = accent.onAccent
     val names = roomNames(room.participants)
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(ROW_HEIGHT)
             .drawBehind { if (ruled) drawLine(JellybeamTheme.RuleFaint, Offset.Zero, Offset(size.width, 0f), 1.dp.toPx()) }
-            .background(if (filled) JellybeamTheme.Pistacchio else Color.Transparent, ROW_SHAPE)
+            .background(if (filled) accent.accent else Color.Transparent, ROW_SHAPE)
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
             .padding(horizontal = ROW_BLEED),
         verticalAlignment = Alignment.CenterVertically,
@@ -223,13 +225,13 @@ private fun RoomRow(room: SyncPlayRoom, ruled: Boolean, joining: Boolean, modifi
         Spacer(Modifier.width(16.dp))
         Column(Modifier.width(75.dp), horizontalAlignment = Alignment.End) {
             val tag = if (joining) R.string.wt_room_joining else roomTag(room.phase)
-            tag?.let { Mono(stringResource(it), 9.sp, if (filled) ink else tagColor(room.phase)) }
+            tag?.let { Mono(stringResource(it), 9.sp, if (filled) ink else tagColor(room.phase, accent.accentInk)) }
         }
     }
 }
 
-private fun tagColor(phase: SyncPlayPhase?): Color = when (phase) {
-    SyncPlayPhase.PLAYING -> JellybeamTheme.Pistacchio
+private fun tagColor(phase: SyncPlayPhase?, playing: Color): Color = when (phase) {
+    SyncPlayPhase.PLAYING -> playing
     SyncPlayPhase.WAITING -> JellybeamTheme.Grigio
     SyncPlayPhase.IDLE, SyncPlayPhase.PAUSED, null -> JellybeamTheme.Panna2
 }

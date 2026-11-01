@@ -43,6 +43,7 @@ import tv.jellybeam.AppForeground
 import tv.jellybeam.AppGraph
 import tv.jellybeam.BuildConfig
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.AppLocale
 import tv.jellybeam.i18n.mediumDateFormatter
@@ -96,7 +97,8 @@ fun UpdatesSectionContent(visible: Boolean = true, onAutomaticChange: (Boolean) 
         available -> R.string.updates_status_ready
         else -> R.string.updates_status_idle
     })
-    val accent = if (failed) updateError else if (checking) updateAmber else JellybeamTheme.Pistacchio
+    val scheme = LocalAccent.current
+    val accent = if (failed) updateError else if (checking) updateAmber else scheme.accentInk
     val headline = when {
         failed && snapshot?.failure == UpdateFailure.NETWORK -> stringResource(R.string.updates_headline_server_down)
         failed -> stringResource(R.string.updates_headline_failed)
@@ -158,14 +160,14 @@ fun UpdatesSectionContent(visible: Boolean = true, onAutomaticChange: (Boolean) 
                         else -> BuildConfig.VERSION_NAME
                     },
                         Modifier.background(JellybeamTheme.Notte, CircleShape).border(1.dp, JellybeamTheme.Hairline, CircleShape)
-                            .padding(horizontal = 10.dp, vertical = 4.dp), style = updateMono(9, JellybeamTheme.Pistacchio))
+                            .padding(horizontal = 10.dp, vertical = 4.dp), style = updateMono(9, scheme.accentInk))
                     BasicText(detail, Modifier.weight(1f), style = updateText(11, JellybeamTheme.Panna2))
                 }
                 if (phase == "Downloading") {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                         Box(Modifier.weight(1f).height(3.dp).background(JellybeamTheme.Hairline, CircleShape)) {
                             val fraction = if (snapshot!!.total == 0uL) 0f else (snapshot.bytes.toDouble() / snapshot.total.toDouble()).toFloat().coerceIn(0f, 1f)
-                            Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(JellybeamTheme.Pistacchio, CircleShape))
+                            Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(scheme.accentInk, CircleShape))
                         }
                         BasicText(stringResource(R.string.updates_progress, snapshot!!.bytes.toDouble() / 1048576, ((snapshot.total + 1048575u) / 1048576u).toInt()),
                             style = updateMono(9, JellybeamTheme.Panna))
@@ -262,15 +264,16 @@ private fun UpdateButton(label: String, subtitle: String?, key: String, filled: 
     val focused by interactions.collectIsFocusedAsState()
     val memory = LocalSettingsFocusMemory.current
     val entry = LocalSettingsPaneEntryKey.current
-    val ink = if (filled) JellybeamTheme.Notte else JellybeamTheme.Panna
+    val scheme = LocalAccent.current
+    val ink = if (filled) scheme.onAccent else JellybeamTheme.Panna
     Column(Modifier.fillMaxWidth().padding(3.dp)
-        .border(if (focused) 2.dp else 1.dp, if (focused) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline, CircleShape)
-        .padding(3.dp).background(if (filled) JellybeamTheme.Pistacchio else JellybeamTheme.Notte, CircleShape)
+        .border(if (focused) 2.dp else 1.dp, if (focused) scheme.accentInk else JellybeamTheme.Hairline, CircleShape)
+        .padding(3.dp).background(if (filled) scheme.accent else JellybeamTheme.Notte, CircleShape)
         .let { if (memory == null) it else it.focusKey(memory, key) }.paneEntry(entry, key)
         .clickable(interactionSource = interactions, indication = null, onClick = onClick)
         .padding(horizontal = 8.dp, vertical = if (subtitle == null) 12.dp else 7.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         BasicText(label, style = updateText(14, ink, true).copy(textAlign = TextAlign.Center))
-        if (subtitle != null) BasicText(subtitle, style = updateText(9, if (filled) JellybeamTheme.Notte else JellybeamTheme.Grigio).copy(textAlign = TextAlign.Center))
+        if (subtitle != null) BasicText(subtitle, style = updateText(9, if (filled) scheme.onAccent else JellybeamTheme.Grigio).copy(textAlign = TextAlign.Center))
     }
 }
 
@@ -279,7 +282,8 @@ private fun UpdateAutomatic(value: Boolean, onToggle: () -> Unit) {
     val interactions = remember { MutableInteractionSource() }
     val focused by interactions.collectIsFocusedAsState()
     val memory = LocalSettingsFocusMemory.current
-    Row(Modifier.fillMaxWidth().border(if (focused) 2.dp else 0.dp, if (focused) JellybeamTheme.Pistacchio else Color.Transparent, updateCardShape)
+    val scheme = LocalAccent.current
+    Row(Modifier.fillMaxWidth().border(if (focused) 2.dp else 0.dp, if (focused) scheme.accentInk else Color.Transparent, updateCardShape)
         .background(JellybeamTheme.Surface, updateCardShape)
         .let { if (memory == null) it else it.focusKey(memory, "updates/automatic") }
         .toggleable(value, interactionSource = interactions, indication = null, role = Role.Switch, onValueChange = { onToggle() })
@@ -288,7 +292,7 @@ private fun UpdateAutomatic(value: Boolean, onToggle: () -> Unit) {
             BasicText(stringResource(R.string.updates_automatic_title), style = updateText(13, bold = true))
             BasicText(stringResource(R.string.updates_automatic_hint), style = updateText(10, JellybeamTheme.Grigio))
         }
-        Box(Modifier.size(36.dp, 20.dp).background(if (value) JellybeamTheme.Pistacchio else JellybeamTheme.Grigio, CircleShape).padding(2.dp)) {
+        Box(Modifier.size(36.dp, 20.dp).background(if (value) scheme.accent else JellybeamTheme.Grigio, CircleShape).padding(2.dp)) {
             Box(Modifier.size(16.dp).align(if (value) Alignment.CenterEnd else Alignment.CenterStart).background(JellybeamTheme.Panna, CircleShape))
         }
     }
@@ -305,8 +309,9 @@ private fun ReleaseNotesCard(snapshot: UpdateSnapshot?, available: Boolean, modi
     val interactions = remember { MutableInteractionSource() }
     val focused by interactions.collectIsFocusedAsState()
     val memory = LocalSettingsFocusMemory.current
+    val scheme = LocalAccent.current
     Column(modifier.background(JellybeamTheme.Surface, updateCardShape)
-        .border(if (focused) 2.dp else 0.dp, if (focused) JellybeamTheme.Pistacchio else Color.Transparent, updateCardShape)
+        .border(if (focused) 2.dp else 0.dp, if (focused) scheme.accentInk else Color.Transparent, updateCardShape)
         .onPreviewKeyEvent { event ->
             if (event.type != KeyEventType.KeyDown) false else {
                 val delta = when (event.key) {
@@ -329,7 +334,7 @@ private fun ReleaseNotesCard(snapshot: UpdateSnapshot?, available: Boolean, modi
             blocks.forEachIndexed { index, block ->
                 if (block.heading) {
                     if (index > 0) { Spacer(Modifier.height(5.dp)); Box(Modifier.fillMaxWidth().height(1.dp).background(JellybeamTheme.Hairline)); Spacer(Modifier.height(3.dp)) }
-                    BasicText(block.text.text.uppercaseUi(), style = updateMono(9, if (index == 0) JellybeamTheme.Pistacchio else JellybeamTheme.Grigio))
+                    BasicText(block.text.text.uppercaseUi(), style = updateMono(9, if (index == 0) scheme.accentInk else JellybeamTheme.Grigio))
                 } else if (block.text.text.startsWith("• ")) {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         BasicText("•", style = updateText(12, JellybeamTheme.Grigio))

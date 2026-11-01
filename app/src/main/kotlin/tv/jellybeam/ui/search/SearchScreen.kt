@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.cards.PosterCard
@@ -347,7 +348,7 @@ private fun DiscoverSectionHeader(status: String?, topGap: Boolean) {
 
 /**
  * The house text-field style ([tv.jellybeam.ui.signin.SignInScreen]'s `JellybeamTextField` recipe): a
- * Grigio label, a Surface box with a Hairline border that turns Pistacchio on focus, Archivo
+ * Grigio label, a Surface box with a Hairline border that turns accent on focus, Archivo
  * text. `imeAction = Done` just dismisses the keyboard -- results are already live via
  * [SearchViewModel]'s debounce.
  */
@@ -364,7 +365,8 @@ private fun SearchField(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    val borderColor = if (isFocused) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline
+    val accent = LocalAccent.current
+    val borderColor = if (isFocused) accent.accentInk else JellybeamTheme.Hairline
     val keyboardController = LocalSoftwareKeyboardController.current
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -396,7 +398,7 @@ private fun SearchField(
                     fontSize = 16.sp,
                 ),
                 singleLine = true,
-                cursorBrush = SolidColor(JellybeamTheme.Pistacchio),
+                cursorBrush = SolidColor(accent.accentInk),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { keyboardController?.hide() }),
                 interactionSource = interactionSource,

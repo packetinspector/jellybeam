@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import tv.jellybeam.AppGraph
+import tv.jellybeam.ProvideAccent
 import tv.jellybeam.MainActivity
 import tv.jellybeam.perf.PerfLog
 import uniffi.jellybeam_core.AccountIdentity
@@ -327,12 +328,14 @@ class PlaybackActivity : ComponentActivity() {
             if (isFinishing || isDestroyed) return@launch
             PerfLog.markPlayback("ui.install")
             setContent {
-                PlaybackScreen(
-                    viewModel = viewModel,
-                    focusRestoreEpoch = windowFocusEpoch,
-                    inPictureInPicture = inPictureInPicture,
-                    onExitRequested = { if (!tryEnterPip()) finish() },
-                )
+                ProvideAccent {
+                    PlaybackScreen(
+                        viewModel = viewModel,
+                        focusRestoreEpoch = windowFocusEpoch,
+                        inPictureInPicture = inPictureInPicture,
+                        onExitRequested = { if (!tryEnterPip()) finish() },
+                    )
+                }
             }
         }
     }

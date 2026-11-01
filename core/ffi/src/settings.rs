@@ -172,6 +172,11 @@ fn default_skip_commercial() -> SegmentAction {
     SegmentAction::AutoSkip
 }
 
+/// [`Settings::accent_color`]'s default: the brand accent.
+fn default_accent_color() -> String {
+    "pistacchio".to_owned()
+}
+
 /// [`Settings::show_clock`]'s real default -- `true`, not `bool`'s zero
 /// value, so an explicit `#[serde(default = "...")]` is required.
 fn default_show_clock() -> bool {
@@ -494,6 +499,11 @@ pub struct Settings {
     /// choice; an unknown stored value loads as the default.
     #[serde(default, deserialize_with = "crate::home::deserialize_layout")]
     pub home_layout: HomeLayout,
+    /// docs/09: Appearance accent as a key, not a colour, so palette edits never migrate;
+    /// Kotlin resolves it and an unknown key shows the default.
+    #[serde(default = "default_accent_color")]
+    #[uniffi(default = "pistacchio")]
+    pub accent_color: String,
 }
 
 impl Default for Settings {
@@ -544,6 +554,7 @@ impl Default for Settings {
             diagnostic_logging_enabled: false,
             crash_reports_enabled: default_crash_reports_enabled(),
             home_layout: HomeLayout::default(),
+            accent_color: default_accent_color(),
         }
     }
 }
@@ -702,6 +713,7 @@ mod tests {
             diagnostic_logging_enabled: true,
             crash_reports_enabled: false,
             home_layout: HomeLayout::Classic,
+            accent_color: "oceano".to_owned(),
         }
     }
 
@@ -1083,6 +1095,29 @@ mod tests {
         raw["preload_on_focus"] = json!(true);
         let loaded = load_from_json(raw);
         assert!(!loaded.mini_player_enabled);
+    }
+
+    /// Pins [`Settings::accent_color`]'s JSON shape at a non-default value.
+    #[test]
+    fn accent_color_round_trips_through_json() {
+        let original = Settings {
+            accent_color: "oceano".to_owned(),
+            ..Settings::default()
+        };
+        let json = serde_json::to_value(&original).expect("serialize");
+        assert_eq!(json["accent_color"], "oceano");
+
+        let loaded: Settings = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(loaded, original);
+    }
+
+    /// `accent_color` absent loads as the brand accent, not an empty key.
+    #[test]
+    fn load_tolerates_a_settings_json_written_before_accent_color_existed() {
+        let mut raw = serde_json::to_value(Settings::default()).expect("serialize");
+        raw.as_object_mut().expect("object").remove("accent_color");
+        let loaded = load_from_json(raw);
+        assert_eq!(loaded.accent_color, "pistacchio");
     }
 
     /// Pins [`Settings::osd_detail`]'s exact JSON shape at a non-default

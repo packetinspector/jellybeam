@@ -26,6 +26,8 @@ the in-memory state and mirror side effects.
 `Settings` fields (types from playback-policy::prefs where they exist):
 - `next_up_cutoff_days: Option<u32>` + `next_up_rewatching: bool` → mapped onto
   media-cache `NextUpOptions` via `set_next_up_options` on apply.
+- `accent_color: String` (default `pistacchio`) → the Appearance accent, stored as a
+  key; Kotlin resolves it (`accentSchemeFor`) and an unknown key shows the default.
 - `hidden_library_ids: Vec<String>` → home_snapshot skips these views.
 - `hide_watched_in_latest: bool` → latest(..., hide_watched) wiring.
 - `home_shelf_size: u32` (presets [10,20,30], default 20) → the limit for

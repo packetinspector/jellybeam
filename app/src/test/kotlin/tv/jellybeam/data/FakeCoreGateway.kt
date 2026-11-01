@@ -1302,8 +1302,9 @@ class FakeCoreGateway(
     var validateSessionCallCount: Int = 0
         private set
 
-    override suspend fun validateSession() {
+    override suspend fun validateSession(): Boolean {
         validateSessionCallCount++
+        return false
     }
 
     var isAdministratorCallCount: Int = 0

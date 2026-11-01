@@ -1363,6 +1363,9 @@ pub struct ExternalSubtitleFfi {
     pub display_title: Option<String>,
     pub is_default: bool,
     pub is_forced: bool,
+    /// docs/12 §16: the server's SDH flag; Media3 has no such flag for a file's tracks.
+    #[uniffi(default = false)]
+    pub hearing_impaired: bool,
 }
 
 /// A sidecar's authed URL plus its descriptor. Deliberately not `Debug`: `url` embeds the token.
@@ -1447,6 +1450,7 @@ pub(crate) fn external_subtitles_of(
                     display_title: s.display_title.clone().filter(|t| !t.is_empty()),
                     is_default: s.is_default.unwrap_or(false),
                     is_forced: s.is_forced.unwrap_or(false),
+                    hearing_impaired: s.is_hearing_impaired == Some(true),
                 },
             })
         })
@@ -1469,6 +1473,9 @@ pub struct EmbeddedSubtitleFfi {
     /// How the server delivers the stream under this plan; `None` when it said nothing known.
     #[uniffi(default = None)]
     pub delivery: Option<SubtitleDeliveryFfi>,
+    /// docs/12 §16: the server's SDH flag; Media3 has no such flag for a file's tracks.
+    #[uniffi(default = false)]
+    pub hearing_impaired: bool,
 }
 
 /// docs/18 §3.1: the server's `DeliveryMethod` for one subtitle stream.
@@ -1505,6 +1512,7 @@ pub(crate) fn embedded_subtitles_of(
                 language: s.language.clone(),
                 title: s.title.clone(),
                 forced: s.is_forced == Some(true),
+                hearing_impaired: s.is_hearing_impaired == Some(true),
                 default: s.is_default == Some(true),
                 codec: s.codec.clone(),
                 display_title: s.display_title.clone().filter(|t| !t.is_empty()),
@@ -1809,6 +1817,34 @@ mod tests {
         );
     }
 
+    /// docs/12 §16: both subtitle records carry the server's SDH flag; an absent one reads false.
+    #[test]
+    fn subtitle_records_carry_the_servers_hearing_impaired_flag() {
+        use jellyfin_api::models::{MediaSourceInfo, MediaStream, MediaStreamType};
+        let stream = |index, external, flag| MediaStream {
+            index: Some(index),
+            type_: Some(MediaStreamType::Subtitle),
+            is_external: Some(external),
+            is_hearing_impaired: flag,
+            codec: Some("srt".to_string()),
+            delivery_url: Some("/Videos/x/Subtitles/1/Stream.srt".to_string()),
+            ..Default::default()
+        };
+        let source = MediaSourceInfo {
+            media_streams: vec![
+                stream(1, false, Some(true)),
+                stream(2, false, None),
+                stream(3, true, Some(true)),
+            ],
+            ..Default::default()
+        };
+        let embedded = embedded_subtitles_of(&source);
+        assert!(embedded[0].hearing_impaired);
+        assert!(!embedded[1].hearing_impaired);
+        let external = external_subtitles_of(&source, |url| Some(url.to_string()));
+        assert!(external[0].track.hearing_impaired);
+    }
+
     #[test]
     fn embedded_subtitles_keep_manifest_sidecars_but_not_fetched_ones() {
         use jellyfin_api::models::{
@@ -1942,6 +1978,7 @@ mod tests {
             display_title: None,
             is_default: false,
             is_forced: false,
+            hearing_impaired: false,
         };
         let sidecars = SessionSidecars {
             play_session_id: "a".to_string(),

@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.ui.cards.WIDE_ART_ASPECT
 import tv.jellybeam.ui.cards.ArtBox
 import tv.jellybeam.ui.cards.CardArtImage
@@ -116,6 +117,7 @@ fun EpisodeGridCard(
 /** Watched tick, top-right of the art. */
 @Composable
 private fun BoxScope.EpisodeWatchedTick() {
+    val accent = LocalAccent.current
     Box(
         modifier = Modifier
             .align(Alignment.TopEnd)
@@ -129,7 +131,7 @@ private fun BoxScope.EpisodeWatchedTick() {
             style = TextStyle(
                 fontFamily = JellybeamTheme.Archivo,
                 fontWeight = FontWeight.Bold,
-                color = JellybeamTheme.Pistacchio,
+                color = accent.accentInk,
                 fontSize = 11.sp,
             ),
         )

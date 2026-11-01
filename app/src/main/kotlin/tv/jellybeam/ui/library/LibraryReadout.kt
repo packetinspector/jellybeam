@@ -31,6 +31,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.util.Date
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.AppLocale
 import tv.jellybeam.i18n.UiStrings
@@ -95,6 +96,7 @@ private fun Modifier.onlyIfItFits(): Modifier = layout { measurable, constraints
 @Composable
 private fun ReadoutBody(card: Card, modifier: Modifier) {
     val strings = rememberUiStrings()
+    val accent = LocalAccent.current
     val context = LocalContext.current
     val timeFormat = remember(context) { android.text.format.DateFormat.getTimeFormat(context) }
     // Read here, not in the grid: a minute tick recomposes only this body.
@@ -126,7 +128,7 @@ private fun ReadoutBody(card: Card, modifier: Modifier) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(READOUT_COLUMN_GAP)) {
             if (endsAt != null) {
-                ReadoutColumn(strings, R.string.library_readout_ends_at, endsAt, JellybeamTheme.Pistacchio, endsSub)
+                ReadoutColumn(strings, R.string.library_readout_ends_at, endsAt, accent.accentInk, endsSub)
             }
             ReadoutColumn(strings, R.string.library_readout_last_played, lastPlayed, JellybeamTheme.Panna, lastPlayedSub)
             if (addedRelative != null) {

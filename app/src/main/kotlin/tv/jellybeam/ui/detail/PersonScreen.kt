@@ -52,6 +52,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.cards.ArtSource
@@ -306,6 +307,7 @@ private fun PersonHeader(
     headerFocus: FocusRequester?,
 ) {
     val density = LocalDensity.current
+    val accent = LocalAccent.current
     val portraitWidthPx = remember(density) { CardFormatting.bucketedImageWidth(with(density) { PORTRAIT_WIDTH.roundToPx() }) }
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = PAGE_MARGIN),
@@ -335,7 +337,7 @@ private fun PersonHeader(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = if (headerFocus != null) {
-                    Modifier.focusRequester(headerFocus).focusRing(isFocused = nameFocused, cornerRadius = 4.dp).focusable(interactionSource = nameSource)
+                    Modifier.focusRequester(headerFocus).focusRing(isFocused = nameFocused, cornerRadius = 4.dp, color = accent.accentInk).focusable(interactionSource = nameSource)
                 } else {
                     Modifier
                 },

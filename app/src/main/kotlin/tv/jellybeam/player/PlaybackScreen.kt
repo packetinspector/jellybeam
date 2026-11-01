@@ -123,6 +123,7 @@ import tv.jellybeam.AppGraph
 import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.ui.watchtogether.activeUserName
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.i18n.rememberUiStrings
@@ -162,6 +163,7 @@ private object Osd {
     val TITLE_MINIMAL_GAP = 10.dp
     val TIME_ROW_GAP = 14.dp
     val TIME_COL_FULL_LEFT = 120.dp
+    val TIME_COL_FULL_LEFT_HOURS = 156.dp
     val TIME_COL_FULL_RIGHT = 160.dp
     val TIME_COL_MINIMAL = 65.dp
     val TRACK_HEIGHT_FULL = 2.dp
@@ -593,7 +595,7 @@ private fun EpisodeGlyph(forward: Boolean, tint: Color, modifier: Modifier = Mod
  * tinted accent whenever it isn't 1x, even unfocused. */
 @Composable
 private fun SpeedButtonLabel(rate: Float, focusedTint: Color, modifier: Modifier = Modifier) {
-    val tint = if (rate != 1f) JellybeamTheme.Pistacchio else focusedTint
+    val tint = if (rate != 1f) LocalAccent.current.accentInk else focusedTint
     BasicText(
         text = formatSpeedLabel(rate),
         modifier = modifier,
@@ -1995,7 +1997,7 @@ private fun OsdTitleLine(state: PlaybackUiState, directPlayDetail: PlaybackOsdDe
                         modifier = Modifier.widthIn(max = Osd.TITLE_MAX_WIDTH),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Pistacchio, fontSize = 11.sp),
+                        style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = LocalAccent.current.accentInk, fontSize = 11.sp),
                     )
                 }
                 // A plain weighted Spacer (not weight() on the kicker text, which would only
@@ -2076,7 +2078,12 @@ private fun OsdTimeAndScrubber(
     val isFull = state.osdDetail == OsdDetailSetting.FULL
     val positionMs = PlaybackTicks.ticksToMs(positionTicks)
     val durationMs = durationTicks?.let(PlaybackTicks::ticksToMs)
-    val leftColumn = if (isFull) Osd.TIME_COL_FULL_LEFT else Osd.TIME_COL_MINIMAL
+    // docs/12 §6: chosen per video, not per digit, so the bar never moves during playback.
+    val leftColumn = when {
+        !isFull -> Osd.TIME_COL_MINIMAL
+        PlaybackTimeFormat.showsHours(durationMs) -> Osd.TIME_COL_FULL_LEFT_HOURS
+        else -> Osd.TIME_COL_FULL_LEFT
+    }
     val rightColumn = if (isFull) Osd.TIME_COL_FULL_RIGHT else Osd.TIME_COL_MINIMAL
 
     Row(modifier = modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2163,6 +2170,7 @@ private fun OsdScrubber(
     val trackHeight = if (isFull) Osd.TRACK_HEIGHT_FULL else Osd.TRACK_HEIGHT_MINIMAL
     val grooveColor = JellybeamTheme.Panna.copy(alpha = 0.14f)
     val tickColor = OsdColor.Surface.copy(alpha = 0.75f)
+    val playedInk = LocalAccent.current.accentInk
 
     Canvas(modifier = modifier.fillMaxWidth().height(Osd.TRACK_CANVAS_HEIGHT)) {
         val trackHeightPx = trackHeight.toPx()
@@ -2176,7 +2184,7 @@ private fun OsdScrubber(
 
         val playedWidth = size.width * playedFraction
         if (playedWidth > 0f) {
-            drawRoundRect(color = JellybeamTheme.Pistacchio, topLeft = Offset(0f, trackTop), size = Size(playedWidth, trackHeightPx), cornerRadius = cornerRadius)
+            drawRoundRect(color = playedInk, topLeft = Offset(0f, trackTop), size = Size(playedWidth, trackHeightPx), cornerRadius = cornerRadius)
         }
 
         if (isFull) {
@@ -2255,8 +2263,8 @@ private fun OsdButtonRow(
 
 /**
  * One docs/12 §8 button (docs/12 §0: flat -- no circle/fill/ring/shadow). Rest is a
- * plain [JellybeamTheme.Panna] glyph; focused retints it
- * [JellybeamTheme.Pistacchio]. The 44dp [Box] only serves as the invisible
+ * plain [JellybeamTheme.Panna] glyph; focused retints it the
+ * accent ink. The 44dp [Box] only serves as the invisible
  * touch/focus target and [onCenterMeasured] anchor.
  */
 @Composable
@@ -2267,7 +2275,8 @@ private fun OsdControlButton(
     onCenterMeasured: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val tint = if (focused) JellybeamTheme.Pistacchio else JellybeamTheme.Panna
+    val accent = LocalAccent.current
+    val tint = if (focused) accent.accentInk else JellybeamTheme.Panna
 
     // docs/12 §8/§9: stays in the row so layout and focus order hold; dimmed while it can't seek.
     val dimmed = SeekGuard.skipButtonsDimmed(state.seekability) && (button == ControlButton.SKIP_BACK || button == ControlButton.SKIP_FORWARD)
@@ -2300,7 +2309,7 @@ private fun OsdControlButton(
                     .offset(x = (-7).dp, y = 7.dp)
                     .size(Osd.ACTIVE_DOT)
                     .clip(CircleShape)
-                    .background(JellybeamTheme.Pistacchio),
+                    .background(accent.accentInk),
             )
         }
     }
@@ -2365,7 +2374,7 @@ private fun OsdSheetContainer(
 
 /**
  * Renders a flat [StatsSpan] run (docs/12 §17: accent spans, no separators) as one [BasicText].
- * [accentColor] defaults to [JellybeamTheme.Pistacchio] (the library rating figure, §17's one
+ * [accentColor] defaults to the accent ink (the library rating figure, §17's one
  * accent); the stats sheet's headline overrides it to plain [JellybeamTheme.Panna] bold.
  */
 @Composable
@@ -2375,13 +2384,14 @@ private fun StatsSpansText(
     modifier: Modifier = Modifier,
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Ellipsis,
-    accentColor: Color = JellybeamTheme.Pistacchio,
+    accentColor: Color? = null,
 ) {
-    val annotated = remember(spans, accentColor) {
+    val spanColor = accentColor ?: LocalAccent.current.accentInk
+    val annotated = remember(spans, spanColor) {
         buildAnnotatedString {
             spans.forEach { span ->
                 if (span.accent) {
-                    withStyle(SpanStyle(color = accentColor, fontWeight = FontWeight.Bold)) { append(span.text) }
+                    withStyle(SpanStyle(color = spanColor, fontWeight = FontWeight.Bold)) { append(span.text) }
                 } else {
                     append(span.text)
                 }
@@ -2533,16 +2543,17 @@ private fun OsdMenuRow(
     /** A second line under [label], wrapped to [OSD_MENU_ROW_SUBTITLE_MAX_LINES]. */
     subtitle: String? = null,
 ) {
-    val labelColor = if (focused) JellybeamTheme.Notte else JellybeamTheme.Panna
-    val trailingColor = if (focused) JellybeamTheme.Notte else if (trailingMuted) JellybeamTheme.Grigio else JellybeamTheme.Pistacchio
-    // Same contrast swap as [trailingColor] -- a focused row's solid fill would swallow a
-    // Pistacchio marker.
-    val leadingColor = if (focused) JellybeamTheme.Notte else JellybeamTheme.Pistacchio
+    val accent = LocalAccent.current
+    val labelColor = if (focused) accent.onAccent else JellybeamTheme.Panna
+    val trailingColor = if (focused) accent.onAccent else if (trailingMuted) JellybeamTheme.Grigio else accent.accentInk
+    // Same contrast swap as [trailingColor] -- a focused row's solid fill would swallow an
+    // accent marker.
+    val leadingColor = if (focused) accent.onAccent else accent.accentInk
     Column(
         modifier = modifier
             .revealWhenFocused(focused)
             .fillMaxWidth()
-            .background(if (focused) JellybeamTheme.Pistacchio else Color.Transparent)
+            .background(if (focused) accent.accent else Color.Transparent)
             .padding(horizontal = 13.dp, vertical = 8.dp),
     ) {
         Row(
@@ -2582,7 +2593,7 @@ private fun OsdMenuRow(
                 modifier = Modifier.padding(start = OSD_MENU_ROW_LEADING_WIDTH, top = 2.dp),
                 maxLines = OSD_MENU_ROW_SUBTITLE_MAX_LINES,
                 overflow = TextOverflow.Ellipsis,
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (focused) JellybeamTheme.Notte else JellybeamTheme.Grigio, fontSize = 12.sp),
+                style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (focused) accent.onAccent else JellybeamTheme.Grigio, fontSize = 12.sp),
             )
         }
     }
@@ -2649,6 +2660,7 @@ private fun GlideSurface(
         surface.chapterIndex?.let { state.chapters.getOrNull(it)?.name }
     }
     val targetFraction = fractions?.target ?: 0f
+    val playedInk = LocalAccent.current.accentInk
 
     Box(modifier = modifier.fillMaxWidth()) {
         if (fractions != null) {
@@ -2675,7 +2687,7 @@ private fun GlideSurface(
                 val playedWidth = size.width * fractions.played
                 if (playedWidth > 0f) {
                     drawRoundRect(
-                        color = JellybeamTheme.Pistacchio,
+                        color = playedInk,
                         topLeft = Offset(0f, trackTop),
                         size = Size(playedWidth, trackHeightPx),
                         cornerRadius = cornerRadius,
@@ -2929,7 +2941,7 @@ private fun EndOfEpisodeScrim(modifier: Modifier = Modifier) {
     }
 }
 
-/** The countdown rule shared by both cards: a 2dp Panna@16% track, Pistacchio fill left-anchored
+/** The countdown rule shared by both cards: a 2dp Panna@16% track, accent-ink fill left-anchored
  * at [remainingFraction] (1f full -> 0f empty). `null` draws the bare track -- up-next with
  * autoplay off. Reads [State.value] inside [drawBehind] so a per-frame update invalidates only the
  * draw phase, never layout or composition.
@@ -2937,7 +2949,7 @@ private fun EndOfEpisodeScrim(modifier: Modifier = Modifier) {
 @Composable
 private fun EndOfEpisodeCountdownRule(remainingFraction: State<Float>?, modifier: Modifier = Modifier) {
     val track = JellybeamTheme.Panna.copy(alpha = 0.16f)
-    val fill = JellybeamTheme.Pistacchio
+    val fill = LocalAccent.current.accentInk
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -3044,7 +3056,7 @@ private fun EndOfEpisodeCard(
                 BasicText(
                     text = actionLabel,
                     modifier = Modifier.alignByBaseline(),
-                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = JellybeamTheme.Pistacchio, fontSize = 14.sp),
+                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = LocalAccent.current.accentInk, fontSize = 14.sp),
                 )
                 numeral?.let {
                     BasicText(
@@ -3244,13 +3256,14 @@ private val TRACK_SECTION_HEAD_REVEAL = 48.dp
 
 @Composable
 private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, modifier: Modifier = Modifier, revealAbove: Dp = 0.dp) {
-    // Same focus treatment as [OsdMenuRow]: Pistacchio fill, Notte text and markers.
-    val textColor = if (isFocused) JellybeamTheme.Notte else JellybeamTheme.Panna
+    // Same focus treatment as [OsdMenuRow]: accent fill, on-accent text and markers.
+    val accent = LocalAccent.current
+    val textColor = if (isFocused) accent.onAccent else JellybeamTheme.Panna
     Row(
         modifier = modifier
             .revealWhenFocused(isFocused, revealAbove)
             .fillMaxWidth()
-            .background(if (isFocused) JellybeamTheme.Pistacchio else Color.Transparent)
+            .background(if (isFocused) accent.accent else Color.Transparent)
             .padding(horizontal = TRACK_ROW_H_PADDING, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -3272,7 +3285,7 @@ private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, modifier: Mo
         choice.meta?.let {
             BasicText(
                 text = it,
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (isFocused) JellybeamTheme.Notte else JellybeamTheme.Grigio, fontSize = 11.sp),
+                style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (isFocused) accent.onAccent else JellybeamTheme.Grigio, fontSize = 11.sp),
             )
         }
     }
@@ -3303,7 +3316,7 @@ private fun SkipPill(label: String, focused: Boolean, modifier: Modifier = Modif
             .padding(horizontal = 12.dp, vertical = 8.dp),
         style = TextStyle(
             fontFamily = JellybeamTheme.Archivo,
-            color = if (focused) JellybeamTheme.Pistacchio else JellybeamTheme.Panna,
+            color = if (focused) LocalAccent.current.accentInk else JellybeamTheme.Panna,
             fontSize = 14.sp,
         ),
     )
@@ -3365,6 +3378,7 @@ private val DELAY_RULER_LABEL_WIDTH = 32.dp
 /** docs/12 §16: the delay control's top strip -- header, direction line and ruler on a fading scrim. */
 @Composable
 private fun SubtitleDelayStrip(delay: DelayState, flash: DelayFlash?, strings: UiStrings, modifier: Modifier = Modifier) {
+    val ink = LocalAccent.current.accentInk
     val mono = JellybeamTheme.MartianMono
     val archivo = JellybeamTheme.Archivo
     Box(
@@ -3377,7 +3391,7 @@ private fun SubtitleDelayStrip(delay: DelayState, flash: DelayFlash?, strings: U
             Column(modifier = Modifier.width(DELAY_SIDE_COLUMN)) {
                 BasicText(
                     text = stringResource(R.string.player_subtitle_delay_row).uppercaseUi(),
-                    style = TextStyle(fontFamily = mono, color = JellybeamTheme.Pistacchio, fontSize = 8.sp, letterSpacing = (-0.02).em, shadow = DELAY_TEXT_SHADOW),
+                    style = TextStyle(fontFamily = mono, color = ink, fontSize = 8.sp, letterSpacing = (-0.02).em, shadow = DELAY_TEXT_SHADOW),
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 BasicText(
@@ -3410,7 +3424,7 @@ private fun SubtitleDelayStrip(delay: DelayState, flash: DelayFlash?, strings: U
                     text = SubtitleDelay.direction(strings, delay.delayMs),
                     style = TextStyle(
                         fontFamily = archivo,
-                        color = if (delay.delayMs == 0L) JellybeamTheme.Panna2 else JellybeamTheme.Pistacchio,
+                        color = if (delay.delayMs == 0L) JellybeamTheme.Panna2 else ink,
                         fontSize = 9.sp,
                         shadow = DELAY_TEXT_SHADOW,
                     ),
@@ -3431,7 +3445,7 @@ private fun SubtitleDelayStrip(delay: DelayState, flash: DelayFlash?, strings: U
 private fun DelayArrow(text: String, lit: Boolean) {
     BasicText(
         text = text,
-        style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (lit) JellybeamTheme.Pistacchio else JellybeamTheme.Panna2, fontSize = 10.sp, shadow = DELAY_TEXT_SHADOW),
+        style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (lit) LocalAccent.current.accentInk else JellybeamTheme.Panna2, fontSize = 10.sp, shadow = DELAY_TEXT_SHADOW),
     )
 }
 
@@ -3443,6 +3457,7 @@ private fun DelayRuler(valueMs: Long, modifier: Modifier = Modifier) {
     val spanMs = 2 * SubtitleDelay.RULER_HALF_SPAN_MS
     val line = JellybeamTheme.Panna.copy(alpha = 0.55f)
     val tick = JellybeamTheme.Panna.copy(alpha = 0.75f)
+    val ink = LocalAccent.current.accentInk
     Box(modifier = modifier.size(DELAY_RULER_WIDTH, 22.dp)) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             val pxPerMs = size.width / spanMs
@@ -3453,7 +3468,7 @@ private fun DelayRuler(valueMs: Long, modifier: Modifier = Modifier) {
             val zeroX = xOf(0)
             val valueX = xOf(valueMs)
             val bar = 2.dp.toPx()
-            drawRect(JellybeamTheme.Pistacchio, Offset(minOf(zeroX, valueX), baseline - bar / 2), Size(kotlin.math.abs(valueX - zeroX), bar))
+            drawRect(ink, Offset(minOf(zeroX, valueX), baseline - bar / 2), Size(kotlin.math.abs(valueX - zeroX), bar))
             for (ms in ticks) {
                 val major = ms % (2 * SubtitleDelay.RULER_TICK_MS) == 0L
                 val height = (if (major) 6.dp else 3.dp).toPx()
@@ -3461,7 +3476,7 @@ private fun DelayRuler(valueMs: Long, modifier: Modifier = Modifier) {
             }
             val markerWidth = 2.dp.toPx()
             drawRoundRect(
-                JellybeamTheme.Pistacchio,
+                ink,
                 Offset(valueX - markerWidth / 2, 0f),
                 Size(markerWidth, DELAY_MARKER_HEIGHT.toPx()),
                 CornerRadius(markerWidth / 2),

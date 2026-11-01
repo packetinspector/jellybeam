@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import java.util.Date
 import kotlinx.coroutines.delay
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.rememberUiStrings
 
@@ -91,7 +92,7 @@ internal fun GroupReadout(group: GroupOsd, osdVisible: Boolean, sheetOpen: Boole
         if (shows == ReadoutShows.All) {
             Column(modifier = Modifier.readoutPlate(), horizontalAlignment = Alignment.End) {
                 Row(modifier = Modifier.widthIn(max = MEMBERS_MAX_WIDTH), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Mono(stringResource(R.string.wt_eyebrow), 10.sp, JellybeamTheme.Pistacchio)
+                    Mono(stringResource(R.string.wt_eyebrow), 10.sp, LocalAccent.current.accentInk)
                     // docs/28 §1: the room's name, verbatim; it ellipsizes before the eyebrow does.
                     group.name?.let {
                         Mono("│", 10.sp, JellybeamTheme.Hairline)
@@ -147,7 +148,7 @@ internal fun GroupWaitingPill(prompt: Boolean, leaveFocused: Boolean, modifier: 
         Spacer(modifier = Modifier.width(16.dp))
         BasicText(
             text = stringResource(R.string.wt_leave),
-            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (leaveFocused) JellybeamTheme.Pistacchio else JellybeamTheme.Panna2, fontSize = 14.sp),
+            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (leaveFocused) LocalAccent.current.accentInk else JellybeamTheme.Panna2, fontSize = 14.sp),
         )
     }
 }

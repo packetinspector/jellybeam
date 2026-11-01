@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
 import tv.jellybeam.ui.nav.accountDrawerLabel
@@ -123,6 +124,7 @@ private fun AccountActions(
     onRemove: () -> Unit,
     onCancel: () -> Unit,
 ) {
+    val accent = LocalAccent.current
     val reauthorizeRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { requestFocusUntilSuccess { reauthorizeRequester.requestFocus() } }
     Column(
@@ -135,7 +137,7 @@ private fun AccountActions(
         )
         BasicText(
             text = accountDrawerLabel(account),
-            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Pistacchio, fontSize = 18.sp),
+            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = accent.accentInk, fontSize = 18.sp),
         )
         if (isActive) {
             BasicText(
@@ -214,6 +216,7 @@ private fun RemoveConfirmation(
     onCancel: () -> Unit,
     onConfirm: () -> Unit,
 ) {
+    val accent = LocalAccent.current
     val cancelRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { requestFocusUntilSuccess { cancelRequester.requestFocus() } }
     Column(
@@ -226,7 +229,7 @@ private fun RemoveConfirmation(
         )
         BasicText(
             text = accountDrawerLabel(account),
-            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Pistacchio, fontSize = 18.sp),
+            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = accent.accentInk, fontSize = 18.sp),
         )
         BasicText(
             text = stringResource(
@@ -270,13 +273,14 @@ private fun ServerAction(
 ) {
     val interactions = remember { MutableInteractionSource() }
     val focused by interactions.collectIsFocusedAsState()
+    val accent = LocalAccent.current
     val background = when {
         focused && destructive -> if (inert) DestructiveFocus.copy(alpha = 0.5f) else DestructiveFocus
-        focused -> if (inert) JellybeamTheme.Pistacchio.copy(alpha = 0.5f) else JellybeamTheme.Pistacchio
+        focused -> if (inert) accent.accent.copy(alpha = 0.5f) else accent.accent
         else -> JellybeamTheme.Surface
     }
     val foreground = when {
-        focused -> JellybeamTheme.Notte
+        focused -> if (destructive) JellybeamTheme.Notte else accent.onAccent
         inert -> JellybeamTheme.Grigio
         else -> JellybeamTheme.Panna
     }

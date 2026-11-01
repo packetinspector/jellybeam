@@ -92,6 +92,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.i18n.uppercaseUi
@@ -1020,6 +1021,7 @@ private fun HeroBanner(
     } else {
         continueEyebrow
     }
+    val accent = LocalAccent.current
     val primaryLabel = stringResource(if (isResumable) R.string.hero_resume else R.string.hero_play)
     val moreInfoLabel = stringResource(R.string.hero_more_info)
     // Full-bleed at screen width, not a fixed 1280 -- bucketed so a window-size change doesn't
@@ -1075,7 +1077,7 @@ private fun HeroBanner(
                 overflow = TextOverflow.Ellipsis,
                 style = TextStyle(
                     fontFamily = JellybeamTheme.MartianMono,
-                    color = JellybeamTheme.Pistacchio,
+                    color = accent.accentInk,
                     fontSize = 10.sp,
                     letterSpacing = (-0.02).em,
                 ),
@@ -1115,7 +1117,7 @@ private fun HeroBanner(
                             modifier = Modifier
                                 .fillMaxHeight()
                                 .fillMaxWidth(progress.coerceIn(0f, 1f))
-                                .background(JellybeamTheme.Pistacchio),
+                                .background(accent.accentInk),
                         )
                     }
                     timingLabel?.let {
@@ -1159,12 +1161,12 @@ private fun HeroBanner(
 }
 
 /**
- * One hero button. `isPrimary` (Resume/Play) is pistachio-filled, swapping to [JellybeamTheme.Sheen]
- * on focus; the secondary (More Info) button is a translucent [JellybeamTheme.Notte] wash with a
+ * One hero button. `isPrimary` (Resume/Play) is accent-filled, swapping to [AccentScheme.accentSheen]
+ * on focus for light shades (a deep sheen under `onAccent` text is unreadable); the secondary (More Info) button is a translucent [JellybeamTheme.Notte] wash with a
  * [JellybeamTheme.HairlineStrong] border. Both are fully rounded pills.
  *
- * Ring color override: a same-hue [JellybeamTheme.Pistacchio] ring would nearly disappear against
- * the pistachio-filled primary button's fill, so [focusRing] draws it in [JellybeamTheme.Sheen]
+ * Ring color override: a same-hue accent ring would nearly disappear against
+ * the accent-filled primary button's fill, so [focusRing] draws it in [AccentScheme.accentSheen]
  * there instead -- same recipe [tv.jellybeam.ui.cards.ArtBox] uses for card art.
  */
 @Composable
@@ -1172,14 +1174,15 @@ private fun HeroButton(label: String, isPrimary: Boolean, onClick: () -> Unit, m
     val interactionSource = remember { MutableInteractionSource() }
     val isFocusedState = interactionSource.collectIsFocusedAsState()
     val showFocusStyle by remember(interactionSource) { derivedStateOf { isFocusedState.value } }
+    val accent = LocalAccent.current
 
     val background = if (isPrimary) {
-        if (showFocusStyle) JellybeamTheme.Sheen else JellybeamTheme.Pistacchio
+        if (showFocusStyle && !accent.deep) accent.accentSheen else accent.accent
     } else {
         JellybeamTheme.Notte.copy(alpha = 0.72f)
     }
-    val textColor = if (isPrimary) JellybeamTheme.Notte else JellybeamTheme.Panna
-    val ringColor = if (isPrimary) JellybeamTheme.Sheen else JellybeamTheme.Pistacchio
+    val textColor = if (isPrimary) accent.onAccent else JellybeamTheme.Panna
+    val ringColor = if (isPrimary) accent.accentSheen else accent.accentInk
     val shape = RoundedCornerShape(percent = 50)
 
     Box(

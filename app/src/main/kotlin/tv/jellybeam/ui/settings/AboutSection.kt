@@ -59,6 +59,7 @@ import java.text.NumberFormat
 import kotlin.math.roundToInt
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.i18n.uppercaseUi
@@ -176,6 +177,7 @@ internal fun AboutSectionContent(
 @Composable
 private fun AboutBrandHeader(modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val accent = LocalAccent.current
     val packageInfo = remember(context) {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
     }
@@ -226,7 +228,7 @@ private fun AboutBrandHeader(modifier: Modifier = Modifier) {
                 BasicText(
                     text = fact.uppercaseUi(),
                     modifier = Modifier.padding(horizontal = 8.dp),
-                    style = kickerStyle(if (index == facts.lastIndex) JellybeamTheme.Pistacchio else JellybeamTheme.Panna2),
+                    style = kickerStyle(if (index == facts.lastIndex) accent.accentInk else JellybeamTheme.Panna2),
                 )
             }
         }
@@ -241,6 +243,7 @@ private fun AboutBrandHeader(modifier: Modifier = Modifier) {
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 private fun ServerAboutContent(snapshot: ServerInfoSnapshot, state: AboutUiState) {
+    val accent = LocalAccent.current
     val details = state.details
     val mirror = snapshot.mirror
     val serverUrl = snapshot.serverUrl.orEmpty()
@@ -259,7 +262,7 @@ private fun ServerAboutContent(snapshot: ServerInfoSnapshot, state: AboutUiState
                     details == null -> Unit
                     details.hasPendingRestart == true -> CardStatus(stringResource(R.string.settings_about_status_restart_pending), JellybeamTheme.Ambra)
                     details.hasUpdateAvailable == true -> CardStatus(stringResource(R.string.settings_about_status_update_available), JellybeamTheme.Ambra)
-                    else -> CardStatus(stringResource(R.string.settings_about_status_running), JellybeamTheme.Pistacchio)
+                    else -> CardStatus(stringResource(R.string.settings_about_status_running), accent.accentInk)
                 }
             },
             modifier = Modifier.weight(1f),
@@ -300,7 +303,7 @@ private fun ServerAboutContent(snapshot: ServerInfoSnapshot, state: AboutUiState
                     title = stringResource(R.string.settings_about_mirror_group),
                     status = {
                         if (snapshot.liveEventsConnected) {
-                            CardStatus(stringResource(R.string.settings_about_live_events_connected), JellybeamTheme.Pistacchio)
+                            CardStatus(stringResource(R.string.settings_about_live_events_connected), accent.accentInk)
                         } else {
                             CardStatus(stringResource(R.string.settings_about_live_events_disconnected), JellybeamTheme.Grigio)
                         }
@@ -438,7 +441,7 @@ private fun LibraryTileRows(tiles: List<Pair<String, String>>, numberSp: Float) 
 /**
  * One About card: [title] kicker with an optional right-aligned [status], then its rows. Focusable
  * but not clickable, so the D-pad can walk the cards and `focusable()` scrolls one into view; a
- * Pistacchio border stands in for [RowCard]'s focus ring.
+ * accent border stands in for [RowCard]'s focus ring.
  */
 @Composable
 private fun AboutCard(
@@ -450,6 +453,7 @@ private fun AboutCard(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
     val memory = LocalSettingsFocusMemory.current
     val entryTarget = LocalSettingsPaneEntryKey.current
     val shape = RoundedCornerShape(CARD_CORNER)
@@ -461,7 +465,7 @@ private fun AboutCard(
             .let { it.paneEntry(entryTarget, key) }
             .focusable(interactionSource = interactionSource)
             .background(JellybeamTheme.Surface, shape)
-            .border(1.dp, if (isFocused) JellybeamTheme.Pistacchio else Color.Transparent, shape)
+            .border(1.dp, if (isFocused) accent.accentInk else Color.Transparent, shape)
             .padding(start = CARD_HPADDING, end = CARD_HPADDING, bottom = CARD_BOTTOM_PADDING),
     ) {
         Row(

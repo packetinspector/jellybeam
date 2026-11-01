@@ -57,10 +57,13 @@ mark and colour rules.
 | PANNA | `#F7E9CE` |
 | PANNA-2 | `#C9C0B2` |
 | GRIGIO | `#8C8478` |
-| PISTACCHIO | `#A8CB6B` — the only accent |
+| PISTACCHIO | `#A8CB6B` — the default accent, and always the logo's |
 | SHEEN | `#C6DE9B` |
 
-One accent, warm neutrals, no gradients, glows, or translucency **in the
+One accent at a time (Settings > Appearance picks from twelve, `AccentSchemes`
+in `JellybeamTheme.kt`; the mascot, wordmark and launch dot stay Pistacchio;
+fills use `accent`, text on them `onAccent`, rings on fills `accentSheen`, text
+and thin bars on dark `accentInk`), warm neutrals, no gradients, glows, or translucency **in the
 UI**. The single exception is inside the mascot art itself (§5).
 
 ## 4. Wordmark

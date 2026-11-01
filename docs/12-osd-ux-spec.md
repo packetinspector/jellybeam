@@ -32,7 +32,7 @@ Colors, by the `JellybeamTheme` name the code uses (handoff name in brackets):
 | Panna [cream] | `#F7E9CE` | title, elapsed digits, glyphs at rest, sheet values, pill text |
 | Panna2 [cream-dim] | `#C9C0B2` | every secondary readout in the OSD band: total, remaining, ENDS, Direct Play line, Minimal's inline `S4 E18`, sheet meta line |
 | Grigio [muted] | `#8C8478` | sheet interiors only: kickers, `BACK TO CLOSE`, grid labels; card eyebrows and captions; picker meta |
-| Pistacchio [accent] | `#A8CB6B` | series kicker, played bar, the focused glyph, non-default tracks dot, Speed label when rate ≠ 1×, menu check/current markers, sheet rating figure, focused menu-row fill, card countdown rule fill and action label |
+| Accent ink [accent] (docs/brand.md) | default `#A8CB6B` | series kicker, played bar, the focused glyph, non-default tracks dot, Speed label when rate ≠ 1×, menu check/current markers, sheet rating figure, focused menu-row fill, card countdown rule fill and action label |
 | Notte | `#14100D` | center flash disc, trickplay chip, text on a focused menu row, card corner scrim |
 | SurfaceRaised | `#1D1814` | skip pill, buffering and reconnecting pills (all at `@0xee`) |
 | SurfacePanel | `#261F19` | track picker, undo toast |
@@ -136,7 +136,7 @@ column. Martian Mono 13sp throughout.
 | Mode | Left column | Right column, right-aligned |
 |---|---|---|
 | Minimal | fixed 65dp, `13:52` Panna | min 65dp, `-7:11` Panna2 |
-| Full | fixed 120dp, `13:52` Panna + ` / 22:04` Panna2 | min 160dp, `-7:11 · ENDS 10:14` Panna2 |
+| Full | fixed per video: 120dp, or 156dp when the total reaches an hour; `13:52` Panna + ` / 22:04` Panna2 | min 160dp, `-7:11 · ENDS 10:14` Panna2 |
 
 - Time format: `m:ss`, or `h:mm:ss` once an hour is reached. Remaining is
   always negative-signed and clamps at `-0:00`.
@@ -568,10 +568,18 @@ a `✓` on the selected track, label Archivo 16sp Panna, meta Archivo 11sp
 Grigio; focused row = §12's Pistacchio fill with Notte text and markers. Opens
 with focus on the selected track; Up / Down clamp; Select chooses; Back,
 Escape or Menu close. Choices are remembered per series. A row's label is the
-track title, else its language, else `Track N` (a blank title counts as none);
-its meta is `lang codec`, and a sidecar subtitle file (docs/18 §3.2) adds
-`· External`, then `· Loading…` while it is fetched or `· Unavailable` once it
-failed. A failed sidecar puts subtitles back to Off with a top-centre notice
+server's track title verbatim, else the language's name in the app's language
+(a code with no name shows as written; `und` or none counts as absent), else
+`Track N` (a blank title counts as none). Its meta joins, with ` · `, the
+language name (only when the row has a title, since the label says it
+otherwise), the format (`SRT`, `PGS`, `Dolby Digital`; a codec with no friendly
+name as written, never dropped), `Forced`, `SDH`, then for a sidecar subtitle
+file (docs/18 §3.2) `External`, then `Loading…` while it is fetched or
+`Unavailable` once it failed. `SDH` and the server's codec (which tells ASS
+from SSA) come from the server: a file's own text tracks take them by position
+only when the server lists as many text streams with the same languages (and titles, where both have one) in the
+same order, else none; a transcode's and a sidecar's tracks name their own
+stream. A failed sidecar puts subtitles back to Off with a top-centre notice
 (the §9 seek notice's toast).
 
 Subtitles: bottom padding fraction 0.08 by default, 0.24 while the OSD is
@@ -604,8 +612,8 @@ Shifts when cues appear, for a file whose subtitles run early or late.
   notice while up. It never reaches the subtitle line.
   - Header, top 16dp, 48dp side inset, three columns. Left (150dp):
     `SUBTITLE DELAY` in Martian Mono 8sp Pistacchio, and 4dp below the
-    selected subtitle's picker label and format (`English · SRT`; SRT, ASS,
-    PGS or VTT, omitted for any other) in Archivo 9sp Panna2, the server's
+    selected subtitle's picker label and format (`English · SRT`; the picker's
+    format name, omitted when unknown) in Archivo 9sp Panna2, the server's
     name verbatim. Centre: `◀ value ▶` (10dp gaps, arrows Archivo 10sp Panna2,
     lighting Pistacchio for 150 ms on the matching press), the value in Martian
     Mono 18sp Panna, minimum width 100dp and centred so the arrows never

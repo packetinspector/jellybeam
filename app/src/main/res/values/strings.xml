@@ -192,11 +192,25 @@
          Playback, holding library/detail-page-scoped
          toggles that don't belong under Home. -->
     <string name="settings_section_home">Home</string>
+    <string name="settings_section_appearance">Appearance</string>
     <string name="settings_section_library">Library</string>
     <string name="settings_section_playback">Playback</string>
     <string name="settings_section_osd">OSD</string>
     <string name="settings_section_subtitles">Subtitles</string>
     <string name="settings_section_about">About</string>
+
+    <!-- Appearance section (docs/09): accent picker. The flavour names come from the scheme and are not translated. -->
+    <string name="settings_appearance_accent_label">Accent colour</string>
+    <string name="settings_appearance_light">Light</string>
+    <string name="settings_appearance_deep">Deep</string>
+    <string name="settings_appearance_preview">Preview</string>
+    <string name="settings_appearance_sample_title">The Long Weekend</string>
+    <string name="settings_appearance_sample_count">3 watching</string>
+    <string name="settings_appearance_sample_start">Start</string>
+    <string name="settings_appearance_hint_ok">OK</string>
+    <string name="settings_appearance_hint_use">Use %1$s</string>
+    <string name="settings_appearance_hint_back">Back</string>
+    <string name="settings_appearance_hint_keep">Keep %1$s</string>
 
     <!-- Home section, "Next Up" subgroup: the group header carries "Next
          Up" now, so the cutoff row's own label is just "Cutoff". -->

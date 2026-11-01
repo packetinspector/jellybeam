@@ -109,6 +109,7 @@ import java.util.Date
 import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.ui.cards.rememberEdgeMarginBringIntoViewSpec
 import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
@@ -190,7 +191,8 @@ internal val DETAIL_TITLE_STYLE = TextStyle(
 
 // docs/11 §Loading state: every style and metric a skeleton measures lives here, shared with the
 // real text, so a region and its skeleton cannot drift apart.
-internal val EYEBROW_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Pistacchio, fontSize = 11.sp, letterSpacing = (-0.02).em)
+// Metrics only: the eyebrow's colour is the accent ink, applied where it is drawn.
+internal val EYEBROW_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, fontSize = 11.sp, letterSpacing = (-0.02).em)
 internal val DETAIL_META_LINE_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 14.sp)
 private val MOVIE_META_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna2, fontSize = 13.5.sp)
 private val RATING_BADGE_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna2, fontSize = 9.5.sp)
@@ -835,7 +837,8 @@ internal val UP_NEXT_TITLE_META_GAP = 4.dp
 internal val UP_NEXT_THUMB_RADIUS = 2.dp
 /** Two 13.5sp/17sp title lines, reserved even when the title is one line. */
 internal val UP_NEXT_TITLE_HEIGHT = 34.dp
-internal val UP_NEXT_LABEL_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Pistacchio, fontSize = 10.sp, letterSpacing = (-0.02).em)
+// Metrics only, like [EYEBROW_STYLE]: the label is drawn in the accent ink.
+internal val UP_NEXT_LABEL_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, fontSize = 10.sp, letterSpacing = (-0.02).em)
 private val UP_NEXT_TITLE_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = JellybeamTheme.Panna, fontSize = 13.5.sp, lineHeight = 17.sp)
 internal val UP_NEXT_META_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 11.sp)
 
@@ -848,6 +851,7 @@ internal val UP_NEXT_META_STYLE = TextStyle(fontFamily = JellybeamTheme.Archivo,
 private fun UpNextPanel(nextEpisode: Card, onClick: () -> Unit, memory: FocusMemory, modifier: Modifier = Modifier) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
     // Computed inline, not remembered, so a refreshed nextEpisode recomputes instead of staying
     // stale.
     val artSource = CardFormatting.railArtSource(nextEpisode)
@@ -862,7 +866,7 @@ private fun UpNextPanel(nextEpisode: Card, onClick: () -> Unit, memory: FocusMem
         modifier = modifier
             .focusKey(memory, "up-next")
             .width(UP_NEXT_PANEL_WIDTH)
-            .focusRing(isFocused = isFocused, cornerRadius = 4.dp)
+            .focusRing(isFocused = isFocused, cornerRadius = 4.dp, color = accent.accentInk)
             .clip(UP_NEXT_PANEL_SHAPE)
             .background(JellybeamTheme.Notte.copy(alpha = UP_NEXT_PANEL_FILL_ALPHA))
             .border(1.dp, JellybeamTheme.Hairline, UP_NEXT_PANEL_SHAPE)
@@ -872,7 +876,7 @@ private fun UpNextPanel(nextEpisode: Card, onClick: () -> Unit, memory: FocusMem
     ) {
         BasicText(
             text = stringResource(R.string.detail_up_next),
-            style = UP_NEXT_LABEL_STYLE,
+            style = UP_NEXT_LABEL_STYLE.copy(color = accent.accentInk),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(UP_NEXT_THUMB_TITLE_GAP)) {
             Box(
@@ -1496,19 +1500,20 @@ private fun SeasonChip(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
     // docs/11 §12: All and unknown (flag off, Specials) are the plain chip.
     val fill = availability?.fill ?: SeasonFill.All
     val isNone = fill == SeasonFill.None
     val isSome = fill == SeasonFill.Some
     val background = when {
-        isNone -> if (isSelected) JellybeamTheme.Pistacchio.copy(alpha = SEASON_NONE_SELECTED_ALPHA) else Color.Transparent
-        isSome && isSelected -> JellybeamTheme.SeasonSomeSelectedEmpty
-        isSelected -> JellybeamTheme.Pistacchio
+        isNone -> if (isSelected) accent.accent.copy(alpha = SEASON_NONE_SELECTED_ALPHA) else Color.Transparent
+        isSome && isSelected -> accent.accentTankEmpty
+        isSelected -> accent.accent
         else -> JellybeamTheme.Surface
     }
     val textColor = when {
         isNone -> if (isSelected) JellybeamTheme.Panna else JellybeamTheme.SeasonNoneLabel
-        isSelected -> JellybeamTheme.Notte
+        isSelected -> accent.onAccent
         dimmed -> JellybeamTheme.Grigio
         else -> JellybeamTheme.Panna
     }
@@ -1516,16 +1521,16 @@ private fun SeasonChip(
         color = textColor,
         fontWeight = if (isNone && !isSelected) FontWeight.Medium else SEASON_CHIP_STYLE.fontWeight,
     )
-    val tankColor = if (isSelected) JellybeamTheme.Pistacchio else JellybeamTheme.SeasonSomeFilled
+    val tankColor = if (isSelected) accent.accent else JellybeamTheme.SeasonSomeFilled
     val borderColor = when {
         isSome -> tankColor
         else -> JellybeamTheme.Hairline
     }
-    val dashColor = if (isSelected) JellybeamTheme.Pistacchio else JellybeamTheme.SeasonNoneDash
+    val dashColor = if (isSelected) accent.accentInk else JellybeamTheme.SeasonNoneDash
 
-    // docs/15 §1.2 / docs/12 §0.4: a ring on a Pistacchio fill must be Sheen, or it vanishes into
+    // docs/15 §1.2 / docs/12 §0.4: a ring on an accent fill must be the sheen, or it vanishes into
     // the fill.
-    Box(modifier = Modifier.focusRing(isFocused = isFocused, cornerRadius = 50.dp, color = if (isSelected) JellybeamTheme.Sheen else JellybeamTheme.Pistacchio)) {
+    Box(modifier = Modifier.focusRing(isFocused = isFocused, cornerRadius = 50.dp, color = if (isSelected) accent.accentSheen else accent.accentInk)) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
@@ -2169,10 +2174,11 @@ internal fun OverviewBlock(text: String?, color: Color, memory: FocusMemory, mor
 private fun MoreStop(memory: FocusMemory, moreKey: String, onMore: () -> Unit) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
     Box(
         modifier = Modifier
             .focusKey(memory, moreKey)
-            .focusRing(isFocused = isFocused, cornerRadius = 4.dp)
+            .focusRing(isFocused = isFocused, cornerRadius = 4.dp, color = accent.accentInk)
             .clickable(interactionSource = interactionSource, indication = null, onClick = onMore)
             .padding(horizontal = 4.dp, vertical = 2.dp),
     ) {
@@ -2470,6 +2476,7 @@ private fun MovieEyebrowRegion(
 /** One-line eyebrow: library name (shrinks and ellipsizes first), then each status part behind a Hairline `│` with 7dp each side. */
 @Composable
 private fun EyebrowParts(parts: List<EyebrowPart>) {
+    val ink = LocalAccent.current.accentInk
     Row(verticalAlignment = Alignment.CenterVertically) {
         parts.forEachIndexed { index, part ->
             if (index > 0) {
@@ -2487,7 +2494,7 @@ private fun EyebrowParts(parts: List<EyebrowPart>) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = if (isLibrary) Modifier.weight(1f, fill = false) else Modifier,
-                style = if (isLibrary) EYEBROW_STYLE else EYEBROW_STYLE.copy(color = JellybeamTheme.Panna2),
+                style = EYEBROW_STYLE.copy(color = if (isLibrary) ink else JellybeamTheme.Panna2),
             )
         }
     }
@@ -2503,26 +2510,27 @@ internal fun EyebrowText(text: String, modifier: Modifier = Modifier) {
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier = modifier,
-        style = EYEBROW_STYLE,
+        style = EYEBROW_STYLE.copy(color = LocalAccent.current.accentInk),
     )
 }
 
 /** A resumable item's progress bar + mono "{n}m left" label. */
 @Composable
 private fun ResumeProgressRow(fraction: Float, remainingLabel: String?) {
+    val accent = LocalAccent.current
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(
             modifier = Modifier
                 .width(220.dp)
                 .height(4.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(JellybeamTheme.ProgressTrack),
+                .background(accent.progressTrack),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(fraction.coerceIn(0f, 1f))
                     .fillMaxHeight()
-                    .background(JellybeamTheme.Pistacchio),
+                    .background(accent.accentInk),
             )
         }
         remainingLabel?.let {
@@ -2543,8 +2551,9 @@ private fun PrimaryPillButton(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
 
-    Box(modifier = Modifier.focusRing(isFocused = enabled && isFocused, cornerRadius = ACTION_BUTTON_HEIGHT / 2, color = if (enabled) JellybeamTheme.Sheen else JellybeamTheme.Pistacchio)) {
+    Box(modifier = Modifier.focusRing(isFocused = enabled && isFocused, cornerRadius = ACTION_BUTTON_HEIGHT / 2, color = if (enabled) accent.accentSheen else accent.accentInk)) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
@@ -2552,7 +2561,7 @@ private fun PrimaryPillButton(
                 .heightIn(min = ACTION_BUTTON_HEIGHT)
                 .widthIn(min = ACTION_BUTTON_MIN_WIDTH)
                 .clip(RoundedCornerShape(50))
-                .background(if (enabled) JellybeamTheme.Pistacchio else JellybeamTheme.Surface)
+                .background(if (enabled) accent.accent else JellybeamTheme.Surface)
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .onFocusChanged { focusState ->
                     preloadItemId?.let { itemId ->
@@ -2568,17 +2577,17 @@ private fun PrimaryPillButton(
         ) {
             BasicText(
                 text = label,
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = if (enabled) JellybeamTheme.Notte else JellybeamTheme.Grigio, fontSize = 15.sp),
+                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = if (enabled) accent.onAccent else JellybeamTheme.Grigio, fontSize = 15.sp),
             )
         }
     }
 }
 
 /** [DetailFormatting.SpecWeight]'s three tier colors -- one place, so a call site never picks. */
-private fun specWeightColor(weight: DetailFormatting.SpecWeight): Color = when (weight) {
+private fun specWeightColor(weight: DetailFormatting.SpecWeight, bestInClass: Color): Color = when (weight) {
     DetailFormatting.SpecWeight.BASELINE -> JellybeamTheme.Grigio
     DetailFormatting.SpecWeight.NOTABLE -> JellybeamTheme.Panna
-    DetailFormatting.SpecWeight.BEST_IN_CLASS -> JellybeamTheme.Pistacchio
+    DetailFormatting.SpecWeight.BEST_IN_CLASS -> bestInClass
 }
 
 /**
@@ -2589,6 +2598,7 @@ private fun specWeightColor(weight: DetailFormatting.SpecWeight): Color = when (
  */
 @Composable
 private fun SpecStripRow(fields: List<DetailFormatting.SpecField>, modifier: Modifier = Modifier) {
+    val accent = LocalAccent.current
     FlowRow(
         modifier = modifier
             .clip(RoundedCornerShape(50))
@@ -2606,7 +2616,7 @@ private fun SpecStripRow(fields: List<DetailFormatting.SpecField>, modifier: Mod
                 }
                 BasicText(
                     text = field.value,
-                    style = SPEC_TEXT_STYLE.copy(color = specWeightColor(field.weight)),
+                    style = SPEC_TEXT_STYLE.copy(color = specWeightColor(field.weight, accent.accentInk)),
                 )
             }
         }
@@ -2735,6 +2745,7 @@ private fun CastPortrait(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
 
     // The whole card is the focus target (the ring still draws on the portrait): the shelf scroll
     // rule pins the focused node's leading edge at the page margin, and a centered portrait would
@@ -2752,7 +2763,7 @@ private fun CastPortrait(
         Box(
             modifier = Modifier
                 .size(CAST_AVATAR_SIZE)
-                .focusRing(isFocused = isFocused, cornerRadius = CAST_AVATAR_SIZE / 2)
+                .focusRing(isFocused = isFocused, cornerRadius = CAST_AVATAR_SIZE / 2, color = accent.accentInk)
                 .clip(CircleShape),
         ) {
             CardArtImage(

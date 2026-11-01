@@ -53,6 +53,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.player.PulsingDots
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
@@ -75,6 +76,7 @@ fun SignInScreen(
     ),
 ) {
     val state by viewModel.state.collectAsState()
+    val accent = LocalAccent.current
     LaunchedEffect(state.signedIn) {
         if (state.signedIn) onSignedIn()
     }
@@ -202,7 +204,7 @@ fun SignInScreen(
                             style = TextStyle(
                                 fontFamily = JellybeamTheme.Archivo,
                                 fontWeight = FontWeight.Bold,
-                                color = JellybeamTheme.Pistacchio,
+                                color = accent.accentInk,
                                 fontSize = 42.sp,
                             ),
                         )
@@ -316,7 +318,8 @@ private fun JellybeamTextField(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    val borderColor = if (isFocused) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline
+    val accent = LocalAccent.current
+    val borderColor = if (isFocused) accent.accentInk else JellybeamTheme.Hairline
 
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         BasicText(
@@ -340,7 +343,7 @@ private fun JellybeamTextField(
                     fontSize = 16.sp,
                 ),
                 singleLine = true,
-                cursorBrush = SolidColor(JellybeamTheme.Pistacchio),
+                cursorBrush = SolidColor(accent.accentInk),
                 visualTransformation = visualTransformation,
                 keyboardOptions = keyboardOptions,
                 keyboardActions = keyboardActions,
@@ -355,13 +358,14 @@ private fun JellybeamTextField(
 private fun SignInButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, inert: Boolean = false) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
     val background = when {
         !isFocused -> JellybeamTheme.Surface
-        inert -> JellybeamTheme.Pistacchio.copy(alpha = 0.5f)
-        else -> JellybeamTheme.Pistacchio
+        inert -> accent.accent.copy(alpha = 0.5f)
+        else -> accent.accent
     }
     val textColor = when {
-        isFocused -> JellybeamTheme.Notte
+        isFocused -> accent.onAccent
         inert -> JellybeamTheme.Grigio
         else -> JellybeamTheme.Panna
     }
@@ -460,6 +464,7 @@ private fun DiscoveredServerRow(
     onSelect: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val accent = LocalAccent.current
     val shape = RoundedCornerShape(8.dp)
 
     if (server.alreadySaved) {
@@ -487,7 +492,7 @@ private fun DiscoveredServerRow(
         modifier = modifier
             .fillMaxWidth()
             .background(JellybeamTheme.SurfaceRaised, shape)
-            .border(2.dp, if (isFocused) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline, shape)
+            .border(2.dp, if (isFocused) accent.accentInk else JellybeamTheme.Hairline, shape)
             .onFocusChanged { focusState -> isFocused = focusState.isFocused }
             .clickable(interactionSource = interactionSource, indication = null, onClick = onSelect)
             .padding(horizontal = 18.dp, vertical = 14.dp),

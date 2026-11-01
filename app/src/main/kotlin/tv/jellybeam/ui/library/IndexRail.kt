@@ -40,6 +40,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.ui.nav.LocalDrawerLeftEdgeSuppressed
 import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
@@ -97,6 +98,7 @@ internal fun IndexRail(
 ) {
     val focusGate = LocalFocusGate.current
     val scope = rememberCoroutineScope()
+    val accent = LocalAccent.current
     var railFocused by remember { mutableStateOf(false) }
     // docs/16 §4.4: a repeat retargets the in-flight load+scroll job; it loops until its last read
     // matches the newest target, and only that target scrolls the grid.
@@ -180,7 +182,7 @@ internal fun IndexRail(
                 // docs/16 §4.4: an empty entry reads as disabled (HairlineStrong).
                 val color = when {
                     entry.count == 0 -> JellybeamTheme.HairlineStrong
-                    focusedHere -> JellybeamTheme.Pistacchio
+                    focusedHere -> accent.accentInk
                     !railFocused && index == current -> JellybeamTheme.Panna
                     else -> JellybeamTheme.Grigio
                 }
@@ -198,7 +200,7 @@ internal fun IndexRail(
                             .width(RAIL_RING_WIDTH)
                             .heightIn(max = RAIL_RING_HEIGHT)
                             .fillMaxHeight()
-                            .let { if (focusedHere) it.border(2.dp, JellybeamTheme.Pistacchio, RoundedCornerShape(50)) else it },
+                            .let { if (focusedHere) it.border(2.dp, accent.accentInk, RoundedCornerShape(50)) else it },
                         contentAlignment = Alignment.Center,
                     ) {
                         BasicText(

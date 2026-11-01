@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.cards.CardFormatting
@@ -339,6 +340,7 @@ private fun CollectionPlayPill(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
     val strings = rememberUiStrings()
     val subtext = CollectionFormatting.playSubtext(strings, play)
     // Keyed on the target too: a reload can retarget a focused pill, and the old item's preload must stop.
@@ -349,7 +351,7 @@ private fun CollectionPlayPill(
         onDispose { PreloadOnDwell.default.onCardUnfocused(play.targetId) }
     }
 
-    Box(modifier = Modifier.focusRing(isFocused = isFocused, cornerRadius = COLLECTION_PILL_HEIGHT / 2, color = JellybeamTheme.Sheen)) {
+    Box(modifier = Modifier.focusRing(isFocused = isFocused, cornerRadius = COLLECTION_PILL_HEIGHT / 2, color = accent.accentSheen)) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
@@ -358,14 +360,14 @@ private fun CollectionPlayPill(
                 .heightIn(min = COLLECTION_PILL_HEIGHT)
                 .widthIn(min = ACTION_BUTTON_MIN_WIDTH)
                 .clip(RoundedCornerShape(50))
-                .background(JellybeamTheme.Pistacchio)
+                .background(accent.accent)
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
                 .padding(horizontal = ACTION_BUTTON_HPADDING),
         ) {
             BasicText(
                 text = CollectionFormatting.playLabel(strings, play),
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = JellybeamTheme.Notte, fontSize = 15.sp),
+                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = accent.onAccent, fontSize = 15.sp),
             )
             subtext?.let {
                 BasicText(
@@ -373,7 +375,7 @@ private fun CollectionPlayPill(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 320.dp),
-                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Notte.copy(alpha = 0.75f), fontSize = 11.sp),
+                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = if (accent.deep) accent.onAccentMuted else accent.onAccent.copy(alpha = 0.75f), fontSize = 11.sp),
                 )
             }
         }

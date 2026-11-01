@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.nav.Screen
 import tv.jellybeam.ui.cards.FOCUS_RING_EXTENT
@@ -94,7 +95,7 @@ private val SECTION_LABEL_TOP_PADDING = 16.dp
 /**
  * One drawer row, resolved by the caller ([NavDrawerHost]'s `entries` builder): [onSelect] bakes
  * in navigate-vs-switch-server so the renderer never switches on the target, and [isCurrent]
- * drives the same Pistacchio dot for both a current [Screen] row and the active-account row.
+ * drives the same accent dot for both a current [Screen] row and the active-account row.
  */
 private data class DrawerEntry(val label: String, val isCurrent: Boolean, val onSelect: () -> Unit)
 
@@ -412,7 +413,7 @@ private fun DrawerPanel(
 
                 val chevronAlpha = spineChevronAlpha(p)
                 if (chevronAlpha > 0f) {
-                    // Never Pistacchio: accent means focus everywhere else, and this can't take it.
+                    // Never the accent: accent means focus everywhere else, and this can't take it.
                     val box = MenuSpine.CHEVRON_SIZE.toPx()
                     val left = (spineWidth - box) / 2f
                     val top = (size.height - box) / 2f
@@ -488,7 +489,7 @@ private fun DrawerSectionLabel(text: String) {
 
 /**
  * One drawer entry row, same [focusRing]/SURFACE_RAISED recipe as `SettingsScreen`'s `RowCard`.
- * A Pistacchio dot marks the [isCurrent] entry. `enabled` ties to the drawer's open/closed state
+ * An accent dot marks the [isCurrent] entry. `enabled` ties to the drawer's open/closed state
  * since `clickable`'s `enabled` also gates focusability, so closed rows drop out of focus search.
  */
 @Composable
@@ -501,13 +502,14 @@ private fun DrawerRow(
     onClick: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
+    val accent = LocalAccent.current
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(ENTRY_HEIGHT)
             .background(if (isFocused) JellybeamTheme.SurfaceRaised else Color.Transparent, RoundedCornerShape(8.dp))
-            .focusRing(isFocused, cornerRadius = 8.dp)
+            .focusRing(isFocused, cornerRadius = 8.dp, color = accent.accentInk)
             .clickable(interactionSource = interactionSource, indication = null, enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -516,7 +518,7 @@ private fun DrawerRow(
         Box(
             modifier = Modifier
                 .size(6.dp)
-                .background(if (isCurrent) JellybeamTheme.Pistacchio else Color.Transparent, CircleShape),
+                .background(if (isCurrent) accent.accentInk else Color.Transparent, CircleShape),
         )
         BasicText(
             text = label,

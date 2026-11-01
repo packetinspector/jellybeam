@@ -252,17 +252,4 @@ class SubtitleDelayTest {
         memory.load("item-a")
         assertEquals(0L, memory.delayMs)
     }
-
-    @Test
-    fun `a subtitle format shows as SRT ASS PGS or VTT from a codec or mime`() {
-        assertEquals("SRT", TrackChoiceText.subtitleFormat("application/x-subrip"))
-        assertEquals("SRT", TrackChoiceText.subtitleFormat("srt"))
-        assertEquals("ASS", TrackChoiceText.subtitleFormat("text/x-ssa"))
-        assertEquals("ASS", TrackChoiceText.subtitleFormat("ass"))
-        assertEquals("PGS", TrackChoiceText.subtitleFormat("application/pgs"))
-        assertEquals("VTT", TrackChoiceText.subtitleFormat("text/vtt"))
-        assertEquals("VTT", TrackChoiceText.subtitleFormat("webvtt"))
-        assertNull(TrackChoiceText.subtitleFormat("application/x-media3-cues"))
-        assertNull(TrackChoiceText.subtitleFormat(null))
-    }
 }

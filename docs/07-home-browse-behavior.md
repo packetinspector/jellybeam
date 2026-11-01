@@ -157,7 +157,7 @@ Play/Resume plays it.
 | Image fade | 150ms, network loads only | |
 | Skeleton pulse | 2s, 0.85↔1.0 | |
 | Fetch widths | poster 320 / backdrop 1280 / thumb 400 | |
-| Accent | PISTACCHIO #A8CB6B only | ring, progress, badge, primary button |
+| Accent | the chosen accent (docs/brand.md), default PISTACCHIO #A8CB6B | ring, progress, badge, primary button |
 
 Structural rule for Compose: art boxes are fixed slots; focus growth applies to an inner
 layer so siblings never reflow. Text blocks reserve fixed height regardless of content.

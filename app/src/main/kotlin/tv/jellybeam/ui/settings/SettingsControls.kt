@@ -59,7 +59,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import tv.jellybeam.AccentScheme
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.focus.FocusMemory
@@ -123,8 +125,12 @@ internal class SettingsPaneEntryTarget(private val recordedKey: () -> String?) {
  * `enter` can pick it by key without any composition-time read of the recorded key.
  * [canClaim] gates only the nothing-recorded case (chips claim only when selected). */
 @Composable
-internal fun Modifier.paneEntry(target: SettingsPaneEntryTarget?, rowKey: String, canClaim: Boolean = true): Modifier {
-    val requester = remember { FocusRequester() }
+internal fun Modifier.paneEntry(
+    target: SettingsPaneEntryTarget?,
+    rowKey: String,
+    canClaim: Boolean = true,
+    requester: FocusRequester = remember { FocusRequester() },
+): Modifier {
     DisposableEffect(target, rowKey, canClaim) {
         target?.register(PaneEntryRow(rowKey, canClaim), requester)
         onDispose { target?.unregister(rowKey, requester) }
@@ -191,12 +197,13 @@ internal fun RowCard(
     height: Dp = ROW_HEIGHT,
     content: @Composable RowScope.() -> Unit,
 ) {
+    val accent = LocalAccent.current
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(height)
             .background(JellybeamTheme.SurfaceRaised, RoundedCornerShape(ROW_CORNER))
-            .focusRing(isFocused, cornerRadius = ROW_CORNER)
+            .focusRing(isFocused, cornerRadius = ROW_CORNER, color = accent.accentInk)
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -217,10 +224,10 @@ internal fun rowLabelStyle() = TextStyle(
  * the app's quietest text tier.
  */
 @Composable
-internal fun SectionHeader(text: String) {
+internal fun SectionHeader(text: String, modifier: Modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)) {
     BasicText(
         text = text.uppercaseUi(),
-        modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
+        modifier = modifier,
         style = TextStyle(
             fontFamily = JellybeamTheme.Archivo,
             fontWeight = FontWeight.SemiBold,
@@ -254,7 +261,7 @@ internal fun ToggleSwitch(isOn: Boolean, modifier: Modifier = Modifier) {
         animationSpec = tween(TOGGLE_ANIM_MS),
         label = "toggleKnobOffset",
     )
-    val trackColor = lerp(JellybeamTheme.Hairline, JellybeamTheme.Pistacchio, progress)
+    val trackColor = lerp(JellybeamTheme.Hairline, LocalAccent.current.accent, progress)
 
     Box(
         modifier = modifier
@@ -384,7 +391,7 @@ internal val CHIP_GAP = 8.dp
 private val CHIP_HPADDING = 14.dp
 
 /**
- * One segmented chip: filled Pistacchio/Notte-label when [selected], transparent/Hairline-border
+ * One segmented chip: accent-filled with an onAccent label when [selected], transparent/Hairline-border
  * otherwise. Individually focusable via its own [focusRing]. [key] combines with the enclosing
  * [ChipFieldRow]'s row key via [combineChipKey] (or is used as-is outside one) to form the full
  * docs/15-focus-and-selection.md §5 key; defaults to [label]. Also used outside this focus
@@ -416,15 +423,16 @@ internal fun SettingsChip(
         onDispose { if (selected && selectedChip != null) selectedChip.attachedCount-- }
     }
 
-    // Ring on a Pistacchio fill is Sheen (docs/15-focus-and-selection.md §1.2).
-    Box(modifier = modifier.focusRing(isFocused, cornerRadius = CHIP_HEIGHT / 2, color = if (selected) JellybeamTheme.Sheen else JellybeamTheme.Pistacchio)) {
+    val accent = LocalAccent.current
+    // Ring on an accent fill is the sheen (docs/15-focus-and-selection.md §1.2).
+    Box(modifier = modifier.focusRing(isFocused, cornerRadius = CHIP_HEIGHT / 2, color = if (selected) accent.accentSheen else accent.accentInk)) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
                 .height(CHIP_HEIGHT)
                 .let {
                     if (selected) {
-                        it.background(JellybeamTheme.Pistacchio, RoundedCornerShape(50))
+                        it.background(accent.accent, RoundedCornerShape(50))
                     } else {
                         it.border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(50))
                     }
@@ -452,7 +460,7 @@ internal fun SettingsChip(
                     style = TextStyle(
                         fontFamily = JellybeamTheme.Archivo,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (selected) JellybeamTheme.Notte else JellybeamTheme.Panna2,
+                        color = if (selected) accent.onAccent else JellybeamTheme.Panna2,
                         fontSize = 13.sp,
                     ),
                 )
@@ -623,7 +631,7 @@ internal val RAIL_WIDTH = 190.dp
 private val RAIL_ROW_HEIGHT = 44.dp
 
 /**
- * One rail entry, same SURFACE_RAISED-on-focus + [focusRing] + Pistacchio dot recipe as
+ * One rail entry, same SURFACE_RAISED-on-focus + [focusRing] + accent dot recipe as
  * [tv.jellybeam.ui.nav.NavDrawerHost]'s `DrawerRow`. Section switching is driven by the
  * `Modifier.onFocusChanged` [SettingsScreen] attaches to this row (focus-follows-pane, the
  * standard TV-settings pattern) -- [onSelect] is just an idempotent fallback, since Select always
@@ -635,16 +643,19 @@ internal fun SettingsRailRow(
     isActive: Boolean,
     onSelect: () -> Unit,
     modifier: Modifier = Modifier,
+    /** The Appearance row's dot follows the focused swatch (docs/09); every other row passes `null`. */
+    dotAccent: AccentScheme? = null,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(RAIL_ROW_HEIGHT)
             .background(if (isFocused) JellybeamTheme.SurfaceRaised else Color.Transparent, RoundedCornerShape(ROW_CORNER))
-            .focusRing(isFocused, cornerRadius = ROW_CORNER)
+            .focusRing(isFocused, cornerRadius = ROW_CORNER, color = accent.accentInk)
             .clickable(interactionSource = interactionSource, indication = null, onClick = onSelect)
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -654,7 +665,7 @@ internal fun SettingsRailRow(
             modifier = Modifier
                 .size(6.dp)
                 .background(
-                    if (isActive) JellybeamTheme.Pistacchio else Color.Transparent,
+                    if (isActive) (dotAccent ?: accent).accentInk else Color.Transparent,
                     CircleShape,
                 ),
         )

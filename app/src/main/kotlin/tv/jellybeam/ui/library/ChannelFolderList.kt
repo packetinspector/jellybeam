@@ -44,6 +44,7 @@ import java.time.ZoneId
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.nav.CHANNEL_FOLDER_ITEM_TYPE
 import tv.jellybeam.ui.cards.focusRing
@@ -81,6 +82,7 @@ fun ChannelFolderList(
     onOpenDetail: (Card) -> Unit,
     isTop: Boolean,
 ) {
+    val accent = LocalAccent.current
     var focusedIndex by remember { mutableStateOf<Int?>(null) }
     val initialFocusRequester = remember { FocusRequester() }
     val listState = remember { LazyListState() }
@@ -163,7 +165,7 @@ fun ChannelFolderList(
                     .fillMaxWidth()
                     .height(ROW_HEIGHT)
                     .background(if (isFocused) JellybeamTheme.Surface else Color.Transparent, RoundedCornerShape(ROW_CORNER))
-                    .focusRing(isFocused, cornerRadius = ROW_CORNER)
+                    .focusRing(isFocused, cornerRadius = ROW_CORNER, color = accent.accentInk)
                     .focusKey(memory, "card:${card.id}")
                     .onFocusChanged { focusState ->
                         if (focusState.isFocused) {
@@ -203,6 +205,7 @@ private fun ChannelFolderRow(
     use24h: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val accent = LocalAccent.current
     val isFolder = card.itemType == CHANNEL_FOLDER_ITEM_TYPE
 
     Row(
@@ -275,11 +278,11 @@ private fun ChannelFolderRow(
                 )
                 card.played -> BasicText(
                     text = "✓",
-                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Pistacchio, fontSize = 18.sp),
+                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = accent.accentInk, fontSize = 18.sp),
                 )
                 card.positionTicks > 0 -> BasicText(
                     text = stringResource(R.string.library_resume_tag),
-                    style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Pistacchio, fontSize = 11.sp),
+                    style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = accent.accentInk, fontSize = 11.sp),
                 )
             }
         }

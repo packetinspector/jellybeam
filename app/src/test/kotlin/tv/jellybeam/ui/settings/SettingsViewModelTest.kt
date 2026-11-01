@@ -215,6 +215,19 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `selecting an accent writes its key and nothing else, and no write happens before it`() = runTest {
+        val seeded = defaultTestSettings().copy(accentColor = "pistacchio")
+        val gateway = FakeCoreGateway(settings = seeded)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
+        assertTrue(gateway.setSettingsCalls.isEmpty())
+
+        viewModel.selectAccent("oceano")
+
+        assertEquals(seeded.copy(accentColor = "oceano"), gateway.setSettingsCalls.single())
+        assertEquals("oceano", viewModel.state.value.settings.accentColor)
+    }
+
+    @Test
     fun `selecting a shelf size chip sets that value exactly`() = runTest {
         val gateway = FakeCoreGateway(settings = defaultTestSettings().copy(homeShelfSize = 20u))
         val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)

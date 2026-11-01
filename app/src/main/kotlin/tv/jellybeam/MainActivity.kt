@@ -193,12 +193,14 @@ class MainActivity : ComponentActivity() {
         // soon-settled request, so it can't race settling.
         val launchedForExternalPlayback = isExternalPlaybackIntent(intent)
         setContent {
-            JellybeamRoot(
-                onExitApp = ::finish,
-                launchedForExternalPlayback = launchedForExternalPlayback,
-                firstFrameAtMs = firstFrameElapsedMs,
-                rootFocus = rootFocus,
-            )
+            ProvideAccent {
+                JellybeamRoot(
+                    onExitApp = ::finish,
+                    launchedForExternalPlayback = launchedForExternalPlayback,
+                    firstFrameAtMs = firstFrameElapsedMs,
+                    rootFocus = rootFocus,
+                )
+            }
         }
         markFirstFrame(createStartElapsedMs)
     }
@@ -871,13 +873,15 @@ private fun JellybeamRoot(
     // Home renders from the mirror, so a revoked token would otherwise wait for the first Play.
     // Launch, account switch and re-authorization check at once ([AccountTreeOwner.epoch]); a return to the
     // foreground checks at most once a minute. A 401 reaches re-authorization through the
-    // gateway's seam; every other outcome fails open.
+    // gateway's seam; every other outcome fails open. A name change fires no core event, so the list re-reads here.
     var sessionCheckedAtMs by remember { mutableLongStateOf(Long.MIN_VALUE) }
     fun checkSession(force: Boolean) {
         val now = SystemClock.elapsedRealtime()
         if (!force && now - sessionCheckedAtMs < SESSION_CHECK_MIN_INTERVAL_MS) return
         sessionCheckedAtMs = now
-        composableScope.launch { runCatchingCancellable { gateway.validateSession() } }
+        composableScope.launch {
+            runCatchingCancellable { if (gateway.validateSession()) accounts = gateway.listAccounts() }
+        }
     }
 
     val latestFirstFrameAtMs by rememberUpdatedState(firstFrameAtMs)
@@ -1594,12 +1598,13 @@ private fun CrashPromptDialog(onReportNow: () -> Unit, onLater: () -> Unit, onDi
 private fun CrashPromptButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier, primary: Boolean = false) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
     Box(
         modifier = modifier
-            .background(if (isFocused) JellybeamTheme.Pistacchio else Color.Transparent, RoundedCornerShape(50))
+            .background(if (isFocused) accent.accent else Color.Transparent, RoundedCornerShape(50))
             .let {
                 if (!isFocused) {
-                    it.border(1.dp, if (primary) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline, RoundedCornerShape(50))
+                    it.border(1.dp, if (primary) accent.accentInk else JellybeamTheme.Hairline, RoundedCornerShape(50))
                 } else {
                     it
                 }
@@ -1612,7 +1617,7 @@ private fun CrashPromptButton(label: String, onClick: () -> Unit, modifier: Modi
             style = TextStyle(
                 fontFamily = JellybeamTheme.Archivo,
                 fontWeight = FontWeight.SemiBold,
-                color = if (isFocused) JellybeamTheme.Notte else JellybeamTheme.Panna,
+                color = if (isFocused) accent.onAccent else JellybeamTheme.Panna,
                 fontSize = 14.sp,
             ),
         )

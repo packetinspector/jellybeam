@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
@@ -171,7 +172,7 @@ fun DiscoverSearchScreen(
 }
 
 /** [tv.jellybeam.ui.search.SearchScreen]'s private `SearchField`, copied verbatim (Grigio label,
- * Surface box, Hairline/Pistacchio-on-focus border, Archivo text).
+ * Surface box, Hairline/accent-on-focus border, Archivo text).
  */
 @Composable
 private fun DiscoverSearchField(
@@ -185,7 +186,8 @@ private fun DiscoverSearchField(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    val borderColor = if (isFocused) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline
+    val accent = LocalAccent.current
+    val borderColor = if (isFocused) accent.accentInk else JellybeamTheme.Hairline
     val keyboardController = LocalSoftwareKeyboardController.current
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -212,7 +214,7 @@ private fun DiscoverSearchField(
                     },
                 textStyle = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 16.sp),
                 singleLine = true,
-                cursorBrush = SolidColor(JellybeamTheme.Pistacchio),
+                cursorBrush = SolidColor(accent.accentInk),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { keyboardController?.hide() }),
                 interactionSource = interactionSource,

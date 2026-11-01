@@ -2,6 +2,9 @@ package tv.jellybeam.player
 
 /** OSD position/duration text formatting (GOAL item 3: "H:MM:SS / M:SS", Martian Mono 14sp). */
 object PlaybackTimeFormat {
+    /** Whether [format] of this duration carries an hours field; unknown shows no total to fit. */
+    fun showsHours(durationMs: Long?): Boolean = durationMs != null && durationMs >= 3_600_000L
+
     /** `"H:MM:SS"` once an hour is reached, else `"M:SS"`. Negative input clamps to 0 rather than
      * showing a sign.
      */

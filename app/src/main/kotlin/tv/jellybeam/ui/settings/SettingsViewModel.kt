@@ -340,6 +340,9 @@ class SettingsViewModel(
         AppGraph.diag.event("settings.change")
     }
 
+    /** docs/09: only an OK on a swatch writes; browsing is screen-local. */
+    fun selectAccent(key: String) = updateSettings { it.copy(accentColor = key) }
+
     fun selectNextUpCutoff(days: UInt?) = updateSettings { it.copy(nextUpCutoffDays = days) }
 
     fun selectHomeShelfSize(size: UInt) = updateSettings { it.copy(homeShelfSize = size) }

@@ -129,14 +129,53 @@ internal fun routeStreamRow(decision: TrackDecisionFfi, rows: List<TrackInfo>): 
  * identity and flags so they match Direct Play's; copies of streams burned in instead are dropped.
  */
 internal fun manifestTrackInfos(infos: List<TrackInfo>, streams: List<EmbeddedSubtitleFfi>): List<TrackInfo> {
-    val manifest = streams.filter { it.delivery == SubtitleDeliveryFfi.HLS && it.displayTitle != null }
+    val manifest = manifestStreams(streams)
     if (manifest.isEmpty()) return infos
     return infos.mapNotNull { info ->
         if (info.kind != TrackKindFfi.SUBTITLE) return@mapNotNull info
-        // Same-named renditions are one group in Media3; the first stream of that name stands for it.
-        val stream = manifest.firstOrNull { it.displayTitle == info.title && normalizedLanguage(it.language) == normalizedLanguage(info.lang) }
-        stream?.let { info.copy(title = it.title, codec = it.codec, isDefault = it.default, isForced = it.forced) }
+        manifest.streamOf(info)?.let { info.copy(title = it.title, codec = it.codec, isDefault = it.default, isForced = it.forced) }
     }
+}
+
+private fun manifestStreams(streams: List<EmbeddedSubtitleFfi>) =
+    streams.filter { it.delivery == SubtitleDeliveryFfi.HLS && it.displayTitle != null }
+
+// Same-named renditions are one group in Media3; the first stream of that name stands for it.
+private fun List<EmbeddedSubtitleFfi>.streamOf(info: TrackInfo) =
+    firstOrNull { it.displayTitle == info.title && normalizedLanguage(it.language) == normalizedLanguage(info.lang) }
+
+// Two tracks of one language can only be told apart by title, so a title on both sides must agree.
+private fun sameSubtitleTrack(stream: EmbeddedSubtitleFfi, info: TrackInfo): Boolean {
+    val titles = listOf(stream.title, info.title).map { it?.trim().orEmpty() }
+    return normalizedLanguage(stream.language) == normalizedLanguage(info.lang) &&
+        (titles.any { it.isEmpty() } || titles[0] == titles[1])
+}
+
+private fun EmbeddedSubtitleFfi.facts() = SubtitleFacts(hearingImpaired = hearingImpaired, forced = forced, codec = codec)
+
+/**
+ * docs/12 §16: the server's SDH and codec facts per picker id. Media3 has no SDH flag and calls ASS
+ * and SSA alike, so a file's text tracks take the server's by position, only when the counts and
+ * every language agree: a wrong SDH is worse than none. A transcode names its streams instead.
+ */
+internal fun serverSubtitleFacts(
+    infos: List<TrackInfo>,
+    streams: List<EmbeddedSubtitleFfi>,
+    transcoding: Boolean,
+    sidecars: List<ExternalSubtitleFfi>,
+): Map<Long, SubtitleFacts> {
+    val text = infos.filter { it.kind == TrackKindFfi.SUBTITLE }
+    val streamFacts = if (transcoding) {
+        val manifest = manifestStreams(streams)
+        text.mapNotNull { info -> manifest.streamOf(info)?.let { info.id to it.facts() } }.toMap() +
+            streams.associate { streamRowId(it.index) to it.facts() }
+    } else {
+        // A manifest sidecar copy is not a track of the file Media3 reads.
+        val inFile = streams.filter { it.delivery != SubtitleDeliveryFfi.HLS }
+        val paired = inFile.size == text.size && inFile.zip(text).all { (stream, info) -> sameSubtitleTrack(stream, info) }
+        if (paired) text.zip(inFile).associate { (info, stream) -> info.id to stream.facts() } else emptyMap()
+    }
+    return streamFacts + sidecars.associate { ExternalSubtitles.idFor(it.index) to SubtitleFacts(it.hearingImpaired, it.isForced, it.codec) }
 }
 
 /** docs/18 §3.1: a transcode's streams only a renegotiation shows: manifest text while the
@@ -2293,9 +2332,10 @@ class PlaybackViewModel(
         val subtitle = allTrackInfos(tracks).filter { it.kind == TrackKindFfi.SUBTITLE }
         return buildList {
             val rows = streamRows(tracks)
+            val facts = subtitleFacts(tracks)
             add(TrackChoice(id = TRACK_PICKER_SUBTITLE_OFF_ID, label = strings.get(R.string.player_track_off), selected = (subtitle + rows).none { it.isSelected }))
             rows.forEachIndexed { index, info ->
-                add(TrackChoice(id = info.id, label = TrackChoiceText.label(strings, info, index), selected = info.isSelected, meta = TrackChoiceText.meta(strings, info, external = false), isDefault = info.isDefault))
+                add(TrackChoice(id = info.id, label = TrackChoiceText.label(strings, info, index), selected = info.isSelected, meta = TrackChoiceText.meta(strings, info, external = false, facts = facts[info.id]), isDefault = info.isDefault))
             }
             subtitle.forEachIndexed { index, info ->
                 val sidecar = ExternalSubtitles.indexOf(info.id)
@@ -2304,12 +2344,18 @@ class PlaybackViewModel(
                         id = info.id,
                         label = TrackChoiceText.label(strings, info, index),
                         selected = info.isSelected,
-                        meta = TrackChoiceText.meta(strings, info, external = sidecar != null, status = sidecar?.let(sidecarStatus::get)),
+                        meta = TrackChoiceText.meta(strings, info, external = sidecar != null, status = sidecar?.let(sidecarStatus::get), facts = facts[info.id]),
                         isDefault = info.isDefault,
                     ),
                 )
             }
         }
+    }
+
+    /** docs/12 §16: [serverSubtitleFacts] for the live plan and its sidecars. */
+    private fun subtitleFacts(tracks: Tracks): Map<Long, SubtitleFacts> {
+        val plan = currentPlan
+        return serverSubtitleFacts(TrackMapping.toTrackInfos(tracks), plan?.embeddedSubtitles.orEmpty(), plan?.playMethod == PlayMethodFfi.TRANSCODE, sidecars)
     }
 
     /** docs/18 §3.1: [transcodeStreamRows] for the live plan; the one burned in reads selected. */
@@ -2492,7 +2538,7 @@ class PlaybackViewModel(
         val subtitles = allTrackInfos(tracks).filter { it.kind == TrackKindFfi.SUBTITLE }
         val shown = subtitles.indexOfFirst { it.isSelected }
         if (shown < 0) return
-        val track = TrackChoiceText.delayTrack(strings, subtitles[shown], shown)
+        val track = TrackChoiceText.delayTrack(strings, subtitles[shown], shown, subtitleFacts(tracks)[subtitles[shown].id])
         open(OpenSurface.DelayControl(DelayState(playerHolder.subtitleDelayMs, track = track)))
     }
 

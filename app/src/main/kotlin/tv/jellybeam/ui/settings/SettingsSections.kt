@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.diag.DiagStatus
 import tv.jellybeam.player.pipController
@@ -68,6 +69,8 @@ import uniffi.jellybeam_core.SubtitlePositionPreset
  */
 internal enum class SettingsSection(val labelRes: Int) {
     HOME(R.string.settings_section_home),
+    // docs/09: the accent picker; its one setting is `Settings.accentColor`.
+    APPEARANCE(R.string.settings_section_appearance),
     // "Show missing episodes" only affects series/season detail pages, so it's its own section,
     // not filed under Home.
     LIBRARY(R.string.settings_section_library),
@@ -893,7 +896,8 @@ private fun DiscoverTextField(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    val borderColor = if (isFocused) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline
+    val accent = LocalAccent.current
+    val borderColor = if (isFocused) accent.accentInk else JellybeamTheme.Hairline
     val memory = LocalSettingsFocusMemory.current
     val entryTarget = LocalSettingsPaneEntryKey.current
 
@@ -918,7 +922,7 @@ private fun DiscoverTextField(
                     .let { it.paneEntry(entryTarget, key) },
                 textStyle = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 16.sp),
                 singleLine = true,
-                cursorBrush = SolidColor(JellybeamTheme.Pistacchio),
+                cursorBrush = SolidColor(accent.accentInk),
                 visualTransformation = visualTransformation,
                 keyboardOptions = keyboardOptions,
                 interactionSource = interactionSource,

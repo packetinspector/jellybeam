@@ -127,6 +127,8 @@ add-server, in-place password/Quick Connect reauthorization of expired saved
 accounts (preserving their mirror), automatic reauthorization routing when
 playback discovers an expired token, and confirmation-gated server removal
 (credentials and isolated local cache), with server/account names shown verbatim;
+a user renamed on the server shows the new name at the next session check (launch,
+account switch, or a return to the app), with no new sign-in;
 Jellyfin server compatibility 10.11 through 12.x: every request authenticates
 with the standard `Authorization: MediaBrowser` header, and the URLs handed to
 the image loader and player carry the token as `ApiKey`, the only query form
@@ -240,7 +242,7 @@ playback state, dropped frames, plus the source file's name/size); a separate, o
 title (episode/season identity, plot, air/premiere and library-added dates,
 watch count and last-watch date, content/community/critic ratings when
 available, genres, director/writer, studio, and runtime); one unified track-selector control for the shared
-audio/subtitle picker;
+audio/subtitle picker (a row's label is the server's title or the language's name; its meta adds the format, Forced and SDH, e.g. `SRT · SDH`);
 external playback orchestration through an exported PLAY intent or
 `jellybeam://play/&lt;item-id&gt;` deep link (active server/account, resume semantics,
 any UUID spelling treated as the same item the UI plays,
@@ -373,7 +375,9 @@ payload.
 
 **Settings** — whole-record Rust-owned settings store (`get_settings`/
 `set_settings`, tolerant load/migration, atomic file replacement and ordered
-Settings-screen saves); Home section (Next Up cutoff
+Settings-screen saves); Appearance section (twelve accent colours in light and
+deep shades with a live preview; OK applies across the app at once, Back keeps
+the current one; the logo stays Pistacchio); Home section (Next Up cutoff
 presets + rewatching toggle, per-library Home visibility, shelf size (10/20/30,
 default 20, every Home row), Resume art chips for Continue Watching and Next Up (Episode / Series thumb / Poster), Favorites row toggle, hide-watched-in-Latest,
 startup screen picker, clock toggle, show/hide missing episodes); Playback

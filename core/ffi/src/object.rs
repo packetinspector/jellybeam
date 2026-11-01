@@ -2846,11 +2846,20 @@ impl JellybeamCore {
 
     /// One authenticated round trip (`GET /Users/Me`). Browse reads the mirror, so without this
     /// a revoked token goes unnoticed until the first Play; the app calls it at launch, account
-    /// switch and return to foreground, and routes `Unauthorized` to re-authorization.
-    pub fn validate_session(&self) -> Result<(), CoreError> {
-        let client = self.require_client()?;
-        self.runtime.block_on(client.current_user())?;
-        Ok(())
+    /// switch and return to foreground, and routes `Unauthorized` to re-authorization. Returns
+    /// whether the reply changed a saved or shown name, so the app's account list needs a re-read;
+    /// a reply with no name or an empty one changes nothing.
+    pub fn validate_session(&self) -> Result<bool, CoreError> {
+        let (epoch, client) = self
+            .lock_state()
+            .account
+            .current_client()
+            .ok_or(CoreError::NotSignedIn)?;
+        let user = self.runtime.block_on(client.current_user())?;
+        Ok(user
+            .name
+            .filter(|name| !name.is_empty())
+            .is_some_and(|name| self.apply_user_name(epoch, &client, name)))
     }
 
     /// Whether the signed-in user is a server administrator (docs/19 §1.1)
@@ -4545,6 +4554,51 @@ impl JellybeamCore {
             session_lock,
         )
         .await;
+    }
+
+    /// docs/13 About > server info: saves the server's `name`, verbatim, on the record `client`
+    /// authenticated as even when stale, and shows it only while `epoch`, captured with `client`,
+    /// is current and that record exists; returns whether either name changed.
+    fn apply_user_name(
+        &self,
+        epoch: u64,
+        client: &jellyfin_api::JellyfinClient,
+        name: String,
+    ) -> bool {
+        let Some(user_id) = client.user_id() else {
+            return false;
+        };
+        let mut record_changed = false;
+        let mut storage_failed = false;
+        let saved = session::mutate(&self.data_dir, &self.session_lock, |list| {
+            let row = list
+                .sessions
+                .iter_mut()
+                .find(|row| row.is_account(client.base_url(), user_id))
+                .ok_or(())?;
+            record_changed = row.user_name != name;
+            row.user_name.clone_from(&name);
+            Ok::<(), ()>(())
+        });
+        match saved {
+            Ok(()) => {}
+            Err(session::MutateError::Refused(())) => return false,
+            // An unreadable list reads as empty, so report no change and let the next validation
+            // retry the save, which the differing record makes it report.
+            Err(session::MutateError::Storage(e)) => {
+                tracing::warn!(error = %e, "failed to persist the renamed user");
+                storage_failed = true;
+            }
+        }
+        let mut state = self.lock_state();
+        let Some(installed) = state.account.installed_mut(epoch) else {
+            return record_changed && !storage_failed;
+        };
+        let shown_changed = installed.account.user_name != name;
+        if shown_changed {
+            installed.account.user_name = name;
+        }
+        !storage_failed && (record_changed || shown_changed)
     }
 
     /// docs/13 About > server info: applies a `version`/`server_name` pair fetched from either
@@ -9506,6 +9560,7 @@ pub(crate) mod tests {
                     display_title: None,
                     is_default: false,
                     is_forced: false,
+                    hearing_impaired: false,
                 },
             }],
         }
@@ -11850,6 +11905,247 @@ pub(crate) mod tests {
             mock.hit_count("GET", "/Users/Me"),
             2,
             "validation is never cached"
+        );
+    }
+
+    fn users_me_named(name: &str) -> serde_json::Value {
+        serde_json::json!({ "Id": "00000000-0000-4000-8000-000000000040", "Name": name })
+    }
+
+    fn sessions_json_bytes(dir: &std::path::Path) -> Vec<u8> {
+        std::fs::read(dir.join("sessions.json")).expect("sessions.json exists")
+    }
+
+    /// Re-saves the list in a spelling the writer never produces, so any rewrite changes the bytes.
+    fn respell_sessions_json(dir: &std::path::Path) -> Vec<u8> {
+        let list = session::load_list(dir);
+        let mut bytes = serde_json::to_vec_pretty(&list).expect("serialize the list");
+        bytes.extend_from_slice(b"\n\n");
+        std::fs::write(dir.join("sessions.json"), &bytes).expect("respell the list");
+        bytes
+    }
+
+    fn shown_user_name(core: &JellybeamCore) -> Option<String> {
+        core.server_info_snapshot().user_name
+    }
+
+    /// `validate_session`, with its `/Users/Me` reply held until `meanwhile` has run.
+    fn validate_session_around(
+        core: &Arc<JellybeamCore>,
+        mock: &RouteMockServer,
+        meanwhile: impl FnOnce(),
+    ) -> Result<bool, CoreError> {
+        let held = mock.gate("GET", "/Users/Me", 0);
+        let validating = std::thread::spawn({
+            let core = core.clone();
+            move || core.validate_session()
+        });
+        wait_until(
+            || mock.hit_count("GET", "/Users/Me") == 1,
+            "the validation request to arrive",
+        );
+        meanwhile();
+        held.open();
+        validating.join().expect("validate_session returns")
+    }
+
+    /// docs/13 About > server info: the reply's name lands on the record and the installed
+    /// account as sent, and nothing else on the record moves.
+    #[test]
+    fn validate_session_saves_and_shows_a_renamed_user_verbatim() {
+        let (dir, core, mock) = core_signed_in_against_routes();
+        let before = session::load_list(dir.path()).sessions[0].clone();
+        mock.route("GET", "/Users/Me", 200, users_me_named(" Renamed User "));
+
+        assert!(core.validate_session().expect("validates"), "name changed");
+
+        let expected = session::SessionFile {
+            user_name: " Renamed User ".to_string(),
+            ..before
+        };
+        assert_eq!(session::load_list(dir.path()).sessions, vec![expected]);
+        assert_eq!(shown_user_name(&core).as_deref(), Some(" Renamed User "));
+        assert!(
+            !core.validate_session().expect("validates"),
+            "the same name again is not a change"
+        );
+    }
+
+    #[test]
+    fn validate_session_with_the_same_name_writes_nothing_and_reports_no_change() {
+        let (dir, core, mock) = core_signed_in_against_routes();
+        let bytes = respell_sessions_json(dir.path());
+        mock.route("GET", "/Users/Me", 200, users_me_named("jellybeam-user"));
+
+        assert!(!core.validate_session().expect("validates"));
+
+        assert_eq!(sessions_json_bytes(dir.path()), bytes);
+        assert_eq!(shown_user_name(&core).as_deref(), Some("jellybeam-user"));
+    }
+
+    /// A reply that landed on the record while its account was parked still reaches the installed
+    /// account at the next validation, with no second write.
+    #[test]
+    fn validate_session_shows_a_name_the_record_already_holds() {
+        let (dir, core, mock) = core_signed_in_against_routes();
+        let mut list = session::load_list(dir.path());
+        list.sessions[0].user_name = "Renamed User".to_string();
+        session::save_list(dir.path(), &list).expect("save the list");
+        let bytes = respell_sessions_json(dir.path());
+        mock.route("GET", "/Users/Me", 200, users_me_named("Renamed User"));
+
+        assert!(core.validate_session().expect("validates"));
+
+        assert_eq!(sessions_json_bytes(dir.path()), bytes);
+        assert_eq!(shown_user_name(&core).as_deref(), Some("Renamed User"));
+    }
+
+    /// docs/18 §2.1: a reply is persisted by the identity its client authenticated as and
+    /// reaches [`Installed`] only under its own epoch.
+    #[test]
+    fn validate_session_across_an_account_switch_renames_only_the_clients_record() {
+        let (dir, core, mock) = core_signed_in_against_routes();
+        seed_session(dir.path(), &mock.base_url, "u2");
+        mock.route("GET", "/Users/Me", 200, users_me_named("Renamed User"));
+
+        let changed = validate_session_around(&core, &mock, || {
+            core.switch_session(1).expect("switches to u2");
+        })
+        .expect("validates");
+
+        assert!(
+            changed,
+            "the saved list changed, so the app must re-read it"
+        );
+        let list = session::load_list(dir.path());
+        assert_eq!(list.active, 1);
+        assert_eq!(list.sessions[0].user_name, "Renamed User");
+        assert_eq!(list.sessions[1].user_name, "u2-name");
+        assert_eq!(shown_user_name(&core).as_deref(), Some("u2-name"));
+
+        core.switch_session(0).expect("switches back to u1");
+        assert_eq!(shown_user_name(&core).as_deref(), Some("Renamed User"));
+    }
+
+    #[test]
+    fn validate_session_never_recreates_an_account_removed_in_flight() {
+        let (dir, core, mock) = core_signed_in_against_routes();
+        mock.route("GET", "/Users/Me", 200, users_me_named("Renamed User"));
+
+        let changed = validate_session_around(&core, &mock, || {
+            core.remove_session(0).expect("removes the active account");
+        })
+        .expect("validates");
+
+        assert!(!changed);
+        assert!(session::load_list(dir.path()).sessions.is_empty());
+        assert_eq!(shown_user_name(&core), None);
+    }
+
+    #[test]
+    fn validate_session_never_recreates_a_parked_account_removed_in_flight() {
+        let (dir, core, mock) = core_signed_in_against_routes();
+        let other = seed_session(dir.path(), &mock.base_url, "u2");
+        mock.route("GET", "/Users/Me", 200, users_me_named("Renamed User"));
+
+        let changed = validate_session_around(&core, &mock, || {
+            core.switch_session(1).expect("switches to u2");
+            core.remove_session(0).expect("removes the parked account");
+        })
+        .expect("validates");
+
+        assert!(!changed);
+        assert_eq!(session::load_list(dir.path()).sessions, vec![other]);
+        assert_eq!(shown_user_name(&core).as_deref(), Some("u2-name"));
+    }
+
+    /// The removal commits its record before it tears the account down, so a reply can land
+    /// with no record while the epoch is still current; it reports nothing and shows nothing.
+    #[test]
+    fn validate_session_with_no_saved_record_changes_nothing_on_the_installed_account() {
+        let (dir, core, mock) = core_signed_in_against_routes();
+        session::save_list(dir.path(), &session::SessionList::default()).expect("empty the list");
+        mock.route("GET", "/Users/Me", 200, users_me_named("Renamed User"));
+
+        assert!(!core.validate_session().expect("validates"));
+
+        assert!(session::load_list(dir.path()).sessions.is_empty());
+        assert_eq!(shown_user_name(&core).as_deref(), Some("jellybeam-user"));
+    }
+
+    #[test]
+    fn validate_session_without_a_name_in_the_reply_changes_nothing() {
+        for reply in [
+            serde_json::json!({ "Id": "00000000-0000-4000-8000-000000000040" }),
+            serde_json::json!({ "Id": "00000000-0000-4000-8000-000000000040", "Name": null }),
+            users_me_named(""),
+        ] {
+            let (dir, core, mock) = core_signed_in_against_routes();
+            let bytes = respell_sessions_json(dir.path());
+            mock.route("GET", "/Users/Me", 200, reply.clone());
+
+            assert!(!core.validate_session().expect("validates"), "{reply}");
+
+            assert_eq!(sessions_json_bytes(dir.path()), bytes, "{reply}");
+            assert_eq!(
+                shown_user_name(&core).as_deref(),
+                Some("jellybeam-user"),
+                "{reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_session_failures_change_nothing() {
+        for status in [401, 500] {
+            let (dir, core, mock) = core_signed_in_against_routes();
+            let bytes = respell_sessions_json(dir.path());
+            mock.route("GET", "/Users/Me", status, users_me_named("Renamed User"));
+
+            let error = core.validate_session().expect_err("the request failed");
+
+            assert_eq!(
+                matches!(error, CoreError::Unauthorized { .. }),
+                status == 401,
+                "{error:?}"
+            );
+            assert_eq!(sessions_json_bytes(dir.path()), bytes, "{status}");
+            assert_eq!(
+                shown_user_name(&core).as_deref(),
+                Some("jellybeam-user"),
+                "{status}"
+            );
+        }
+    }
+
+    /// A list that cannot be saved still shows the new name this run; the record keeps
+    /// differing, so the next validation retries the write.
+    #[cfg(unix)]
+    #[test]
+    fn validate_session_with_an_unreadable_list_shows_the_name_and_retries_the_save() {
+        let (dir, core, mock) = core_signed_in_against_routes();
+        mock.route("GET", "/Users/Me", 200, users_me_named("Renamed User"));
+        let list = dir.path().join("sessions.json");
+        let aside = dir.path().join("sessions.aside");
+        // A directory fails to read even for root, unlike a chmod.
+        std::fs::rename(&list, &aside).expect("move the list aside");
+        std::fs::create_dir(&list).expect("block the list's path");
+
+        assert!(
+            !core.validate_session().expect("validates"),
+            "no re-read of an unreadable list"
+        );
+        assert_eq!(shown_user_name(&core).as_deref(), Some("Renamed User"));
+
+        std::fs::remove_dir(&list).expect("unblock the list's path");
+        std::fs::rename(&aside, &list).expect("restore the list");
+        assert!(
+            core.validate_session().expect("validates"),
+            "the retried save changes the list"
+        );
+        assert_eq!(
+            session::load_list(dir.path()).sessions[0].user_name,
+            "Renamed User"
         );
     }
 

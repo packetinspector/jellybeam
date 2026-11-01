@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import tv.jellybeam.AccentScheme
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
@@ -131,6 +132,8 @@ fun SettingsScreen(
     var activeSection by rememberSaveable(stateSaver = SettingsSectionSaver) { mutableStateOf(sections.first()) }
     val railFocusRequesters = remember(sections) { sections.associateWith { FocusRequester() } }
     val memory = rememberFocusMemory()
+    // The swatch focused in Appearance, or null; hoisted so the rail dot can follow it (docs/09).
+    var focusedAccent by remember { mutableStateOf<AccentScheme?>(null) }
 
     // §3's per-section pane memory: which pane row/chip key was last focused in each section, so a
     // return via the rail (not a becoming-top restore, that's [memory]'s job) can re-enter there.
@@ -199,6 +202,12 @@ fun SettingsScreen(
                         ) {
                             when (activeSection) {
                                 SettingsSection.HOME -> HomeSectionContent(state, viewModel)
+                                SettingsSection.APPEARANCE -> AppearanceSectionContent(
+                                    storedKey = state.settings.accentColor,
+                                    focusedScheme = focusedAccent,
+                                    onFocusedScheme = { focusedAccent = it },
+                                    onApply = viewModel::selectAccent,
+                                )
                                 SettingsSection.LIBRARY -> LibrarySectionContent(state, viewModel)
                                 SettingsSection.PLAYBACK -> PlaybackSectionContent(state, viewModel)
                                 SettingsSection.OSD -> OsdSectionContent(state, viewModel)
@@ -248,6 +257,7 @@ fun SettingsScreen(
                             SettingsRailRow(
                                 label = stringResource(section.labelRes),
                                 isActive = section == activeSection,
+                                dotAccent = focusedAccent.takeIf { section == SettingsSection.APPEARANCE },
                                 onSelect = { activeSection = section },
                                 modifier = Modifier
                                     // §5: registers this row under "rail:<Section.name>" so

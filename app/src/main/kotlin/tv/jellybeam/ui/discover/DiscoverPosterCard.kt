@@ -36,6 +36,7 @@ import coil.request.ImageRequest
 import kotlinx.coroutines.delay
 import tv.jellybeam.AppForeground
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.ui.cards.ArtBox
 import tv.jellybeam.ui.cards.CardTitleText
 import tv.jellybeam.ui.cards.IMAGE_LOAD_MAX_RETRIES
@@ -142,6 +143,7 @@ private fun SeerrPosterArt(posterUrl: String?, title: String, modifier: Modifier
  */
 @Composable
 private fun BoxScope.SeerrAvailabilityBadgeOverlay(badge: SeerrAvailabilityBadge) {
+    val accent = LocalAccent.current
     when (badge) {
         SeerrAvailabilityBadge.None -> Unit
 
@@ -150,12 +152,12 @@ private fun BoxScope.SeerrAvailabilityBadgeOverlay(badge: SeerrAvailabilityBadge
                 .align(Alignment.TopEnd)
                 .padding(4.dp)
                 .size(20.dp)
-                .background(JellybeamTheme.Pistacchio, CircleShape),
+                .background(accent.accent, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             BasicText(
                 text = "✓",
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = JellybeamTheme.Notte, fontSize = 12.sp),
+                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = accent.onAccent, fontSize = 12.sp),
             )
         }
 

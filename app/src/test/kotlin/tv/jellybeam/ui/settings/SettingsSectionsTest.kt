@@ -7,13 +7,15 @@ import org.junit.Test
 class SettingsSectionsTest {
 
     @Test
-    fun `rail order is Home, Library, Playback, OSD, Subtitles, Discover, Troubleshooting, About`() {
+    fun `rail order is Home, Appearance, Library, Playback, OSD, Subtitles, Discover, Troubleshooting, About`() {
+        // docs/09: Appearance sits directly under Home.
         // docs/14-seerr-discover.md: Discover sits before Troubleshooting/About; its config lives
         // outside the Settings record. docs/21-user-reporting.md §6: Troubleshooting sits between
         // Discover and About.
         assertEquals(
             listOf(
                 SettingsSection.HOME,
+                SettingsSection.APPEARANCE,
                 SettingsSection.LIBRARY,
                 SettingsSection.PLAYBACK,
                 SettingsSection.OSD,

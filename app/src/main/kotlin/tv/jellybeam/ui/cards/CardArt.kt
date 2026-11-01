@@ -58,6 +58,7 @@ import coil.size.Precision
 import tv.jellybeam.AppForeground
 import tv.jellybeam.IMAGE_CROSSFADE_MS
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -182,6 +183,7 @@ fun ArtBox(
     // as concurrent children, so a focus change starts (or reverses) them together -- one extra
     // coroutine only while a card is animating, none at rest. [focusVisuals] is read only inside
     // the layer/draw lambdas below.
+    val ringInk = LocalAccent.current.accentInk
     // Seeded from the first isFocused so a card mounted already focused snaps, never grows in.
     val progress = remember { Animatable(if (isFocused) 1f else 0f) }
     val scaleProgress = remember { Animatable(if (isFocused) 1f else 0f) }
@@ -236,7 +238,7 @@ fun ArtBox(
                     val strokeWidthPx = RING_WIDTH.toPx()
                     val outset = strokeWidthPx / 2f + RING_GAP.toPx()
                     drawRoundRect(
-                        color = JellybeamTheme.Pistacchio.copy(alpha = ringAlpha),
+                        color = ringInk.copy(alpha = ringAlpha),
                         topLeft = Offset(-outset, -outset),
                         size = Size(size.width + outset * 2, size.height + outset * 2),
                         style = Stroke(width = strokeWidthPx),
@@ -251,15 +253,14 @@ fun ArtBox(
  * The same accent ring [ArtBox] draws, factored out as a plain [Modifier] so tab chips, hero
  * buttons and Settings rows share one width/outset geometry instead of hand-rolling a border.
  * Unlike ArtBox's ring this doesn't fade -- a boolean toggle is enough for non-scaling chrome.
- * [color] defaults to [JellybeamTheme.Pistacchio], overridable (e.g. [JellybeamTheme.Sheen] on an
- * already-Pistacchio control). Prepends `zIndex(1f)` while focused (docs/15 §0.3) so the ring,
+ * [color] is the accent ink on a dark ground, or the accent sheen on an accent-filled control. Prepends `zIndex(1f)` while focused (docs/15 §0.3) so the ring,
  * drawn outside the element's layout bounds, paints after siblings regardless of paint order.
  * [width] and [gap] default to the shared 3 dp ring; a thinner ring passes both.
  */
 fun Modifier.focusRing(
     isFocused: Boolean,
     cornerRadius: Dp = ART_RADIUS,
-    color: Color = JellybeamTheme.Pistacchio,
+    color: Color,
     width: Dp = RING_WIDTH,
     gap: Dp = RING_GAP,
 ): Modifier = this
@@ -574,18 +575,19 @@ fun CardArtImage(
 /** docs/07 §1: 3dp progress bar inside the art's bottom edge; fill=accent, track=accent@30%. */
 @Composable
 fun BoxScope.WatchProgressBar(fraction: Float) {
+    val accent = LocalAccent.current
     Box(
         modifier = Modifier
             .align(Alignment.BottomCenter)
             .fillMaxWidth()
             .height(3.dp)
-            .background(JellybeamTheme.ProgressTrack),
+            .background(accent.progressTrack),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth(fraction.coerceIn(0f, 1f))
                 .height(3.dp)
-                .background(JellybeamTheme.Pistacchio),
+                .background(accent.accentInk),
         )
     }
 }
@@ -593,12 +595,13 @@ fun BoxScope.WatchProgressBar(fraction: Float) {
 /** docs/07 §1: watch-state badge, top-right, ~20dp -- unplayed count pill XOR watched checkmark. */
 @Composable
 fun BoxScope.WatchBadge(indicator: WatchIndicator) {
+    val accent = LocalAccent.current
     when (indicator) {
         is WatchIndicator.Count -> Box(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(4.dp)
-                .background(JellybeamTheme.Pistacchio, RoundedCornerShape(50)),
+                .background(accent.accent, RoundedCornerShape(50)),
         ) {
             BasicText(
                 text = indicator.count.toString(),
@@ -606,7 +609,7 @@ fun BoxScope.WatchBadge(indicator: WatchIndicator) {
                 style = TextStyle(
                     fontFamily = JellybeamTheme.Archivo,
                     fontWeight = FontWeight.SemiBold,
-                    color = JellybeamTheme.Notte,
+                    color = accent.onAccent,
                     fontSize = 11.sp,
                 ),
             )

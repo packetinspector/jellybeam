@@ -577,10 +577,11 @@ interface CoreGateway {
 
     /** One authenticated round trip. Browse reads the mirror, so a revoked token is otherwise
      * unnoticed until the first Play; a 401 here reaches re-authorization through
-     * [RealCoreGateway]'s seam like any other call's.
+     * [RealCoreGateway]'s seam like any other call's. Returns whether the reply changed a
+     * saved or shown name, so the account list needs a re-read.
      */
     @Throws(CoreException::class)
-    suspend fun validateSession()
+    suspend fun validateSession(): Boolean
 
     /** docs/07 Watch state: the app came to the foreground; the core refreshes played state in
      * the background. Runs on [Dispatchers.IO]; the core never does network work inline. */
@@ -1240,7 +1241,7 @@ internal class RealCoreGateway(
     override suspend fun refreshMetadata(itemId: String) =
         ffi("ffi.refreshMetadata") { refreshMetadata(itemId) }
 
-    override suspend fun validateSession() =
+    override suspend fun validateSession(): Boolean =
         ffi("ffi.validateSession") { validateSession() }
 
     override suspend fun onForeground() = ffi("ffi.onForeground") { onForeground() }

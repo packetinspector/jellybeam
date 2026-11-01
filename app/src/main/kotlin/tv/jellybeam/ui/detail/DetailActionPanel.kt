@@ -70,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.focusRing
@@ -101,9 +102,6 @@ private val PanelGround = Color(0xFF100D0B)
 /** `#6B6157` -- unfocused row/heading-label state text. */
 private val PanelMuted = Color(0xFF6B6157)
 
-/** `#2E3A18` -- focused row's subtext colour (not the label's Notte). */
-private val PanelFocusedSubtext = Color(0xFF2E3A18)
-
 /** `rgba(7,6,5,0.9)` -- the shadow gradient's edge stop, adjacent to the panel. */
 private val PanelShadowEdge = Color(0xFF070605).copy(alpha = 0.9f)
 
@@ -119,8 +117,9 @@ internal fun MenuDoorPill(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
 
-    Box(modifier = modifier.focusRing(isFocused = isFocused, cornerRadius = size / 2, color = JellybeamTheme.Sheen)) {
+    Box(modifier = modifier.focusRing(isFocused = isFocused, cornerRadius = size / 2, color = accent.accentSheen)) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
@@ -128,12 +127,12 @@ internal fun MenuDoorPill(
                 .size(size)
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .clip(CircleShape)
-                .background(JellybeamTheme.Pistacchio)
+                .background(accent.accent)
                 .clickable(interactionSource = interactionSource, indication = null, onClick = onOpen),
         ) {
             BasicText(
                 text = "···",
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = JellybeamTheme.Notte, fontSize = 15.sp),
+                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = accent.onAccent, fontSize = 15.sp),
             )
         }
     }
@@ -338,13 +337,14 @@ private fun PanelHeader(itemName: String, seasonNumber: Int?, level: MenuLevel) 
     val actionsLabel = stringResource(R.string.detail_menu_kicker_actions).uppercaseUi()
     val seasonLabel = seasonNumber?.let { stringResource(R.string.detail_menu_kicker_season, it).uppercaseUi() }
     val collectionsLabel = stringResource(R.string.detail_menu_collections_header).uppercaseUi()
-    val kicker = remember(level, actionsLabel, seasonLabel, collectionsLabel) {
+    val ink = LocalAccent.current.accentInk
+    val kicker = remember(level, actionsLabel, seasonLabel, collectionsLabel, ink) {
         buildAnnotatedString {
             if (level == MenuLevel.COLLECTIONS) {
                 withStyle(SpanStyle(color = JellybeamTheme.HairlineStrong)) { append("◂ ") }
-                withStyle(SpanStyle(color = JellybeamTheme.Pistacchio)) { append(collectionsLabel) }
+                withStyle(SpanStyle(color = ink)) { append(collectionsLabel) }
             } else {
-                withStyle(SpanStyle(color = JellybeamTheme.Pistacchio)) { append(actionsLabel) }
+                withStyle(SpanStyle(color = ink)) { append(actionsLabel) }
                 if (seasonLabel != null) {
                     withStyle(SpanStyle(color = JellybeamTheme.HairlineStrong)) { append(" │ ") }
                     withStyle(SpanStyle(color = JellybeamTheme.Grigio)) { append(seasonLabel) }
@@ -398,6 +398,7 @@ private fun PanelActionRow(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
 
     var rowModifier: Modifier = Modifier
     if (focusable && focusRequester != null) rowModifier = rowModifier.focusRequester(focusRequester)
@@ -406,7 +407,7 @@ private fun PanelActionRow(
         .fillMaxWidth()
         .padding(horizontal = if (isFocused) PANEL_FOCUSED_INSET else PANEL_SIDE_PADDING)
         .alpha(if (dimmed) 0.4f else 1f)
-    if (isFocused) rowModifier = rowModifier.clip(RoundedCornerShape(50)).background(JellybeamTheme.Pistacchio)
+    if (isFocused) rowModifier = rowModifier.clip(RoundedCornerShape(50)).background(accent.accent)
     if (focusable) rowModifier = rowModifier.clickable(interactionSource = interactionSource, indication = null, onClick = onSelect)
     rowModifier = rowModifier.padding(horizontal = if (isFocused) PANEL_FOCUSED_HPADDING else 0.dp, vertical = 7.dp)
 
@@ -419,7 +420,7 @@ private fun PanelActionRow(
             style = TextStyle(
                 fontFamily = JellybeamTheme.Archivo,
                 fontWeight = if (isFocused) FontWeight.SemiBold else FontWeight.Normal,
-                color = if (isFocused) JellybeamTheme.Notte else JellybeamTheme.Panna2,
+                color = if (isFocused) accent.onAccent else JellybeamTheme.Panna2,
                 fontSize = 13.sp,
             ),
         )
@@ -432,7 +433,7 @@ private fun PanelActionRow(
                 overflow = TextOverflow.Ellipsis,
                 style = TextStyle(
                     fontFamily = JellybeamTheme.MartianMono,
-                    color = if (isFocused) PanelFocusedSubtext else PanelMuted,
+                    color = if (isFocused) accent.onAccentMuted else PanelMuted,
                     fontSize = 8.sp,
                     letterSpacing = (-0.02).em,
                 ),
@@ -490,6 +491,7 @@ private fun BulkConfirmBlock(
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
 ) {
+    val accent = LocalAccent.current
     val title = if (confirm.played) {
         pluralStringResource(R.plurals.detail_menu_confirm_watched_title, confirm.count, confirm.count)
     } else {
@@ -511,7 +513,7 @@ private fun BulkConfirmBlock(
             .padding(horizontal = PANEL_FOCUSED_INSET)
             .clip(RoundedCornerShape(7.dp))
             .background(JellybeamTheme.Notte)
-            .border(1.dp, JellybeamTheme.Pistacchio, RoundedCornerShape(7.dp))
+            .border(1.dp, accent.accentInk, RoundedCornerShape(7.dp))
             .padding(13.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -528,14 +530,15 @@ private fun BulkConfirmBlock(
 private fun ConfirmPillButton(label: String, primary: Boolean, onClick: () -> Unit, focusRequester: FocusRequester? = null) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    val ringColor = if (primary) JellybeamTheme.Sheen else JellybeamTheme.Pistacchio
+    val accent = LocalAccent.current
+    val ringColor = if (primary) accent.accentSheen else accent.accentInk
 
     Box(modifier = Modifier.focusRing(isFocused = isFocused, cornerRadius = 999.dp, color = ringColor)) {
         Box(
             modifier = Modifier
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .clip(RoundedCornerShape(50))
-                .background(if (primary) JellybeamTheme.Pistacchio else Color.Transparent)
+                .background(if (primary) accent.accent else Color.Transparent)
                 .let { if (!primary) it.border(1.dp, JellybeamTheme.HairlineStrong, RoundedCornerShape(50)) else it }
                 .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
                 .padding(horizontal = 14.dp, vertical = 7.dp),
@@ -545,7 +548,7 @@ private fun ConfirmPillButton(label: String, primary: Boolean, onClick: () -> Un
                 style = TextStyle(
                     fontFamily = JellybeamTheme.Archivo,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (primary) JellybeamTheme.Notte else JellybeamTheme.Panna,
+                    color = if (primary) accent.onAccent else JellybeamTheme.Panna,
                     fontSize = 11.5.sp,
                 ),
             )

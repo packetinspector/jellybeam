@@ -50,6 +50,7 @@ import java.util.Date
 import kotlinx.coroutines.delay
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.i18n.rememberUiStrings
@@ -310,7 +311,7 @@ private fun Eyebrow(role: Int) = Eyebrow(stringResource(role))
 @Composable
 internal fun Eyebrow(role: String) {
     Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-        Mono(stringResource(R.string.wt_eyebrow), 11.sp, JellybeamTheme.Pistacchio)
+        Mono(stringResource(R.string.wt_eyebrow), 11.sp, LocalAccent.current.accentInk)
         Mono("│", 11.sp, JellybeamTheme.Hairline)
         Mono(role, 11.sp, JellybeamTheme.Panna2)
     }
@@ -346,6 +347,7 @@ private fun Log(line: LogLine) {
 
 @Composable
 private fun MemberList(rows: List<MemberRow>) {
+    val accent = LocalAccent.current
     Column(modifier = Modifier.width(280.dp)) {
         Mono(stringResource(R.string.wt_members, rows.size), 8.5.sp, JellybeamTheme.Grigio, Modifier.padding(bottom = 6.dp))
         rows.forEach { row ->
@@ -364,7 +366,7 @@ private fun MemberList(rows: List<MemberRow>) {
                     overflow = TextOverflow.Ellipsis,
                     style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = JellybeamTheme.Panna, fontSize = 14.sp),
                 )
-                Mono(stringResource(row.tag.label), 8.5.sp, if (row.own) JellybeamTheme.Pistacchio else JellybeamTheme.Grigio)
+                Mono(stringResource(row.tag.label), 8.5.sp, if (row.own) accent.accentInk else JellybeamTheme.Grigio)
             }
         }
     }
@@ -383,16 +385,17 @@ private fun RoomName(name: String) {
 
 /**
  * docs/15 §4: [inert] keeps the pill focusable but ignores Select, since a disabled focused node drops focus.
- * Focus draws a Sheen [focusRing] outside the pill; a primary pill adds a ground-coloured gap inside it.
+ * Focus draws an accent-sheen [focusRing] outside the pill; a primary pill adds a ground-coloured gap inside it.
  */
 @Composable
 private fun Pill(label: String, onClick: () -> Unit, modifier: Modifier, inert: Boolean = false, primary: Boolean = false) {
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
-    val fill = if (primary) JellybeamTheme.Pistacchio else Color.Transparent
+    val accent = LocalAccent.current
+    val fill = if (primary) accent.accent else Color.Transparent
     Box(
         modifier = modifier
-            .focusRing(focused, 50.dp, JellybeamTheme.Sheen, width = PILL_RING, gap = if (primary) PILL_RING else 0.dp)
+            .focusRing(focused, 50.dp, accent.accentSheen, width = PILL_RING, gap = if (primary) PILL_RING else 0.dp)
             .background(fill, PILL_SHAPE)
             .then(if (primary) Modifier else Modifier.border(0.5.dp, JellybeamTheme.HairlineStrong, PILL_SHAPE))
             .clickable(interactionSource = interactionSource, indication = null, onClick = { if (!inert) onClick() })
@@ -404,7 +407,7 @@ private fun Pill(label: String, onClick: () -> Unit, modifier: Modifier, inert: 
                 fontFamily = JellybeamTheme.Archivo,
                 fontWeight = FontWeight.SemiBold,
                 color = when {
-                    primary -> JellybeamTheme.Notte
+                    primary -> accent.onAccent
                     inert -> JellybeamTheme.Grigio
                     else -> JellybeamTheme.Panna
                 },

@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.ui.cards.focusRing
@@ -365,8 +366,8 @@ private fun HairlineRule() {
     Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(JellybeamTheme.Hairline))
 }
 
-/** Strip chip vocabulary (§4.2): fully rounded, Archivo SemiBold 16sp, Pistacchio/Notte fill when
- * [active]; [focusRing] uses the Sheen-on-Pistacchio rule other filled controls use.
+/** Strip chip vocabulary (§4.2): fully rounded, Archivo SemiBold 16sp, accent/onAccent fill when
+ * [active]; [focusRing] uses the sheen-on-accent rule other filled controls use.
  */
 @Composable
 private fun StripChip(
@@ -380,17 +381,18 @@ private fun StripChip(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+    val accent = LocalAccent.current
 
     Box(
         modifier = modifier
-            .focusRing(isFocused, cornerRadius = STRIP_CHIP_HEIGHT / 2, color = if (active) JellybeamTheme.Sheen else JellybeamTheme.Pistacchio)
+            .focusRing(isFocused, cornerRadius = STRIP_CHIP_HEIGHT / 2, color = if (active) accent.accentSheen else accent.accentInk)
             .let { if (onTopPositioned != null) it.onGloballyPositioned { coords -> onTopPositioned(coords.positionInParent().y) } else it },
     ) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
                 .height(STRIP_CHIP_HEIGHT)
-                .let { if (active) it.background(JellybeamTheme.Pistacchio, RoundedCornerShape(50)) else it }
+                .let { if (active) it.background(accent.accent, RoundedCornerShape(50)) else it }
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .onFocusChanged { onFocusChange(it.isFocused) }
                 .clickable(interactionSource = interactionSource, indication = null, onClick = onSelect)
@@ -402,7 +404,7 @@ private fun StripChip(
                     fontFamily = JellybeamTheme.Archivo,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 16.sp,
-                    color = if (active) JellybeamTheme.Notte else JellybeamTheme.Panna2,
+                    color = if (active) accent.onAccent else JellybeamTheme.Panna2,
                 ),
             )
         }

@@ -2741,7 +2741,7 @@ class PlaybackViewModelTest {
             assertEquals(2, picker!!.audioTracks.size)
             assertEquals("English", picker.audioTracks[0].label)
             assertTrue("the currently-selected audio track must read as selected", picker.audioTracks[0].selected)
-            assertEquals(japaneseAudioInfo.lang, picker.audioTracks[1].label)
+            assertEquals("Japanese", picker.audioTracks[1].label)
             assertFalse(picker.audioTracks[1].selected)
             assertEquals(englishAudioInfo.id, picker.audioTracks[0].id)
 
@@ -2752,6 +2752,29 @@ class PlaybackViewModelTest {
             assertEquals("English", picker.subtitleTracks[1].label)
             assertFalse(picker.subtitleTracks[1].selected)
         }
+    }
+
+    @Test
+    fun `a picker row carries the server's SDH and codec only while the file's streams pair up with its tracks`() = runTest(timeout = TEST_TIMEOUT) {
+        suspend fun subtitleMeta(streamLanguage: String): String? {
+            val stream = EmbeddedSubtitleFfi(index = 2, language = streamLanguage, title = null, forced = false, default = false, codec = "ass", hearingImpaired = true)
+            val plan = samplePlan(embeddedSubtitles = listOf(stream), externalSubtitles = listOf(sampleSidecar().copy(hearingImpaired = true)))
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(FakeCoreGateway(preparePlaybackResult = Result.success(plan)), player, plan.itemId)
+            var meta: String? = null
+            withSession(viewModel) {
+                val tracks = pickerTracks()
+                player.fireTracksChanged(tracks)
+                viewModel.openTrackPicker()
+                val rows = viewModel.state.value.trackPicker!!.subtitleTracks
+                assertEquals("the sidecar's own flag needs no pairing", "SRT · SDH · External", rows.single { it.id == ExternalSubtitles.idFor(5) }.meta)
+                val embeddedId = TrackMapping.toTrackInfos(tracks).single { it.kind == TrackKindFfi.SUBTITLE }.id
+                meta = rows.single { it.id == embeddedId }.meta
+            }
+            return meta
+        }
+        assertEquals("English · ASS · SDH", subtitleMeta("eng"))
+        assertEquals("English · VTT", subtitleMeta("fre"))
     }
 
     @Test
@@ -4693,7 +4716,7 @@ class PlaybackViewModelTest {
             viewModel.openTrackPicker()
             val sidecarId = ExternalSubtitles.idFor(5)
             val row = viewModel.state.value.trackPicker!!.subtitleTracks.single { it.id == sidecarId }
-            assertEquals("en srt · External", row.meta)
+            assertEquals("SRT · External", row.meta)
             assertTrue("nothing is fetched before the pick", gateway.fetchExternalSubtitleCalls.isEmpty())
 
             viewModel.chooseSubtitle(sidecarId)
@@ -4810,7 +4833,7 @@ class PlaybackViewModelTest {
             assertEquals(PlaybackEvent.SubtitleUnavailable, viewModel.events.replayCache.last())
             val rows = viewModel.state.value.trackPicker!!.subtitleTracks
             assertTrue("Off reads selected again", rows.first().selected)
-            assertEquals("en srt · External · Unavailable", rows.single { it.id == ExternalSubtitles.idFor(5) }.meta)
+            assertEquals("SRT · External · Unavailable", rows.single { it.id == ExternalSubtitles.idFor(5) }.meta)
             assertTrue("a broken file is never remembered for the series", gateway.rememberTrackMemoryCalls.isEmpty())
         }
     }
@@ -4990,11 +5013,11 @@ class PlaybackViewModelTest {
         withSession(viewModel) {
             player.fireTracksChanged(pickerTracks())
             viewModel.chooseSubtitle(ExternalSubtitles.idFor(5))
-            assertEquals("en srt · External · Loading…", sidecarMeta(viewModel, 5))
+            assertEquals("SRT · External · Loading…", sidecarMeta(viewModel, 5))
 
             viewModel.chooseSubtitle(ExternalSubtitles.idFor(7))
             assertSame(cues["seven"], viewModel.state.value.sidecarCues)
-            assertEquals("the abandoned load stops reading Loading", "en srt · External", sidecarMeta(viewModel, 5))
+            assertEquals("the abandoned load stops reading Loading", "SRT · External", sidecarMeta(viewModel, 5))
 
             gate.complete(Unit)
             runCurrent()
@@ -5028,7 +5051,7 @@ class PlaybackViewModelTest {
 
             assertNull("item-1's file never draws over item-2", viewModel.state.value.sidecarCues)
             player.fireTracksChanged(pickerTracks())
-            assertEquals("item-2's row was never loaded or chosen", "en srt · External", sidecarMeta(viewModel, 5))
+            assertEquals("item-2's row was never loaded or chosen", "SRT · External", sidecarMeta(viewModel, 5))
             assertFalse(viewModel.state.value.trackPicker!!.subtitleTracks.single { it.id == ExternalSubtitles.idFor(5) }.selected)
         }
     }
@@ -5123,7 +5146,7 @@ class PlaybackViewModelTest {
             oldFetch.complete(Unit)
             runCurrent()
             assertFalse("the old session's refusal is not the file failing", viewModel.events.replayCache.any { it == PlaybackEvent.SubtitleUnavailable })
-            assertEquals("still chosen while the swap negotiates", "en srt · External · Loading…", sidecarMeta(viewModel, 5))
+            assertEquals("still chosen while the swap negotiates", "SRT · External · Loading…", sidecarMeta(viewModel, 5))
 
             negotiation.complete(Unit)
             runCurrent()
@@ -5174,7 +5197,7 @@ class PlaybackViewModelTest {
 
             assertEquals("never asked again", listOf("session-1" to 5), gateway.fetchExternalSubtitleCalls)
             assertNull(viewModel.state.value.sidecarCues)
-            assertEquals("en srt · External", sidecarMeta(viewModel, 5))
+            assertEquals("SRT · External", sidecarMeta(viewModel, 5))
         }
     }
 

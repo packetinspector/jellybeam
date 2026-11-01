@@ -6,6 +6,15 @@ import org.junit.Test
 class PlaybackTimeFormatTest {
 
     @Test
+    fun `showsHours agrees with the format at the hour boundary`() {
+        assertEquals(false, PlaybackTimeFormat.showsHours(null))
+        assertEquals(false, PlaybackTimeFormat.showsHours(3_599_999L))
+        assertEquals("59:59", PlaybackTimeFormat.format(3_599_999L))
+        assertEquals(true, PlaybackTimeFormat.showsHours(3_600_000L))
+        assertEquals("1:00:00", PlaybackTimeFormat.format(3_600_000L))
+    }
+
+    @Test
     fun `under an hour formats as M-SS`() {
         assertEquals("0:00", PlaybackTimeFormat.format(0L))
         assertEquals("0:09", PlaybackTimeFormat.format(9_000L))

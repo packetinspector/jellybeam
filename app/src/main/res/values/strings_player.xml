@@ -100,8 +100,9 @@
     <string name="player_subtitle_delay_track">%1$s · %2$s</string>
     <string name="player_track_default_name">Track %1$d</string>
     <string name="player_track_external">External</string>
-    <string name="player_track_external_meta">%1$s · External</string>
-    <string name="player_track_status_meta">%1$s · %2$s</string>
+    <string name="player_track_forced">Forced</string>
+    <string name="player_track_sdh">SDH</string>
+    <string name="player_track_meta_join">%1$s · %2$s</string>
     <string name="player_track_loading">Loading…</string>
     <string name="player_track_unavailable">Unavailable</string>
     <string name="player_subtitle_unavailable">These subtitles couldn\'t be loaded</string>

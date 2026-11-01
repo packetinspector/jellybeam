@@ -72,6 +72,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.PlaceholderTile
@@ -359,6 +360,7 @@ private fun DiscoverDetailContent(
 ) {
     val card = state.card ?: return
     val context = LocalContext.current
+    val accent = LocalAccent.current
 
     // Provided at the scrolling container itself; see [rememberHeaderPageBringIntoViewSpec].
     val pageScrollState = rememberScrollState()
@@ -425,7 +427,7 @@ private fun DiscoverDetailContent(
 
                 BasicText(
                     text = card.availability.detailLabel(),
-                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = JellybeamTheme.Pistacchio, fontSize = 14.sp),
+                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = accent.accentInk, fontSize = 14.sp),
                 )
 
                 card.overview?.let { overview ->
@@ -601,6 +603,7 @@ private fun PersonRefShelf(
     onOpenPerson: (Long) -> Unit,
     memory: FocusMemory,
 ) {
+    val accent = LocalAccent.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         ShelfTitle(title)
         ShelfRow(listState) {
@@ -616,7 +619,7 @@ private fun PersonRefShelf(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Box(modifier = Modifier.size(72.dp).focusRing(isFocused = isFocused, cornerRadius = 36.dp).clip(CircleShape).background(JellybeamTheme.SurfaceRaised)) {
+                    Box(modifier = Modifier.size(72.dp).focusRing(isFocused = isFocused, cornerRadius = 36.dp, color = accent.accentInk).clip(CircleShape).background(JellybeamTheme.SurfaceRaised)) {
                         if (person.profileUrl != null) {
                             AsyncImage(
                                 model = person.profileUrl,
@@ -688,7 +691,7 @@ private fun CardShelf(
 
 /** House pill-button recipe (fill-on-focus vocabulary shared with
  * [tv.jellybeam.ui.signin.SignInScreen]'s `SignInButton`/settings chips); `primary` spends the one
- * Pistacchio-filled action per row when idle. `enabled = false` takes the pill out of focus;
+ * accent-bordered action per row when idle. `enabled = false` takes the pill out of focus;
  * `inert` keeps it focusable but ignores Select, so a busy state never strands focus (docs/15 §4). */
 @Composable
 private fun ActionPill(
@@ -702,24 +705,25 @@ private fun ActionPill(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    // One green per meaning: focused pill is the only fill, `primary` is the only green border,
+    val accent = LocalAccent.current
+    // One accent per meaning: focused pill is the only fill, `primary` is the only accent border,
     // `selected` is accent text on the ordinary hairline chip.
     val background = when {
         !isFocused -> Color.Transparent
-        inert -> JellybeamTheme.Pistacchio.copy(alpha = 0.5f)
-        else -> JellybeamTheme.Pistacchio
+        inert -> accent.accent.copy(alpha = 0.5f)
+        else -> accent.accent
     }
     val textColor = when {
-        isFocused -> JellybeamTheme.Notte
+        isFocused -> accent.onAccent
         inert -> JellybeamTheme.Grigio
-        selected -> JellybeamTheme.Pistacchio
+        selected -> accent.accentInk
         else -> JellybeamTheme.Panna
     }
 
     Box(
         modifier = modifier
             .background(background, RoundedCornerShape(50))
-            .then(if (!isFocused) Modifier.border(1.dp, if (primary) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline, RoundedCornerShape(50)) else Modifier)
+            .then(if (!isFocused) Modifier.border(1.dp, if (primary) accent.accentInk else JellybeamTheme.Hairline, RoundedCornerShape(50)) else Modifier)
             .clickable(interactionSource = interactionSource, indication = null, enabled = enabled, onClick = { if (!inert) onClick() })
             .padding(horizontal = 18.dp, vertical = 10.dp),
     ) {
@@ -952,17 +956,18 @@ private fun DialogKicker(text: String) {
 
 @Composable
 private fun SeasonCheckbox(checked: Boolean, inert: Boolean) {
+    val accent = LocalAccent.current
     Box(
         modifier = Modifier
             .size(20.dp)
-            .background(if (checked) JellybeamTheme.Pistacchio else Color.Transparent, RoundedCornerShape(4.dp))
-            .border(1.dp, if (checked) JellybeamTheme.Pistacchio else JellybeamTheme.Hairline, RoundedCornerShape(4.dp)),
+            .background(if (checked) accent.accent else Color.Transparent, RoundedCornerShape(4.dp))
+            .border(1.dp, if (checked) accent.accent else JellybeamTheme.Hairline, RoundedCornerShape(4.dp)),
         contentAlignment = Alignment.Center,
     ) {
         if (checked) {
             BasicText(
                 text = "✓",
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = if (inert) JellybeamTheme.Grigio else JellybeamTheme.Notte, fontSize = 12.sp),
+                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = if (inert && !accent.deep) JellybeamTheme.Grigio else accent.onAccent, fontSize = 12.sp),
             )
         }
     }
