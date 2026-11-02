@@ -377,7 +377,8 @@ payload.
 `set_settings`, tolerant load/migration, atomic file replacement and ordered
 Settings-screen saves); Appearance section (twelve accent colours in light and
 deep shades with a live preview; OK applies across the app at once, Back keeps
-the current one; the logo stays Pistacchio); Home section (Next Up cutoff
+the current one; the header mascot and wordmark follow the accent and appear in
+the preview, while launcher art and other mascot poses stay Pistacchio); Home section (Next Up cutoff
 presets + rewatching toggle, per-library Home visibility, shelf size (10/20/30,
 default 20, every Home row), Resume art chips for Continue Watching and Next Up (Episode / Series thumb / Poster), Favorites row toggle, hide-watched-in-Latest,
 startup screen picker, clock toggle, show/hide missing episodes); Playback

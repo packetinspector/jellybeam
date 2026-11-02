@@ -57,11 +57,12 @@ mark and colour rules.
 | PANNA | `#F7E9CE` |
 | PANNA-2 | `#C9C0B2` |
 | GRIGIO | `#8C8478` |
-| PISTACCHIO | `#A8CB6B` — the default accent, and always the logo's |
+| PISTACCHIO | `#A8CB6B` — the default accent, and always the launcher's and non-base poses' |
 | SHEEN | `#C6DE9B` |
 
 One accent at a time (Settings > Appearance picks from twelve, `AccentSchemes`
-in `JellybeamTheme.kt`; the mascot, wordmark and launch dot stay Pistacchio;
+in `JellybeamTheme.kt`; the base mascot, wordmark and launch dot follow it, while
+launcher art and the other poses stay Pistacchio;
 fills use `accent`, text on them `onAccent`, rings on fills `accentSheen`, text
 and thin bars on dark `accentInk`), warm neutrals, no gradients, glows, or translucency **in the
 UI**. The single exception is inside the mascot art itself (§5).
@@ -70,7 +71,7 @@ UI**. The single exception is inside the mascot art itself (§5).
 
 - Font: **Bagel Fat One** (Google Fonts, SIL OFL), used only for the word
   "Jellybeam".
-- Two colours: `Jelly` in PANNA, `beam` in PISTACCHIO.
+- Two colours: `Jelly` in PANNA, `beam` in the accent's `accentInk`.
 - **One kerning adjustment:** −0.03em between the `y` and the `b`. Nothing
   else is tracked or kerned; one baseline.
 - In Compose, it's one `Text` built from an `AnnotatedString` with two
@@ -79,7 +80,7 @@ UI**. The single exception is inside the mascot art itself (§5).
 - **Rays** (the three bars over the `m`) appear only on the launch screen
   and in marketing, never in the app header. Geometry, in em of the
   wordmark size:
-  - Bar width 0.107em, fully rounded ends, PISTACCHIO.
+  - Bar width 0.107em, fully rounded ends, `accentInk`.
   - Group box 0.6 × 0.467em. Its right edge sits 0.04em past the end of
     `beam`, and its top 1.16em above the baseline.
   - A: x 0.067, y 0.093, length 0.293, −24°. B: x 0.267, y 0, length
@@ -104,7 +105,9 @@ Rules for tier 2:
   backing halo: two stacked drop shadows in NOTTE, 3px blur at 90% opacity
   and 22px blur at 75%.
 - Display at 96dp or larger for states. Keep the aspect ratio
-  (`ContentScale.Fit`). Don't tint, recolour, or crop.
+  (`ContentScale.Fit`). Don't tint, recolour, or crop at runtime. The base pose
+  has one painted file per accent (`jb_mascot_base_<key>.webp`, at most 240px, so
+  decoding stays cheap).
 - Pose → state:
 
 | Pose | Where |
@@ -148,7 +151,7 @@ After the system splash (Android 12+ `SplashScreen`: background
 holds until the first server response.
 - Fast pose, 280dp wide.
 - 22dp gap, then the wordmark at 66sp **with rays** (§4).
-- 22dp gap, then a status row: 6dp PISTACCHIO dot, 6dp gap, `CONNECTING ·
+- 22dp gap, then a status row: 6dp `accentInk` dot, 6dp gap, `CONNECTING ·
   <HOST>` in Martian Mono 11sp, GRIGIO.
 - If the connection fails, the screen stays up, the status swaps to
   `SERVER UNREACHABLE · <HOST>`, and the existing error flow proceeds.

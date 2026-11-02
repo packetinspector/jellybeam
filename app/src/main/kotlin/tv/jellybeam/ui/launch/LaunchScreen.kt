@@ -20,6 +20,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.i18n.rememberUiStrings
@@ -46,7 +47,7 @@ fun LaunchScreen(host: String?, unreachable: Boolean, modifier: Modifier = Modif
         JellybeamWordmark(size = 66.sp, rays = true)
         Spacer(Modifier.height(22.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(6.dp).background(JellybeamTheme.Pistacchio, CircleShape))
+            Box(Modifier.size(6.dp).background(LocalAccent.current.accentInk, CircleShape))
             Spacer(Modifier.width(6.dp))
             BasicText(
                 text = launchStatusText(rememberUiStrings(), host, unreachable),

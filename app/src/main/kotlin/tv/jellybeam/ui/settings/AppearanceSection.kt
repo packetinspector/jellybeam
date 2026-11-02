@@ -47,6 +47,7 @@ import tv.jellybeam.R
 import tv.jellybeam.accentSchemeFor
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.ui.cards.focusRing
+import tv.jellybeam.ui.theme.JellybeamHeaderLockup
 
 /** Swatch columns per row (docs/09): lights fill the first row, each deep sits under its light partner. */
 internal const val ACCENT_COLUMNS = 6
@@ -211,49 +212,59 @@ private fun AccentSwatch(
     }
 }
 
-/** Static sample of the accent in use (fills, primary pill, thin bar); [LocalAccent] is overridden around it. */
+/** Static sample of the accent in use (logo, fills, primary pill, thin bar); [LocalAccent] is overridden around it. */
 @Composable
 private fun AccentPreviewCard() {
     val accent = LocalAccent.current
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(JellybeamTheme.Surface, GRID_SHAPE)
             .padding(horizontal = 16.dp, vertical = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         SectionHeader(stringResource(R.string.settings_appearance_preview), Modifier)
-        Row(
-            modifier = Modifier.weight(1f).background(accent.accent, RoundedCornerShape(5.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            BasicText(
-                text = stringResource(R.string.settings_appearance_sample_title),
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = accent.onAccent, fontSize = 13.sp),
-            )
-            BasicText(
-                text = stringResource(R.string.settings_appearance_sample_count).uppercaseUi(),
-                style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = accent.onAccent, fontSize = 9.sp),
-            )
-        }
-        // Always drawn as focused: the sample is not interactive and shows the ring in this accent's sheen.
+        // The real Home header (docs/brand.md §6.1) on its own ground, so the sample cannot drift from it.
         Box(
             modifier = Modifier
-                .padding(vertical = 4.dp)
-                .focusRing(true, cornerRadius = 50.dp, color = accent.accentSheen, width = 2.dp, gap = 2.dp)
-                .background(accent.accent, RoundedCornerShape(50))
-                .padding(horizontal = 20.dp, vertical = 8.dp),
+                .fillMaxWidth()
+                .background(JellybeamTheme.Notte, RoundedCornerShape(5.dp))
+                .padding(horizontal = 16.dp, vertical = 16.dp),
         ) {
-            BasicText(
-                text = stringResource(R.string.settings_appearance_sample_start),
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = accent.onAccent, fontSize = 14.sp),
-            )
+            JellybeamHeaderLockup()
         }
-        // Thin bars use ink (docs/brand.md), not the fill colour.
-        Box(Modifier.width(100.dp).height(4.dp).background(JellybeamTheme.Hairline, RoundedCornerShape(2.dp))) {
-            Box(Modifier.fillMaxWidth(0.62f).height(4.dp).background(accent.accentInk, RoundedCornerShape(2.dp)))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.weight(1f).background(accent.accent, RoundedCornerShape(5.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BasicText(
+                    text = stringResource(R.string.settings_appearance_sample_title),
+                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = accent.onAccent, fontSize = 13.sp),
+                )
+                BasicText(
+                    text = stringResource(R.string.settings_appearance_sample_count).uppercaseUi(),
+                    style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = accent.onAccent, fontSize = 9.sp),
+                )
+            }
+            // Always drawn as focused: the sample is not interactive and shows the ring in this accent's sheen.
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 4.dp)
+                    .focusRing(true, cornerRadius = 50.dp, color = accent.accentSheen, width = 2.dp, gap = 2.dp)
+                    .background(accent.accent, RoundedCornerShape(50))
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
+            ) {
+                BasicText(
+                    text = stringResource(R.string.settings_appearance_sample_start),
+                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.Bold, color = accent.onAccent, fontSize = 14.sp),
+                )
+            }
+            // Thin bars use ink (docs/brand.md), not the fill colour.
+            Box(Modifier.width(100.dp).height(4.dp).background(JellybeamTheme.Hairline, RoundedCornerShape(2.dp))) {
+                Box(Modifier.fillMaxWidth(0.62f).height(4.dp).background(accent.accentInk, RoundedCornerShape(2.dp)))
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 package tv.jellybeam
 
+import androidx.annotation.DrawableRes
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -39,7 +40,7 @@ object JellybeamTheme {
     /** Tertiary/muted text. */
     val Grigio = Color(0xFF8C8478)
 
-    /** The default accent and the logo's fixed colour; every other site reads [LocalAccent] (docs/brand.md). */
+    /** The default accent and the launcher's and non-base poses' fixed colour; every other site reads [LocalAccent] (docs/brand.md). */
     val Pistacchio = Color(0xFFA8CB6B)
 
     /** A lighter highlight, paired with [Pistacchio]. */
@@ -131,6 +132,8 @@ data class AccentScheme(
     val accent: Color,
     val accentSheen: Color,
     val onAccent: Color,
+    /** This flavour's base-pose mascot (docs/brand.md §5); other poses stay Pistacchio. */
+    @param:DrawableRes val mascot: Int,
     /** Season chip's unfilled tank when a partly-present season is selected (docs/11 §12); [onAccent] stays readable on it. */
     val accentTankEmpty: Color =
         if (deep) lerp(accent, JellybeamTheme.Notte, 0.5f) else lerp(accentSheen, JellybeamTheme.Panna, 0.5f),
@@ -144,14 +147,15 @@ data class AccentScheme(
     val progressTrack: Color get() = accentInk.copy(alpha = 0.3f)
 }
 
-private fun lightAccent(key: String, name: String, accent: Long, sheen: Long) =
-    AccentScheme(key, name, deep = false, Color(accent), Color(sheen), JellybeamTheme.Notte)
+private fun lightAccent(key: String, name: String, accent: Long, sheen: Long, @DrawableRes mascot: Int) =
+    AccentScheme(key, name, deep = false, Color(accent), Color(sheen), JellybeamTheme.Notte, mascot)
 
-private fun deepAccent(key: String, name: String, accent: Long, sheen: Long) =
-    AccentScheme(key, name, deep = true, Color(accent), Color(sheen), JellybeamTheme.Panna)
+private fun deepAccent(key: String, name: String, accent: Long, sheen: Long, @DrawableRes mascot: Int) =
+    AccentScheme(key, name, deep = true, Color(accent), Color(sheen), JellybeamTheme.Panna, mascot)
 
 private val PistacchioScheme = AccentScheme(
     "pistacchio", "Pistacchio", deep = false, JellybeamTheme.Pistacchio, JellybeamTheme.Sheen, JellybeamTheme.Notte,
+    R.drawable.jb_mascot_base_pistacchio,
     accentTankEmpty = Color(0xFFE4EDD0),
     onAccentMuted = Color(0xFF2E3A18),
 )
@@ -159,17 +163,17 @@ private val PistacchioScheme = AccentScheme(
 /** Every flavour in picker order; the first is the default. */
 val AccentSchemes: List<AccentScheme> = listOf(
     PistacchioScheme,
-    lightAccent("menta", "Menta", 0xFF7FCFAE, 0xFFAEE3CB),
-    lightAccent("puffo", "Puffo", 0xFF86C3E3, 0xFFB5DBEF),
-    lightAccent("mirtillo", "Mirtillo", 0xFFA6B4EE, 0xFFC9D1F6),
-    lightAccent("lavanda", "Lavanda", 0xFFC6A8E6, 0xFFDDCAF1),
-    lightAccent("fragola", "Fragola", 0xFFEEA0B4, 0xFFF5C5D1),
-    deepAccent("bosco", "Bosco", 0xFF4E6A2C, 0xFFA8CB6B),
-    deepAccent("pino", "Pino", 0xFF2C6B58, 0xFF7FCFAE),
-    deepAccent("oceano", "Oceano", 0xFF2B5F82, 0xFF86C3E3),
-    deepAccent("mirtillo_scuro", "Mirtillo scuro", 0xFF4C4F94, 0xFFA6B4EE),
-    deepAccent("prugna", "Prugna", 0xFF6E3F7C, 0xFFC6A8E6),
-    deepAccent("amarena", "Amarena", 0xFF8C2F48, 0xFFEEA0B4),
+    lightAccent("menta", "Menta", 0xFF7FCFAE, 0xFFAEE3CB, R.drawable.jb_mascot_base_menta),
+    lightAccent("puffo", "Puffo", 0xFF86C3E3, 0xFFB5DBEF, R.drawable.jb_mascot_base_puffo),
+    lightAccent("mirtillo", "Mirtillo", 0xFFA6B4EE, 0xFFC9D1F6, R.drawable.jb_mascot_base_mirtillo),
+    lightAccent("lavanda", "Lavanda", 0xFFC6A8E6, 0xFFDDCAF1, R.drawable.jb_mascot_base_lavanda),
+    lightAccent("fragola", "Fragola", 0xFFEEA0B4, 0xFFF5C5D1, R.drawable.jb_mascot_base_fragola),
+    deepAccent("bosco", "Bosco", 0xFF4E6A2C, 0xFFA8CB6B, R.drawable.jb_mascot_base_bosco),
+    deepAccent("pino", "Pino", 0xFF2C6B58, 0xFF7FCFAE, R.drawable.jb_mascot_base_pino),
+    deepAccent("oceano", "Oceano", 0xFF2B5F82, 0xFF86C3E3, R.drawable.jb_mascot_base_oceano),
+    deepAccent("mirtillo_scuro", "Mirtillo scuro", 0xFF4C4F94, 0xFFA6B4EE, R.drawable.jb_mascot_base_mirtillo_scuro),
+    deepAccent("prugna", "Prugna", 0xFF6E3F7C, 0xFFC6A8E6, R.drawable.jb_mascot_base_prugna),
+    deepAccent("amarena", "Amarena", 0xFF8C2F48, 0xFFEEA0B4, R.drawable.jb_mascot_base_amarena),
 )
 
 /** The scheme for a stored key; `null` or an unknown key is the default (docs/09). */

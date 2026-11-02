@@ -27,6 +27,24 @@ class JellybeamThemeTest {
     }
 
     @Test
+    fun `every flavour has its own mascot`() {
+        assertEquals(AccentSchemes.size, AccentSchemes.map { it.mascot }.toSet().size)
+    }
+
+    /** A decoded mascot costs width x height x 4 on every screen showing it, whatever the file format. */
+    @Test
+    fun `mascot assets are one WebP per flavour within the memory cap`() {
+        for (scheme in AccentSchemes) {
+            val bytes = java.io.File("src/main/res/drawable-nodpi/jb_mascot_base_${scheme.key}.webp").readBytes()
+            assertEquals("VP8X", String(bytes, 12, 4))
+            fun u24(at: Int) = (bytes[at].toInt() and 0xFF) or ((bytes[at + 1].toInt() and 0xFF) shl 8) or ((bytes[at + 2].toInt() and 0xFF) shl 16)
+            val width = u24(24) + 1
+            val height = u24(27) + 1
+            assertTrue("${scheme.key} is ${width}x$height", width <= 240 && height <= 240)
+        }
+    }
+
+    @Test
     fun `accent table has twelve unique keys in picker order`() {
         assertEquals(
             listOf(

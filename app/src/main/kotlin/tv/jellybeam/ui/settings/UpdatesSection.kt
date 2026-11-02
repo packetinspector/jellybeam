@@ -139,7 +139,7 @@ fun UpdatesSectionContent(visible: Boolean = true, onAutomaticChange: (Boolean) 
         phase in setOf("Downloading", "Staging") -> R.drawable.jb_mascot_fast
         failed -> R.drawable.jb_mascot_update_sleeping
         current -> R.drawable.jb_mascot_update_happy
-        else -> R.drawable.jb_mascot_base
+        else -> LocalAccent.current.mascot
     }
     val largeFont = LocalDensity.current.fontScale > 1.1f
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {

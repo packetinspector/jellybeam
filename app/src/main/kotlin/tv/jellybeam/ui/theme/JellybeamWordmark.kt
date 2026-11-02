@@ -11,6 +11,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
@@ -21,18 +22,20 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
 import tv.jellybeam.JellybeamTheme
+import tv.jellybeam.LocalAccent
 
 /**
  * The "Jellybeam" wordmark (docs/brand.md §4): one text run in [JellybeamTheme.BagelFatOne],
- * `Jelly` in Panna and `beam` in Pistacchio, kerned only between the `y` and the `b`. [rays] draws
+ * `Jelly` in Panna and `beam` in the accent's ink, kerned only between the `y` and the `b`. [rays] draws
  * the three bars over the `m`; launch screen and marketing only, never the header.
  */
 @Composable
 fun JellybeamWordmark(size: TextUnit, modifier: Modifier = Modifier, rays: Boolean = false) {
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
     val emPx = with(LocalDensity.current) { size.toPx() }
+    val ink = LocalAccent.current.accentInk
     BasicText(
-        text = wordmarkText(),
+        text = remember(ink) { wordmarkText(ink) },
         style = TextStyle(fontFamily = JellybeamTheme.BagelFatOne, fontSize = size),
         onTextLayout = { layout = it },
         modifier = modifier.drawWithContent {
@@ -42,7 +45,7 @@ fun JellybeamWordmark(size: TextUnit, modifier: Modifier = Modifier, rays: Boole
                 for (bar in WordmarkRays.bars(emPx, textEndPx = l.getLineRight(0), baselinePx = l.firstBaseline)) {
                     rotate(bar.degrees, pivot = bar.center) {
                         drawRoundRect(
-                            color = JellybeamTheme.Pistacchio,
+                            color = ink,
                             topLeft = bar.topLeft,
                             size = bar.size,
                             cornerRadius = CornerRadius(bar.size.height / 2f),
@@ -54,12 +57,12 @@ fun JellybeamWordmark(size: TextUnit, modifier: Modifier = Modifier, rays: Boole
     )
 }
 
-private fun wordmarkText() = buildAnnotatedString {
+private fun wordmarkText(ink: Color) = buildAnnotatedString {
     withStyle(SpanStyle(color = JellybeamTheme.Panna)) {
         append("Jell")
         withStyle(SpanStyle(letterSpacing = WordmarkRays.Y_TO_B_KERN_EM.em)) { append("y") }
     }
-    withStyle(SpanStyle(color = JellybeamTheme.Pistacchio)) { append("beam") }
+    withStyle(SpanStyle(color = ink)) { append("beam") }
 }
 
 /** Ray geometry in em of the wordmark size (§4), resolved to pixels for one laid-out text run. */

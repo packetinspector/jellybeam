@@ -195,7 +195,7 @@ private fun AboutBrandHeader(modifier: Modifier = Modifier) {
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(HEADER_LOCKUP_GAP)) {
             Image(
-                painter = painterResource(R.drawable.jb_mascot_base),
+                painter = painterResource(LocalAccent.current.mascot),
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.height(HEADER_MASCOT_HEIGHT),
