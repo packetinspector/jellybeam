@@ -19,6 +19,8 @@ Want more Rust? [Try out Jellybeam on your Mac.](https://github.com/packetinspec
 - **More Direct Play than you're used to.** The TV's decoders are probed, not assumed. Files other clients transcode play as files here.
 - **TrueHD, DTS, DTS-HD, Atmos, HDR10, Dolby Vision.** Decoded on the device or passed straight through. The server stays cool.
 - **Seerr is built in.** Trending, upcoming, search, request. From the couch, with the remote.
+- **Your music library, too.** Albums, artists, songs, playlists and genres. Gapless, Direct Play, lyrics, a queue, and it keeps playing while you browse or leave the app.
+- **Watch together.** Jellyfin's own SyncPlay, no plugin. Start a room from any title and everyone's pause and seek moves the whole group, each with their own audio and subtitles.
 - **A player that was designed, not inherited.** Glyph-only OSD, chapter ticks, skips per segment type.
 - **Fansubs the way they were made.** Opt in and ASS/SSA renders as authored: embedded fonts, signs, karaoke, animation. A pure-Rust port of libass, on the TV, no burn-in.
 - **Glide Seek with trickplay.** Hold Left or Right and the file glides at 6x, 30x, then 120x, with the server's own thumbnails on screen the whole way. Release and it seeks once, exactly where you stopped.
