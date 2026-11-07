@@ -81,6 +81,7 @@ import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.placeByKeys
+import tv.jellybeam.ui.focus.LocalFocusSeat
 import tv.jellybeam.ui.focus.refreshGuardEligible
 import tv.jellybeam.ui.focus.restoreNow
 import tv.jellybeam.ui.focus.rememberFocusMemory
@@ -259,6 +260,8 @@ fun LibraryScreen(
     // [RefreshRestoreOwner] (docs/15 §3) owns the refresh guard's `restoreNow` coroutine.
     // [refreshGuardEligible] is the shared predicate this guard and Home's read.
     val refreshOwner = rememberRefreshRestoreOwner(isTop)
+    // docs/15 §3: focus on the music bar or the drawer is still held; a refresh never takes it back.
+    val seat = LocalFocusSeat.current
     // Live top state read via `rememberUpdatedState`, never the captured `isTop` parameter: the
     // refresh guard's eligibility and the drawer close's in-place check.
     val latestIsTop by rememberUpdatedState(isTop)
@@ -338,6 +341,7 @@ fun LibraryScreen(
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = libraryHasFocus,
+                        focusElsewhere = seat?.focusElsewhere(libraryHasFocus) == true,
                         frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },

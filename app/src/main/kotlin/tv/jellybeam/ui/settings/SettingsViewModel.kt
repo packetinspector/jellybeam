@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import tv.jellybeam.AppGraph
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.SettingsStore
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.diag.DiagStatus
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
@@ -219,7 +220,13 @@ data class SettingsUiState(
     /** docs/21 §6: whether a crash capture exists -- gates the "Clear log" row alongside
      * [diagStatus]'s line count. */
     val crashPending: Boolean = false,
+    /** docs/29 §1: whether any fetched audio item carried a normalisation gain, read when Playback opens. */
+    val musicHasNormalizationGain: Boolean = false,
 )
+
+/** docs/29 §1: the switch shows once a gain was seen, and stays while it is on so it can be turned off. */
+internal fun normalizationRowShown(state: SettingsUiState): Boolean =
+    state.musicHasNormalizationGain || state.settings.normalizationEnabled
 
 /**
  * docs/21 §6: the Troubleshooting row actions that reach [tv.jellybeam.AppGraph.diag]/
@@ -416,6 +423,16 @@ class SettingsViewModel(
 
     /** Playback section, "Mini player" row (docs/17-mini-player.md §4), default off. */
     fun toggleMiniPlayer() = updateSettings { it.copy(miniPlayerEnabled = !it.miniPlayerEnabled) }
+
+    fun toggleNormalization() = updateSettings { it.copy(normalizationEnabled = !it.normalizationEnabled) }
+
+    /** docs/29 §1: re-reads the mirror's gain flag each time Playback opens; no request leaves the device. */
+    fun playbackSectionOpened() {
+        viewModelScope.launch {
+            val seen = runCatchingCancellable { gateway.musicHasNormalizationGain() }.getOrDefault(false)
+            _state.update { it.copy(musicHasNormalizationGain = seen) }
+        }
+    }
 
     fun togglePreferFfmpegTrueHd() =
         updateSettings { it.copy(preferFfmpegTrueHd = !it.preferFfmpegTrueHd) }

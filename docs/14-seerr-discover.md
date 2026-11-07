@@ -139,7 +139,9 @@ Records/enums (`seerr_types.rs`):
 `seerr_tv(tmdb_id)`, `seerr_person(person_id)`, `seerr_request_options(media_type, is_4k)`,
 `seerr_submit_request_detail(input) -> SeerrRequestDetail`,
 `seerr_cancel_request_detail(media_type, tmdb_id, request_id) -> SeerrRequestDetail`,
-`seerr_my_requests`. `SeerrRequestDetail` is `Movie{detail}` / `Tv{detail}` read with one GET after
+`seerr_my_requests`, `seerr_watchlist`, `seerr_set_watchlist(card, on)`.
+`SeerrMovieDetail`/`SeerrTvDetail` carry `on_watchlist: Option<bool>` (see Watchlist).
+`SeerrRequestDetail` is `Movie{detail}` / `Tv{detail}` read with one GET after
 the mutation (submit = pre-read + POST/PUT + GET, cancel = DELETE + GET): request, availability,
 seasons and cast are current, `similar`/`recommendations`/scores are empty, so the caller merges
 rather than replaces. The app merges the returned request fields (card, active request,
@@ -172,6 +174,36 @@ and Cancel stay usable (the server-side pre-read keeps a repeat from duplicating
   `GET /request` only for unprivileged accounts, and an `ADMIN`/`MANAGE_REQUESTS` user
   (the instance owner) would otherwise see everyone's requests. Under API_KEY the id is
   the key owner's, from `/auth/me`, so the page is the owner's own requests.
+
+### Watchlist
+
+Seerr's own per-user watchlist (local and Jellyfin users alike; Plex is not involved).
+Verified against Seerr 3.4.1:
+
+- `POST /watchlist {tmdbId, mediaType: "movie"|"tv", title}` → 201 with the row; a title
+  already listed → 409 `{"message":""}`; a missing `mediaType` → 500. `title` is stored as sent
+  (may be empty). Adding creates a Seerr media row with `status: 1`, which still maps to
+  NOT_REQUESTED.
+- `DELETE /watchlist/{tmdbId}?mediaType=` → 204; not listed, listed by another user, or the
+  wrong `mediaType` → 404 `{"message":"not Found"}`; no `mediaType` → 400.
+- `GET /discover/watchlist?page=` → `{page, totalPages, totalResults, results: [{id, tmdbId,
+  mediaType, title, ratingKey: "", media, requestedBy, createdAt, updatedAt}]}`, the session
+  user's own rows only, oldest first, with no poster or year.
+- `GET /movie/{id}` and `GET /tv/{id}` carry `onUserWatchlist: bool` for the session user.
+- An API-key connection acts as the key's owner (the admin): its list and flag are the owner's.
+
+Rules (in Rust, tested): add treats 409 and remove treats 404 as success, so a toggle is
+idempotent. `seerr_watchlist` reads the last two pages (20 rows a page, so they always hold the newest 20;
+page 1 first, for `totalPages`), keeps the newest 20 rows, newest first, resolves each
+row to a card through its detail (10 in flight, same helper as My Requests), and drops a row
+that cannot be resolved. It shares the home snapshot's 60s cache, generation counter and
+invalidation. A successful `seerr_set_watchlist` edits the cached shelf in place (the card leaves
+it; an add puts it first, capped at 20) under its original stamp, so within the 60s the shelf is
+right on return with no refetch, and an expired one is still refetched; it bumps the generation so a fetch already in flight is not cached, and leaves the home
+rows cached, since a watchlist change moves no availability. With no cached shelf the next read
+fetches. Under API_KEY, `seerr_watchlist` is empty
+with no request, `seerr_set_watchlist` is refused, and `on_watchlist` is `None`, so the UI
+hides the pill and the shelf.
 
 ### Image URLs (built in Rust, consumed by Coil)
 
@@ -206,7 +238,8 @@ and Cancel stay usable (the server-side pre-read keeps a repeat from duplicating
   Movies, TV, Upcoming Movies, Upcoming TV — plus a top action row (Search,
   My Requests, Movies, TV as chips). PosterCard geometry per docs/07; availability shown
   as a small corner badge (check = available, dot = pending/processing) using the
-  WatchBadge pattern; no new colors.
+  WatchBadge pattern; no new colors. Up/Down into a shelf lands on its first fully visible
+  card (docs/15 §2, the Detail shelves' `ShelfEntry`), never the spatially nearest one.
 - **Grids** (Movies/TV/view-more): `LazyVerticalGrid(8)` per Library recipe, paged
   (fetch next page on approach), sort + genre filter chips; further filters can follow.
 - **Card lists are de-duplicated on the Kotlin side** (`distinctSeerrCards`, keyed
@@ -256,6 +289,14 @@ and Cancel stay usable (the server-side pre-read keeps a repeat from duplicating
   both dialogs' Back and their buttons are inert. A failure shows its message (in the open
   request dialog, or on the page for a cancel) and re-reads the title; until that read
   succeeds, Request, Request 4K and Cancel request are disabled.
+- **Watchlist**: the detail action row carries "Add to watchlist" / "On watchlist" after the
+  request pills whenever `on_watchlist` is set. The toggle runs through the same busy slot as
+  submit and cancel: every action is inert while it runs and focus stays on the pill. Success
+  flips the label with no re-read. A failure shows its message beside the card and re-reads
+  the title. Discover home loads `seerr_watchlist` beside `seerr_home`, never blocking it, and
+  shows a "Watchlist" shelf first whenever it has cards. A failed read leaves the shelf out
+  without an error. A successful toggle moves the revision, and the reload on return reads the
+  edited shelf from the core's cache, so it is current at once.
 - **My Requests**: grid of the account's requests with status badges; Select opens detail.
 - **Person**: header + credits grid.
 - **Settings → Discover**: status row, URL / method chips / identity / secret fields
@@ -265,6 +306,21 @@ and Cancel stay usable (the server-side pre-read keeps a repeat from duplicating
   chip, or the confirm chip) through the retained layer's focus gate; a text field is never the
   landing spot, since landing in one opens editing and the D-pad stops moving.
   Every value writes through on Connect only.
+
+### Trailer
+
+The Trailer pill hands Seerr's `trailer_url` to the shared trailer opener
+(`ui/common/TrailerOpener.kt`), which library remote trailers use too
+(docs/19 §1.6). It asks which apps handle `vnd.youtube:<key>` only to find
+the installed YouTube apps, then always launches the canonical
+`https://www.youtube.com/watch?v=<key>` link, because SmartTube opens that
+link but not the `vnd.youtube:` form. Only real apps count: the TV's
+`com.android.tv.frameworkpackagestubs` browser stub and Jellybeam itself
+never do. One YouTube app gets the link aimed at its component; several get
+the system picker limited to them; with none, the link goes to the real
+`https` handlers the same way; with nothing at all it shows `No app can play
+this trailer`.
+The `<queries>` manifest entry makes the handlers visible on API 30+.
 
 ## Testing
 

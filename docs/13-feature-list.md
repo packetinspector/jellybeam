@@ -15,16 +15,19 @@ title and body plus a `host:port │ N LIBRARIES │ 0 ITEMS` strip, no button),
 Search with no matches, and the Quick Connect pairing code -- never over
 posters, backdrops, video or a populated shelf; on launch, a system splash
 (Android 12+ SplashScreen, Notte background and the painted mascot) hands off
-immediately to a Compose launch screen -- mascot, rayed wordmark, and a status
-line naming the saved server's host, or reporting it unreachable, while the
-session resolves.
-<!-- verified: app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml; app/src/main/res/drawable-v26/ic_launcher_foreground.xml; tools/launcher-icon/check.py; app/src/main/res/drawable-xhdpi/banner.png; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamWordmark.kt; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamLockup.kt; app/src/main/kotlin/tv/jellybeam/ui/home/HomeScreen.kt EmptyLibraryState/HomeMasthead; app/src/main/kotlin/tv/jellybeam/ui/common/EmptyStateFormat.kt; app/src/main/kotlin/tv/jellybeam/ui/search/SearchScreen.kt SearchNoResults; app/src/main/kotlin/tv/jellybeam/ui/signin/SignInScreen.kt quick connect column; app/src/main/kotlin/tv/jellybeam/ui/settings/AboutSection.kt; app/src/main/kotlin/tv/jellybeam/ui/launch/LaunchScreen.kt; app/src/main/res/values/themes.xml Theme.Jellybeam.Starting; app/src/main/kotlin/tv/jellybeam/MainActivity.kt installSplashScreen -->
+immediately, with no cross-fade, to a Compose launch screen -- mascot, rayed
+wordmark, and a status line naming the saved server's host, or reporting it
+unreachable, while the session resolves; on a cold start it stays up to 1 s
+more for Home's first data, so Home appears finished instead of flashing its
+loading skeleton.
+<!-- verified: app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml; app/src/main/res/drawable-v26/ic_launcher_foreground.xml; tools/launcher-icon/check.py; app/src/main/res/drawable-xhdpi/banner.png; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamWordmark.kt; app/src/main/kotlin/tv/jellybeam/ui/theme/JellybeamLockup.kt; app/src/main/kotlin/tv/jellybeam/ui/home/HomeScreen.kt EmptyLibraryState/HomeMasthead; app/src/main/kotlin/tv/jellybeam/ui/common/EmptyStateFormat.kt; app/src/main/kotlin/tv/jellybeam/ui/search/SearchScreen.kt SearchNoResults; app/src/main/kotlin/tv/jellybeam/ui/signin/SignInScreen.kt quick connect column; app/src/main/kotlin/tv/jellybeam/ui/settings/AboutSection.kt; app/src/main/kotlin/tv/jellybeam/ui/launch/LaunchScreen.kt; app/src/main/res/values/themes.xml Theme.Jellybeam.Starting; app/src/main/kotlin/tv/jellybeam/MainActivity.kt installSplashScreen, holdLaunchForHome; app/src/main/kotlin/tv/jellybeam/data/LaunchWarmup.kt awaitHome -->
 
 **Browsing & library** — mirror-backed instant browse everywhere (local SQLite
 mirror, no server round-trip for navigation; the library list in the menu follows
 server changes live, and a library's sort and filter choice is saved even if you leave
 right after changing it); Home shelves (resume, next-up,
-favorites, latest, per-library visibility; a user-set shelf size caps every row,
+favorites, latest, per-library visibility; a music library's Latest shows one square card per album,
+OK opens the album and the remote's Play plays it, or pauses and resumes it when it is the album playing; a user-set shelf size caps every row,
 and Next Up never repeats a Continue Watching title and moves on as soon as an
 episode is finished or marked watched, here or on another device; watched, unwatched and
 partly watched changes from other clients show after a launch, a return to the app, a
@@ -95,10 +98,19 @@ scrolls, focus lands on the row the page state predicts; mark watched/unwatched 
 with a one-time confirmation on the bulk marks; add/remove favorite; play
 next unwatched, play from the beginning, play one random episode; go to
 series from an episode; add to an existing collection; refresh metadata
-for administrators -- rows that cannot apply are absent, counts and
+for administrators; a Trailers & extras level listing a title's trailers and
+special features (behind the scenes, featurettes, interviews, deleted scenes
+and the rest) by the server's own names, each played from the start in the
+player and never touching the title's resume point, Next Up or Continue
+Watching -- rows that cannot apply are absent, counts and
 episode numbers are shown as trailing subtext, and every action reports
 with one toast; docs/19-detail-action-menu.md);
-search (mirror-backed, live results as you type; with Discover connected, Seerr
+a Trailer pill at position three on movie pages when the movie has a
+trailer something can play: its own trailer file in the player, else its
+YouTube trailer in an installed YouTube app (docs/19 §1.6);
+search (mirror-backed, live results as you type, grouped under a header per type in a fixed order --
+Films, Series, Episodes, Artists, Albums, Songs, Playlists -- with art by type and song rows that play on OK and open the song menu on a held OK or Menu;
+no matches names the library kinds searched; with Discover connected, Seerr
 results follow in their own labelled "From Discover" section after a longer pause
 (two characters or more; a hint above the field counts them while they are below the fold),
 never delaying library results, minus titles the library results already show;
@@ -155,6 +167,64 @@ only a transcode; every single-file video kind (`Video`, `MusicVideo`,
 <!-- verified: app/src/main/kotlin/tv/jellybeam/ui/detail/DetailRegions.kt regionShow(); app/src/main/kotlin/tv/jellybeam/ui/detail/DetailSkeletons.kt RegionReveal; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailScreen.kt; core/jellyfin-core/src/playback.rs is_codec_blind()/choose(); core/jellyfin-api/src/lib.rs stream_url() item-id path; core/ffi/src/types.rs ViewKind::ChannelFolder, LiveSort; core/ffi/src/object.rs live_children() sort mapping; app/src/main/kotlin/tv/jellybeam/ui/detail/DetailFormatting.kt OTHER_SINGLE_VIDEO_ITEM_TYPES; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt liveChildren() doc comment; app/src/main/kotlin/tv/jellybeam/nav/Screen.kt screenForLibraryCard(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryViewModel.kt ViewKind.isLive branches/liveSortFor() in refresh()/loadNextPage()/onBecameTop(); app/src/main/kotlin/tv/jellybeam/ui/library/LibraryScreen.kt ChannelFolderList diversion; app/src/main/kotlin/tv/jellybeam/ui/library/ChannelFolderList.kt; app/src/main/kotlin/tv/jellybeam/ui/library/RecordingFormatting.kt --> Empty Home retains D-pad access to libraries and server management, including before the first titles arrive. A first sign-in keeps the loading skeleton until its first sync writes titles, so an empty library message appears only for a library that is really empty.
 
 
+**Music** (docs/29) — a music library opens on its last-used tab (Albums the
+first time): Albums, Artists, Songs, Playlists and Genres pills that switch on
+OK, a sort strip with the count, the focused album's or artist's facts top
+right, and an A–Z rail when the list is longer than a screen; every list pages
+100 at a time. Artists shows album artists or all artists (performers credited
+per track read `APPEARS ON n`); Genres are tiles named verbatim; Playlists
+starts with a New playlist tile that names a new empty playlist in the side
+panel and opens it. Album pages keep the cover, the spec capsule (codec, rate,
+bit depth or bitrate) and the genre fixed while the tracks scroll, with disc
+headers on multi-disc albums and focus on the playing track; artist pages show
+Play all, Most played and the albums; song lists (all, favorite songs,
+recently played, a genre) show PLAYS and when each was played or added;
+playlist pages number rows by position and, coming back to one, show songs
+added or removed from another screen. Reorder songs (a playlist's ···)
+swaps the actions for a `REORDERING │ ▲▼ MOVE │ OK DROP │ BACK CANCEL`
+banner: OK picks a row up (accent, indent, ↕), Up/Down move it, OK drops it
+on the server and Back puts it back; a refused move puts the rows back and
+names the song. Music plays in the background with its own player, gapless,
+Direct Play by default: it keeps playing on Home, in other screens and after
+leaving the app (with the system Now Playing card), and media keys control it
+everywhere; starting a video stops it, starting music closes a video in the
+mini player, and leaving the account that plays it stops it. A music bar sits
+at the bottom of browse screens while music plays (art, title, artist,
+progress, previous, play/pause, next; OK on the title opens Now Playing) and
+never covers the focused card, on any screen; the nav drawer gains a two-line
+Now playing entry while music plays; a Current dot marks the playing song
+wherever it is listed. Now Playing shows the art, title, artist link, the queue strip
+(focus it to seek), shuffle and repeat, the next song, when the song ends, the
+Direct Play or transcode line, favorite (it stays set when the song comes
+back), and lyrics beside the art when the song has them (synced lyrics follow
+the song). Music left playing on a kept account keeps its art, line and source
+name, but Now Playing hides favorite and ··· and a queue row offers no Go to
+album, since those would act on the account now in use. The Queue screen shows the
+playing song, what you queued and the rest of the source in the order that
+will play; OK plays a row, a held OK or Menu offers Play next, Move, Remove
+and Go to album, and Clear queue keeps the playing song. After 2 minutes with
+no input, an ambient screen shows the art, title and artist
+drifting slowly, cross-fading to a new spot on each new song; paused, the
+sleepy mascot and `PAUSED │ m:ss` join them, and after 10 minutes paused it
+lets the system screensaver take over. It starts on any screen while music is
+playing or paused, never while a video plays, the app is in the background, a
+dialog or menu is open or the keyboard shows; any key closes it and leaves you
+on the same screen with the same focus.
+Settings › Playback shows Normalize volume (off by default) once any song
+carried a loudness gain, and plays songs at the server's measured level.
+On Home, a music library's Latest is a shelf of square album cards, and the
+remote's Play key plays the focused album; search groups Artists, Albums, Songs
+and Playlists under their own headers.
+Music items get the same panel as videos from their page's ··· or a held OK / Menu on any song row (albums, song lists, playlists, the Songs tab, search, the queue, Now Playing):
+favorite in place, go to album or artist, play next, add to queue, Instant Mix, add to a playlist (the seven
+most recently changed with a mark on those already holding the song, all playlists, or a new one named in
+the panel), remove from the playlist it was opened in, and refresh metadata for administrators; the music bar
+confirms queue and playlist adds for three seconds; Instant Mix (artist, album, playlist, song, genre list)
+shows loading dots after 400 ms, Back cancels it with the queue untouched, a mix opens Now Playing, and an
+empty or failed one says there is no mix yet; Most played shows each song's play count, and an
+album's facts its play count.
+<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/music/MusicLibraryScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicLibraryViewModel.kt createPlaylist; app/src/main/kotlin/tv/jellybeam/ui/home/classic/ShelfAssembly.kt albumPlayKey; app/src/main/kotlin/tv/jellybeam/ui/nav/NavDrawerHost.kt Now playing row; app/src/main/kotlin/tv/jellybeam/ui/music/MusicMenuModel.kt buildMusicMenu InQueue; app/src/main/kotlin/tv/jellybeam/ui/music/MusicAlbumScreen.kt MusicPlaylistScreen/ReorderBanner; app/src/main/kotlin/tv/jellybeam/ui/music/PlaylistReorder.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicArtistScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicSongsScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicBar.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicNowPlayingScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicQueueScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/AmbientLogic.kt; app/src/main/kotlin/tv/jellybeam/ui/music/AmbientHost.kt; app/src/main/kotlin/tv/jellybeam/ui/music/AmbientScreen.kt; app/src/main/kotlin/tv/jellybeam/player/music/MusicService.kt normalizationVolume; app/src/main/kotlin/tv/jellybeam/ui/settings/SettingsSections.kt playback/normalize_volume; app/src/main/kotlin/tv/jellybeam/JellybeamApp.kt beforePlayback -->
+
 **Navigation** — a left-edge nav drawer (Home, every library, Discover when
 connected, Search, Settings, plus a Servers section) opens with D-pad Left
 from the first column of any screen and closes with Right or Back. Its
@@ -183,7 +253,9 @@ when you return to them; while a request or cancel runs its pills stay
 focused but dimmed, and focus lands back on the pill that started it, or
 the one that replaced it, once the dialog closes), and a My Requests page; connect
 via Jellyfin login, Seerr local login, or an API key from Settings >
-Discover. Zero impact on cold start (a local-only "is Discover configured"
+Discover. Trailer opens the YouTube link in an installed YouTube app
+directly (SmartTube included; any other real handler otherwise, never the
+TV's browser stub) and says so when nothing can play it. Zero impact on cold start (a local-only "is Discover configured"
 check gates the drawer entry; no Seerr network call happens until the
 Discover screen or its Settings section is opened) and fails open to an
 inline message if the Seerr server is unreachable, never affecting Jellyfin
@@ -197,7 +269,14 @@ and connecting or disconnecting reloads them; the request and cancel buttons
 stay busy until the refreshed title is on screen (a second press does nothing),
 a failed request or cancel shows its message beside the title with the buttons
 still usable, and a failed Discover
-search says search isn't available instead of "No matches".
+search says search isn't available instead of "No matches". A Seerr
+watchlist: the title page has an "Add to watchlist" / "On watchlist" pill
+(dimmed while it saves, focus stays on it; a failure shows its message and
+re-reads the title), and Discover opens with a Watchlist shelf, newest first,
+whenever the list has titles. Up or Down into a Discover shelf lands on its first
+visible card (the first card, or where you left that shelf scrolled), not the
+card that happens to sit above or below. Both are hidden on API-key connections, which
+act as the key's owner rather than you.
 
 **Playback** — Direct Play by default, with an opt-in Quality setting
 (docs/18): Direct Play never transcodes and refuses a file the server would
@@ -298,7 +377,7 @@ autoplays inside the window; dismissing the window from the system UI or
 exiting Jellybeam stops playback with a final position report, never a headless
 player.
 
-**Resilience** — an audio clock guard keeps a skip from parking playback in an endless buffering state on boxes whose passthrough audio track reports a position ahead of what it has played (docs/18 §5.1); network-aware load retry policy riding out Wi-Fi radio stalls
+**Resilience** — an audio clock guard keeps a skip from parking playback in an endless buffering state on boxes whose passthrough audio track reports a position ahead of what it has played (docs/18 §5.1) while following an audio clock that merely runs fast, so sound and picture stay in sync over long films, and logs the clock's drift rate once a minute (numbers only); network-aware load retry policy riding out Wi-Fi radio stalls
 (60s / 64MB buffer, up to 90s of retries before surfacing an error);
 reconnect with backoff on transient network errors, frozen resume position
 preserved across the interlock; transactional sync/sign-in (add-server and
@@ -378,7 +457,7 @@ payload.
 Settings-screen saves); Appearance section (twelve accent colours in light and
 deep shades with a live preview; OK applies across the app at once, Back keeps
 the current one; the header mascot and wordmark follow the accent and appear in
-the preview, while launcher art and other mascot poses stay Pistacchio); Home section (Next Up cutoff
+the preview, while launcher art, the launch screen and other mascot poses stay Pistacchio); Home section (Next Up cutoff
 presets + rewatching toggle, per-library Home visibility, shelf size (10/20/30,
 default 20, every Home row), Resume art chips for Continue Watching and Next Up (Episode / Series thumb / Poster), Favorites row toggle, hide-watched-in-Latest,
 startup screen picker, clock toggle, show/hide missing episodes); Playback
@@ -436,7 +515,8 @@ last focused row per section; Troubleshooting section (Diagnostic logging
 toggle with status, Crash reports toggle, Report a problem, Clear log).
 
 **App updates** — docs/26: Settings > Updates checks GitHub Releases for a
-newer build (automatic checks on by default, with a switch; a quiet Settings
+newer build (automatic checks on by default, with a switch, run after launch
+or a return to the app at most hourly, retrying 15 minutes after a failure; a quiet Settings
 indicator, never a dialog), shows the release notes as readable native text,
 and downloads and verifies the APK with its matching performance profile
 before Android's own install confirmation. Cancel keeps the verified
@@ -454,7 +534,7 @@ Dates, times and numbers already follow the TV's locale.
 Settings > Troubleshooting) recorded as a 2000-line / 256 KB ring off the
 hot path with per-process aliases in place of item and server ids, Rust
 `tracing` WARN/ERROR forwarded into the same ring, perf-tier lines mirrored
-when the docs/10 gate is on; Report a problem serves a frozen snapshot
+when the docs/10 gate is on, audio-clock data (drift rate per minute, any clock fault with its rule; numbers only) so a sync report needs no adb; Report a problem serves a frozen snapshot
 (summary, full log, JSON) on the local network behind a QR-coded random
 path for ten minutes, shows "Opened on a phone" / "Log downloaded", and the
 phone page opens a prefilled GitHub issue form; crash capture (on by
@@ -803,8 +883,6 @@ public display.)*
 
 ## Planned
 
-- Trailer button on detail pages (needs a RemoteTrailers/LocalTrailers
-  FFI path; the action row has its slot at position three).
 - Byte-level preload (buffering actual media bytes ahead of Play, not just
   the playback handshake -- see Shipped/Playback's focus-dwell preload for
   the metadata-only tier already in place).

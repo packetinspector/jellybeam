@@ -68,6 +68,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -90,6 +91,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import tv.jellybeam.ui.music.pressPlayOnAlbum
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.LocalAccent
@@ -98,6 +100,12 @@ import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.PlaybackActivity
+import tv.jellybeam.player.music.MusicSource
+import tv.jellybeam.ui.music.SQUARE_ART
+import tv.jellybeam.ui.music.SquareCard
+import tv.jellybeam.ui.music.albumArt
+import tv.jellybeam.ui.music.isMusicLibrary
+import tv.jellybeam.ui.music.rememberMusicImageUrl
 import tv.jellybeam.ui.cards.WIDE_ART_ASPECT
 import tv.jellybeam.ui.cards.BACKDROP_PLACEHOLDER_DIM
 import tv.jellybeam.ui.cards.CARD_TITLE_BLOCK_HEIGHT
@@ -120,6 +128,7 @@ import tv.jellybeam.ui.focus.RefreshRestoreOwner
 import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
+import tv.jellybeam.ui.focus.LocalFocusSeat
 import tv.jellybeam.ui.focus.refreshGuardEligible
 import tv.jellybeam.ui.focus.PlacementToken
 import tv.jellybeam.ui.focus.rememberFocusMemory
@@ -236,6 +245,8 @@ private val SKELETON_ART_RADIUS = 2.dp
 internal fun ClassicHomeScreen(
     onOpenDetail: (Card) -> Unit,
     isTop: Boolean = true,
+    /** docs/29 §9 J1: the remote's Play on a focused album plays it. */
+    onPlayAlbum: (albumId: String) -> Unit = ::pressPlayOnAlbum,
     viewModel: ClassicHomeViewModel = viewModel(
         factory = ClassicHomeViewModelFactory(AppGraph.gateway, AppGraph.strings, launchWarmup = AppGraph.launchWarmup),
     ),
@@ -300,6 +311,8 @@ internal fun ClassicHomeScreen(
     // docs/15-focus-and-selection.md §3: [RefreshRestoreOwner] owns the refresh guard's (below)
     // `restoreNow` coroutine.
     val refreshOwner = rememberRefreshRestoreOwner(isTop)
+    // docs/15 §3: focus on the music bar or the drawer is still held; a refresh never takes it back.
+    val seat = LocalFocusSeat.current
     if (drawerFocusCoordinator != null) {
         SideEffect {
             drawerFocusCoordinator.onDrawerOpened = {
@@ -407,8 +420,9 @@ internal fun ClassicHomeScreen(
     val favoritesTitle = stringResource(R.string.shelf_favorites)
     val latestInTemplate = stringResource(R.string.shelf_latest_in)
     val resumeArt = chrome.resumeArt
-    val shelves = remember(state.shelves, resumeArt) {
-        buildShelves(state.shelves, continueWatchingTitle, nextUpTitle, favoritesTitle, resumeArt) { viewName ->
+    val musicViewIds = remember(chrome.views) { chrome.views.filter { it.isMusicLibrary }.mapTo(HashSet()) { it.id } }
+    val shelves = remember(state.shelves, resumeArt, musicViewIds) {
+        buildShelves(state.shelves, continueWatchingTitle, nextUpTitle, favoritesTitle, resumeArt, musicViewIds) { viewName ->
             String.format(latestInTemplate, viewName)
         }
     }
@@ -533,6 +547,7 @@ internal fun ClassicHomeScreen(
                     resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                     // A kept focus that the refresh moved out of its row is owed a scroll, not a placement.
                     hasFocus = homeHasFocus && keptFocusOutOfView(memory.focusedKey, shelfListStates::visibleCardIds) == null,
+                    focusElsewhere = seat?.focusElsewhere(homeHasFocus) == true,
                     frozenByOthers = memory.frozenBesides(ownTokens),
                 )
             },
@@ -764,6 +779,7 @@ internal fun ClassicHomeScreen(
                                     initialFocusRequester = initialFocusRequester,
                                     onFirstCellPositioned = { shelf0FirstCellPositioned = true },
                                     onOpenDetail = onOpenDetail,
+                                    onPlayAlbum = onPlayAlbum,
                                 )
                             }
                         } else {
@@ -775,6 +791,7 @@ internal fun ClassicHomeScreen(
                                 initialFocusRequester = null,
                                 onFirstCellPositioned = null,
                                 onOpenDetail = onOpenDetail,
+                                onPlayAlbum = onPlayAlbum,
                             )
                         }
                         }
@@ -1230,6 +1247,7 @@ private fun Shelf(
     initialFocusRequester: FocusRequester?,
     onFirstCellPositioned: (() -> Unit)?,
     onOpenDetail: (Card) -> Unit,
+    onPlayAlbum: (albumId: String) -> Unit,
 ) {
     // CELL_GAP passed explicitly so this can never silently drift from the gap the LazyRow below
     // actually
@@ -1238,7 +1256,9 @@ private fun Shelf(
     val artHeight = when (spec.kind) {
         ShelfKind.RESUME -> rowHeight
         ShelfKind.POSTER -> POSTER_CELL_WIDTH * 1.5f
+        ShelfKind.SQUARE -> SQUARE_ART
     }
+    val squareImageUrl = rememberMusicImageUrl(SQUARE_ART)
     // Bucketed to the cell's actual drawn width (docs/07 §1) so Home shares a rendition with the
     // library grid and Detail's placeholder instead of fetching a flat, cache-fragmenting size.
     val density = LocalDensity.current
@@ -1356,6 +1376,24 @@ private fun Shelf(
                                 art = spec.art,
                             )
                         }
+
+                        ShelfKind.SQUARE -> SquareCard(
+                            title = card.name,
+                            subline = card.albumArtist,
+                            art = albumArt(card),
+                            imageUrl = squareImageUrl,
+                            onClick = { onOpenDetail(card) },
+                            modifier = cellModifier.onKeyEvent { event ->
+                                when (albumPlayKey(event.key, event.type, event.nativeKeyEvent.repeatCount)) {
+                                    AlbumKey.PLAY -> {
+                                        onPlayAlbum(card.id)
+                                        true
+                                    }
+                                    AlbumKey.CONSUME -> true
+                                    AlbumKey.PASS -> false
+                                }
+                            },
+                        )
                     }
                 }
             }

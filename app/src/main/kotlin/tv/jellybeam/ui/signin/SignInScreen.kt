@@ -55,7 +55,7 @@ import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
-import tv.jellybeam.player.PulsingDots
+import tv.jellybeam.ui.music.LoadingDots
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
 import tv.jellybeam.ui.settings.SectionHeader
 import tv.jellybeam.ui.settings.SettingsChip
@@ -417,7 +417,7 @@ private fun DiscoverySection(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                PulsingDots()
+                LoadingDots()
                 BasicText(
                     text = stringResource(R.string.sign_in_discovery_searching),
                     style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 13.sp),

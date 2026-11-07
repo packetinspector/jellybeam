@@ -74,6 +74,7 @@ import tv.jellybeam.ui.focus.RefreshRestoreOwner
 import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
+import tv.jellybeam.ui.focus.LocalFocusSeat
 import tv.jellybeam.ui.focus.refreshGuardEligible
 import tv.jellybeam.ui.focus.restoreNow
 import tv.jellybeam.ui.nav.LocalDrawerFocusCoordinator
@@ -153,6 +154,8 @@ internal fun CollectionDetailScreen(
     var collectionHasFocus by remember(card.id) { mutableStateOf(false) }
     val focusMarked = remember(card.id) { booleanArrayOf(false) }
     val refreshOwner = rememberRefreshRestoreOwner(isTop)
+    // docs/15 §3: focus on the music bar or the drawer is still held; a refresh never takes it back.
+    val seat = LocalFocusSeat.current
     val latestIsTop by rememberUpdatedState(isTop)
     LaunchedEffect(panelOpen) {
         // The panel holds focus outside the page; its close needs no release (docs/15 §5).
@@ -184,6 +187,7 @@ internal fun CollectionDetailScreen(
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = collectionHasFocus,
+                        focusElsewhere = seat?.focusElsewhere(collectionHasFocus) == true,
                         frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },

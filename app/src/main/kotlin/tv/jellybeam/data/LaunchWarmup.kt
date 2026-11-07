@@ -89,6 +89,11 @@ class LaunchWarmup(
     /** The restored session with its mirror already open, or `null` once taken or discarded. */
     suspend fun takeSession(): Session? = sessionSlot.getAndSet(null)?.await()
 
+    /** docs/brand.md §6.3: waits for the Home prefetch to settle without taking it; a no-op once taken or discarded. */
+    suspend fun awaitHome() {
+        homeSlot.get()?.join()
+    }
+
     /** The prefetched first Home snapshot, or `null` once taken, discarded, signed out or failed. */
     suspend fun takeHome(): Home? {
         val prefetched = homeSlot.getAndSet(null)?.await()

@@ -620,6 +620,43 @@ class SettingsViewModelTest {
         assertEquals(seeded.copy(miniPlayerEnabled = true), gateway.setSettingsCalls.single())
     }
 
+    // ---- Normalize volume (docs/29 §1) -----------------------------------
+
+    @Test
+    fun `the Normalize volume switch is hidden until Playback opens on a library whose audio carried a gain`() = runTest {
+        val gateway = FakeCoreGateway(settings = defaultTestSettings()).apply { musicHasNormalizationGainResult = true }
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
+
+        assertFalse("nothing read before the section opens", normalizationRowShown(viewModel.state.value))
+        viewModel.playbackSectionOpened()
+        assertTrue(normalizationRowShown(viewModel.state.value))
+    }
+
+    @Test
+    fun `without a seen gain the switch stays hidden, unless it is already on`() = runTest {
+        val gateway = FakeCoreGateway(settings = defaultTestSettings())
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
+        viewModel.playbackSectionOpened()
+        assertFalse(normalizationRowShown(viewModel.state.value))
+        assertTrue(
+            "an on switch stays reachable so it can be turned off",
+            normalizationRowShown(SettingsUiState(settings = defaultTestSettings().copy(normalizationEnabled = true))),
+        )
+    }
+
+    @Test
+    fun `toggleNormalization flips the flag, default off, and persists`() = runTest {
+        val seeded = defaultTestSettings()
+        assertFalse(seeded.normalizationEnabled)
+        val gateway = FakeCoreGateway(settings = seeded)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
+
+        viewModel.toggleNormalization()
+
+        assertEquals(seeded.copy(normalizationEnabled = true), viewModel.state.value.settings)
+        assertEquals(seeded.copy(normalizationEnabled = true), gateway.setSettingsCalls.single())
+    }
+
     // ---- OSD detail (docs/jellybeam-osd-handoff/handoff/JELLYBEAM-TV-OSD-SPEC.md §§7/11) ----
 
     @Test

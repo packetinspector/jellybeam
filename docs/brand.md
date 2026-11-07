@@ -147,8 +147,13 @@ column on NOTTE; header and spine as normal.
 
 ### 6.3 Launch screen
 After the system splash (Android 12+ `SplashScreen`: background
-`#14100D`, icon = the painted mascot, `ic_splash_foreground`), a full-screen NOTTE composable
-holds until the first server response.
+`#14100D`, icon = the painted mascot, `ic_splash_foreground`; removed without a fade so its icon
+never overlaps the mascot below), a full-screen NOTTE composable holds until the session resolves.
+On a cold start that lands on Home it also holds for Home's first data, at most 1 s, so Home
+appears finished; a slower first load shows Home's skeleton. External launches and a startup
+library never wait.
+- Always the default flavour (PISTACCHIO), whatever accent the user picked: the launch screen is
+  the brand mark.
 - Fast pose, 280dp wide.
 - 22dp gap, then the wordmark at 66sp **with rays** (§4).
 - 22dp gap, then a status row: 6dp `accentInk` dot, 6dp gap, `CONNECTING ·

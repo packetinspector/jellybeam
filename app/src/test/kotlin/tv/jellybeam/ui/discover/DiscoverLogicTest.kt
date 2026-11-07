@@ -4,9 +4,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tv.jellybeam.R
 import uniffi.jellybeam_core.SeerrAvailability
+import uniffi.jellybeam_core.SeerrActiveRequest
 import uniffi.jellybeam_core.SeerrCard
+import uniffi.jellybeam_core.SeerrHomeRow
 import uniffi.jellybeam_core.SeerrMediaType
+import uniffi.jellybeam_core.SeerrRequestStatus
 import uniffi.jellybeam_core.SeerrSeasonStatus
 
 /** docs/14-seerr-discover.md's own house "one tested rule, not N inline checks" convention -- see
@@ -246,5 +250,140 @@ class DiscoverLogicTest {
     fun `seerrCardKey combines media type and tmdb id`() {
         assertEquals("MOVIE-42", seerrCardKey(SeerrMediaType.MOVIE, 42L))
         assertEquals("TV-7", seerrCardKey(SeerrMediaType.TV, 7L))
+    }
+
+    // -- Watchlist shelf composition (DiscoverViewModel.kt) -----------------------
+
+    private fun homeRow(id: String, vararg cards: SeerrCard) = SeerrHomeRow(id = id, title = "Row $id", cards = cards.toList())
+
+    @Test
+    fun `a non-empty watchlist is the first shelf, with its own id and title, ahead of the home rows`() {
+        val rows = discoverRows(
+            watchlist = listOf(card(SeerrMediaType.MOVIE, 1L)),
+            watchlistTitle = "Watchlist",
+            home = listOf(homeRow("trending"), homeRow("movies")),
+        )
+
+        assertEquals(listOf(WATCHLIST_ROW_ID, "trending", "movies"), rows.map { it.id })
+        assertEquals("watchlist", rows.first().id)
+        assertEquals("Watchlist", rows.first().title)
+    }
+
+    @Test
+    fun `an empty watchlist leaves no shelf and the home rows untouched`() {
+        val home = listOf(homeRow("trending"), homeRow("movies"))
+
+        assertEquals(home, discoverRows(emptyList(), "Watchlist", home))
+    }
+
+    @Test
+    fun `watchlist and home cards are de-duplicated within their own shelf`() {
+        val dup = card(SeerrMediaType.MOVIE, 1L)
+        val rows = discoverRows(listOf(dup, dup), "Watchlist", listOf(homeRow("trending", dup, dup)))
+
+        assertEquals(listOf(dup), rows[0].cards)
+        assertEquals(listOf(dup), rows[1].cards)
+    }
+
+    // -- Refresh refocus (discoverRefocusKey) -----------------------------------------
+
+    private fun key(rowId: String, id: Long) = discoverCardFocusKey(rowId, card(SeerrMediaType.MOVIE, id))
+
+    private val shelves = listOf(
+        homeRow("watchlist", card(SeerrMediaType.MOVIE, 1L), card(SeerrMediaType.MOVIE, 2L), card(SeerrMediaType.MOVIE, 3L)),
+        homeRow("trending", card(SeerrMediaType.MOVIE, 10L), card(SeerrMediaType.MOVIE, 11L)),
+    )
+
+    @Test
+    fun `a removed card refocuses the card nearest the viewport start in its own shelf`() {
+        val removed = key("watchlist", 2L)
+        val rowsAfter = listOf(homeRow("watchlist", card(SeerrMediaType.MOVIE, 1L), card(SeerrMediaType.MOVIE, 3L))) + shelves.drop(1)
+
+        assertEquals(key("watchlist", 3L), discoverRefocusKey(rowsAfter, removed) { 1 })
+        assertEquals(key("watchlist", 1L), discoverRefocusKey(rowsAfter, removed) { 0 })
+    }
+
+    @Test
+    fun `a first visible index past the shorter shelf clamps to its last card`() {
+        assertEquals(key("trending", 11L), discoverRefocusKey(shelves, key("trending", 99L)) { 7 })
+    }
+
+    @Test
+    fun `a vanished shelf refocuses the first shelf that still has cards`() {
+        val rowsAfter = listOf(homeRow("watchlist"), homeRow("trending", card(SeerrMediaType.MOVIE, 10L), card(SeerrMediaType.MOVIE, 11L)))
+
+        assertEquals(key("trending", 10L), discoverRefocusKey(rowsAfter, key("watchlist", 1L)) { 0 })
+        assertEquals(key("trending", 10L), discoverRefocusKey(shelves.drop(1), key("watchlist", 1L)) { 0 })
+    }
+
+    @Test
+    fun `no cards anywhere, a chip key or a fresh entry has no card target so focus goes to the first chip`() {
+        assertEquals(null, discoverRefocusKey(emptyList(), key("watchlist", 1L)) { 0 })
+        assertEquals(null, discoverRefocusKey(shelves, "chip:tv") { 0 })
+        assertEquals(null, discoverRefocusKey(shelves, null) { 0 })
+    }
+
+    // -- Watchlist pill (actionSlots) -------------------------------------------------
+
+    private val activeRequest = SeerrActiveRequest(requestId = 7L, status = SeerrRequestStatus.PENDING, is4k = false, seasons = emptyList())
+
+    @Test
+    fun `the watchlist pill is absent when the watchlist is unavailable`() {
+        val state = DiscoverDetailUiState(isLoading = false, canRequest = true, onWatchlist = null)
+
+        assertFalse(state.actionSlots().any { it.id == ACTION_WATCHLIST })
+    }
+
+    @Test
+    fun `the watchlist pill is present for either known state and labelled by it`() {
+        for (on in listOf(false, true)) {
+            val state = DiscoverDetailUiState(isLoading = false, onWatchlist = on)
+
+            assertTrue("on=$on", state.actionSlots().any { it.id == ACTION_WATCHLIST })
+        }
+        assertEquals(R.string.discover_action_add_to_watchlist, watchlistActionLabel(false))
+        assertEquals(R.string.discover_action_on_watchlist, watchlistActionLabel(true))
+    }
+
+    @Test
+    fun `the watchlist pill stays focusable but inert while a mutation is in flight`() {
+        val idle = DiscoverDetailUiState(isLoading = false, onWatchlist = false)
+        val held = idle.copy(busy = true)
+
+        assertTrue(idle.actionSlots().single { it.id == ACTION_WATCHLIST }.actionable)
+        assertFalse(held.actionSlots().single { it.id == ACTION_WATCHLIST }.actionable)
+        assertEquals(idle.actionKeys(), held.actionKeys())
+    }
+
+    @Test
+    fun `the watchlist pill follows the request family and precedes the trailer`() {
+        val state = DiscoverDetailUiState(
+            isLoading = false,
+            card = card(SeerrMediaType.MOVIE, 1L).copy(jellyfinItemId = "item"),
+            activeRequest = activeRequest,
+            canRequest = true,
+            canRequest4k = true,
+            trailerUrl = "http://trailer.test",
+            onWatchlist = true,
+        )
+
+        assertEquals(
+            listOf(ACTION_GO_TO_LIBRARY, ACTION_CANCEL_REQUEST, ACTION_REQUEST, ACTION_REQUEST_4K, ACTION_WATCHLIST, ACTION_TRAILER),
+            state.actionSlots().map { it.id },
+        )
+    }
+
+    @Test
+    fun `the watchlist is never the primary pill`() {
+        val state = DiscoverDetailUiState(isLoading = false, onWatchlist = false)
+
+        assertFalse(state.actionSlots().single().primary)
+    }
+
+    @Test
+    fun `a toggle targets the opposite state, and nothing when the watchlist is unavailable`() {
+        assertEquals(true, DiscoverDetailUiState(onWatchlist = false).watchlistToggleTarget())
+        assertEquals(false, DiscoverDetailUiState(onWatchlist = true).watchlistToggleTarget())
+        assertEquals(null, DiscoverDetailUiState(onWatchlist = null).watchlistToggleTarget())
     }
 }

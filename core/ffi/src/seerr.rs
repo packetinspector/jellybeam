@@ -52,6 +52,9 @@ const HOME_CACHE_TTL: Duration = Duration::from_secs(60);
 /// bounds fan-out on a Seerr instance while keeping My Requests (up to 50) to a few round trips.
 const MAX_CONCURRENT_DETAIL_FETCHES: usize = 10;
 
+/// Cards the Discover watchlist shelf shows, one Seerr page (docs/14 Watchlist).
+const WATCHLIST_SHELF_SIZE: usize = 20;
+
 /// Longest a `/settings/public` read may hold a connect or handle build (docs/14 "Auth").
 const PUBLIC_SETTINGS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -187,6 +190,14 @@ struct GenreCache {
     tv: Option<Vec<SeerrGenre>>,
 }
 
+/// The 60s snapshots one invalidation clears together: home rows and the watchlist
+/// (docs/14 Performance, Watchlist).
+#[derive(Default)]
+struct HomeCache {
+    home: Option<(Instant, SeerrHome)>,
+    watchlist: Option<(Instant, Vec<SeerrCard>)>,
+}
+
 struct SeerrHandleInner {
     client: seerr_api::SeerrClient,
     user_id: i64,
@@ -197,7 +208,7 @@ struct SeerrHandleInner {
     series4k_enabled: bool,
     cache_images: bool,
     application_title: Option<String>,
-    home_cache: Mutex<Option<(Instant, SeerrHome)>>,
+    home_cache: Mutex<HomeCache>,
     /// Bumped by every home invalidation; a home fetch stores only if it is unchanged.
     home_gen: AtomicU64,
     genre_cache: Mutex<GenreCache>,
@@ -226,7 +237,7 @@ impl SeerrHandle {
                 series4k_enabled: public.series4k_enabled,
                 cache_images: public.cache_images,
                 application_title: public.application_title,
-                home_cache: Mutex::new(None),
+                home_cache: Mutex::new(HomeCache::default()),
                 home_gen: AtomicU64::new(0),
                 genre_cache: Mutex::new(GenreCache::default()),
             }),
@@ -235,6 +246,10 @@ impl SeerrHandle {
 
     fn client(&self) -> &seerr_api::SeerrClient {
         &self.inner.client
+    }
+
+    fn is_api_key(&self) -> bool {
+        self.inner.client.is_api_key()
     }
 
     fn user_id(&self) -> i64 {
@@ -266,13 +281,11 @@ impl SeerrHandle {
             .home_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().and_then(|(at, home)| {
-            if at.elapsed() < HOME_CACHE_TTL {
-                Some(home.clone())
-            } else {
-                None
-            }
-        })
+        guard
+            .home
+            .as_ref()
+            .filter(|(at, _)| cache_is_fresh(*at, Instant::now()))
+            .map(|(_, home)| home.clone())
     }
 
     fn home_generation(&self) -> u64 {
@@ -288,7 +301,7 @@ impl SeerrHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if self.home_generation() == generation {
-            *cache = Some((Instant::now(), home));
+            cache.home = Some((Instant::now(), home));
         }
     }
 
@@ -301,7 +314,46 @@ impl SeerrHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         self.inner.home_gen.fetch_add(1, Ordering::SeqCst);
-        *cache = None;
+        *cache = HomeCache::default();
+    }
+
+    fn cached_watchlist(&self, now: Instant) -> Option<Vec<SeerrCard>> {
+        let guard = self
+            .inner
+            .home_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+            .watchlist
+            .as_ref()
+            .filter(|(at, _)| cache_is_fresh(*at, now))
+            .map(|(_, cards)| cards.clone())
+    }
+
+    /// [`Self::cache_home`]'s rule for the watchlist: stored only while `generation` is current.
+    fn cache_watchlist(&self, generation: u64, now: Instant, cards: Vec<SeerrCard>) {
+        let mut cache = self
+            .inner
+            .home_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.home_generation() == generation {
+            cache.watchlist = Some((now, cards));
+        }
+    }
+
+    /// docs/14 Watchlist: a landed toggle edits the shelf snapshot in place, keeping its stamp so
+    /// it still expires on time, and drops any fetch already in flight; home rows stay cached.
+    fn apply_watchlist_toggle(&self, card: &SeerrCard, on: bool) {
+        let mut cache = self
+            .inner
+            .home_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.inner.home_gen.fetch_add(1, Ordering::SeqCst);
+        if let Some((at, cards)) = cache.watchlist.take() {
+            cache.watchlist = Some((at, watchlist_after_toggle(cards, card, on)));
+        }
     }
 
     fn cached_genres(&self, media_type: SeerrMediaType) -> Option<Vec<SeerrGenre>> {
@@ -594,6 +646,37 @@ fn backdrop_url(path: Option<&str>, images: ImageContext<'_>) -> Option<String> 
 /// don't expose a distinct profile-picture size in this app's contract.
 fn profile_url(path: Option<&str>, images: ImageContext<'_>) -> Option<String> {
     build_image_url(path, "/t/p/w500", images)
+}
+
+/// The `mediaType` Seerr's endpoints take for `media_type`.
+fn media_type_wire(media_type: SeerrMediaType) -> &'static str {
+    match media_type {
+        SeerrMediaType::Movie => "movie",
+        SeerrMediaType::Tv => "tv",
+    }
+}
+
+/// One (TMDB id, kind) pair's card via its detail fetch; `None` when the pair is incomplete or the
+/// fetch fails, so callers drop the item instead of failing the list.
+async fn resolve_card(
+    client: &seerr_api::SeerrClient,
+    tmdb_id: Option<i64>,
+    kind: Option<&str>,
+    images: ImageContext<'_>,
+) -> Option<SeerrCard> {
+    match (tmdb_id, kind) {
+        (Some(id), Some("movie")) => client
+            .movie_details(id)
+            .await
+            .ok()
+            .map(|d| card_from_movie_details(&d, images)),
+        (Some(id), Some("tv")) => client
+            .tv_details(id)
+            .await
+            .ok()
+            .map(|d| card_from_tv_details(&d, images)),
+        _ => None,
+    }
 }
 
 fn media_type_from_str(value: Option<&str>) -> Option<SeerrMediaType> {
@@ -913,6 +996,7 @@ fn movie_detail_from(
         active_request: active_request_for(details.media_info.as_ref(), handle.user_id()),
         can_request,
         can_request_4k: can_request && handle.movie4k_enabled(),
+        on_watchlist: on_watchlist_for(handle.is_api_key(), details.on_user_watchlist),
         card,
     }
 }
@@ -952,8 +1036,55 @@ fn tv_detail_from(
         // signal, gated by the server's own `series4kEnabled` toggle.
         can_request_4k: can_request && handle.series4k_enabled(),
         seasons,
+        on_watchlist: on_watchlist_for(handle.is_api_key(), details.on_user_watchlist),
         card,
     }
+}
+
+/// The watchlist pages holding its newest [`WATCHLIST_SHELF_SIZE`] rows: Seerr lists oldest
+/// first, 20 per page, so the last two pages always cover them (docs/14 Watchlist).
+fn watchlist_tail_pages(total_pages: i64) -> Vec<i64> {
+    match total_pages {
+        ..=1 => vec![1],
+        n => vec![n - 1, n],
+    }
+}
+
+/// The shelf after a toggle: `card` leaves it, and an add puts it first, capped at
+/// [`WATCHLIST_SHELF_SIZE`] (docs/14 Watchlist).
+fn watchlist_after_toggle(cards: Vec<SeerrCard>, card: &SeerrCard, on: bool) -> Vec<SeerrCard> {
+    let same = |c: &SeerrCard| c.media_type == card.media_type && c.tmdb_id == card.tmdb_id;
+    let rest = cards.into_iter().filter(|c| !same(c));
+    if on {
+        std::iter::once(card.clone())
+            .chain(rest)
+            .take(WATCHLIST_SHELF_SIZE)
+            .collect()
+    } else {
+        rest.collect()
+    }
+}
+
+/// The newest [`WATCHLIST_SHELF_SIZE`] rows of an oldest-first run, newest first.
+fn newest_watchlist_rows(
+    oldest_first: Vec<seerr_api::WatchlistItem>,
+) -> Vec<seerr_api::WatchlistItem> {
+    oldest_first
+        .into_iter()
+        .rev()
+        .take(WATCHLIST_SHELF_SIZE)
+        .collect()
+}
+
+/// A snapshot stored at `stored_at` is served until [`HOME_CACHE_TTL`] has passed at `now`.
+fn cache_is_fresh(stored_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(stored_at) < HOME_CACHE_TTL
+}
+
+/// docs/14 Watchlist: an API-key connection acts as the key owner, so the flag is not the
+/// signed-in user's and reads as unavailable (`None`).
+fn on_watchlist_for(is_api_key: bool, on_user_watchlist: bool) -> Option<bool> {
+    (!is_api_key).then_some(on_user_watchlist)
 }
 
 /// The season list a TV `PUT /request/{id}` must carry: Seerr replaces the request's seasons
@@ -1040,10 +1171,7 @@ impl JellybeamCore {
         input: SeerrRequestInput,
     ) -> Result<(), CoreError> {
         let client = handle.client();
-        let media_type_str: &'static str = match input.media_type {
-            SeerrMediaType::Movie => "movie",
-            SeerrMediaType::Tv => "tv",
-        };
+        let media_type_str = media_type_wire(input.media_type);
         let seasons = if input.seasons.is_empty() {
             None
         } else {
@@ -1769,6 +1897,68 @@ impl JellybeamCore {
         self.changed_request_detail(&handle, media_type, tmdb_id)
     }
 
+    /// The signed-in user's Seerr watchlist, newest first, resolved to cards (docs/14 Watchlist);
+    /// an item that cannot be resolved is dropped. Empty without a request under an API key.
+    /// Cached 60s with the home snapshot's invalidation.
+    pub fn seerr_watchlist(&self) -> Result<Vec<SeerrCard>, CoreError> {
+        let handle = self.require_seerr_handle()?;
+        if handle.is_api_key() {
+            return Ok(Vec::new());
+        }
+        if let Some(cached) = handle.cached_watchlist(Instant::now()) {
+            return Ok(cached);
+        }
+        let generation = handle.home_generation();
+        let client = handle.client().clone();
+        let first = self.runtime().block_on(client.watchlist(1))?;
+        let tail = watchlist_tail_pages(first.total_pages);
+        let mut rows = Vec::new();
+        for page in tail {
+            if page == 1 {
+                rows.extend(first.results.iter().cloned());
+            } else {
+                rows.extend(self.runtime().block_on(client.watchlist(page))?.results);
+            }
+        }
+        let images = handle.images();
+        let resolved: Vec<Option<SeerrCard>> = self.runtime().block_on(async {
+            futures_util::stream::iter(newest_watchlist_rows(rows).into_iter().map(|item| {
+                let client = client.clone();
+                async move {
+                    resolve_card(&client, item.tmdb_id, item.media_type.as_deref(), images).await
+                }
+            }))
+            .buffered(MAX_CONCURRENT_DETAIL_FETCHES)
+            .collect()
+            .await
+        });
+        let cards: Vec<SeerrCard> = resolved.into_iter().flatten().collect();
+        handle.cache_watchlist(generation, Instant::now(), cards.clone());
+        Ok(cards)
+    }
+
+    /// Adds (`on`) or removes `card` on the signed-in user's watchlist; idempotent. On success the
+    /// cached shelf takes the change without a refetch (docs/14 Watchlist). Refused under an API key.
+    pub fn seerr_set_watchlist(&self, card: SeerrCard, on: bool) -> Result<(), CoreError> {
+        let handle = self.require_seerr_handle()?;
+        if handle.is_api_key() {
+            return Err(CoreError::Api {
+                detail: "watchlist unavailable under API key".to_string(),
+            });
+        }
+        let wire = media_type_wire(card.media_type);
+        let client = handle.client();
+        if on {
+            self.runtime()
+                .block_on(client.watchlist_add(card.tmdb_id, wire, &card.title))?;
+        } else {
+            self.runtime()
+                .block_on(client.watchlist_remove(card.tmdb_id, wire))?;
+        }
+        handle.apply_watchlist_toggle(&card, on);
+        Ok(())
+    }
+
     /// The account's own requests (server auto-scoped); one this app can't
     /// resolve a title for is omitted, same fail-open as `seerr_home`.
     pub fn seerr_my_requests(&self) -> Result<Vec<SeerrMyRequest>, CoreError> {
@@ -1784,19 +1974,8 @@ impl JellybeamCore {
                 let client = client.clone();
                 async move {
                     let tmdb_id = request.media.as_ref().and_then(|m| m.tmdb_id);
-                    let card = match (tmdb_id, request.kind.as_deref()) {
-                        (Some(id), Some("movie")) => client
-                            .movie_details(id)
-                            .await
-                            .ok()
-                            .map(|d| card_from_movie_details(&d, images)),
-                        (Some(id), Some("tv")) => client
-                            .tv_details(id)
-                            .await
-                            .ok()
-                            .map(|d| card_from_tv_details(&d, images)),
-                        _ => None,
-                    };
+                    let card =
+                        resolve_card(&client, tmdb_id, request.kind.as_deref(), images).await;
                     card.map(|card| SeerrMyRequest {
                         request_id: request.id,
                         card,

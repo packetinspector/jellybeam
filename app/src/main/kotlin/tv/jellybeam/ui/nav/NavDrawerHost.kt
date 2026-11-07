@@ -5,6 +5,7 @@ import androidx.compose.animation.core.EaseIn
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
@@ -22,7 +23,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
@@ -71,10 +71,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
+import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.nav.Screen
+import tv.jellybeam.nav.screenForView
 import tv.jellybeam.ui.cards.FOCUS_RING_EXTENT
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.focus.LocalFocusGate
@@ -84,26 +86,35 @@ import tv.jellybeam.ui.focus.requestFocusUntilSuccess
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import tv.jellybeam.ui.common.serverHostLabel
+import tv.jellybeam.ui.music.CurrentDot
+import tv.jellybeam.ui.music.LocalMusicBarInset
+import tv.jellybeam.ui.music.NoteGlyph
+import tv.jellybeam.ui.music.PannaB3
+import tv.jellybeam.ui.music.rememberNowPlayingTitle
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.ViewSnapshot
 
-private val DRAWER_WIDTH = 272.dp
+internal val DRAWER_WIDTH = 272.dp
 private val ENTRY_HEIGHT = 52.dp
 private val ENTRY_GAP = 4.dp
 private val SECTION_LABEL_TOP_PADDING = 16.dp
+
+/** docs/29 §9 G3: the two-line Now playing row is 10 dp taller than a plain row. */
+private val NOW_PLAYING_EXTRA = 10.dp
 
 /**
  * One drawer row, resolved by the caller ([NavDrawerHost]'s `entries` builder): [onSelect] bakes
  * in navigate-vs-switch-server so the renderer never switches on the target, and [isCurrent]
  * drives the same accent dot for both a current [Screen] row and the active-account row.
  */
-private data class DrawerEntry(val label: String, val isCurrent: Boolean, val onSelect: () -> Unit)
+private data class DrawerEntry(val label: String, val isCurrent: Boolean, val subline: String? = null, val onSelect: () -> Unit)
 
 /** [DrawerEntry.isCurrent] for a [Screen]-targeted row; a pure function, JVM-testable without a
  * Compose runtime.
  */
 fun matchesCurrentScreen(entryScreen: Screen, current: Screen): Boolean = when (entryScreen) {
     is Screen.Library -> current is Screen.Library && current.view.id == entryScreen.view.id
+    is Screen.MusicLibrary -> current is Screen.MusicLibrary && current.view.id == entryScreen.view.id
     else -> current == entryScreen
 }
 
@@ -155,6 +166,12 @@ internal val LocalDrawerFocusCoordinator = staticCompositionLocalOf<DrawerFocusC
 internal val LocalDrawerLeftEdgeSuppressed = staticCompositionLocalOf<MutableState<Boolean>?> { null }
 
 /**
+ * docs/29 §9 G3: whether the top layer's drawer is open, written by that layer's [NavDrawerHost] for the
+ * music bar beside the layers, which starts at the drawer's edge and takes no focus then; `null` outside the root.
+ */
+internal val LocalDrawerOpenSink = staticCompositionLocalOf<MutableState<Boolean>?> { null }
+
+/**
  * Wraps whichever screen's [content] is showing (every branch [tv.jellybeam.MainActivity] mounts
  * this around except Search) with a left-edge drawer: D-pad Left opens it once
  * `moveFocus(FocusDirection.Left)` fails inside [content] (a true left edge, not a guess);
@@ -188,6 +205,8 @@ fun NavDrawerHost(
     discoverConfigured: Boolean = false,
     /** Selecting the Discover row. */
     onOpenDiscover: () -> Unit = {},
+    /** docs/29 §9 G3: selecting the Now playing row, present only while music holds playback. */
+    onOpenNowPlaying: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     var isOpen by remember { mutableStateOf(false) }
@@ -214,19 +233,28 @@ fun NavDrawerHost(
     val serversSectionLabel = stringResource(R.string.drawer_servers_section)
     val addServerLabel = stringResource(R.string.drawer_add_server)
     val manageServersLabel = stringResource(R.string.drawer_manage_servers)
+    val nowPlayingLabel = stringResource(R.string.music_now_playing)
+    val musicOwner by AppGraph.musicStarted
+    val nowPlaying = rememberNowPlayingTitle(musicOwner)
+    val nowPlayingLine = nowPlaying?.let { (title, artist) ->
+        if (artist.isEmpty()) title else stringResource(R.string.music_now_playing_line, title, artist)
+    }
 
     // Independently-remembered lists so a library add/remove never rebuilds the Servers section's
     // [FocusRequester]s and vice versa; concatenated via its own `remember` for referential
     // stability.
-    val navEntries = remember(libraries, currentScreen, homeLabel, discoverLabel, discoverConfigured, searchLabel, togetherLabel, settingsLabel) {
+    val navEntries = remember(libraries, currentScreen, homeLabel, discoverLabel, discoverConfigured, searchLabel, togetherLabel, settingsLabel, nowPlayingLine, onOpenNowPlaying) {
         buildList {
             add(DrawerEntry(homeLabel, matchesCurrentScreen(Screen.Home, currentScreen)) { onNavigate(Screen.Home) })
+            // docs/29 §9 G3: directly under Home, only while music plays or is paused.
+            if (nowPlayingLine != null) add(DrawerEntry(nowPlayingLabel, isCurrent = false, subline = nowPlayingLine, onSelect = onOpenNowPlaying))
             libraries.forEach { view ->
-                add(DrawerEntry(view.name, matchesCurrentScreen(Screen.Library(view), currentScreen)) { onNavigate(Screen.Library(view)) })
+                val screen = screenForView(view)
+                add(DrawerEntry(view.name, matchesCurrentScreen(screen, currentScreen)) { onNavigate(screen) })
             }
             // docs/14-seerr-discover.md: between libraries and Search, only when configured.
             if (discoverConfigured) {
-                add(DrawerEntry(discoverLabel, matchesCurrentScreen(Screen.Discover, currentScreen), onOpenDiscover))
+                add(DrawerEntry(discoverLabel, matchesCurrentScreen(Screen.Discover, currentScreen), onSelect = onOpenDiscover))
             }
             add(DrawerEntry(searchLabel, matchesCurrentScreen(Screen.Search, currentScreen)) { onNavigate(Screen.Search) })
             // docs/28 §1: a plain entry to the room list; nothing about a group runs until the screen opens.
@@ -276,6 +304,13 @@ fun NavDrawerHost(
         onDispose { if (seat?.leftEdge === edge) seat.leftEdge = null }
     }
 
+    // docs/29 §9 G3: the top layer publishes its drawer state; losing top or closing clears it.
+    val drawerOpenSink = LocalDrawerOpenSink.current
+    DisposableEffect(drawerOpenSink, isTop, isOpen) {
+        if (isTop) drawerOpenSink?.value = isOpen
+        onDispose { if (isTop) drawerOpenSink?.value = false }
+    }
+
     // Registers later than MainActivity's back-stack-pop BackHandler, so it wins (LIFO): Back
     // closes the drawer instead of popping a screen; a hidden layer's drawer never takes Back.
     BackHandler(enabled = isTop && isOpen) { closeDrawer(navigatingAway = false) }
@@ -303,6 +338,8 @@ fun NavDrawerHost(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                // docs/29 §8.4: the layer's bar room, outside every scroller in the page.
+                .padding(bottom = LocalMusicBarInset.current)
                 .focusRequester(contentFocusRequester)
                 .focusRestorer()
                 .focusGroup(),
@@ -450,6 +487,7 @@ private fun DrawerPanel(
                     val isFocused by remember(index) { derivedStateOf { focusedIndex == index } }
                     DrawerRow(
                         label = entry.label,
+                        subline = entry.subline,
                         isFocused = isFocused,
                         isCurrent = entry.isCurrent,
                         enabled = isOpen,
@@ -491,10 +529,12 @@ private fun DrawerSectionLabel(text: String) {
  * One drawer entry row, same [focusRing]/SURFACE_RAISED recipe as `SettingsScreen`'s `RowCard`.
  * An accent dot marks the [isCurrent] entry. `enabled` ties to the drawer's open/closed state
  * since `clickable`'s `enabled` also gates focusability, so closed rows drop out of focus search.
+ * A [subline] makes the docs/29 §9 G3 Now playing row: two lines and an accent note, never the dot.
  */
 @Composable
 private fun DrawerRow(
     label: String,
+    subline: String?,
     isFocused: Boolean,
     isCurrent: Boolean,
     enabled: Boolean,
@@ -507,7 +547,7 @@ private fun DrawerRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .height(ENTRY_HEIGHT)
+            .height(if (subline != null) ENTRY_HEIGHT + NOW_PLAYING_EXTRA else ENTRY_HEIGHT)
             .background(if (isFocused) JellybeamTheme.SurfaceRaised else Color.Transparent, RoundedCornerShape(8.dp))
             .focusRing(isFocused, cornerRadius = 8.dp, color = accent.accentInk)
             .clickable(interactionSource = interactionSource, indication = null, enabled = enabled, onClick = onClick)
@@ -515,21 +555,28 @@ private fun DrawerRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .size(6.dp)
-                .background(if (isCurrent) accent.accentInk else Color.Transparent, CircleShape),
-        )
-        BasicText(
-            text = label,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = TextStyle(
-                fontFamily = JellybeamTheme.Archivo,
-                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Medium,
-                color = if (isFocused) JellybeamTheme.Panna else JellybeamTheme.Panna2,
-                fontSize = 16.sp,
-            ),
-        )
+        CurrentDot(color = if (isCurrent) accent.accentInk else Color.Transparent)
+        Column(modifier = Modifier.weight(1f)) {
+            BasicText(
+                text = label,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = TextStyle(
+                    fontFamily = JellybeamTheme.Archivo,
+                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Medium,
+                    color = if (isFocused) JellybeamTheme.Panna else JellybeamTheme.Panna2,
+                    fontSize = 16.sp,
+                ),
+            )
+            if (subline != null) {
+                BasicText(
+                    text = subline,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = PannaB3, fontSize = 11.sp),
+                )
+            }
+        }
+        if (subline != null) Canvas(Modifier.size(14.dp)) { NoteGlyph(accent.accentInk) }
     }
 }

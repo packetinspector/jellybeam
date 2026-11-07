@@ -41,6 +41,10 @@ const SEEK_DEBOUNCE: Duration = Duration::from_millis(500);
 /// How long `stop()` waits for the actor to acknowledge final delivery before taking it over,
 /// when the actor hasn't begun it yet.
 const STOP_ACK_TIMEOUT: Duration = Duration::from_millis(100);
+/// docs/feature-dev/music-design-brief.md §1.3: how long a successor's Start waits for its
+/// predecessor's Stopped to land; past it Start goes anyway, so a failing Stopped never mutes the
+/// next track.
+const PREDECESSOR_STOP_WAIT: Duration = Duration::from_secs(3);
 
 /// Who sends the final Stopped report: claimed once, by the actor when it begins delivery or by
 /// `stop()` when the actor hasn't within [`STOP_ACK_TIMEOUT`]. A Stopped already on the wire is
@@ -513,7 +517,26 @@ impl ReportingSession {
         Self::start_with_sink(Arc::new(client), ctx)
     }
 
+    /// [`Self::start`], sending Start only once `predecessor` fires (or is dropped), at most
+    /// [`PREDECESSOR_STOP_WAIT`] later: Jellyfin's Stopped clears the device's now-playing item
+    /// whatever it names, so the previous track's Stopped must land first.
+    pub fn start_after(
+        client: JellyfinClient,
+        ctx: ReportContext,
+        predecessor: oneshot::Receiver<()>,
+    ) -> Self {
+        Self::start_after_with_sink(Arc::new(client), ctx, Some(predecessor))
+    }
+
     pub(crate) fn start_with_sink(sink: Arc<dyn ReportSink>, ctx: ReportContext) -> Self {
+        Self::start_after_with_sink(sink, ctx, None)
+    }
+
+    fn start_after_with_sink(
+        sink: Arc<dyn ReportSink>,
+        ctx: ReportContext,
+        predecessor: Option<oneshot::Receiver<()>>,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (position_tx, position_rx) = watch::channel(0i64);
         let start_acked = Arc::new(AtomicBool::new(false));
@@ -522,6 +545,7 @@ impl ReportingSession {
         let task = tokio::spawn(run(
             sink.clone(),
             ctx.clone(),
+            predecessor,
             cmd_rx,
             position_rx,
             start_acked.clone(),
@@ -722,6 +746,7 @@ fn build_report(
         subtitle_stream_index,
         play_session_id: ctx.play_session_id.clone(),
         play_method: ctx.play_method,
+        now_playing_queue: ctx.media.now_playing_queue(),
     }
 }
 
@@ -731,6 +756,7 @@ fn build_report(
 async fn run(
     sink: Arc<dyn ReportSink>,
     ctx: ReportContext,
+    predecessor: Option<oneshot::Receiver<()>>,
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     mut position_rx: watch::Receiver<i64>,
     start_acked: Arc<AtomicBool>,
@@ -743,6 +769,9 @@ async fn run(
         subtitle_stream_index: None,
     };
 
+    if let Some(predecessor) = predecessor {
+        let _ = tokio::time::timeout(PREDECESSOR_STOP_WAIT, predecessor).await;
+    }
     let start_ok = send_retrying(&sink, report_for(&ctx, &state, PlaybackReportKind::Start)).await;
     start_acked.store(start_ok, Ordering::Relaxed);
 
@@ -850,6 +879,7 @@ fn report_for(
         subtitle_stream_index: state.subtitle_stream_index,
         play_session_id: ctx.play_session_id.clone(),
         play_method: ctx.play_method,
+        now_playing_queue: ctx.media.now_playing_queue(),
     }
 }
 
@@ -1125,6 +1155,7 @@ mod tests {
             media_source_id: "source".into(),
             play_session_id: "session".into(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+            media: crate::ReportMedia::Video,
         }
     }
 
@@ -1136,6 +1167,7 @@ mod tests {
             media_source_id: "source".into(),
             play_session_id: play_session_id.into(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+            media: crate::ReportMedia::Video,
         }
     }
 
@@ -1149,6 +1181,64 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(matches!(calls[0].kind, PlaybackReportKind::Start));
 
+        session.stop(0).await;
+    }
+
+    /// docs/feature-dev/music-design-brief.md §1.3: a successor sends Start only once its
+    /// predecessor's Stopped settles, and on its own once that wait runs out.
+    #[tokio::test(start_paused = true)]
+    async fn a_successor_starts_after_its_predecessor_or_once_the_wait_runs_out() {
+        let sink = FakeSink::new(0);
+        let (settled_tx, settled_rx) = oneshot::channel();
+        let next = ReportingSession::start_after_with_sink(sink.clone(), ctx(), Some(settled_rx));
+        tokio::task::yield_now().await;
+        assert!(sink.calls().is_empty(), "Start waits for the predecessor");
+        settled_tx.send(()).expect("successor waits");
+        tokio::task::yield_now().await;
+        assert_eq!(sink.calls().len(), 1);
+        next.stop(0).await;
+
+        let sink = FakeSink::new(0);
+        let (_held_tx, held_rx) = oneshot::channel::<()>();
+        let next = ReportingSession::start_after_with_sink(sink.clone(), ctx(), Some(held_rx));
+        tokio::task::yield_now().await;
+        tokio::time::advance(PREDECESSOR_STOP_WAIT - Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(sink.calls().is_empty());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            sink.calls().len(),
+            1,
+            "a held predecessor never mutes the next track"
+        );
+        next.stop(0).await;
+    }
+
+    /// An audio session names its queue on Start and Progress; a video session names none.
+    #[tokio::test(start_paused = true)]
+    async fn an_audio_session_reports_its_queue() {
+        let sink = FakeSink::new(0);
+        let queue: Arc<[String]> = vec!["a".to_string(), "b".to_string()].into();
+        let audio = ReportContext {
+            media: crate::ReportMedia::Audio {
+                queue: queue.clone(),
+            },
+            ..ctx()
+        };
+        let session = ReportingSession::start_with_sink(sink.clone(), audio);
+        tokio::task::yield_now().await;
+        tokio::time::advance(PROGRESS_INTERVAL).await;
+        tokio::task::yield_now().await;
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.now_playing_queue == queue));
+        session.stop(0).await;
+
+        let sink = FakeSink::new(0);
+        let session = ReportingSession::start_with_sink(sink.clone(), ctx());
+        tokio::task::yield_now().await;
+        assert!(sink.calls()[0].now_playing_queue.is_empty());
         session.stop(0).await;
     }
 

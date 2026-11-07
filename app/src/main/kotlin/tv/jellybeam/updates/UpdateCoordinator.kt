@@ -39,7 +39,10 @@ class UpdateCoordinator(private val context: Context) {
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private var resumed = false
     private var pageVisible = false
-    private var playback = tv.jellybeam.player.playbackActivityTracker.isActive
+    private var videoPlayback = tv.jellybeam.player.playbackActivityTracker.isActive
+
+    /** docs/26 §1: a video player or a starting or playing music session holds an install back; library sync never does. */
+    private val playback: Boolean get() = videoPlayback || AppGraph.musicOwnerIfStarted()?.holdsPlayback == true
     private var playbackStarting = false
     private var authorization: ULong? = null
     private var permissionReturn = false
@@ -241,10 +244,11 @@ class UpdateCoordinator(private val context: Context) {
             nudge()
         }
     }
+    /** [active]: a video player; music is read from its owner, which calls this on each change too. */
     fun playbackChanged(active: Boolean) {
-        playback = active
+        videoPlayback = active
         playbackStarting = false
-        if (active) {
+        if (playback) {
             autoCheck?.cancel()
             val plan = yieldToPlayback()
             if (plan.launch == PlayLaunchPlan.LaunchThenAbandonStaging && !unavailable) scope.launch { abandonUncommittedStaging(plan.cancelCore) }

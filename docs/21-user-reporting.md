@@ -126,6 +126,7 @@ Fixed event names, `key=value` fields, no free text from the server.
 | Settings | `settings.change` | field name, old, new (never server addresses or API keys) |
 | Errors | `error` | where, code, posMs |
 | Core calls | `ffi.error` | section (the fixed `ffi.<method>` name), kind (the error variant as a fixed word, never its text) -- recorded for every failed core call, since most callers fail open |
+| Audio clock | `audio.clock` | kind (`clamp`, `drift`, `summary`, `lag`), rule (`start`, `jump`, `ceiling`; clamp only), numbers only: output number, ppm, span s, lag ms, clamps, maxExcess ms, reported/bound ms. One `clamp` per fault (first 20 per output), one `drift` a minute and at release, one `summary` or `lag` at release; never per position read. A 2 h film is about 120 lines (about 11 KB, 6% of the line budget); a seek-heavy evening adds one `lag` line per output. Same facts as the always-on `JellybeamSeek clock ...` lines (docs/18 §5.1) |
 
 Rust `tracing` WARN and ERROR records reach the same ring through a
 uniffi callback interface registered once at core construction, formatted

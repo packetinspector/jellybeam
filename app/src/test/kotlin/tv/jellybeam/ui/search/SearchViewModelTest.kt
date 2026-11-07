@@ -18,6 +18,8 @@ import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.SeerrAvailability
 import uniffi.jellybeam_core.SeerrCard
 import uniffi.jellybeam_core.SeerrMediaType
+import uniffi.jellybeam_core.ViewKind
+import uniffi.jellybeam_core.ViewSnapshot
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SearchViewModelTest {
@@ -49,6 +51,21 @@ class SearchViewModelTest {
         assertEquals(listOf(FakeCoreGateway.SearchCall("quantum", 60u)), fake.searchCalls)
         assertEquals(results, viewModel.state.value.results)
         assertEquals(false, viewModel.state.value.isSearching)
+    }
+
+    @Test
+    fun `a settled search carries the library kinds it searched`() = runTest {
+        val views = listOf(
+            ViewSnapshot(id = "m", name = "Music", kind = ViewKind.LIBRARY, collectionType = "music"),
+            ViewSnapshot(id = "f", name = "Films", kind = ViewKind.LIBRARY, collectionType = "movies"),
+        )
+        val fake = FakeCoreGateway(viewsList = views, searchResultsByQuery = mapOf("zzq" to emptyList()))
+        val viewModel = SearchViewModel(fake)
+
+        viewModel.onQueryChange("zzq")
+        advanceUntilIdle()
+
+        assertEquals(listOf(SearchedKind.Films, SearchedKind.Music), viewModel.state.value.searched)
     }
 
     @Test

@@ -1,5 +1,7 @@
 package tv.jellybeam.ui.home.classic
 
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -42,5 +44,25 @@ class ShelfAssemblyTest {
         val grown = 5
         assertEquals(3, mountedShelfCount(grown = grown, shelfCount = 3))
         assertEquals(5, mountedShelfCount(grown = grown, shelfCount = 6))
+    }
+
+    @Test
+    fun `Play and Play-Pause on a focused album play it on the first press`() {
+        assertEquals(AlbumKey.PLAY, albumPlayKey(Key.MediaPlay, KeyEventType.KeyDown, repeatCount = 0))
+        assertEquals(AlbumKey.PLAY, albumPlayKey(Key.MediaPlayPause, KeyEventType.KeyDown, repeatCount = 0))
+    }
+
+    @Test
+    fun `a held Play and its release are consumed without playing again`() {
+        assertEquals(AlbumKey.CONSUME, albumPlayKey(Key.MediaPlay, KeyEventType.KeyDown, repeatCount = 1))
+        assertEquals(AlbumKey.CONSUME, albumPlayKey(Key.MediaPlay, KeyEventType.KeyUp, repeatCount = 0))
+        assertEquals(AlbumKey.CONSUME, albumPlayKey(Key.MediaPlayPause, KeyEventType.KeyUp, repeatCount = 0))
+    }
+
+    @Test
+    fun `other keys pass to the card and the media session`() {
+        assertEquals(AlbumKey.PASS, albumPlayKey(Key.DirectionCenter, KeyEventType.KeyDown, repeatCount = 0))
+        assertEquals(AlbumKey.PASS, albumPlayKey(Key.MediaPause, KeyEventType.KeyDown, repeatCount = 0))
+        assertEquals(AlbumKey.PASS, albumPlayKey(Key.MediaNext, KeyEventType.KeyDown, repeatCount = 0))
     }
 }

@@ -54,6 +54,7 @@ class DiscoverDetailViewModelTest {
         activeRequest = null,
         canRequest = true,
         canRequest4k = false,
+        onWatchlist = null,
     )
 
     private fun season(number: Int, requestable: Boolean = true) = SeerrSeasonStatus(
@@ -77,6 +78,7 @@ class DiscoverDetailViewModelTest {
         canRequest = true,
         canRequest4k = false,
         seasons = seasons,
+        onWatchlist = null,
     )
 
     @Test

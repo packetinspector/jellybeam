@@ -258,6 +258,7 @@ async fn playback_report_lifecycle_does_not_400() {
         subtitle_stream_index: None,
         play_session_id: play_session_id.clone(),
         play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+        now_playing_queue: Default::default(),
     };
     client
         .report_playback(base.clone())

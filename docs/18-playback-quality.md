@@ -637,23 +637,44 @@ skip. Read from logcat, AudioFlinger and the Media3 1.9.0 source:
   only another flush (a skip) creates a new one.
 
 Rule: **an output's reported position can never lead the time it has
-actually spent playing.** A lead of more than 100 ms is a lie, and a lie is
-replaced by `play time - latency`, where latency is `play time - position`
-as measured on the last healthy output after its first second and before
-its `stop()` (once the last frame is written the position freezes at the
-end while play time runs on, which would teach the next item a lag as long
-as the silence; 0 until one has been measured); nothing ever goes backwards. `player/AudioClockGuard.kt`
-applies it in a `ForwardingAudioOutput` installed through
-`DefaultAudioSink.Builder.setAudioOutputProvider`, the extension point
-Media3 documents for wrapping the AudioTrack output. Healthy tracks always
-lag play time by their latency, so the rule never touches them; a lying
-track is reported where the audio really is, the renderer stays ready, the
-video clock never sees a 2.5 s jump (so no drop-to-keyframe codec flush
-either), and the seek path is untouched. If the box's offset never
-corrects, the residual error is the difference between that track's
-latency and the last measured one, not a constant lead. Logging, tag
-`JellybeamSeek`, numbers only: `clock clamp reported=<ms> bound=<ms>` on the
-first clamp of an output and `clock clamps=<n> maxExcess=<ms>` on release.
+actually spent playing, unless its own clock runs a little fast.** A position
+is a lie only when it leads play time by more than 100 ms **and** one rule
+fires; each rule is a fact about what no real audio clock does:
+
+| Rule | Fires when | Why |
+|---|---|---|
+| `start` | first sample, or inside the first 2 s of play | no clock gains 100 ms in 2 s |
+| `jump` | one step gains more than 250 ms on play time | drift is smooth |
+| `ceiling` | the lead grows faster than 1000 ppm (plus 5 ms of sampling jitter) | audio crystals stay within a few hundred ppm |
+
+A lead of 100 ms or less, or a catch-up that stays behind play time, is never
+touched. A smooth drift below the ceiling is a real clock running fast and is
+**followed**: the first version bounded the position by wall time for the
+whole track, so a healthy output 50-300 ppm fast was clamped after 566-3400 s
+and the picture then followed wall time while the sound ran ahead, 0.3-2 s over
+two hours (#32; JVM trace test `smooth drift`).
+
+A lie is rebased: the guard remembers `raw - (play time - latency)` at the
+fault and reports the raw position minus that offset, so the track keeps its
+own rate, bounded below by `play time - latency` and above by
+`play time + slack`; the offset ends when the raw position is truthful again.
+`latency` is `play time - position` as measured on the last healthy output
+between 1 s and 10 s of play (before its `stop()`, and before drift can have
+built up; 0 until one has been measured), so drift never carries into the next
+item. Nothing ever goes backwards. `player/AudioClockGuard.kt` applies it in a
+`ForwardingAudioOutput` installed through `DefaultAudioSink.Builder.setAudioOutputProvider`,
+the extension point Media3 documents for wrapping the AudioTrack output. The
+renderer stays ready, the video clock never sees a 2.5 s jump (so no
+drop-to-keyframe codec flush either), and the seek path is untouched.
+Logging, tag `JellybeamSeek`, numbers only: `clock clamp rule=<start|jump|ceiling>
+reported=<ms> bound=<ms>` on each fault of an output (first 20), `clock clamps=<n> maxExcess=<ms>
+start=<n> jump=<n> ceiling=<n>` on release, and the always-on `clock drift out=<n> ppm=<n>
+span=<s> lag=<ms> clamps=<n>` once a minute (the raw position's rate against
+`nanoTime`; a final line with `final=1` at release). Tests are trace tests: the
+seek-stall trace (a counter of the previous stream, 2.5 s and 12.4 h), jumps at
+any time, drift of up to 1000 ppm either way over three hours, and a replay of
+the previous guard asserting that the new one only clamps where the old one
+clamped and gives the same output until then.
 
 Verified on a test TV: a
 long skip-burst session with no fault; one lying track caught (10 clamps

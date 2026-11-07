@@ -27,12 +27,19 @@ internal fun isDpadKey(keyCode: Int): Boolean = when (keyCode) {
 
 /**
  * A retained layer's re-entry seat (docs/15 §4): [place] is its screen's [FocusRestorer] (false = nothing to
- * place; a landing-nothing placement calls `onMiss`), [fallback] the gated entry, [leftEdge] a drawer opened on Left.
+ * place; a landing-nothing placement calls `onMiss`), [fallback] the gated entry, [leftEdge] a drawer opened on Left,
+ * [windowHasFocus] the root's focus flag for refresh guards.
  */
 internal class FocusSeat {
     var place: ((onMiss: () -> Unit) -> Boolean)? = null
     var fallback: ((keyCode: Int) -> Boolean)? = null
     var leftEdge: (() -> Unit)? = null
+
+    /** Whether anything in the window holds focus, the layer's screen or a sibling such as the music bar (docs/15 §3). */
+    var windowHasFocus: () -> Boolean = { false }
+
+    /** docs/15 §3: focus is held, but outside a screen whose own root reports [screenHasFocus]. */
+    fun focusElsewhere(screenHasFocus: Boolean): Boolean = !screenHasFocus && windowHasFocus()
 
     fun reenter(keyCode: Int) {
         val miss = {

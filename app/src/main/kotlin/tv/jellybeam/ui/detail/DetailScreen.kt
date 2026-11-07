@@ -1,6 +1,7 @@
 package tv.jellybeam.ui.detail
 
 import android.view.ViewTreeObserver
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -118,6 +119,7 @@ import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.PlaybackActivity
 import tv.jellybeam.ui.common.ActiveWhileTop
+import tv.jellybeam.ui.common.openTrailer
 import tv.jellybeam.ui.common.rememberMinuteClock
 import tv.jellybeam.ui.discover.DISCOVER_PAGE_MARGIN
 import tv.jellybeam.ui.discover.DiscoverErrorMessage
@@ -130,6 +132,7 @@ import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.cards.POSTER_CELL_WIDTH
 import tv.jellybeam.ui.cards.PosterCard
 import tv.jellybeam.ui.cards.PreloadOnDwell
+import tv.jellybeam.ui.cards.ShelfEntry
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberHeaderPageBringIntoViewSpec
 import tv.jellybeam.ui.cards.rememberSkeletonPulseAlpha
@@ -143,6 +146,7 @@ import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.placeByKeys
+import tv.jellybeam.ui.focus.LocalFocusSeat
 import tv.jellybeam.ui.focus.refreshGuardEligible
 import tv.jellybeam.ui.focus.restoreNow
 import tv.jellybeam.ui.focus.rememberFocusMemory
@@ -280,7 +284,7 @@ fun DetailScreen(
     onWatchTogether: (String, Long) -> Unit = { _, _ -> },
     viewModel: DetailViewModel = viewModel(
         key = "detail-${card.id}",
-        factory = DetailViewModelFactory(AppGraph.gateway, card, AppGraph.strings),
+        factory = DetailViewModelFactory(AppGraph.gateway, card, AppGraph.strings, LocalContext.current.applicationContext),
     ),
 ) {
     val focusGate = LocalFocusGate.current
@@ -348,6 +352,15 @@ fun DetailScreen(
             dropPanelForNavigation()
             onOpenDetail(series)
             viewModel.consumePendingSeriesNavigation()
+        }
+    }
+    // docs/19 §1.3: a remote trailer opens in the system's player; the panel drops at once, as for any row that leaves the page.
+    val context = LocalContext.current
+    LaunchedEffect(state.pendingTrailerUrl) {
+        state.pendingTrailerUrl?.let { url ->
+            dropPanelForNavigation()
+            if (!openTrailer(context, url)) Toast.makeText(context, R.string.trailer_unavailable, Toast.LENGTH_SHORT).show()
+            viewModel.consumePendingTrailer()
         }
     }
     LaunchedEffect(state.pendingWatchTogether) {
@@ -423,6 +436,8 @@ fun DetailScreen(
                 itemName = state.card.name,
                 collections = state.collections,
                 memberOfCollections = state.memberOfCollections,
+                extras = state.extras,
+                strings = AppGraph.strings,
                 confirm = state.confirm,
                 offsetX = panelOffsetX,
                 isTop = isTop,
@@ -430,6 +445,8 @@ fun DetailScreen(
                 onEnterCollections = viewModel::enterCollections,
                 onSelectCollection = viewModel::selectCollection,
                 onBackFromCollections = viewModel::backFromCollections,
+                onSelectExtra = viewModel::selectExtra,
+                onBackFromExtras = viewModel::backFromExtras,
                 onConfirmBulkMark = viewModel::confirmBulkMark,
                 onDismissConfirm = viewModel::dismissConfirm,
                 onClose = viewModel::closeMenu,
@@ -544,6 +561,8 @@ private fun EpisodeDetailScreen(
     // [refreshGuardEligible] is the shared predicate. Cancelled wherever this body stops owning
     // focus: losing `isTop`, the action panel opening, losing RESUMED, or the drawer opening.
     val refreshOwner = rememberRefreshRestoreOwner(isTop)
+    // docs/15 §3: focus on the music bar or the drawer is still held; a refresh never takes it back.
+    val seat = LocalFocusSeat.current
     // The live top state every ownership hook below reads (`rememberUpdatedState`, never the
     // captured `isTop` param).
     val latestIsTop by rememberUpdatedState(isTop)
@@ -585,6 +604,7 @@ private fun EpisodeDetailScreen(
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = episodeHasFocus,
+                        focusElsewhere = seat?.focusElsewhere(episodeHasFocus) == true,
                         frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },
@@ -1024,6 +1044,8 @@ private fun SeriesDetailScreen(
     // Same [RefreshRestoreOwner] shape as [EpisodeDetailScreen]; [refreshGuardEligible] is the
     // shared predicate.
     val refreshOwner = rememberRefreshRestoreOwner(isTop)
+    // docs/15 §3: focus on the music bar or the drawer is still held; a refresh never takes it back.
+    val seat = LocalFocusSeat.current
     val latestIsTop by rememberUpdatedState(isTop)
     LaunchedEffect(panelOpen) {
         // The panel holds focus outside the page; its close needs no release (docs/15 §5).
@@ -1058,6 +1080,7 @@ private fun SeriesDetailScreen(
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = seriesHasFocus,
+                        focusElsewhere = seat?.focusElsewhere(seriesHasFocus) == true,
                         frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },
@@ -1611,31 +1634,6 @@ internal fun <T> rememberCardWindow(
     return CardWindow(items.subList(start, endIndex), start)
 }
 
-/**
- * docs/15 §2: a lazy shelf's per-item requesters so entering it lands on its first fully visible
- * item ([DetailFormatting.shelfEntryIndex]), not the spatially nearest one; yields while
- * [FocusMemory.frozen] so a remembered key wins. Indices are in the composed (sliced) list space.
- */
-private class ShelfEntry {
-    private val requesters = mutableMapOf<Int, FocusRequester>()
-
-    fun target(memory: FocusMemory, listState: LazyListState, itemCount: Int): FocusRequester {
-        if (memory.frozen) return FocusRequester.Default
-        val index = DetailFormatting.shelfEntryIndex(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, itemCount)
-        return index?.let { requesters[it] } ?: FocusRequester.Default
-    }
-
-    @Composable
-    fun requester(index: Int): FocusRequester {
-        val requester = remember { FocusRequester() }
-        DisposableEffect(index, requester) {
-            requesters[index] = requester
-            onDispose { if (requesters[index] === requester) requesters.remove(index) }
-        }
-        return requester
-    }
-}
-
 /** §3 item 7's season episode shelf: a horizontal, per-season row of [EpisodeGridCard]s (not a
  * wrapping grid).
  */
@@ -1793,6 +1791,8 @@ private fun MovieDetailScreen(
     // Same [RefreshRestoreOwner] shape as [EpisodeDetailScreen]; [refreshGuardEligible] is the
     // shared predicate.
     val refreshOwner = rememberRefreshRestoreOwner(isTop)
+    // docs/15 §3: focus on the music bar or the drawer is still held; a refresh never takes it back.
+    val seat = LocalFocusSeat.current
     val latestIsTop by rememberUpdatedState(isTop)
     LaunchedEffect(panelOpen) {
         // The panel holds focus outside the page; its close needs no release (docs/15 §5).
@@ -1825,6 +1825,7 @@ private fun MovieDetailScreen(
                         seeded = memory.seeded,
                         resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
                         hasFocus = movieHasFocus,
+                        focusElsewhere = seat?.focusElsewhere(movieHasFocus) == true,
                         frozenByOthers = memory.frozenBesides(ownTokens),
                     )
             },
@@ -1923,6 +1924,9 @@ private fun MovieDetailScreen(
                                     doorFocusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.SECONDARY) doorFocusRequester else null,
                                     memory = memory,
                                     onOpenMenu = { memory.captureInvoker(); viewModel.openMenu() },
+                                    showTrailer = state.pillTrailer != null,
+                                    onTrailer = viewModel::playPillTrailer,
+                                    onPlayStarted = viewModel::cancelTrailerLookup,
                                 )
                                 OverviewBlock(
                                     text = card.overview,
@@ -2097,7 +2101,8 @@ private fun GenreChip(name: String, modifier: Modifier = Modifier) {
 }
 
 /** §4 item 5's Movie button row: Play/Resume, then the `···` door at position two (docs/19 rules
- * 1-2). The door renders even with no primary action, so this row is never empty.
+ * 1-2), then the outlined Trailer pill when [showTrailer] (docs/19 §1.3). The door renders even
+ * with no primary action, so this row is never empty.
  */
 @Composable
 private fun MovieActionRow(
@@ -2107,6 +2112,9 @@ private fun MovieActionRow(
     doorFocusRequester: FocusRequester?,
     memory: FocusMemory,
     onOpenMenu: () -> Unit,
+    showTrailer: Boolean,
+    onTrailer: () -> Unit,
+    onPlayStarted: () -> Unit,
 ) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -2123,6 +2131,7 @@ private fun MovieActionRow(
                 enabled = action is DetailFormatting.PrimaryAction.Playable,
                 onClick = {
                     if (action is DetailFormatting.PrimaryAction.Playable) {
+                        onPlayStarted()
                         PerfLog.markStartup("playback.click")
                         PlaybackActivity.launch(action.targetId)
                     }
@@ -2138,6 +2147,16 @@ private fun MovieActionRow(
             memory = memory,
             focusRequester = doorFocusRequester,
         )
+        if (showTrailer) {
+            PrimaryPillButton(
+                label = stringResource(R.string.discover_action_trailer),
+                enabled = true,
+                onClick = onTrailer,
+                memory = memory,
+                key = "action:trailer",
+                primary = false,
+            )
+        }
     }
 }
 
@@ -2548,10 +2567,13 @@ private fun PrimaryPillButton(
     key: String,
     focusRequester: FocusRequester? = null,
     preloadItemId: String? = null,
+    /** `false` draws the outlined secondary pill: filled only while focused (docs/19 §1.3's Trailer). */
+    primary: Boolean = true,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
     val accent = LocalAccent.current
+    val filled = enabled && (primary || isFocused)
 
     Box(modifier = Modifier.focusRing(isFocused = enabled && isFocused, cornerRadius = ACTION_BUTTON_HEIGHT / 2, color = if (enabled) accent.accentSheen else accent.accentInk)) {
         Box(
@@ -2561,7 +2583,8 @@ private fun PrimaryPillButton(
                 .heightIn(min = ACTION_BUTTON_HEIGHT)
                 .widthIn(min = ACTION_BUTTON_MIN_WIDTH)
                 .clip(RoundedCornerShape(50))
-                .background(if (enabled) accent.accent else JellybeamTheme.Surface)
+                .background(if (filled) accent.accent else if (enabled) Color.Transparent else JellybeamTheme.Surface)
+                .let { if (enabled && !filled) it.border(1.dp, JellybeamTheme.Hairline, RoundedCornerShape(50)) else it }
                 .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
                 .onFocusChanged { focusState ->
                     preloadItemId?.let { itemId ->
@@ -2577,7 +2600,16 @@ private fun PrimaryPillButton(
         ) {
             BasicText(
                 text = label,
-                style = TextStyle(fontFamily = JellybeamTheme.Archivo, fontWeight = FontWeight.SemiBold, color = if (enabled) accent.onAccent else JellybeamTheme.Grigio, fontSize = 15.sp),
+                style = TextStyle(
+                    fontFamily = JellybeamTheme.Archivo,
+                    fontWeight = FontWeight.SemiBold,
+                    color = when {
+                        filled -> accent.onAccent
+                        enabled -> JellybeamTheme.Panna
+                        else -> JellybeamTheme.Grigio
+                    },
+                    fontSize = 15.sp,
+                ),
             )
         }
     }

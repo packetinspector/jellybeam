@@ -3,8 +3,12 @@ package tv.jellybeam.ui.detail
 import kotlin.random.Random
 import tv.jellybeam.R
 import tv.jellybeam.i18n.UiStrings
+import tv.jellybeam.ui.common.youtubeKey
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.CollectionInfo
+import uniffi.jellybeam_core.ExtraItem
+import uniffi.jellybeam_core.ItemDetail
+import uniffi.jellybeam_core.RemoteTrailer
 
 /**
  * Pure, plain-Kotlin content model for the detail-page action panel (docs/19-detail-action-menu.md
@@ -14,6 +18,7 @@ import uniffi.jellybeam_core.CollectionInfo
  * this JVM-testable.
  */
 
+private const val MOVIE_ITEM_TYPE = "Movie"
 private const val SERIES_ITEM_TYPE = "Series"
 private const val EPISODE_ITEM_TYPE = "Episode"
 private const val BOXSET_ITEM_TYPE = "BoxSet"
@@ -39,6 +44,9 @@ sealed interface MenuAction {
 
     data class GoToSeries(val series: Card) : MenuAction
     data object AddToCollection : MenuAction
+
+    /** docs/19 §1.3: the door to the Trailers and extras level. */
+    data object Extras : MenuAction
     data object RefreshMetadata : MenuAction
 }
 
@@ -73,6 +81,8 @@ data class MenuInput(
      * subtext reads it. Distinct from [scopeSeason].
      */
     val highlightedSeasonNumber: Int? = null,
+    /** [extrasAvailable]'s answer; gates the [MenuAction.Extras] row. */
+    val extrasAvailable: Boolean = false,
 )
 
 /** docs/19 §1.1/§1.2: builds every group/row this input warrants, and which row focuses first. */
@@ -211,6 +221,8 @@ private fun buildPlaybackRows(strings: UiStrings, input: MenuInput): List<MenuRo
         val target = if (action.targetId == input.card.id) input.card else input.allEpisodes.firstOrNull { it.id == action.targetId }
         rows += MenuRow(MenuAction.WatchTogether(action.targetId, target?.positionTicks ?: 0L), strings.get(R.string.detail_menu_watch_together), null)
     }
+    // docs/19 §1.3: last in the group, so it never moves the focus prediction (§1.2); its state column is the `▸` marker.
+    if (input.extrasAvailable) rows += MenuRow(MenuAction.Extras, strings.get(R.string.detail_menu_extras), null)
     return rows
 }
 
@@ -255,6 +267,108 @@ data class CollectionRow(val collection: CollectionInfo, val alreadyIn: Boolean)
 /** Pure so [DetailMenuModelTest] covers it without Compose; the panel calls this directly. */
 fun buildCollectionRows(collections: List<CollectionInfo>, memberOfCollections: Set<String>): List<CollectionRow> =
     collections.map { CollectionRow(it, alreadyIn = it.id in memberOfCollections) }
+
+/** docs/19 §1.3: what the Movie page's Trailer pill plays. */
+sealed interface PillTrailer {
+    data object Local : PillTrailer
+    data class Remote(val url: String) : PillTrailer
+}
+
+/** docs/19 §1.3: a row of the Trailers and extras level. */
+sealed interface ExtraEntry {
+    data class Local(val item: ExtraItem) : ExtraEntry
+    data class Remote(val name: String?, val url: String) : ExtraEntry
+}
+
+/** docs/19 §1.3: the extras level's load state; [Idle] until the menu first opens with the row present. */
+sealed interface ExtrasState {
+    data object Idle : ExtrasState
+    data object Loading : ExtrasState
+    data class Loaded(val entries: List<ExtraEntry>) : ExtrasState
+    data object Failed : ExtrasState
+}
+
+/** docs/19 §1.3: Movie only; a server trailer wins, else the first remote link an installed app can open. */
+fun pillTrailer(itemType: String, detail: ItemDetail?, canOpenRemote: (String) -> Boolean): PillTrailer? {
+    if (itemType != MOVIE_ITEM_TYPE || detail == null) return null
+    if (detail.localTrailerCount > 0) return PillTrailer.Local
+    return detail.remoteTrailers.firstOrNull { canOpenRemote(it.url) }?.let { PillTrailer.Remote(it.url) }
+}
+
+/** docs/19 §1.3: from the detail's counts alone, so the menu opens without a fetch; a Movie's pill plays the first trailer. */
+fun extrasAvailable(itemType: String, detail: ItemDetail?, canOpenRemote: (String) -> Boolean): Boolean {
+    if (detail == null || itemType == BOXSET_ITEM_TYPE) return false
+    val trailers = detail.localTrailerCount + detail.remoteTrailers.count { canOpenRemote(it.url) }
+    return if (itemType == MOVIE_ITEM_TYPE) {
+        trailers > 1 || detail.specialFeatureCount > 0
+    } else {
+        trailers + detail.specialFeatureCount > 0
+    }
+}
+
+private const val TRAILER_EXTRA_TYPE = "Trailer"
+private const val THEME_SONG_EXTRA_TYPE = "ThemeSong"
+
+/** docs/19 §1.3: features follow this type order, then name; any other type, or none, sorts last. */
+private val FEATURE_TYPE_ORDER = listOf("BehindTheScenes", "Featurette", "Interview", "Scene", "DeletedScene", "Short", "Clip", "Sample")
+
+private fun featureRank(extraType: String?): Int = FEATURE_TYPE_ORDER.indexOf(extraType).let { if (it < 0) FEATURE_TYPE_ORDER.size else it }
+
+/**
+ * docs/19 §1.3: trailers (server order, then openable links), then features by type and name. A
+ * Movie drops the trailer its pill plays; theme songs are audio and never listed.
+ */
+fun buildExtrasList(
+    itemType: String,
+    localTrailers: List<ExtraItem>,
+    remote: List<RemoteTrailer>,
+    features: List<ExtraItem>,
+    canOpenRemote: (String) -> Boolean,
+): List<ExtraEntry> {
+    // The endpoint is the trailer list, so an untyped entry is a trailer.
+    val trailers = localTrailers.map { ExtraEntry.Local(it.copy(extraType = it.extraType ?: TRAILER_EXTRA_TYPE)) } +
+        remote.filter { canOpenRemote(it.url) }.map { ExtraEntry.Remote(it.name, it.url) }
+    val shownTrailers = if (itemType == MOVIE_ITEM_TYPE) trailers.drop(1) else trailers
+    val shownFeatures = features
+        .filter { it.extraType != THEME_SONG_EXTRA_TYPE }
+        .sortedWith(compareBy<ExtraItem>({ featureRank(it.extraType) }, { it.name.lowercase() }))
+        .map { ExtraEntry.Local(it) }
+    return shownTrailers + shownFeatures
+}
+
+/** One rendered row of the extras level: the server's [label] verbatim (a blank one falls back) and a state-column [subtext]. */
+data class ExtraRow(val entry: ExtraEntry, val label: String, val subtext: String)
+
+/** Pure so [DetailMenuModelTest] covers it without Compose; the panel calls this directly. */
+fun buildExtraRows(strings: UiStrings, entries: List<ExtraEntry>): List<ExtraRow> = entries.map { entry ->
+    when (entry) {
+        is ExtraEntry.Local -> ExtraRow(
+            entry,
+            entry.item.name.ifBlank {
+                strings.get(if (entry.item.extraType == TRAILER_EXTRA_TYPE) R.string.detail_extra_trailer_fallback else R.string.detail_extra_fallback)
+            },
+            strings.get(localTypeLabelRes(entry.item.extraType)),
+        )
+        is ExtraEntry.Remote -> ExtraRow(
+            entry,
+            entry.name?.takeIf { it.isNotBlank() } ?: strings.get(R.string.detail_extra_trailer_fallback),
+            strings.get(if (youtubeKey(entry.url) != null) R.string.detail_extra_type_youtube else R.string.detail_extra_type_trailer),
+        )
+    }
+}
+
+private fun localTypeLabelRes(extraType: String?): Int = when (extraType) {
+    TRAILER_EXTRA_TYPE -> R.string.detail_extra_type_trailer
+    "BehindTheScenes" -> R.string.detail_extra_type_behind_the_scenes
+    "Featurette" -> R.string.detail_extra_type_featurette
+    "Interview" -> R.string.detail_extra_type_interview
+    "Scene" -> R.string.detail_extra_type_scene
+    "DeletedScene" -> R.string.detail_extra_type_deleted_scene
+    "Short" -> R.string.detail_extra_type_short
+    "Clip" -> R.string.detail_extra_type_clip
+    "Sample" -> R.string.detail_extra_type_sample
+    else -> R.string.detail_extra_type_other
+}
 
 /** docs/19 §1.1's random pick: uniform over non-virtual episodes, `null` if none. */
 fun pickRandom(episodes: List<Card>, random: Random): Card? =

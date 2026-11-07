@@ -16,15 +16,26 @@ use crate::{
 const FAVORITES_FROM_SQL: &str =
     "FROM items WHERE is_favorite = 1 AND item_type IN ('Movie', 'Series', 'Season', 'Episode', 'BoxSet')";
 
-const CARD_COLUMNS: &str = "id, item_type, name, primary_tag, primary_blurhash, played, \
+/// An expression here holds no `", "`: [`qualified_card_columns`] splits on it.
+pub(crate) const CARD_COLUMNS: &str =
+    "id, item_type, name, primary_tag, primary_blurhash, played, \
      playback_position_ticks, runtime_ticks, unplayed_item_count, production_year, \
      index_number, parent_index_number, series_id, series_primary_tag, \
      parent_backdrop_item_id, parent_backdrop_tag, last_played_date, overview, \
      premiere_date, is_virtual, series_name, library_id, backdrop_tag, thumb_tag, \
-     is_favorite, parent_thumb_item_id, parent_thumb_tag, date_created";
+     is_favorite, parent_thumb_item_id, parent_thumb_tag, date_created, album, album_id, \
+     album_artist, CASE WHEN items.item_type = 'Audio' THEN (SELECT group_concat(ia.name,char(31) \
+     ORDER BY ia.ord) FROM item_artists ia WHERE ia.item_id = items.id AND ia.role = 1) END, \
+     has_lyrics, album_primary_tag, normalization_gain, album_normalization_gain, play_count, \
+     CASE WHEN items.item_type IN ('Audio','MusicAlbum') THEN (SELECT ia.artist_id \
+     FROM item_artists ia WHERE ia.item_id = items.id AND ia.role = 0 AND ia.ord = 0) END, \
+     media_type";
+
+/// Joins `CardRow::artists` in the `CARD_COLUMNS` subquery; a server name never holds it.
+const ARTIST_SEPARATOR: char = '\u{1f}';
 
 /// Watch state leaves the mirror already graced (docs/07 §1), so every browse surface agrees.
-fn row_to_card(row: &Row<'_>) -> rusqlite::Result<CardRow> {
+pub(crate) fn row_to_card(row: &Row<'_>) -> rusqlite::Result<CardRow> {
     let item_type: String = row.get(1)?;
     let runtime_ticks = row.get(7)?;
     let (position_ticks, played) = crate::watch_grace::displayed_watch_state(
@@ -62,6 +73,20 @@ fn row_to_card(row: &Row<'_>) -> rusqlite::Result<CardRow> {
         parent_thumb_item_id: row.get(25)?,
         parent_thumb_tag: row.get(26)?,
         date_created: row.get(27)?,
+        album: row.get(28)?,
+        album_id: row.get(29)?,
+        album_artist: row.get(30)?,
+        artists: row
+            .get::<_, Option<String>>(31)?
+            .map(|joined| joined.split(ARTIST_SEPARATOR).map(str::to_string).collect())
+            .unwrap_or_default(),
+        has_lyrics: row.get::<_, Option<bool>>(32)?.unwrap_or(false),
+        album_primary_tag: row.get(33)?,
+        normalization_gain: row.get(34)?,
+        album_normalization_gain: row.get(35)?,
+        play_count: u32::try_from(row.get::<_, i64>(36)?.max(0)).unwrap_or(u32::MAX),
+        album_artist_id: row.get(37)?,
+        media_type: row.get(38)?,
     })
 }
 
@@ -130,7 +155,7 @@ fn grid_sort_index(field: GridSortField) -> &'static str {
 /// scan to serve DESC). Name is a special case: `key` there already IS `sort_name COLLATE
 /// NOCASE`, and repeating that term breaks SQLite 3.43's index match (`USE TEMP B-TREE`), so
 /// the redundant tiebreak term is dropped for Name (a no-op on row order).
-fn grid_sort_order(sort: GridSort) -> String {
+pub(crate) fn grid_sort_order(sort: GridSort) -> String {
     let dir = if sort.descending { "DESC" } else { "ASC" };
     let key = match sort.field {
         GridSortField::Name => "sort_name COLLATE NOCASE".to_string(),
@@ -334,7 +359,7 @@ pub(crate) fn library_grid_counts_checked(
 /// §2.4's per-group key expression, run-length encoded by [`library_grid_groups`]. Each
 /// field maps its NULL/absent case to the empty string, which lands last purely via
 /// `grid_sort_order`'s `NULLS LAST` -- no separate handling needed here.
-fn grid_group_key_expr(field: GridSortField) -> &'static str {
+pub(crate) fn grid_group_key_expr(field: GridSortField) -> &'static str {
     match field {
         GridSortField::Name => {
             "CASE WHEN upper(substr(sort_name,1,1)) BETWEEN 'A' AND 'Z' \
@@ -393,8 +418,15 @@ pub(crate) fn library_grid_groups_checked(
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
+    run_length_groups(rows)
+}
+
+/// §2.4: one [`GridGroup`] per contiguous run of equal keys, in the order given.
+pub(crate) fn run_length_groups(
+    keys: impl Iterator<Item = rusqlite::Result<String>>,
+) -> rusqlite::Result<Vec<GridGroup>> {
     let mut groups: Vec<GridGroup> = Vec::new();
-    for key in rows {
+    for key in keys {
         let key = key?;
         match groups.last_mut() {
             Some(last) if last.key == key => last.count += 1,
@@ -445,7 +477,15 @@ fn sort_clause(sort: Sort) -> &'static str {
 fn qualified_card_columns() -> String {
     CARD_COLUMNS
         .split(", ")
-        .map(|c| format!("items.{c}"))
+        // The artists expression already names `items.` itself; only Audio rows pay for it,
+        // so video cards on Home/Detail skip the lookup.
+        .map(|c| {
+            if c.starts_with("CASE") {
+                c.to_string()
+            } else {
+                format!("items.{c}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -871,7 +911,13 @@ pub(crate) fn latest(
         return latest_grouped_series(conn, view_id, limit, hide_watched, watched_index_ready);
     }
 
-    let item_types = crate::item_types_for_collection(&collection_type);
+    // docs/feature-dev/music-design-brief.md §1.3: the server groups a music library's Latest
+    // into albums, which the mirror holds as rows; reconciliation keeps counting `Audio`.
+    let item_types: &[&str] = if collection_type == "music" {
+        &["MusicAlbum"]
+    } else {
+        crate::item_types_for_collection(&collection_type)
+    };
     if item_types.is_empty() {
         return Vec::new();
     }
@@ -1517,6 +1563,35 @@ mod tests {
             .collect();
         assert_eq!(got, vec![b, a]);
         assert!(cards_by_ids(&conn, &[]).is_empty());
+    }
+
+    /// An audio and a video playlist read back their `MediaType` on the browse path.
+    #[test]
+    fn a_playlist_card_carries_its_media_type() {
+        let (_dir, mut conn) = open_test_db();
+        let parent = uuid_n(1);
+        let (audio, video) = (uuid_n(2), uuid_n(3));
+        let playlist = |id: &str, media_type| BaseItemDto {
+            media_type: Some(media_type),
+            ..item_dto(
+                id,
+                "Synthetic Playlist",
+                Some(&parent),
+                BaseItemKind::Playlist,
+            )
+        };
+        apply_upsert_items(
+            &mut conn,
+            &[
+                playlist(&audio, jellyfin_api::models::MediaType::Audio),
+                playlist(&video, jellyfin_api::models::MediaType::Video),
+            ],
+        )
+        .expect("insert");
+
+        let media_type = |id: &str| card_by_id(&conn, id).expect("stored").media_type;
+        assert_eq!(media_type(&audio).as_deref(), Some("Audio"));
+        assert_eq!(media_type(&video).as_deref(), Some("Video"));
     }
 
     #[test]
@@ -2941,8 +3016,11 @@ mod tests {
             text.contains("parent_index_number"),
             "seek on (series_id, parent_index_number): {text}"
         );
+        // The card's artists subquery sorts its own few rows; the episodes must not need one.
         assert!(
-            !text.contains("TEMP B-TREE"),
+            !plan
+                .iter()
+                .any(|l| l.contains("TEMP B-TREE") && !l.contains("group_concat")),
             "both branches arrive in index order: {text}"
         );
     }

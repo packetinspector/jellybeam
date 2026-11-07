@@ -72,7 +72,7 @@ separators, footnotes) use `muted` — going darker drops under 4.5:1 the moment
 - Nerdy: kicker mono 11sp `accent` (`SERIES · S4 E18`) + title **20sp/600** `cream`, `gap 3dp`, max width 530dp.
 - Clean: **one line** — title 20sp/700 `cream` + inline mono 11sp `muted` (`S4 E18`), baseline-aligned,
   `gap 10dp`. No series name (it's in the info sheet).
-- Titles are display strings: **strip release tags** (`[Itchy]`, `1080p`, group names). Never render them
+- Titles are display strings: **strip release tags** (`[Grp]`, `1080p`, group names). Never render them
   in a title, anywhere. They appear only in the stats sheet FILE row, and only if present.
 - Overflow: single line, ellipsis. Never wrap to two.
 

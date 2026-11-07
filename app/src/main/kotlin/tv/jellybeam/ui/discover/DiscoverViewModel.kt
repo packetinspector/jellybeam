@@ -4,7 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.R
 import tv.jellybeam.data.displayMessage
+import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,8 +16,10 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import uniffi.jellybeam_core.CoreException
+import uniffi.jellybeam_core.SeerrCard
 import uniffi.jellybeam_core.SeerrHomeRow
 
 data class DiscoverUiState(
@@ -37,6 +41,10 @@ class DiscoverViewModel(private val gateway: CoreGateway, private val strings: U
 
     private var loadJob: Job? = null
 
+    // The two sources of `state.rows`; both are written only under the current [loadJob] (docs/14 Watchlist).
+    private var home: List<SeerrHomeRow> = emptyList()
+    private var watchlist: List<SeerrCard> = emptyList()
+
     private var active = true
 
     init {
@@ -56,10 +64,18 @@ class DiscoverViewModel(private val gateway: CoreGateway, private val strings: U
         // Rows already on screen stay up during a reload; only an empty screen shows the skeleton (docs/14).
         _state.update { it.copy(isLoading = it.rows.isEmpty(), error = null, notConfigured = false) }
         loadJob = viewModelScope.launch {
+            // Fails open: a watchlist failure only leaves its shelf out (docs/14 Watchlist).
+            val watchlistLoad = async { runCatchingCancellable { gateway.seerrWatchlist() }.getOrDefault(emptyList()) }
             try {
-                val home = gateway.seerrHome()
-                _state.update { it.copy(isLoading = false, rows = home.rows.map { row -> row.copy(cards = distinctSeerrCards(row.cards)) }) }
+                home = gateway.seerrHome().rows
+                // Only an empty screen shows home first; a reload waits, so the previous watchlist never pairs with the new home rows.
+                if (_state.value.rows.isEmpty()) publishRows()
+                watchlist = watchlistLoad.await()
+                publishRows()
             } catch (e: CoreException) {
+                watchlistLoad.cancel()
+                home = emptyList()
+                watchlist = emptyList()
                 _state.update {
                     it.copy(
                         isLoading = false,
@@ -70,6 +86,10 @@ class DiscoverViewModel(private val gateway: CoreGateway, private val strings: U
                 }
             }
         }
+    }
+
+    private fun publishRows() = _state.update {
+        it.copy(isLoading = false, rows = discoverRows(watchlist, strings.get(R.string.discover_watchlist_title), home))
     }
 
     fun retry() = refresh()

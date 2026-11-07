@@ -126,6 +126,19 @@ the entry named here is the one to extend.
   `onDestroy` and from a player start that doesn't run; `PlaybackActivityTracker` gets each instance's create and destroy, tagged with
   its generation (docs/17 §3).
 
+### Music session start / track / stop
+
+- **Enters:** every screen through `AppGraph.music.send` (the only creator of
+  `MusicPlaybackOwner`); `MusicService` `onCreate` / `onStartCommand` / `onDestroy` attach and
+  detach their instance; the service's player listener sends events tagged with the session id;
+  media keys and the system Now Playing card through `MusicRoutedPlayer`.
+- **Fans out:** `MusicPlaybackOwner.send` → `reduce` on Main; its effects start, feed and release
+  the service, and send each track start and end to the core through one serial report queue.
+  A video start runs `AppGraph.beforePlayback` → `stopForVideo` first; the owner collects
+  `gateway.accountEpochs` itself and sends `EpochsChanged` (current and parked); `holdsPlaybackChanged` tells `UpdateCoordinator`.
+- **Readers:** `AppGraph.musicStarted` (bar, drawer entry, Current dot, Now Playing, Queue) and
+  `musicOwnerIfStarted()`, so nothing builds the owner but a music request (docs/29 §1).
+
 ### PiP enter / exit
 
 - **Enters:** `PlaybackActivity.onPictureInPictureModeChanged` (entry is requested by
@@ -167,6 +180,10 @@ the entry named here is the one to extend.
 | Warm-up results | `LaunchWarmup` slots | `JellybeamRoot`, `HomeFeed` | — / taken once / `LaunchWarmup.discard` |
 | Back stack, per-screen view models | `JellybeamRoot.navigate`; the epoch-keyed restore effect sets the first stack; `resetSessionState` blanks it | `RetainedScreenLayer` | — / — / `resetSessionState` clears stores and stack |
 | Player presence and play requests (slot, generations, waiting request) | `PlaybackActivityTracker`, written only by `send` → `reduce` on Main | `MainActivity`, `JellybeamRoot`, `UpdateCoordinator`, `WatchTogetherViewModel` | a newer request replaces it / the player's own `Destroyed` / `AccountReset` drops the request, never closes a player |
+| Music session (phase, session id, service instance, pending fetch) | `MusicPlaybackOwner`, written only by `send` → `reduce` (`MusicFlow`) on Main | `AppGraph.musicStarted` readers, `MusicService` | a newer `Play` cancels the fetch / `Stop`, queue end or `ServiceDestroyed` end it once / `EpochsChanged` stops it when its epoch left |
+| Music player and queue (play order, position, pause) | `MusicService` executes the owner's effects; the read-only `MusicPlaybackOwner.now` snapshot comes from its listener | bar, Now Playing, Queue | released with the service |
+| Ambient screen | `AmbientController.send` → `reduceAmbient` (`AmbientController.state`) | `AmbientHost`, `MainActivity.dispatchKeyEvent` (`ambientKeys`) | `Hidden` while `ambientMayCount` is false / `Ended`, then its scope ends as `AmbientHost` leaves with the session / — |
+| Playlist reorder | `MusicPlaylistViewModel.send` → `reduceReorder` | `MusicPlaylistScreen` | a re-read cancels a held or dropping row / tagged results drop when stale |
 | Focus record | `FocusMemory` (`lastKey`, `invokerKey`; `frozen` derived) | `FocusRestorer`, `reenterNow` | `withPlacement` token released / — / stores cleared |
 | Refresh-restore job | `RefreshRestoreOwner` | screen restore effects | `ownershipLost` / — / composition left |
 | Root re-entry seat | `RetainedScreenLayer` → `RootFocus.seat` | `MainActivity.dispatchKeyEvent` | disposed with the layer |

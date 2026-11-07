@@ -2,6 +2,7 @@ package tv.jellybeam.ui.discover
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,37 +22,53 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.R
 import tv.jellybeam.ui.cards.POSTER_CELL_WIDTH
+import tv.jellybeam.ui.cards.ShelfEntry
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
 import tv.jellybeam.ui.cards.rememberSkeletonPulseAlpha
 import tv.jellybeam.ui.common.ActiveWhileTop
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
+import tv.jellybeam.ui.focus.LocalFocusGate
+import tv.jellybeam.ui.focus.LocalFocusSeat
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
+import tv.jellybeam.ui.focus.refreshGuardEligible
 import tv.jellybeam.ui.focus.rememberFocusMemory
+import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
+import tv.jellybeam.ui.focus.restoreNow
+import tv.jellybeam.ui.nav.LocalDrawerFocusCoordinator
 import tv.jellybeam.ui.settings.SettingsChip
 import uniffi.jellybeam_core.SeerrBrowseKind
 import uniffi.jellybeam_core.SeerrHomeRow
@@ -76,7 +93,8 @@ private const val CHIP_ID_TV = "chip:tv"
  * key so shelves can't collide (`"chip:search"`/etc, `"shelf:<row.id>/card:<seerrCardKey>"`). No
  * §2 rule-2 selected item, so `selectedKey` stays `null`. First open lands on [CHIP_ID_SEARCH]; a
  * becoming-top return restores the last-focused chip/cell (scrolling its [LazyListState] via
- * [tv.jellybeam.ui.focus.FocusMemory.scrollTo]), falling back to the first action chip if gone.
+ * [tv.jellybeam.ui.focus.FocusMemory.scrollTo]), falling back per [discoverRefocusKey] if gone; a reload
+ * that removes the focused card re-places focus the same way (§3 refresh guard).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -121,33 +139,67 @@ fun DiscoverScreen(
         true
     }
 
-    // §2 rule 3: a stale key whose shelf still has cards restores to that shelf's nearest
-    // visible cell; a gone shelf, non-shelf key, or fresh entry falls to the first action chip.
+    // §2 rule 3: a stale key lands on [discoverRefocusKey]'s card; a chip or fresh entry on the first chip.
+    val discoverFallback = {
+        val nearbyKey = discoverRefocusKey(state.rows, memory.lastKey) { shelfListStates[it]?.firstVisibleItemIndex ?: 0 }
+        nearbyKey?.let { memory.target(it) } ?: chipSearchRequester.asFocusTarget()
+    }
+
     FocusRestorer(
         memory = memory,
         isTop = isTop,
         ready = !state.isLoading,
-        fallback = {
-            val staleKey = memory.lastKey
-            val rowId = staleKey?.takeIf { it.startsWith("shelf:") }?.removePrefix("shelf:")?.substringBefore("/card:")
-            val row = rowId?.let { id -> state.rows.firstOrNull { it.id == id } }
-            if (row != null && row.cards.isNotEmpty()) {
-                val listState = shelfListStates[row.id]
-                val index = (listState?.firstVisibleItemIndex ?: 0).coerceIn(0, row.cards.lastIndex)
-                val nearbyCard = row.cards[index]
-                val nearbyKey = "shelf:${row.id}/card:${seerrCardKey(nearbyCard.mediaType, nearbyCard.tmdbId)}"
-                memory.target(nearbyKey) ?: chipSearchRequester.asFocusTarget()
-            } else {
-                chipSearchRequester.asFocusTarget()
-            }
-        },
+        fallback = discoverFallback,
         tag = "discover-home",
     )
+
+    // docs/15 §3: a reload can drop the focused card (e.g. the title just removed from the watchlist)
+    // and leave focus nowhere; `frame` lets Compose apply the new rows before [discoverHasFocus] is read.
+    val focusGate = LocalFocusGate.current
+    val seat = LocalFocusSeat.current
+    val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var discoverHasFocus by remember { mutableStateOf(false) }
+    val refreshOwner = rememberRefreshRestoreOwner(isTop)
+    val latestIsTop by rememberUpdatedState(isTop)
+    var drawerOpen by remember { mutableStateOf(false) }
+    val drawerFocusCoordinator = LocalDrawerFocusCoordinator.current
+    if (drawerFocusCoordinator != null) {
+        SideEffect {
+            drawerFocusCoordinator.onDrawerOpened = {
+                drawerOpen = true
+                refreshOwner.ownershipLost()
+            }
+            drawerFocusCoordinator.onDrawerClosed = { _ ->
+                drawerOpen = false
+                false
+            }
+        }
+    }
+    LaunchedEffect(state.rows) {
+        refreshOwner.onContentChanged(
+            scope = scope,
+            frame = { withFrameNanos {} },
+            eligible = { ownTokens ->
+                !drawerOpen &&
+                    refreshGuardEligible(
+                        isTop = latestIsTop,
+                        seeded = memory.seeded,
+                        resumed = lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED,
+                        hasFocus = discoverHasFocus,
+                        focusElsewhere = seat?.focusElsewhere(discoverHasFocus) == true,
+                        frozenByOthers = memory.frozenBesides(ownTokens),
+                    )
+            },
+            restore = { memory.restoreNow(focusGate, fallback = discoverFallback, tag = "discover-refresh") },
+        )
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(JellybeamTheme.Notte)
+            .onFocusChanged { discoverHasFocus = it.hasFocus }
             .verticalScroll(rememberScrollState())
             .padding(bottom = 32.dp),
     ) {
@@ -193,14 +245,17 @@ fun DiscoverScreen(
             state.rows.isEmpty() -> DiscoverMessage(stringResource(R.string.discover_empty))
             else -> Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
                 state.rows.forEach { row ->
-                    if (row.cards.isNotEmpty()) {
-                        val listState = shelfListStates.getOrPut(row.id) { LazyListState() }
-                        DiscoverShelf(
-                            row = row,
-                            listState = listState,
-                            onOpenDetail = onOpenDetail,
-                            memory = memory,
-                        )
+                    // Keyed by row id: the Watchlist shelf coming or going must not hand a shelf's slot state to its neighbour.
+                    key(row.id) {
+                        if (row.cards.isNotEmpty()) {
+                            val listState = shelfListStates.getOrPut(row.id) { LazyListState() }
+                            DiscoverShelf(
+                                row = row,
+                                listState = listState,
+                                onOpenDetail = onOpenDetail,
+                                memory = memory,
+                            )
+                        }
                     }
                 }
             }
@@ -215,7 +270,7 @@ private fun ChipGap() {
     Box(modifier = Modifier.size(12.dp))
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun DiscoverShelf(
     row: SeerrHomeRow,
@@ -224,6 +279,7 @@ private fun DiscoverShelf(
     memory: FocusMemory,
 ) {
     var focusedIndex by remember(row.id) { mutableStateOf<Int?>(null) }
+    val shelfEntry = remember(row.id) { ShelfEntry() }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         BasicText(
@@ -238,13 +294,17 @@ private fun DiscoverShelf(
                 state = listState,
                 horizontalArrangement = Arrangement.spacedBy(CELL_GAP),
                 contentPadding = PaddingValues(horizontal = PAGE_MARGIN),
+                // docs/15 §2: Up/Down into a shelf lands on its first visible card, not the one spatially nearest.
+                modifier = Modifier
+                    .focusProperties { enter = { shelfEntry.target(memory, listState, row.cards.size) } }
+                    .focusGroup(),
             ) {
                 itemsIndexed(
                     row.cards,
                     key = { _, card -> seerrCardKey(card.mediaType, card.tmdbId) },
                     contentType = { _, _ -> "poster" },
                 ) { index, card ->
-                    val cardKey = remember(card.mediaType, card.tmdbId) { seerrCardKey(card.mediaType, card.tmdbId) }
+                    val focusKey = remember(row.id, card.mediaType, card.tmdbId) { discoverCardFocusKey(row.id, card) }
                     val isFocused by remember(index) { derivedStateOf { focusedIndex == index } }
                     SeerrPosterCard(
                         posterUrl = card.posterUrl,
@@ -255,7 +315,8 @@ private fun DiscoverShelf(
                         onClick = { onOpenDetail(card.mediaType, card.tmdbId) },
                         width = POSTER_CELL_WIDTH,
                         modifier = Modifier
-                            .focusKey(memory, "shelf:${row.id}/card:$cardKey")
+                            .focusKey(memory, focusKey)
+                            .focusRequester(shelfEntry.requester(index))
                             .onFocusChanged { focusState ->
                                 if (focusState.isFocused) {
                                     focusedIndex = index

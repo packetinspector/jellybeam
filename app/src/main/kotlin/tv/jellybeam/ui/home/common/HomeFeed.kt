@@ -107,8 +107,9 @@ fun <T> reuseIfUnchanged(current: T, incoming: T): T =
 
 /**
  * First-composition seed (docs/10 "Startup phases"): the finished warm-up as a loaded
- * [HomeFeedState], or `null` when anything is missing or the snapshot is another layout's
- * (docs/25 §6.3), so the ordinary load runs and the skeleton shows.
+ * [HomeFeedState], or `null` when anything is missing, the snapshot is empty (only the ordinary
+ * load can tell a first sync from an empty library) or another layout's (docs/25 §6.3), so the
+ * ordinary load runs and the skeleton shows.
  */
 internal fun <T : Any, U> seedFromWarmup(
     warm: LaunchWarmup.Home?,
@@ -119,6 +120,7 @@ internal fun <T : Any, U> seedFromWarmup(
 ): HomeFeedState<U>? {
     val settings = warm?.settings ?: return null
     val views = warm.views ?: return null
+    if (warm.snapshot.isEmpty()) return null
     val incoming = extract(warm.snapshot) ?: return null
     return HomeFeedState(
         chrome = HomeChrome(

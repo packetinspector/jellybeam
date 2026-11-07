@@ -9,8 +9,8 @@ class OsdTitleFormatTest {
     @Test
     fun `a trailing bracketed group is preserved`() {
         assertEquals(
-            "The Prestidigitation Approximation [Itchy]",
-            OsdTitleFormat.displayTitle("The Prestidigitation Approximation [Itchy]"),
+            "Synthetic Episode Title [Grp]",
+            OsdTitleFormat.displayTitle("Synthetic Episode Title [Grp]"),
         )
     }
 

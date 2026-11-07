@@ -4,6 +4,7 @@ import tv.jellybeam.ui.discover.distinctSeerrCards
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.SeerrCard
 import uniffi.jellybeam_core.SeerrMediaType
+import uniffi.jellybeam_core.ViewSnapshot
 
 /** The Discover section under Search's library results (docs/14 "Unified search"). */
 sealed interface DiscoverSection {
@@ -62,3 +63,54 @@ fun discoverQueryReady(query: String): Boolean = query.trim().length >= DISCOVER
 /** "No matches" only once both sides have settled empty; a Seerr failure shows its own line instead. */
 fun showNoMatches(query: String, librarySearching: Boolean, library: List<Card>, discover: DiscoverSection): Boolean =
     query.isNotBlank() && !librarySearching && library.isEmpty() && discover == DiscoverSection.Hidden
+
+/** docs/29 §9 K1: Search's result groups in their fixed order, so D-pad paths never move with the query;
+ * [Other] keeps every type the spec doesn't name last rather than hiding it. */
+enum class SearchGroup(val itemType: String?) {
+    Films("Movie"),
+    Series("Series"),
+    Episodes("Episode"),
+    Artists("MusicArtist"),
+    Albums("MusicAlbum"),
+    Songs("Audio"),
+    Playlists("Playlist"),
+    Other(null),
+}
+
+/** One non-empty group, its cards in the index's rank order. */
+data class SearchResultGroup(val group: SearchGroup, val cards: List<Card>)
+
+/**
+ * docs/29 §9 K1/K2: [results] split into [SearchGroup]s, empty ones absent; a `Person` hit named exactly
+ * like an artist in the same results is dropped, since the artist card already leads to it.
+ */
+fun groupSearchResults(results: List<Card>): List<SearchResultGroup> {
+    val artistNames = results.mapNotNullTo(HashSet()) { card -> card.name.takeIf { card.itemType == SearchGroup.Artists.itemType } }
+    val byGroup = results
+        .filterNot { it.itemType == PERSON_ITEM_TYPE && it.name in artistNames }
+        .groupBy { card -> SearchGroup.entries.firstOrNull { it.itemType == card.itemType } ?: SearchGroup.Other }
+    return SearchGroup.entries.mapNotNull { group -> byGroup[group]?.let { SearchResultGroup(group, it) } }
+}
+
+private const val PERSON_ITEM_TYPE = "Person"
+
+/** The grid holds one header per group ahead of its cards; this is how many cells that is. */
+fun searchGridCellCount(groups: List<SearchResultGroup>): Int = groups.sumOf { it.cards.size + 1 }
+
+/** The grid index of [cardId]'s cell, or -1 when no group holds it. */
+fun searchGridIndexOf(groups: List<SearchResultGroup>, cardId: String): Int {
+    var groupStart = 0
+    for (group in groups) {
+        val index = group.cards.indexOfFirst { it.id == cardId }
+        if (index >= 0) return groupStart + 1 + index
+        groupStart += group.cards.size + 1
+    }
+    return -1
+}
+
+/** docs/29 §9 K3: what the no-results line says was searched, in this fixed order. */
+enum class SearchedKind(val collectionType: String) { Films("movies"), Series("tvshows"), Music("music") }
+
+/** The kinds the viewer's libraries hold, by collection type; libraries of other types add nothing. */
+fun searchedKinds(views: List<ViewSnapshot>): List<SearchedKind> =
+    SearchedKind.entries.filter { kind -> views.any { it.collectionType == kind.collectionType } }

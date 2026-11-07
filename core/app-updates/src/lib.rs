@@ -1099,6 +1099,59 @@ mod tests {
         assert!(!due(1, 100, 100, 100, 0, false));
     }
     #[test]
+    fn automatic_and_manual_windows_open_exactly_at_their_boundaries() {
+        assert_eq!((SUCCESS_WAIT, FAILURE_WAIT, MANUAL_WAIT), (3600, 900, 60));
+        let t = 1_000_000;
+        // Success window: an hour, not a day.
+        assert!(!due(t + SUCCESS_WAIT - 1, t, 0, 0, 0, false));
+        assert!(due(t + SUCCESS_WAIT, t, 0, 0, 0, false));
+        // Failure window: fifteen minutes, independent of an older success.
+        assert!(!due(t + FAILURE_WAIT - 1, 0, t, 0, 0, false));
+        assert!(due(t + FAILURE_WAIT, 0, t, 0, 0, false));
+        assert!(due(t + FAILURE_WAIT, t - SUCCESS_WAIT, t, 0, 0, false));
+        assert!(!due(t + FAILURE_WAIT, t, t, 0, 0, false));
+        // Manual floor, which ignores both automatic windows.
+        assert!(!due(t + MANUAL_WAIT - 1, t, t, t, 0, true));
+        assert!(due(t + MANUAL_WAIT, t, t, t, 0, true));
+        assert_eq!(
+            manual_refusal(t + MANUAL_WAIT - 1, t, 0),
+            Some(Refusal::Coalesced)
+        );
+        assert_eq!(manual_refusal(t + MANUAL_WAIT, t, 0), None);
+        // A rate-limit deadline holds both kinds until it passes.
+        assert!(!due(t + SUCCESS_WAIT, t, 0, 0, t + SUCCESS_WAIT + 1, false));
+        assert!(due(
+            t + SUCCESS_WAIT + 1,
+            t,
+            0,
+            0,
+            t + SUCCESS_WAIT + 1,
+            false
+        ));
+        assert!(!due(t, 0, 0, 0, t + 1, true));
+        assert!(due(t + 1, 0, 0, 0, t + 1, true));
+    }
+    #[test]
+    fn clock_moved_backwards_waits_one_window_from_now_not_from_the_stale_stamp() {
+        let t = 1_000_000;
+        let ahead = t + 10 * SUCCESS_WAIT;
+        // Raw future stamps never make a check due early.
+        assert!(!due(t, ahead, 0, 0, 0, false));
+        assert!(!due(t, 0, ahead, 0, 0, false));
+        // Past the slack, sanitize clamps them to now, so the windows restart from now.
+        let success = past_stamp(ahead, t);
+        let failure = past_stamp(ahead, t);
+        assert_eq!((success, failure), (t, t));
+        assert!(!due(t + SUCCESS_WAIT - 1, success, 0, 0, 0, false));
+        assert!(due(t + SUCCESS_WAIT, success, 0, 0, 0, false));
+        assert!(!due(t + FAILURE_WAIT - 1, 0, failure, 0, 0, false));
+        assert!(due(t + FAILURE_WAIT, 0, failure, 0, 0, false));
+        // The rate-limit deadline is capped, so a backward clock can't stall checks past an hour.
+        let blocked = deadline(t + 100 * SUCCESS_WAIT, t, BLOCK_MAX);
+        assert!(blocked <= t + BLOCK_MAX);
+        assert!(due(t + BLOCK_MAX, 0, 0, 0, blocked, false));
+    }
+    #[test]
     fn independent_signer_and_actual_apk_facts() {
         let i = installed();
         let c = candidate(release(), metadata(), &i).unwrap().unwrap();

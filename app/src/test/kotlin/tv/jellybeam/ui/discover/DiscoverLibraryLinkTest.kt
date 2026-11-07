@@ -18,7 +18,7 @@ import uniffi.jellybeam_core.ItemDetail
 /** Same bare-minimum fixture shape as [tv.jellybeam.ui.detail.DetailViewModelTest]'s own
  * `testItemDetail`.
  */
-private fun testItemDetail(id: String = "item-1", name: String = "The Prestidigitation Approximation") = ItemDetail(
+private fun testItemDetail(id: String = "item-1", name: String = "Synthetic Episode Title") = ItemDetail(
     id = id,
     name = name,
     itemType = "Movie",
@@ -58,13 +58,13 @@ class DiscoverLibraryLinkTest {
 
     @Test
     fun `resolves a card from getItemDetail's fields`() = runTest {
-        val detail = testItemDetail(id = "movie-1", name = "The Prestidigitation Approximation")
+        val detail = testItemDetail(id = "movie-1", name = "Synthetic Episode Title")
         val fake = FakeCoreGateway(itemDetailResultsByItemId = mapOf("movie-1" to Result.success(detail)))
 
         val card = resolveLibraryCard(fake, "movie-1")
 
         assertEquals("movie-1", card?.id)
-        assertEquals("The Prestidigitation Approximation", card?.name)
+        assertEquals("Synthetic Episode Title", card?.name)
         assertEquals("Movie", card?.itemType)
         assertEquals(2020, card?.productionYear)
         assertEquals(true, card?.played)
@@ -79,7 +79,7 @@ class DiscoverLibraryLinkTest {
         val mirrorCard = uniffi.jellybeam_core.Card(
             id = "movie-1",
             itemType = "Movie",
-            name = "The Prestidigitation Approximation",
+            name = "Synthetic Episode Title",
             primaryTag = "tag-primary",
             backdropTag = "tag-backdrop",
             thumbTag = null,

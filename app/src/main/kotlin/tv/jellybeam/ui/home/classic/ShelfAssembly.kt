@@ -1,5 +1,7 @@
 package tv.jellybeam.ui.home.classic
 
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import uniffi.jellybeam_core.Card
@@ -7,7 +9,8 @@ import uniffi.jellybeam_core.HomeShelf
 import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.ShelfSource
 
-enum class ShelfKind { RESUME, POSTER }
+/** [SQUARE] is a music library's Latest: one 1:1 card per album (docs/29 §9 J1). */
+enum class ShelfKind { RESUME, POSTER, SQUARE }
 
 /** [art] only matters on a [ShelfKind.RESUME] shelf: which 16:9 chain its cards draw (docs/07 §1). */
 data class ShelfSpec(
@@ -22,7 +25,7 @@ data class ShelfSpec(
  * docs/25 §3: the core already decided which shelves show and in what order; this only gives each
  * one its localised title and card treatment. Pulled out of the Composable file so it's
  * plain-JVM-testable. [resumeArt] mirrors `Settings.homeResumeArt` (docs/07 §1): Poster draws the Latest poster cells,
- * the others a 16:9 rail.
+ * the others a 16:9 rail. [musicViewIds] are the views with collection type `music`, whose Latest is square.
  */
 fun buildShelves(
     shelves: List<HomeShelf>,
@@ -30,6 +33,7 @@ fun buildShelves(
     nextUpTitle: String,
     favoritesTitle: String,
     resumeArt: ResumeArt,
+    musicViewIds: Set<String> = emptySet(),
     latestInTitle: (viewName: String) -> String,
 ): List<ShelfSpec> = shelves.map { shelf ->
     val resumeKind = if (resumeArt == ResumeArt.POSTER) ShelfKind.POSTER else ShelfKind.RESUME
@@ -37,7 +41,10 @@ fun buildShelves(
         ShelfSource.ContinueWatching -> ShelfSpec(source.key(), continueWatchingTitle, shelf.cards, resumeKind, resumeArt)
         ShelfSource.NextUp -> ShelfSpec(source.key(), nextUpTitle, shelf.cards, resumeKind, resumeArt)
         ShelfSource.Favorites -> ShelfSpec(source.key(), favoritesTitle, shelf.cards, ShelfKind.POSTER)
-        is ShelfSource.Latest -> ShelfSpec(source.key(), latestInTitle(source.viewName), shelf.cards, ShelfKind.POSTER)
+        is ShelfSource.Latest -> {
+            val kind = if (source.viewId in musicViewIds) ShelfKind.SQUARE else ShelfKind.POSTER
+            ShelfSpec(source.key(), latestInTitle(source.viewName), shelf.cards, kind)
+        }
     }
 }
 
@@ -71,3 +78,16 @@ fun initialMountCount(shelfCount: Int): Int = minOf(2, shelfCount)
  */
 fun mountedShelfCount(grown: Int, shelfCount: Int): Int =
     minOf(shelfCount, maxOf(initialMountCount(shelfCount), grown))
+
+/** What a key does on a focused [ShelfKind.SQUARE] album (docs/29 §9 J1). */
+enum class AlbumKey { PLAY, CONSUME, PASS }
+
+/**
+ * docs/29 §9 J1: the remote's Play or Play/Pause plays the focused album, once per press; its repeats and
+ * release are consumed so they never reach the media session as a toggle.
+ */
+fun albumPlayKey(key: Key, type: KeyEventType, repeatCount: Int): AlbumKey = when {
+    key != Key.MediaPlay && key != Key.MediaPlayPause -> AlbumKey.PASS
+    type == KeyEventType.KeyDown && repeatCount == 0 -> AlbumKey.PLAY
+    else -> AlbumKey.CONSUME
+}

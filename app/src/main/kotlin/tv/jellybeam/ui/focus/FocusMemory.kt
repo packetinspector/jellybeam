@@ -179,21 +179,35 @@ internal suspend fun FocusMemory.placeByKeys(
     for (key in keys) {
         val direct = target(key)
         if (direct != null) {
-            if (requestFocusWithRetry(focusGate, attemptsPerKey) { direct.requestFocus() }) return key
+            if (placeConfirmed(key, focusGate, attemptsPerKey)) return key
             continue
         }
         val scroll = scrollTo ?: continue
         if (!scroll(key)) continue
         repeat(attemptsPerKey) {
             withFrameNanos { }
-            val scrolledInto = target(key)
-            if (scrolledInto != null && requestFocusWithRetry(focusGate, attemptsPerKey) { scrolledInto.requestFocus() }) {
-                return key
-            }
+            if (target(key) != null && placeConfirmed(key, focusGate, attemptsPerKey)) return key
         }
     }
     return null
 }
+
+/**
+ * docs/15 §4: a request into a page holding no focus enters its ancestors, and a `focusRestorer` there (the drawer
+ * host's) may redirect it to a stale saved child, so a placement repeats until [key] itself holds focus.
+ */
+private suspend fun FocusMemory.placeConfirmed(key: String, focusGate: MutableState<Boolean>?, attempts: Int): Boolean {
+    repeat(REDIRECT_TRIES) {
+        val placed = requestFocusWithRetry(focusGate, attempts) { target(key)?.requestFocus() == true }
+        if (!placed) return false
+        withFrameNanos { }
+        if (focusedKey == key) return true
+    }
+    // A target that never reports its own focus keeps the old contract: the request was granted.
+    return true
+}
+
+private const val REDIRECT_TRIES = 3
 
 /** Wraps a plain [FocusRequester] as a [FocusTarget] for [FocusRestorer]'s `fallback`;
  * [tryRequestFocus] makes an unattached requester a miss, not a crash.
@@ -237,14 +251,17 @@ internal suspend fun FocusMemory.restoreNow(
  * [FocusRestorer]'s becoming-top effect) for "a live data refresh dropped the focused item and
  * left focus nowhere". [frozenByOthers] is [FocusMemory.frozenBesides] the refresh owner's own
  * running restore, so a refresh supersedes its predecessor but never a drawer or navigation.
+ * [focusElsewhere] is focus held in the window outside the screen ([FocusSeat.focusElsewhere]: the
+ * music bar, the drawer), which a refresh never takes back.
  */
 internal fun refreshGuardEligible(
     isTop: Boolean,
     seeded: Boolean,
     resumed: Boolean,
     hasFocus: Boolean,
+    focusElsewhere: Boolean,
     frozenByOthers: Boolean,
-): Boolean = isTop && seeded && resumed && !hasFocus && !frozenByOthers
+): Boolean = isTop && seeded && resumed && !hasFocus && !focusElsewhere && !frozenByOthers
 
 /**
  * docs/15-focus-and-selection.md §2-§5's one becoming-top restore effect. Screens delete their

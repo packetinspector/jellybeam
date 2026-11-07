@@ -845,13 +845,4 @@ object DetailFormatting {
         val perCard = cardWidthDp + gapDp
         return max(1, floor(available / perCard).toInt())
     }
-
-    /** The first fully visible item of a shelf (same rule as [rememberCardWindow]'s latch), or null
-     * when the shelf is empty; a partly scrolled-off first item is skipped.
-     */
-    fun shelfEntryIndex(firstVisibleIndex: Int, firstVisibleOffsetPx: Int, itemCount: Int): Int? {
-        if (itemCount <= 0) return null
-        val firstFullyVisible = firstVisibleIndex + if (firstVisibleOffsetPx > 0) 1 else 0
-        return firstFullyVisible.coerceIn(0, itemCount - 1)
-    }
 }

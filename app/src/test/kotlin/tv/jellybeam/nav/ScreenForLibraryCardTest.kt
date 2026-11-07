@@ -28,4 +28,36 @@ class ScreenForLibraryCardTest {
 
         assertEquals(Screen.Detail(card), screen)
     }
+
+    @Test
+    fun `music cards open the music pages`() {
+        assertEquals(Screen.MusicAlbum("al-1"), screenForLibraryCard(testCard(id = "al-1", itemType = "MusicAlbum")))
+        assertEquals(Screen.MusicArtist("ar-1"), screenForLibraryCard(testCard(id = "ar-1", itemType = "MusicArtist")))
+    }
+
+    @Test
+    fun `an audio playlist opens the music playlist page, any other playlist Detail`() {
+        val audio = testCard(id = "pl-1", itemType = "Playlist").copy(mediaType = "Audio")
+        assertEquals(Screen.MusicPlaylist(audio), screenForLibraryCard(audio))
+        val video = testCard(id = "pl-2", itemType = "Playlist").copy(mediaType = "Video")
+        assertEquals(Screen.Detail(video), screenForLibraryCard(video))
+        val unsent = testCard(id = "pl-3", itemType = "Playlist")
+        assertEquals(Screen.Detail(unsent), screenForLibraryCard(unsent))
+    }
+
+    @Test
+    fun `a song opens its album, or Detail when it has none`() {
+        val song = testCard(id = "s-1", itemType = "Audio").copy(albumId = "al-1")
+        assertEquals(Screen.MusicAlbum("al-1"), screenForLibraryCard(song))
+        val loose = testCard(id = "s-2", itemType = "Audio")
+        assertEquals(Screen.Detail(loose), screenForLibraryCard(loose))
+    }
+
+    @Test
+    fun `a music library opens the music landing and every other library the grid`() {
+        val music = ViewSnapshot(id = "m", name = "Synthetic Music", kind = ViewKind.LIBRARY, collectionType = "music")
+        val films = ViewSnapshot(id = "f", name = "Synthetic Films", kind = ViewKind.LIBRARY, collectionType = "movies")
+        assertEquals(Screen.MusicLibrary(music), screenForView(music))
+        assertEquals(Screen.Library(films), screenForView(films))
+    }
 }

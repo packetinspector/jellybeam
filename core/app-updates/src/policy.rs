@@ -274,6 +274,12 @@ pub fn viewer_notes(body: &str) -> String {
     }
     format!("{}{NOTES_SUFFIX}", &notes[..end])
 }
+/// docs/26 §2: automatic wait after a success, so a new release shows up within the hour.
+pub const SUCCESS_WAIT: u64 = 3600;
+/// docs/26 §2: automatic wait after a failure, so a TV that woke before its network retries soon.
+pub const FAILURE_WAIT: u64 = 15 * 60;
+/// docs/26 §2: manual checks coalesce within this floor.
+pub const MANUAL_WAIT: u64 = 60;
 pub fn due(
     now: u64,
     last_success: u64,
@@ -284,10 +290,10 @@ pub fn due(
 ) -> bool {
     now >= blocked_until
         && if manual {
-            last_manual == 0 || now.saturating_sub(last_manual) >= 60
+            last_manual == 0 || now.saturating_sub(last_manual) >= MANUAL_WAIT
         } else {
-            (last_success == 0 || now.saturating_sub(last_success) >= 86400)
-                && (last_failure == 0 || now.saturating_sub(last_failure) >= 21600)
+            (last_success == 0 || now.saturating_sub(last_success) >= SUCCESS_WAIT)
+                && (last_failure == 0 || now.saturating_sub(last_failure) >= FAILURE_WAIT)
         }
 }
 #[derive(Clone, Debug)]
@@ -435,7 +441,7 @@ pub enum Refusal {
 pub fn manual_refusal(now: u64, last_manual: u64, blocked_until: u64) -> Option<Refusal> {
     if now < blocked_until {
         Some(Refusal::Blocked)
-    } else if last_manual != 0 && now.saturating_sub(last_manual) < 60 {
+    } else if last_manual != 0 && now.saturating_sub(last_manual) < MANUAL_WAIT {
         Some(Refusal::Coalesced)
     } else {
         None

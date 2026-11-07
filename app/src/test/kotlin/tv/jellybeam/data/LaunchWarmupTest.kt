@@ -4,6 +4,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -218,5 +220,46 @@ class LaunchWarmupTest {
 
         assertTrue(warmup.peekHome()!!.stale)
         assertEquals(1, gateway.events.subscriptionCount.value)
+    }
+
+    @Test
+    fun `awaitHome waits for the prefetch to settle and takes nothing`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val warmup = LaunchWarmup(Gateway(snapshotGate = gate), backgroundScope)
+        var settled = false
+        launch { warmup.awaitHome(); settled = true }
+        runCurrent()
+        assertFalse(settled)
+
+        gate.complete(Unit)
+        runCurrent()
+
+        assertTrue(settled)
+        assertNotNull(warmup.peekHome())
+        assertSame(snapshot, warmup.takeHome()?.snapshot)
+    }
+
+    @Test
+    fun `awaitHome returns at once after takeHome, discard, or a signed-out launch`() = runTest {
+        val taken = LaunchWarmup(Gateway(), backgroundScope)
+        taken.takeHome()
+        val discarded = LaunchWarmup(Gateway(snapshotGate = CompletableDeferred()), backgroundScope)
+        discarded.discard()
+        val signedOut = LaunchWarmup(Gateway(restored = null), backgroundScope)
+
+        assertNotNull(withTimeoutOrNull(1) { taken.awaitHome() })
+        assertNotNull(withTimeoutOrNull(1) { discarded.awaitHome() })
+        assertNotNull(withTimeoutOrNull(1) { signedOut.awaitHome() })
+    }
+
+    @Test
+    fun `a timed-out awaitHome leaves the prefetch for the later takeHome`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val warmup = LaunchWarmup(Gateway(snapshotGate = gate), backgroundScope)
+
+        assertNull(withTimeoutOrNull(1_000) { warmup.awaitHome() })
+        gate.complete(Unit)
+
+        assertSame(snapshot, warmup.takeHome()?.snapshot)
     }
 }

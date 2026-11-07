@@ -70,6 +70,11 @@ pub(crate) enum WriteCmd {
         position_ticks: i64,
         played: Option<bool>,
     },
+    /// docs/feature-dev/music-design-brief.md §1.2: a song started playing; see
+    /// [`apply_local_audio_play`].
+    RecordLocalAudioPlay {
+        item_id: String,
+    },
     /// Replaces the full membership list of one BoxSet in a single transaction
     /// (delete-then-reinsert), since the server is the sole source of truth for membership.
     SetCollectionMembers {
@@ -236,6 +241,11 @@ impl WriterHandle {
             played,
         })
         .await;
+    }
+
+    /// See `WriteCmd::RecordLocalAudioPlay`.
+    pub(crate) async fn record_local_audio_play(&self, item_id: String) {
+        self.send(WriteCmd::RecordLocalAudioPlay { item_id }).await;
     }
 
     pub(crate) async fn set_collection_members(
@@ -460,6 +470,20 @@ pub(crate) fn run(
                     });
                 }
             }
+            WriteCmd::RecordLocalAudioPlay { item_id } => {
+                let result = apply_local_audio_play(&mut conn, &item_id, chrono::Utc::now())
+                    .map(|id| id.into_iter().collect::<Vec<_>>());
+                if let Some(ids) = changed_ids(
+                    &mut writer_healthy,
+                    result,
+                    |e| tracing::error!(error = %e, item_id = %item_id, "failed to record a local audio play"),
+                ) {
+                    let _ = changes.send(MirrorChange::Upserted {
+                        ids,
+                        library_id: None,
+                    });
+                }
+            }
             WriteCmd::SetCollectionMembers {
                 collection_id,
                 members,
@@ -653,11 +677,13 @@ INSERT INTO items (
     unplayed_item_count, primary_tag, backdrop_tag, thumb_tag, primary_blurhash,
     series_primary_tag, parent_backdrop_item_id, parent_backdrop_tag,
     library_id, last_played_date, overview, is_virtual, series_name, series_status,
-    dto, updated_at, parent_thumb_item_id, parent_thumb_tag
+    dto, updated_at, parent_thumb_item_id, parent_thumb_tag,
+    album, album_id, album_artist, album_primary_tag, has_lyrics, normalization_gain,
+    album_normalization_gain, media_type
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33,
-    ?36, ?37
+    ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45
 )
 ON CONFLICT(id) DO UPDATE SET
     -- A view-stamped `parent_id` survives an upsert carrying a non-view parent (e.g.
@@ -700,6 +726,14 @@ ON CONFLICT(id) DO UPDATE SET
     -- docs/16-library-sort-filter.md §1.1: `Status` is unconditional on the default DTO, so
     -- unlike `played`/`last_played_date` it needs no authoritative-when-present guard.
     series_status = excluded.series_status,
+    album = excluded.album, album_id = excluded.album_id, album_artist = excluded.album_artist,
+    album_primary_tag = excluded.album_primary_tag,
+    -- Optional DTO scalars: absent leaves the stored value, same guard as `library_id`.
+    has_lyrics = COALESCE(excluded.has_lyrics, items.has_lyrics),
+    normalization_gain = COALESCE(excluded.normalization_gain, items.normalization_gain),
+    album_normalization_gain =
+        COALESCE(excluded.album_normalization_gain, items.album_normalization_gain),
+    media_type = excluded.media_type,
     dto = excluded.dto, updated_at = excluded.updated_at
 RETURNING rowid
 ";
@@ -883,6 +917,14 @@ fn upsert_items_in_tx<'a>(
                 // Appended last so the numbered placeholders above stay put.
                 cols.parent_thumb_item_id,
                 cols.parent_thumb_tag,
+                cols.album,
+                cols.album_id,
+                cols.album_artist,
+                cols.album_primary_tag,
+                cols.has_lyrics,
+                cols.normalization_gain,
+                cols.album_normalization_gain,
+                cols.media_type,
             ],
             |row| row.get(0),
         )?;
@@ -911,6 +953,24 @@ fn upsert_items_in_tx<'a>(
                  ON CONFLICT(item_id, genre) DO NOTHING",
             )?
             .execute(params![cols.id, genre])?;
+        }
+
+        // docs/feature-dev/music-design-brief.md §1.2: same outright replace as genres;
+        // `AlbumArtists`/`ArtistItems` are default DTO fields, so every fetch carries them.
+        tx.prepare_cached("DELETE FROM item_artists WHERE item_id = ?1")?
+            .execute([&cols.id])?;
+        for link in &cols.artists {
+            tx.prepare_cached(
+                "INSERT INTO item_artists (item_id, artist_id, name, role, ord) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![
+                cols.id,
+                link.artist_id,
+                link.name,
+                link.role as i64,
+                link.ord
+            ])?;
         }
 
         upserted.push(cols.id);
@@ -1036,7 +1096,7 @@ fn fts_delete(
 /// Deletes one already-selected `items` row, inside the caller's open transaction, along
 /// with its FTS postings (contentless, so the old `dto` text is needed to remove them; a
 /// deserialize failure just skips that step), `collection_members` rows keyed by either
-/// column (no FK; `id` may be a BoxSet or a member), and `item_genres` rows
+/// column (no FK; `id` may be a BoxSet or a member), and `item_genres`/`item_artists` rows
 /// (docs/16-library-sort-filter.md §1.2). Returns whether the `items` row itself was actually
 /// deleted (the `DELETE`'s own affected-row count, not the caller's earlier `SELECT`): the
 /// caller's `removed` list -- and so the `MirrorChange::Removed` broadcast -- must reflect
@@ -1058,6 +1118,8 @@ fn delete_item_row(
     tx.prepare_cached("DELETE FROM collection_members WHERE collection_id = ?1 OR item_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("DELETE FROM item_genres WHERE item_id = ?1")?
+        .execute([id])?;
+    tx.prepare_cached("DELETE FROM item_artists WHERE item_id = ?1")?
         .execute([id])?;
     Ok(deleted)
 }
@@ -1331,6 +1393,35 @@ fn resolve_played_position(
             played_override.unwrap_or(current_played),
         )
     }
+}
+
+/// docs/feature-dev/music-design-brief.md §1.2: what the server records when a song starts --
+/// played, one more play, last played `now` (clamped as a stop's is) -- and never a resume
+/// position, which songs don't keep. `None` for an item the mirror doesn't hold.
+pub(crate) fn apply_local_audio_play(
+    conn: &mut Connection,
+    item_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> rusqlite::Result<Option<String>> {
+    let tx = conn.transaction()?;
+    let existing: Option<Option<String>> = tx
+        .query_row(
+            "SELECT last_played_date FROM items WHERE id = ?1",
+            [item_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(existing_last_played_date) = existing else {
+        return Ok(None);
+    };
+    let last_played_date = clamp_local_last_played_date(existing_last_played_date.as_deref(), now);
+    tx.execute(
+        "UPDATE items SET played = 1, play_count = play_count + 1, last_played_date = ?1, \
+         updated_at = ?2 WHERE id = ?3",
+        params![last_played_date, now_millis(), item_id],
+    )?;
+    tx.commit()?;
+    Ok(Some(item_id.to_string()))
 }
 
 /// Clock-skew clamp for [`apply_local_user_data`]'s `last_played_date` stamp: a local clock
@@ -2443,6 +2534,99 @@ mod tests {
         assert_eq!(library_id, "library-b");
     }
 
+    fn artist_links(conn: &Connection, id: &str) -> Vec<(i64, i64, String)> {
+        conn.prepare(
+            "SELECT role, ord, name FROM item_artists WHERE item_id = ?1 ORDER BY role, ord",
+        )
+        .expect("prepare")
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows")
+    }
+
+    /// docs/feature-dev/music-design-brief.md §1.2: an upsert replaces the item's artist
+    /// links outright, a removal drops them, and a DTO without `HasLyrics` keeps the stored flag.
+    #[test]
+    fn music_upsert_replaces_artist_links_and_removal_drops_them() {
+        let (_dir, mut conn) = open_test_db();
+        let id = "00000000-0000-4000-8000-000000000101";
+        let track = |artists: serde_json::Value, has_lyrics: Option<bool>| -> BaseItemDto {
+            let mut v = serde_json::json!({
+                "Id": id, "Name": "Track", "Type": "Audio",
+                "AlbumId": "00000000-0000-4000-8000-000000000201", "Album": "Test Album",
+                "AlbumArtist": "Test Band",
+                "AlbumArtists": [{ "Name": "Test Band", "Id": "00000000-0000-4000-8000-000000000301" }],
+                "ArtistItems": artists,
+            });
+            if let Some(flag) = has_lyrics {
+                v["HasLyrics"] = serde_json::json!(flag);
+            }
+            serde_json::from_value(v).expect("dto")
+        };
+        let performer = |n: &str, name: &str| serde_json::json!({ "Name": name, "Id": format!("00000000-0000-4000-8000-000000000{n}") });
+
+        apply_upsert_items(
+            &mut conn,
+            &[track(
+                serde_json::json!([
+                    performer("302", "Zed Performer"),
+                    performer("303", "Solo Singer")
+                ]),
+                Some(true),
+            )],
+        )
+        .expect("insert");
+        assert_eq!(
+            artist_links(&conn, id),
+            vec![
+                (0, 0, "Test Band".to_string()),
+                (1, 0, "Zed Performer".to_string()),
+                (1, 1, "Solo Singer".to_string()),
+            ]
+        );
+        let stored: (Option<String>, Option<String>, bool) = conn
+            .query_row(
+                "SELECT album_id, album_artist, has_lyrics FROM items WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("row");
+        assert_eq!(
+            stored,
+            (
+                Some("00000000-0000-4000-8000-000000000201".to_string()),
+                Some("Test Band".to_string()),
+                true
+            )
+        );
+
+        apply_upsert_items(
+            &mut conn,
+            &[track(
+                serde_json::json!([performer("303", "Solo Singer")]),
+                None,
+            )],
+        )
+        .expect("update");
+        assert_eq!(
+            artist_links(&conn, id),
+            vec![
+                (0, 0, "Test Band".to_string()),
+                (1, 0, "Solo Singer".to_string())
+            ]
+        );
+        let has_lyrics: bool = conn
+            .query_row("SELECT has_lyrics FROM items WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .expect("row");
+        assert!(has_lyrics, "an absent HasLyrics keeps the stored flag");
+
+        apply_remove_items(&mut conn, &[id.to_string()]).expect("remove");
+        assert!(artist_links(&conn, id).is_empty());
+    }
+
     #[test]
     fn remove_items_deletes_row() {
         let (_dir, mut conn) = open_test_db();
@@ -3269,6 +3453,38 @@ mod tests {
         assert!(
             !played,
             "a zeroed position must NOT mark a never-watched item played"
+        );
+    }
+
+    /// A song's start marks it played, counts one more play and stamps it, leaving its stored
+    /// position alone; an unknown item is untouched.
+    #[test]
+    fn a_local_audio_play_counts_and_stamps_without_a_position() {
+        let (_dir, mut conn) = open_test_db();
+        let id = "e2f5a5f1-1a0b-4b3a-9c2e-0000000000a1".to_string();
+        apply_upsert_items(&mut conn, &[item_with_runtime(&id, "Audio", 1_000)]).expect("insert");
+        conn.execute(
+            "UPDATE items SET playback_position_ticks = 7, play_count = 2 WHERE id = ?1",
+            [&id],
+        )
+        .expect("seed");
+        let now: chrono::DateTime<chrono::Utc> = "2026-06-01T00:00:00Z".parse().expect("timestamp");
+        assert_eq!(
+            apply_local_audio_play(&mut conn, &id, now).expect("apply"),
+            Some(id.clone())
+        );
+        let row: (i64, bool, i64, Option<String>) = conn
+            .query_row(
+                "SELECT playback_position_ticks, played, play_count, last_played_date \
+                 FROM items WHERE id = ?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("row");
+        assert_eq!(row, (7, true, 3, Some(now.to_rfc3339())));
+        assert_eq!(
+            apply_local_audio_play(&mut conn, "nonexistent", now).expect("apply"),
+            None
         );
     }
 

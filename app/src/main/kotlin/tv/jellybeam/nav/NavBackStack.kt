@@ -103,6 +103,13 @@ fun Screen.entryIdentity(): String = when (this) {
     Screen.Report -> "report"
     // docs/28 §1: one fixed identity, so a newly held title keeps the lobby's composition and view model.
     is Screen.WatchTogether -> "watch-together"
+    is Screen.MusicLibrary -> "music-library-${view.id}"
+    is Screen.MusicAlbum -> "music-album-$albumId"
+    is Screen.MusicArtist -> "music-artist-$artistId"
+    is Screen.MusicSongs -> "music-songs-${tv.jellybeam.ui.music.songSourceKey(source)}"
+    is Screen.MusicPlaylist -> "music-playlist-${playlist.id}"
+    Screen.MusicNowPlaying -> "music-now-playing"
+    Screen.MusicQueue -> "music-queue"
 }
 
 /**
@@ -132,6 +139,12 @@ fun NavBackStack.forDrawerPick(screen: Screen): NavBackStack = when {
 }
 
 private fun NavBackStack.aboveHome(screen: Screen): NavBackStack = if (current == Screen.Home) push(screen) else replace(screen)
+
+/** docs/29 §9 G2/G3: Now Playing is one entry per stack; opening it again pops back to it, else pushes it. */
+fun NavBackStack.toNowPlaying(): NavBackStack {
+    val open = entries.indexOfLast { it == Screen.MusicNowPlaying }
+    return if (open < 0) push(Screen.MusicNowPlaying) else backTo(open)
+}
 
 /**
  * docs/28 §1: the stack's one watch-together entry. Reaching it again pops back to it, taking a newly chosen

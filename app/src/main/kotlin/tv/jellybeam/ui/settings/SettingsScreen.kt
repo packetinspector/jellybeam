@@ -130,6 +130,8 @@ fun SettingsScreen(
     val state by viewModel.state.collectAsState()
     val sections = remember { settingsSectionOrder() }
     var activeSection by rememberSaveable(stateSaver = SettingsSectionSaver) { mutableStateOf(sections.first()) }
+    // docs/29 §1: the Normalize volume row's gate is read from the mirror each time Playback opens.
+    LaunchedEffect(activeSection) { if (activeSection == SettingsSection.PLAYBACK) viewModel.playbackSectionOpened() }
     val railFocusRequesters = remember(sections) { sections.associateWith { FocusRequester() } }
     val memory = rememberFocusMemory()
     // The swatch focused in Appearance, or null; hoisted so the rail dot can follow it (docs/09).

@@ -15,7 +15,14 @@ import kotlinx.coroutines.withContext
 import uniffi.jellybeam_core.AccountEpochs
 import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
+import uniffi.jellybeam_core.AlbumSummary
+import uniffi.jellybeam_core.ArtistScope
 import uniffi.jellybeam_core.AssOverlay
+import uniffi.jellybeam_core.AudioFacts
+import uniffi.jellybeam_core.Lyrics
+import uniffi.jellybeam_core.AudioEnd
+import uniffi.jellybeam_core.AudioStream
+import uniffi.jellybeam_core.AudioTrackPlan
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.ClassicHome
@@ -24,6 +31,7 @@ import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.DeviceCaps
 import uniffi.jellybeam_core.DiscoveredServer
 import uniffi.jellybeam_core.EpisodeNeighbors
+import uniffi.jellybeam_core.ExtraItem
 import uniffi.jellybeam_core.FailedTrackFfi
 import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.GridCounts
@@ -37,15 +45,20 @@ import uniffi.jellybeam_core.ImageKind
 import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.LanguageSettings
 import uniffi.jellybeam_core.LibraryGridPrefs
+import uniffi.jellybeam_core.LiveMusicGenre
 import uniffi.jellybeam_core.LiveSort
 import uniffi.jellybeam_core.MediaSegment
 import uniffi.jellybeam_core.MediaSegmentKind
+import uniffi.jellybeam_core.MixSeedFfi
+import uniffi.jellybeam_core.MusicArtistRow
+import uniffi.jellybeam_core.MusicGenreRow
 import uniffi.jellybeam_core.OsdDetailSetting
 import uniffi.jellybeam_core.PersonPage
 import uniffi.jellybeam_core.PlaybackOsdDetail
 import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.PlaybackRequest
 import uniffi.jellybeam_core.PlaybackQuality
+import uniffi.jellybeam_core.PlaylistEntry
 import uniffi.jellybeam_core.QuickConnectSession
 import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.SeerrAuthMethod
@@ -70,6 +83,7 @@ import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.ServerDetails
 import uniffi.jellybeam_core.ServerInfoSnapshot
 import uniffi.jellybeam_core.Settings
+import uniffi.jellybeam_core.SongSource
 import uniffi.jellybeam_core.SortOrder
 import uniffi.jellybeam_core.StatusFilter
 import uniffi.jellybeam_core.StillWatchingDecision
@@ -272,6 +286,10 @@ class FakeCoreGateway(
     var seerrCancelRequestResult: Result<SeerrRequestDetail>? = null,
     /** [seerrMyRequests] result; defaults to an empty successful list. */
     var seerrMyRequestsResult: Result<List<SeerrMyRequest>> = Result.success(emptyList()),
+    /** [seerrWatchlist] result; defaults to an empty watchlist. */
+    var seerrWatchlistResult: Result<List<SeerrCard>> = Result.success(emptyList()),
+    /** [seerrSetWatchlist] result; defaults to success. */
+    var seerrSetWatchlistResult: Result<Unit> = Result.success(Unit),
     /** Queue of decisions successive [noteEpisodeFinished] calls return; empty falls back to
      * [StillWatchingDecision.COUNTDOWN]. */
     val noteEpisodeFinishedDecisions: ArrayDeque<StillWatchingDecision> = ArrayDeque(),
@@ -501,6 +519,16 @@ class FakeCoreGateway(
 
     /** Bumped like the real gateway: after each successful Seerr request, cancel, connect and disconnect. */
     override val seerrRevision = MutableStateFlow(0L)
+
+    data class SeerrSetWatchlistCall(val mediaType: SeerrMediaType, val tmdbId: Long, val title: String, val on: Boolean)
+
+    private val _seerrSetWatchlistCalls = mutableListOf<SeerrSetWatchlistCall>()
+    val seerrSetWatchlistCalls: List<SeerrSetWatchlistCall> get() = _seerrSetWatchlistCalls
+
+    /** Held open at the top of [seerrWatchlist] / [seerrSetWatchlist] when set. */
+    var seerrWatchlistGate: CompletableDeferred<Unit>? = null
+    var seerrSetWatchlistGate: CompletableDeferred<Unit>? = null
+    var seerrWatchlistCallCount: Int = 0
 
     private val _seerrCancelRequestCalls = mutableListOf<Long>()
     val seerrCancelRequestCalls: List<Long> get() = _seerrCancelRequestCalls
@@ -769,6 +797,44 @@ class FakeCoreGateway(
         return similarResultsByItemId[itemId].orEmpty()
     }
 
+    /** [localTrailers] results keyed by item id; unmapped ids fall back to empty. */
+    val localTrailersByItemId = mutableMapOf<String, List<ExtraItem>>()
+
+    /** [specialFeatures] results keyed by item id; unmapped ids fall back to empty. */
+    val specialFeaturesByItemId = mutableMapOf<String, List<ExtraItem>>()
+
+    /** When non-null, [localTrailers] throws this (after recording the call) instead of answering. */
+    var localTrailersError: Throwable? = null
+
+    /** When non-null, [specialFeatures] throws this (after recording the call) instead of answering. */
+    var specialFeaturesError: Throwable? = null
+
+    /** When non-null, [localTrailers] awaits this (after recording the call) before it answers. */
+    var localTrailersGate: CompletableDeferred<Unit>? = null
+
+    /** When non-null, [specialFeatures] awaits this (after recording the call) before it answers. */
+    var specialFeaturesGate: CompletableDeferred<Unit>? = null
+
+    private val _localTrailersCalls = mutableListOf<String>()
+    val localTrailersCalls: List<String> get() = _localTrailersCalls
+
+    private val _specialFeaturesCalls = mutableListOf<String>()
+    val specialFeaturesCalls: List<String> get() = _specialFeaturesCalls
+
+    override suspend fun localTrailers(itemId: String): List<ExtraItem> {
+        _localTrailersCalls.add(itemId)
+        localTrailersGate?.await()
+        localTrailersError?.let { throw it }
+        return localTrailersByItemId[itemId].orEmpty()
+    }
+
+    override suspend fun specialFeatures(itemId: String): List<ExtraItem> {
+        _specialFeaturesCalls.add(itemId)
+        specialFeaturesGate?.await()
+        specialFeaturesError?.let { throw it }
+        return specialFeaturesByItemId[itemId].orEmpty()
+    }
+
     /** One gate per [getMediaSegments] call, popped in call order; its value is that call's
      * answer. An empty queue answers at once from [mediaSegmentsByItemId].
      */
@@ -991,11 +1057,13 @@ class FakeCoreGateway(
         reportPositionEntered++
         reportPositionGate?.await()
         _reportPositionCalls.add(ticks)
+        reportLog.add("position $playSessionId@$ticks")
     }
 
     override suspend fun reportPaused(playSessionId: String, paused: Boolean) {
         _reportPausedSessionIds.add(playSessionId)
         _reportPausedCalls.add(paused)
+        reportLog.add("paused $playSessionId $paused")
     }
 
     override suspend fun stopPlayback(playSessionId: String, positionTicks: Long) {
@@ -1003,6 +1071,205 @@ class FakeCoreGateway(
         stopPlaybackGate?.await()
         _stopPlaybackCalls.add(positionTicks)
         _stopPlaybackSessionIds.add(playSessionId)
+        reportLog.add("stop $playSessionId@$positionTicks")
+    }
+
+    // -- Music --------------------------------------------------------------------
+
+    /**
+     * Reports in the order they reached the core: `start <item> ends <session>@<ticks>`, `position <session>@<ticks>`,
+     * `paused <session> <paused>`, `stop <session>@<ticks>`.
+     */
+    val reportLog = mutableListOf<String>()
+
+    /** [prepareAudioQueue]'s plan per item; Direct Play under session `ps-<item>` by default. */
+    var audioPlan: (String) -> AudioTrackPlan = { AudioTrackPlan(it, it, "ps-$it", AudioStream.DirectPlay("http://example.test/$it", "audio/flac")) }
+    val prepareAudioQueueCalls = mutableListOf<List<String>>()
+
+    /** When non-null, [startAudioTrack] awaits this before it reaches the core (is logged). */
+    var startAudioTrackGate: CompletableDeferred<Unit>? = null
+    val startAudioTrackRequests = mutableListOf<PlaybackRequest>()
+    var albumTracksByAlbum: Map<String, List<Card>?> = emptyMap()
+    var musicSongsResult: List<Card>? = emptyList()
+    var playlistItemsByPlaylist: Map<String, List<PlaylistEntry>> = emptyMap()
+    var instantMixResult: List<Card> = emptyList()
+
+    /** When non-null, [albumTracks] awaits this, holding a fetch open. */
+    var albumTracksGate: CompletableDeferred<Unit>? = null
+
+    /** When non-null, [prepareAudioQueue] awaits this after it is logged, holding the plans open. */
+    var prepareAudioQueueGate: CompletableDeferred<Unit>? = null
+
+    override suspend fun prepareAudioQueue(itemIds: List<String>, accountEpoch: ULong): List<AudioTrackPlan> {
+        prepareAudioQueueCalls.add(itemIds)
+        prepareAudioQueueGate?.await()
+        return itemIds.map(audioPlan)
+    }
+
+    override suspend fun startAudioTrack(track: AudioTrackPlan, queueIds: List<String>, request: PlaybackRequest, ends: AudioEnd?): String {
+        startAudioTrackGate?.await()
+        startAudioTrackRequests.add(request)
+        reportLog.add("start ${track.itemId}" + (ends?.let { " ends ${it.playSessionId}@${it.ticks}" } ?: ""))
+        return track.playSessionId
+    }
+
+    override suspend fun albumTracks(albumId: String, offset: UInt, limit: UInt): List<Card>? {
+        albumTracksCalls.add("$offset+$limit")
+        albumTracksGate?.await()
+        return albumTracksByAlbum[albumId]?.drop(offset.toInt())?.take(limit.toInt())
+    }
+
+    override suspend fun musicSongs(source: SongSource, offset: UInt, limit: UInt): List<Card>? {
+        musicSongsSources.add(source)
+        musicSongsCalls.add("$offset+$limit")
+        return musicSongsResult?.drop(offset.toInt())?.take(limit.toInt())
+    }
+
+    /** When non-null, [playlistItems] throws it. */
+    var playlistItemsError: Throwable? = null
+
+    val playlistItemsCalls = mutableListOf<String>()
+
+    override suspend fun playlistItems(playlistId: String, offset: UInt, limit: UInt): List<PlaylistEntry> {
+        playlistItemsCalls.add("$playlistId:$offset+$limit")
+        playlistItemsError?.let { throw it }
+        return playlistItemsByPlaylist[playlistId].orEmpty().drop(offset.toInt()).take(limit.toInt())
+    }
+
+    override suspend fun instantMix(seed: MixSeedFfi): List<Card> = instantMixResult
+
+    var musicHasNormalizationGainResult = false
+
+    override suspend fun musicHasNormalizationGain(): Boolean = musicHasNormalizationGainResult
+
+    /** Music browse stubs: each answers its field; `null` is "the mirror can't answer". */
+    var musicSongCountResult: ULong? = 0uL
+    var musicSongGroupsResult: List<GridGroup>? = emptyList()
+    var albumSummaryByAlbum: Map<String, AlbumSummary> = emptyMap()
+    var musicArtistsResult: List<MusicArtistRow>? = emptyList()
+    var musicArtistCountResult: ULong? = 0uL
+    var musicArtistGroupsResult: List<GridGroup>? = emptyList()
+    var artistSummaryById: Map<String, MusicArtistRow> = emptyMap()
+    var artistAlbumsResult: List<Card>? = emptyList()
+    var artistAppearsOnResult: List<Card>? = emptyList()
+    var artistMostPlayedResult: List<Card>? = emptyList()
+    var musicGenresResult: List<MusicGenreRow>? = emptyList()
+    var musicGenresLiveResult: List<LiveMusicGenre> = emptyList()
+    var playlistsResult: List<Card> = emptyList()
+    var hasPlaylistsResult = false
+    var audioFactsResult = AudioFacts(codec = null, sampleRateHz = null, bitDepth = null, bitrateKbps = null, channels = null)
+
+    /** When non-null, [playlists], [musicGenresLive] and [hasPlaylists] throw it. */
+    var musicLiveError: Throwable? = null
+    val musicSongsSources = mutableListOf<SongSource>()
+
+    /** Each live page asked for, `offset+limit`. */
+    val musicGenresLiveCalls = mutableListOf<String>()
+
+    /** When non-null, [musicGenresLive] waits for it, like a slow server. */
+    var musicGenresLiveGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    val playlistsCalls = mutableListOf<String>()
+    val musicSongsCalls = mutableListOf<String>()
+    val albumTracksCalls = mutableListOf<String>()
+    val musicArtistsScopes = mutableListOf<ArtistScope>()
+
+    override suspend fun musicSongCount(source: SongSource): ULong? = musicSongCountResult
+
+    override suspend fun musicSongGroups(source: SongSource): List<GridGroup>? = musicSongGroupsResult
+
+    override suspend fun albumSummary(albumId: String): AlbumSummary? = albumSummaryByAlbum[albumId]
+
+    override suspend fun musicArtists(viewId: String, scope: ArtistScope, offset: UInt, limit: UInt): List<MusicArtistRow>? {
+        musicArtistsScopes.add(scope)
+        return musicArtistsResult?.drop(offset.toInt())?.take(limit.toInt())
+    }
+
+    /** How many times the Artists count and rail were read. */
+    var musicArtistTotalsCalls = 0
+
+    override suspend fun musicArtistCount(viewId: String, scope: ArtistScope): ULong? = musicArtistCountResult.also { musicArtistTotalsCalls++ }
+
+    override suspend fun musicArtistGroups(viewId: String, scope: ArtistScope): List<GridGroup>? = musicArtistGroupsResult.also { musicArtistTotalsCalls++ }
+
+    override suspend fun artistSummary(artistId: String): MusicArtistRow? = artistSummaryById[artistId]
+
+    override suspend fun artistAlbums(artistId: String): List<Card>? = artistAlbumsResult
+
+    override suspend fun artistAppearsOn(artistId: String): List<Card>? = artistAppearsOnResult
+
+    override suspend fun artistMostPlayed(artistId: String, limit: UInt): List<Card>? = artistMostPlayedResult
+
+    override suspend fun musicGenres(viewId: String): List<MusicGenreRow>? = musicGenresResult
+
+    override suspend fun musicGenresLive(viewId: String, offset: UInt, limit: UInt): List<LiveMusicGenre> {
+        musicGenresLiveCalls.add("$offset+$limit")
+        musicGenresLiveGate?.await()
+        musicLiveError?.let { throw it }
+        return musicGenresLiveResult.drop(offset.toInt()).take(limit.toInt())
+    }
+
+    override suspend fun playlists(offset: UInt, limit: UInt): List<Card> {
+        playlistsCalls.add("$offset+$limit")
+        musicLiveError?.let { throw it }
+        return playlistsResult.drop(offset.toInt()).take(limit.toInt())
+    }
+
+    override suspend fun hasPlaylists(): Boolean {
+        musicLiveError?.let { throw it }
+        return hasPlaylistsResult
+    }
+
+    /** Playlist id to the entry ids [playlistEntryIds] answers for any item. */
+    var playlistEntryIdsResult: Map<String, List<String>> = emptyMap()
+    var createPlaylistResult = "new-playlist"
+    var playlistWriteError: Throwable? = null
+    val playlistWrites = mutableListOf<String>()
+
+    override suspend fun playlistEntryIds(playlistId: String, itemId: String): List<String> = playlistEntryIdsResult[playlistId].orEmpty()
+
+    override suspend fun createPlaylist(name: String, itemIds: List<String>): String {
+        playlistWrites += "create:$name:${itemIds.joinToString(",")}"
+        playlistWriteError?.let { throw it }
+        return createPlaylistResult
+    }
+
+    override suspend fun addToPlaylist(playlistId: String, itemIds: List<String>) {
+        playlistWrites += "add:$playlistId:${itemIds.joinToString(",")}"
+        playlistWriteError?.let { throw it }
+        _playlistEdits.tryEmit(playlistId)
+    }
+
+    override suspend fun removeFromPlaylist(playlistId: String, entryIds: List<String>) {
+        playlistWrites += "remove:$playlistId:${entryIds.joinToString(",")}"
+        playlistWriteError?.let { throw it }
+        _playlistEdits.tryEmit(playlistId)
+    }
+
+    private val _playlistEdits = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 8)
+
+    override fun playlistEdits(): Flow<String> = _playlistEdits.asSharedFlow()
+
+    /** Null answers each move at once; a gate holds it until the test completes it (or completes it exceptionally). */
+    var movePlaylistGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    override suspend fun movePlaylistItem(playlistId: String, entryId: String, newIndex: UInt) {
+        playlistWrites += "move:$playlistId:$entryId:$newIndex"
+        movePlaylistGate?.await()
+        playlistWriteError?.let { throw it }
+    }
+
+    override suspend fun audioFacts(itemId: String, accountEpoch: ULong?): AudioFacts {
+        accountBoundCalls.add("audioFacts" to accountEpoch)
+        return audioFactsResult
+    }
+
+    var lyricsResult: Lyrics = Lyrics.None
+    private val _lyricsCalls = mutableListOf<String>()
+    val lyricsCalls: List<String> get() = _lyricsCalls
+
+    override suspend fun lyrics(itemId: String, accountEpoch: ULong): Lyrics {
+        _lyricsCalls.add(itemId)
+        return lyricsResult
     }
 
     override suspend fun abandonPlayback(playSessionId: String) {
@@ -1214,6 +1481,19 @@ class FakeCoreGateway(
         seerrMyRequestsCallCount++
         seerrMyRequestsGate?.await()
         return seerrMyRequestsResult.getOrElse { throw it }
+    }
+
+    override suspend fun seerrWatchlist(): List<SeerrCard> {
+        seerrWatchlistCallCount++
+        seerrWatchlistGate?.await()
+        return seerrWatchlistResult.getOrElse { throw it }
+    }
+
+    override suspend fun seerrSetWatchlist(card: SeerrCard, on: Boolean) {
+        _seerrSetWatchlistCalls.add(SeerrSetWatchlistCall(card.mediaType, card.tmdbId, card.title, on))
+        seerrSetWatchlistGate?.await()
+        seerrSetWatchlistResult.getOrElse { throw it }
+        seerrRevision.update { it + 1 }
     }
 
     /** Matches [RealCoreGateway]'s contract: one shared, replay-0 flow, fed by [emitChange]. */

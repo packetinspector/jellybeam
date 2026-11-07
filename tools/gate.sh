@@ -20,8 +20,8 @@ launcher icon check (tools/launcher-icon/check.py).
 
 core/Cargo.lock is copied aside before the run and copied back after, without git,
 so implementer agents (who never run git) can use this too. Logs go to a temp dir
-whose path is printed. Exit 0 only when every lane passed. Refuses to start while
-another Gradle or container build is running.
+whose path is printed. Exit 0 only when every lane passed. Waits for a build slot first
+(docs/06 "Build admission"); exit 3 when the wait times out.
 EOF
 }
 
@@ -56,21 +56,10 @@ cexec_procs() {
     done' _ "${1:-list}" 2>/dev/null
 }
 
-# One Gradle run at a time: a host client (any checkout) or an orphan left inside the container.
-busy=$(pgrep -fl 'docker.* exec .*(gradlew|cargo)|build\.sh (test|test-rust|lint-rust|check|check-fast|build|release|core|update-fixture)' || true)
-if [ -z "$busy" ] && docker compose ps -q "$SERVICE" 2>/dev/null | grep -q .; then
-  busy=$(cexec_procs)
-fi
-# tools/perf-ab.sh holds this marker while it measures: no builds during a measurement.
-m=internal/perf-ab/.measuring
-if [ -z "$busy" ] && [ -f "$m" ] && kill -0 "$(cat "$m")" 2>/dev/null; then
-  busy="perf-ab measuring (pid $(cat "$m"))"
-fi
-if [ -n "$busy" ]; then
-  echo "gate: another build is running; not starting:" >&2
-  printf '  %s\n' "$busy" >&2
-  exit 3
-fi
+# Queue for a build slot once for the whole run (docs/06 "Build admission"); the lanes'
+# build.sh calls inherit it, so waiting never eats a lane's timeout.
+. tools/build-admission.sh
+admission_acquire "gate-$mode" || exit 3
 
 logs=$(mktemp -d "${TMPDIR:-/tmp}/gate.XXXXXX")
 lock=core/Cargo.lock

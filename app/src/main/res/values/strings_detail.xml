@@ -94,4 +94,29 @@
     <string name="person_born_in">Born %1$s in %2$s</string>
     <string name="person_born_place">Born in %1$s</string>
     <string name="person_died">Died %1$s</string>
+
+    <!-- Detail action panel (docs/19 §1.3): the Trailers and extras second level. The row
+         and the level header share detail_menu_extras; the heading band reads "N EXTRAS". -->
+    <string name="detail_menu_extras">Trailers &amp; extras</string>
+    <plurals name="detail_menu_extras_count">
+        <item quantity="one">%d extra</item>
+        <item quantity="other">%d extras</item>
+    </plurals>
+    <string name="detail_menu_extras_loading">Loading</string>
+    <string name="detail_menu_extras_failed">Couldn\'t load extras</string>
+    <string name="detail_extra_trailer_fallback">Trailer</string>
+    <string name="detail_extra_fallback">Extra</string>
+
+    <!-- The state column of an extras row, by kind. -->
+    <string name="detail_extra_type_trailer">TRAILER</string>
+    <string name="detail_extra_type_youtube">YOUTUBE</string>
+    <string name="detail_extra_type_behind_the_scenes">BEHIND THE SCENES</string>
+    <string name="detail_extra_type_featurette">FEATURETTE</string>
+    <string name="detail_extra_type_interview">INTERVIEW</string>
+    <string name="detail_extra_type_scene">SCENE</string>
+    <string name="detail_extra_type_deleted_scene">DELETED SCENE</string>
+    <string name="detail_extra_type_short">SHORT</string>
+    <string name="detail_extra_type_clip">CLIP</string>
+    <string name="detail_extra_type_sample">SAMPLE</string>
+    <string name="detail_extra_type_other">EXTRA</string>
 </resources>

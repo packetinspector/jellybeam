@@ -5,12 +5,6 @@ import android.view.accessibility.CaptioningManager
 import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.StartOffset
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ScrollState
@@ -119,6 +113,7 @@ import androidx.media3.ui.SubtitleView
 import java.util.Locale
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import tv.jellybeam.ui.music.LoadingDots
 import tv.jellybeam.AppGraph
 import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.ui.watchtogether.activeUserName
@@ -436,7 +431,7 @@ private fun TransportIcon(glyph: TransportGlyph, tint: Color, size: Dp, modifier
     }
 }
 
-private fun DrawScope.drawPauseGlyph(tint: Color) {
+internal fun DrawScope.drawPauseGlyph(tint: Color) {
     val barWidth = size.width * PAUSE_BAR_WIDTH_FRACTION
     val gap = size.width * PAUSE_GAP_FRACTION
     val barHeight = size.height * PAUSE_BAR_HEIGHT_FRACTION
@@ -453,7 +448,7 @@ private fun DrawScope.drawPauseGlyph(tint: Color) {
     )
 }
 
-private fun DrawScope.drawPlayGlyph(tint: Color) {
+internal fun DrawScope.drawPlayGlyph(tint: Color) {
     val triHeight = size.height * PLAY_HEIGHT_FRACTION
     val triWidth = triHeight * PLAY_EQUILATERAL_RATIO
     val left = (size.width - triWidth) / 2f + size.width * PLAY_OPTICAL_SHIFT_FRACTION
@@ -551,43 +546,46 @@ private fun SeekGlyph(seconds: Long, back: Boolean, tint: Color, modifier: Modif
  * pointing the direction of travel on the leading edge. */
 @Composable
 private fun EpisodeGlyph(forward: Boolean, tint: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier.size(Osd.BUTTON_GLYPH)) {
-        // docs/12 §0: solid bar capped at 2.5dp wide (~0.11 of the 22dp box).
-        val barWidth = size.width * 0.11f
-        val barHeight = size.height * 0.78f
-        val triWidth = size.width * 0.46f
-        val top = (size.height - barHeight) / 2f
-        if (forward) {
-            drawRoundRect(
-                color = tint,
-                topLeft = Offset(size.width - barWidth, top),
-                size = Size(barWidth, barHeight),
-                cornerRadius = CornerRadius(barWidth * 0.3f),
-            )
-            val left = size.width - barWidth - triWidth
-            val path = Path().apply {
-                moveTo(left, top)
-                lineTo(left + triWidth, top + barHeight / 2f)
-                lineTo(left, top + barHeight)
-                close()
-            }
-            drawPath(path, tint)
-        } else {
-            drawRoundRect(
-                color = tint,
-                topLeft = Offset(0f, top),
-                size = Size(barWidth, barHeight),
-                cornerRadius = CornerRadius(barWidth * 0.3f),
-            )
-            val left = barWidth
-            val path = Path().apply {
-                moveTo(left + triWidth, top)
-                lineTo(left, top + barHeight / 2f)
-                lineTo(left + triWidth, top + barHeight)
-                close()
-            }
-            drawPath(path, tint)
+    Canvas(modifier = modifier.size(Osd.BUTTON_GLYPH)) { drawSkipGlyph(forward, tint) }
+}
+
+/** The bar-and-triangle skip mark; the music bar's previous/next share it. */
+internal fun DrawScope.drawSkipGlyph(forward: Boolean, tint: Color) {
+    // docs/12 §0: solid bar capped at 2.5dp wide (~0.11 of the 22dp box).
+    val barWidth = size.width * 0.11f
+    val barHeight = size.height * 0.78f
+    val triWidth = size.width * 0.46f
+    val top = (size.height - barHeight) / 2f
+    if (forward) {
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(size.width - barWidth, top),
+            size = Size(barWidth, barHeight),
+            cornerRadius = CornerRadius(barWidth * 0.3f),
+        )
+        val left = size.width - barWidth - triWidth
+        val path = Path().apply {
+            moveTo(left, top)
+            lineTo(left + triWidth, top + barHeight / 2f)
+            lineTo(left, top + barHeight)
+            close()
         }
+        drawPath(path, tint)
+    } else {
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(0f, top),
+            size = Size(barWidth, barHeight),
+            cornerRadius = CornerRadius(barWidth * 0.3f),
+        )
+        val left = barWidth
+        val path = Path().apply {
+            moveTo(left + triWidth, top)
+            lineTo(left, top + barHeight / 2f)
+            lineTo(left + triWidth, top + barHeight)
+            close()
+        }
+        drawPath(path, tint)
     }
 }
 
@@ -3497,36 +3495,6 @@ private fun DelayRuler(valueMs: Long, modifier: Modifier = Modifier) {
 
 // -- Buffering / reconnecting pills ------------------------------------------
 
-private const val PULSING_DOT_COUNT = 3
-private const val PULSING_DOT_CYCLE_MS = 1200
-private val PULSING_DOT_SIZE = 6.dp
-
-@Composable
-internal fun PulsingDots(modifier: Modifier = Modifier) {
-    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        repeat(PULSING_DOT_COUNT) { index ->
-            val transition = rememberInfiniteTransition(label = "pulsingDots")
-            val dotAlpha by transition.animateFloat(
-                initialValue = 0.25f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(PULSING_DOT_CYCLE_MS / 2, easing = LinearEasing),
-                    repeatMode = RepeatMode.Reverse,
-                    initialStartOffset = StartOffset((PULSING_DOT_CYCLE_MS / PULSING_DOT_COUNT) * index),
-                ),
-                label = "pulsingDotAlpha",
-            )
-            Box(
-                modifier = Modifier
-                    .size(PULSING_DOT_SIZE)
-                    .graphicsLayer { alpha = dotAlpha }
-                    .clip(CircleShape)
-                    .background(JellybeamTheme.Panna),
-            )
-        }
-    }
-}
-
 @Composable
 private fun BufferingPill(info: BufferingInfo, modifier: Modifier = Modifier) {
     val strings = rememberUiStrings()
@@ -3543,7 +3511,7 @@ private fun BufferingPill(info: BufferingInfo, modifier: Modifier = Modifier) {
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PulsingDots()
+        LoadingDots()
         BasicText(text = text, style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 13.sp))
     }
 }
@@ -3557,7 +3525,7 @@ private fun ReconnectingPill(info: ReconnectingInfo, modifier: Modifier = Modifi
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PulsingDots()
+        LoadingDots()
         BasicText(
             text = stringResource(R.string.player_reconnecting_label, info.attempt),
             style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 13.sp),

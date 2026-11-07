@@ -47,6 +47,8 @@ why, not how a change came to be.
   how to contribute a translation
 - `28-watch-together.md` — Watch Together over the server's SyncPlay: privacy
   rules, group lifecycle, playback sync and stall recovery (in progress)
+- `29-music.md` — music libraries: idle cost, the playback owner and service,
+  video and account rules, queue semantics, surfaces and the ambient screen
 - `jellybeam-osd-handoff/` — the OSD specification files that `12-osd-ux-spec.md`
   summarizes; code cites them by section, so they stay as they are
 - `brand.md` — name, colour tokens, wordmark, mascot usage, and the acceptance bar
@@ -81,6 +83,7 @@ why, not how a change came to be.
 | Diagnostics and bug reports | `diag/`, `ui/report/` | 21 |
 | App updates | updater core, Android installer, Settings | 26 |
 | Watch Together (SyncPlay) | `core/playback-policy/src/syncplay.rs`, `core/jellyfin-api/src/syncplay.rs` | 28 |
+| Music: library, pages, Now Playing, queue, ambient | `ui/music/`, `player/music/` | 29 |
 | Performance logging | `perf/` | 10 |
 
 Kotlin paths are relative to `app/src/main/kotlin/tv/jellybeam/`; a bare

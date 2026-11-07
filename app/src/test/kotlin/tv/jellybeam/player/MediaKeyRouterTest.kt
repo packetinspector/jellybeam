@@ -238,4 +238,20 @@ class MediaKeyRouterTest {
         assertEquals(ConnectionResult.DEFAULT_SESSION_COMMANDS, trusted.availableSessionCommands)
         assertEquals(ConnectionResult.DEFAULT_UNTRUSTED_SESSION_COMMANDS, untrusted.availableSessionCommands)
     }
+
+    /** Music brief §1.3: the music session adds next and previous track to the same allowlist, and nothing else. */
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    @Test
+    fun `a music controller is also granted next and previous track`() {
+        val music = allowedCommands + setOf(
+            Player.COMMAND_SEEK_TO_NEXT,
+            Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+            Player.COMMAND_SEEK_TO_PREVIOUS,
+            Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+        )
+        val untrusted = grantedCommands(ConnectionResult.accept(ConnectionResult.DEFAULT_UNTRUSTED_SESSION_COMMANDS, ConnectionResult.DEFAULT_UNTRUSTED_PLAYER_COMMANDS), MUSIC_COMMANDS)
+        for ((name, command) in commandConstants()) {
+            assertEquals("$name music", command in music, untrusted.availablePlayerCommands.contains(command))
+        }
+    }
 }

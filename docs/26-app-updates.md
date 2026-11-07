@@ -68,7 +68,9 @@ show useful notes. Prefer concise `## New` / `## Fixed` sections and bullets
 whose first phrase is bold; author notes once for both GitHub and TV.
 
 Persist ETag/response and check times. `304` reuses the accepted response.
-Successful automatic checks wait 24 hours; failures wait six hours. Manual
+Automatic checks run when browsing settles after launch, a foreground return
+or playback end; one waits an hour after a success and 15 minutes after a
+failure (a TV that wakes before its network is up retries soon). Manual
 checks coalesce and wait at least one minute. Respect rate-limit deadlines,
 capped at one hour: `Retry-After` is a delta in seconds, `x-ratelimit-reset` an
 epoch. A stored check, snooze or Ready time later than now (the clock

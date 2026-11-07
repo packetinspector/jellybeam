@@ -76,6 +76,25 @@ class ClassicHomeViewModelTest {
     }
 
     @Test
+    fun `a music library's Latest is a square shelf and every other Latest stays poster`() {
+        val shelves = buildShelves(
+            listOf(
+                latestShelf("movies", "Movies", listOf(testCard(id = "m1"))),
+                latestShelf("music", "Music", listOf(testCard(id = "a1", itemType = "MusicAlbum"))),
+                HomeShelf(ShelfSource.Favorites, listOf(testCard(id = "f1", itemType = "MusicAlbum"))),
+            ),
+            "Continue Watching",
+            "Next Up",
+            "Favorites",
+            resumeArt = ResumeArt.EPISODE,
+            musicViewIds = setOf("music"),
+        ) { "Latest in $it" }
+
+        assertEquals(listOf(ShelfKind.POSTER, ShelfKind.SQUARE, ShelfKind.POSTER), shelves.map { it.kind })
+        assertEquals("Latest in Music", shelves[1].title)
+    }
+
+    @Test
     fun `resume art poster turns only Continue Watching and Next Up into poster shelves`() {
         val shelves = buildShelves(
             listOf(

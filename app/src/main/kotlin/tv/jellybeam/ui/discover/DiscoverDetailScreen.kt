@@ -1,8 +1,6 @@
 package tv.jellybeam.ui.discover
 
 import android.annotation.SuppressLint
-import android.content.ActivityNotFoundException
-import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -67,7 +65,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.net.toUri
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import tv.jellybeam.AppGraph
@@ -79,6 +76,7 @@ import tv.jellybeam.ui.cards.PlaceholderTile
 import tv.jellybeam.ui.cards.focusRing
 import tv.jellybeam.ui.cards.rememberHeaderPageBringIntoViewSpec
 import tv.jellybeam.ui.cards.rememberShelfBringIntoViewSpec
+import tv.jellybeam.ui.common.openTrailer
 import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
@@ -87,6 +85,7 @@ import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.placeByKeys
 import tv.jellybeam.ui.focus.rememberFocusMemory
 import tv.jellybeam.ui.focus.withPlacement
+import tv.jellybeam.ui.music.BlocksAmbient
 import tv.jellybeam.ui.nav.LocalDrawerFocusCoordinator
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
 import uniffi.jellybeam_core.SeerrAvailability
@@ -467,14 +466,18 @@ private fun DiscoverDetailContent(
                             onClick = { memory.invokerKey = "action:${slot.id}"; viewModel.startRequest(true) },
                             actionable = slot.actionable,
                         )
+                        ACTION_WATCHLIST -> ActionSpec(
+                            id = slot.id,
+                            label = stringResource(watchlistActionLabel(state.onWatchlist == true)),
+                            onClick = viewModel::toggleWatchlist,
+                            actionable = slot.actionable,
+                        )
                         else -> ActionSpec(
                             id = slot.id,
                             label = stringResource(R.string.discover_action_trailer),
                             onClick = {
-                                try {
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, state.trailerUrl!!.toUri()))
-                                } catch (_: ActivityNotFoundException) {
-                                    // Fail open: no player installed for this link.
+                                if (!openTrailer(context, state.trailerUrl!!)) {
+                                    Toast.makeText(context, R.string.trailer_unavailable, Toast.LENGTH_SHORT).show()
                                 }
                             },
                         )
@@ -503,7 +506,7 @@ private fun DiscoverDetailContent(
                         }
                     }
                 }
-                (state.requestError ?: state.cancelError ?: state.error)?.let { error ->
+                (state.requestError ?: state.cancelError ?: state.watchlistError ?: state.error)?.let { error ->
                     BasicText(text = error, style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 13.sp))
                 }
             }
@@ -756,6 +759,7 @@ private fun ConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    BlocksAmbient()
     // Seeds only while its page owns focus (top, drawer closed); the page's FocusRestorer places
     // this seed itself when the layer becomes top again (docs/15 §4).
     val focusGate = LocalFocusGate.current
@@ -806,6 +810,7 @@ private fun RequestOptionsDialog(
     ownsFocus: Boolean,
     firstFocusRequester: FocusRequester,
 ) {
+    BlocksAmbient()
     val options = state.requestOptions
     val isTv = state.seasons.isNotEmpty()
     // A missing season pick takes Submit out of focus; a busy state only makes it inert (docs/15 §4).

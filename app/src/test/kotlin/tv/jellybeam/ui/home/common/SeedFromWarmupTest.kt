@@ -8,6 +8,7 @@ import org.junit.Assert.assertSame
 import org.junit.Test
 import tv.jellybeam.data.LaunchWarmup
 import tv.jellybeam.data.defaultTestSettings
+import tv.jellybeam.ui.cards.testCard
 import tv.jellybeam.ui.home.classicSnapshot
 import uniffi.jellybeam_core.ClassicHome
 import uniffi.jellybeam_core.HomeSnapshot
@@ -18,11 +19,12 @@ import uniffi.jellybeam_core.ViewSnapshot
 
 class SeedFromWarmupTest {
     private val views = listOf(ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY))
-    private val snapshot = classicSnapshot()
+    private val snapshot = classicSnapshot(resume = listOf(testCard()))
 
     private fun warm(
         settings: Settings? = defaultTestSettings(),
         views: List<ViewSnapshot>? = this.views,
+        snapshot: HomeSnapshot = this.snapshot,
     ) = LaunchWarmup.Home(snapshot = snapshot, stale = false, settings = settings, views = views)
 
     private fun seed(
@@ -52,6 +54,11 @@ class SeedFromWarmupTest {
     }
 
     @Test
+    fun `an empty snapshot seeds nothing, so the first load decides whether a first sync keeps the skeleton`() {
+        assertNull(seed(warm(snapshot = classicSnapshot())))
+    }
+
+    @Test
     fun `a snapshot another layout owns seeds nothing`() {
         assertNull(seed(warm(), extract = { null }))
     }
@@ -75,6 +82,6 @@ class SeedFromWarmupTest {
     fun `the seeded content is the reduce of the initial content and the extracted record`() {
         val seeded = seed(warm())
 
-        assertEquals("initial+0", seeded?.content)
+        assertEquals("initial+1", seeded?.content)
     }
 }

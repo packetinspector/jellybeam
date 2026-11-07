@@ -51,7 +51,7 @@ class DiscoverDetailMutationTest {
         jellyfinItemId = null,
     )
 
-    private fun movieDetail(activeRequest: SeerrActiveRequest? = null, similar: List<SeerrCard> = emptyList()) = SeerrMovieDetail(
+    private fun movieDetail(activeRequest: SeerrActiveRequest? = null, similar: List<SeerrCard> = emptyList(), onWatchlist: Boolean? = null) = SeerrMovieDetail(
         card = card(SeerrMediaType.MOVIE),
         runtimeMinutes = 100,
         genres = emptyList(),
@@ -64,9 +64,10 @@ class DiscoverDetailMutationTest {
         activeRequest = activeRequest,
         canRequest = activeRequest == null,
         canRequest4k = false,
+        onWatchlist = onWatchlist,
     )
 
-    private fun tvDetail(activeRequest: SeerrActiveRequest? = null) = SeerrTvDetail(
+    private fun tvDetail(activeRequest: SeerrActiveRequest? = null, onWatchlist: Boolean? = null) = SeerrTvDetail(
         card = card(SeerrMediaType.TV),
         genres = emptyList(),
         cast = emptyList(),
@@ -81,6 +82,7 @@ class DiscoverDetailMutationTest {
         seasons = listOf(
             SeerrSeasonStatus(seasonNumber = 1, name = "Season 1", episodeCount = 10, availability = SeerrAvailability.NOT_REQUESTED, requestable = true),
         ),
+        onWatchlist = onWatchlist,
     )
 
     private val active = SeerrActiveRequest(requestId = 7L, status = SeerrRequestStatus.PENDING, is4k = false, seasons = emptyList())
@@ -143,6 +145,24 @@ class DiscoverDetailMutationTest {
             assertEquals(listOf(7L), fake.seerrCancelRequestCalls)
             assertFalse(h.vm.state.value.busy)
             assertEquals(DiscoverDetailTransientEvent.REQUEST_CANCELLED, h.vm.state.value.transientEvent)
+        } finally {
+            h.close()
+        }
+    }
+
+    @Test
+    fun `a successful submit takes the returned watchlist flag`() = runTest {
+        val fake = FakeCoreGateway(seerrMovieResultsByTmdbId = mapOf(1L to Result.success(movieDetail(onWatchlist = true))))
+        fake.seerrSubmitRequestResult = Result.success(SeerrRequestDetail.Movie(movieDetail(onWatchlist = false)))
+        val h = harness(fake)
+        try {
+            advanceUntilIdle()
+            assertEquals(true, h.vm.state.value.onWatchlist)
+
+            h.vm.startRequest(false)
+            advanceUntilIdle()
+
+            assertEquals("the submit's returned flag replaces the one on screen", false, h.vm.state.value.onWatchlist)
         } finally {
             h.close()
         }
@@ -492,5 +512,234 @@ class DiscoverDetailMutationTest {
         } finally {
             h.close()
         }
+    }
+
+    // -- Watchlist toggle (docs/14 Watchlist): rides the same busy slot as request and cancel --------
+
+    private fun watchlistFake(onWatchlist: Boolean?, mediaType: SeerrMediaType = SeerrMediaType.MOVIE) = FakeCoreGateway(
+        seerrMovieResultsByTmdbId = if (mediaType == SeerrMediaType.MOVIE) mapOf(1L to Result.success(movieDetail(onWatchlist = onWatchlist))) else emptyMap(),
+        seerrTvResultsByTmdbId = if (mediaType == SeerrMediaType.TV) mapOf(1L to Result.success(tvDetail(onWatchlist = onWatchlist))) else emptyMap(),
+    )
+
+    @Test
+    fun `either detail kind fills the watchlist state from its own field`() = runTest {
+        for (mediaType in listOf(SeerrMediaType.MOVIE, SeerrMediaType.TV)) {
+            for (on in listOf(null, false, true)) {
+                val h = harness(watchlistFake(on, mediaType), mediaType)
+                try {
+                    advanceUntilIdle()
+
+                    assertEquals("$mediaType on=$on", on, h.vm.state.value.onWatchlist)
+                } finally {
+                    h.close()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a successful toggle flips the pill with the title verbatim, no re-read and no confirmation`() = runTest {
+        val h = harness(watchlistFake(onWatchlist = false))
+        try {
+            advanceUntilIdle()
+
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+
+            assertEquals(
+                listOf(FakeCoreGateway.SeerrSetWatchlistCall(SeerrMediaType.MOVIE, 1L, "Synthetic Title", on = true)),
+                h.fake.seerrSetWatchlistCalls,
+            )
+            val state = h.vm.state.value
+            assertEquals(true, state.onWatchlist)
+            assertFalse(state.busy)
+            assertNull(state.watchlistError)
+            assertNull(state.transientEvent)
+            assertEquals("the title is read once, on open", listOf(1L), h.fake.seerrMovieCalls)
+
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+
+            assertEquals(false, h.fake.seerrSetWatchlistCalls.last().on)
+            assertEquals(false, h.vm.state.value.onWatchlist)
+        } finally {
+            h.close()
+        }
+    }
+
+    @Test
+    fun `a TV title toggles with its own media type`() = runTest {
+        val h = harness(watchlistFake(onWatchlist = true, mediaType = SeerrMediaType.TV), SeerrMediaType.TV)
+        try {
+            advanceUntilIdle()
+
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+
+            assertEquals(
+                listOf(FakeCoreGateway.SeerrSetWatchlistCall(SeerrMediaType.TV, 1L, "Synthetic Title", on = false)),
+                h.fake.seerrSetWatchlistCalls,
+            )
+            assertEquals(false, h.vm.state.value.onWatchlist)
+        } finally {
+            h.close()
+        }
+    }
+
+    @Test
+    fun `a toggle with the watchlist unavailable does nothing`() = runTest {
+        val h = harness(watchlistFake(onWatchlist = null))
+        try {
+            advanceUntilIdle()
+
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+
+            assertEquals(emptyList<FakeCoreGateway.SeerrSetWatchlistCall>(), h.fake.seerrSetWatchlistCalls)
+            assertFalse(h.vm.state.value.busy)
+        } finally {
+            h.close()
+        }
+    }
+
+    @Test
+    fun `a failed toggle shows its error beside the card, re-reads the server state and stays live`() = runTest {
+        val results = mutableMapOf(1L to Result.success(movieDetail(onWatchlist = false)))
+        val fake = FakeCoreGateway(seerrMovieResultsByTmdbId = results, seerrSetWatchlistResult = Result.failure(refusal))
+        val h = harness(fake)
+        try {
+            advanceUntilIdle()
+            results[1L] = Result.success(movieDetail(onWatchlist = true))
+
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+
+            val state = h.vm.state.value
+            assertEquals("refused", state.watchlistError)
+            assertEquals("the pill shows the server state, not the attempted one", true, state.onWatchlist)
+            assertEquals("re-read once after the failure", listOf(1L, 1L), fake.seerrMovieCalls)
+            assertNotNull("the card stays", state.card)
+            assertFalse(state.busy)
+            assertNull(state.transientEvent)
+            assertEquals(0L, fake.seerrRevision.value)
+            assertTrue(state.actionSlots().single { it.id == ACTION_WATCHLIST }.actionable)
+        } finally {
+            h.close()
+        }
+    }
+
+    @Test
+    fun `the next toggle clears a shown watchlist error`() = runTest {
+        val fake = watchlistFake(onWatchlist = false).apply { seerrSetWatchlistResult = Result.failure(refusal) }
+        val h = harness(fake)
+        try {
+            advanceUntilIdle()
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+            assertNotNull(h.vm.state.value.watchlistError)
+            val gate = CompletableDeferred<Unit>().also { fake.seerrSetWatchlistGate = it }
+
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+
+            assertNull(h.vm.state.value.watchlistError)
+            gate.complete(Unit)
+        } finally {
+            h.close()
+        }
+    }
+
+    @Test
+    fun `a second toggle while the first is in flight is a no-op and the pill is inert`() = runTest {
+        val fake = watchlistFake(onWatchlist = false)
+        val h = harness(fake)
+        try {
+            advanceUntilIdle()
+            val gate = CompletableDeferred<Unit>().also { fake.seerrSetWatchlistGate = it }
+
+            h.vm.toggleWatchlist()
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+
+            assertEquals(1, fake.seerrSetWatchlistCalls.size)
+            assertTrue(h.vm.state.value.busy)
+            assertFalse(h.vm.state.value.actionSlots().single { it.id == ACTION_WATCHLIST }.actionable)
+            assertEquals("not yet flipped", false, h.vm.state.value.onWatchlist)
+
+            gate.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(1, fake.seerrSetWatchlistCalls.size)
+            assertEquals(true, h.vm.state.value.onWatchlist)
+            assertFalse(h.vm.state.value.busy)
+        } finally {
+            h.close()
+        }
+    }
+
+    @Test
+    fun `request and cancel are no-ops while a toggle is in flight, and a toggle while a request is`() = runTest {
+        val results = mapOf(1L to Result.success(movieDetail(activeRequest = active, onWatchlist = false)))
+        val fake = FakeCoreGateway(seerrMovieResultsByTmdbId = results)
+        val h = harness(fake)
+        try {
+            advanceUntilIdle()
+            val gate = CompletableDeferred<Unit>().also { fake.seerrSetWatchlistGate = it }
+
+            h.vm.toggleWatchlist()
+            h.vm.confirmCancel()
+            h.vm.startRequest(false)
+            advanceUntilIdle()
+            assertEquals(emptyList<Long>(), fake.seerrCancelRequestCalls)
+            assertEquals(emptyList<Any>(), fake.seerrRequestOptionsCalls)
+            gate.complete(Unit)
+            advanceUntilIdle()
+
+            val cancelGate = CompletableDeferred<Unit>().also { fake.seerrCancelRequestGate = it }
+            h.vm.confirmCancel()
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+            assertEquals("only the first toggle ran", 1, fake.seerrSetWatchlistCalls.size)
+            cancelGate.complete(Unit)
+        } finally {
+            h.close()
+        }
+    }
+
+    @Test
+    fun `a page reload takes the watchlist state from the server`() = runTest {
+        val fake = watchlistFake(onWatchlist = false)
+        val h = harness(fake)
+        try {
+            advanceUntilIdle()
+            h.vm.toggleWatchlist()
+            advanceUntilIdle()
+            assertEquals(true, h.vm.state.value.onWatchlist)
+
+            h.vm.retry()
+            advanceUntilIdle()
+
+            assertEquals("the fake server never changed", false, h.vm.state.value.onWatchlist)
+        } finally {
+            h.close()
+        }
+    }
+
+    @Test
+    fun `clearing the view model mid-toggle publishes nothing`() = runTest {
+        val fake = watchlistFake(onWatchlist = false)
+        val h = harness(fake)
+        advanceUntilIdle()
+        val gate = CompletableDeferred<Unit>().also { fake.seerrSetWatchlistGate = it }
+        h.vm.toggleWatchlist()
+        advanceUntilIdle()
+        val before = h.vm.state.value
+        assertTrue(before.busy)
+
+        h.close()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(before, h.vm.state.value)
     }
 }

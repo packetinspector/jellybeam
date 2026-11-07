@@ -1,5 +1,6 @@
 package tv.jellybeam.ui.detail
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -11,6 +12,7 @@ import tv.jellybeam.data.SettingsStore
 import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.i18n.UiStrings
 import tv.jellybeam.ui.common.ChangeRefreshScheduler
+import tv.jellybeam.ui.common.canOpenTrailer
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -35,6 +37,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.CollectionInfo
+import uniffi.jellybeam_core.ExtraItem
 import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.SortOrder
 
@@ -54,8 +57,8 @@ private const val BROWSE_NOT_READY_BUDGET_MS = 10_000L
 /** How long [DetailUiState.toast] stays before [DetailViewModel] clears it (docs/19 §1.4). */
 private const val TOAST_DURATION_MS = 2_500L
 
-/** docs/19 §3.3's `MenuUiState.level`: the panel's first level, or the collection-picker door. */
-enum class MenuLevel { FIRST, COLLECTIONS }
+/** docs/19 §3.3's `MenuUiState.level`: the panel's first level, or the collections / extras second level. */
+enum class MenuLevel { FIRST, COLLECTIONS, EXTRAS }
 
 /**
  * docs/19 §3.3: the open panel's content and level. [scopeSeasonNumber] is the scoped season's
@@ -171,6 +174,14 @@ data class DetailUiState(
     val pendingSeriesNavigation: Card? = null,
     /** docs/28 §1: a Watch together row's title, consumed once by [DetailScreen] to open the lobby. */
     val pendingWatchTogether: MenuAction.WatchTogether? = null,
+    /** docs/19 §1.3: a remote trailer link, consumed once by [DetailScreen] to open it. */
+    val pendingTrailerUrl: String? = null,
+    /** docs/19 §1.3: what the Movie Trailer pill plays; derived once, from the settled [itemDetail]. */
+    val pillTrailer: PillTrailer? = null,
+    /** docs/19 §1.3: whether the menu lists the Trailers and extras row; derived once, from the settled [itemDetail]. */
+    val extrasAvailable: Boolean = false,
+    /** docs/19 §1.3: the Trailers and extras level's content, fetched on demand. */
+    val extras: ExtrasState = ExtrasState.Idle,
     /** True once the mirror dropped this Movie/Episode; [DetailScreen] then pops (docs/07 §5). */
     val itemRemoved: Boolean = false,
     /**
@@ -194,6 +205,8 @@ class DetailViewModel(
     private val random: Random = Random.Default,
     /** docs/09: the settings owner [DetailUiState.showVirtualEpisodes] is derived from. */
     private val settingsStore: SettingsStore = AppGraph.settingsStore,
+    /** docs/19 §1.3: whether an installed app can open a remote trailer link; tests inject it, Android answers via [canOpenTrailer]. */
+    private val canOpenTrailer: (String) -> Boolean = { false },
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(DetailUiState(card = card))
@@ -215,6 +228,14 @@ class DetailViewModel(
 
     /** The in-flight [loadCollection]; declared above `init` so its first write isn't clobbered. */
     private var collectionJob: Job? = null
+
+    /** docs/19 §1.3: the pill's trailer lookup; a press while it runs is ignored, and leaving the page or starting another play cancels it. */
+    private var pillJob: Job? = null
+
+    /** docs/19 §1.3: [canOpenTrailer] answers per link, so each costs one package query per page. Main-thread only. */
+    private val openableLinks = HashMap<String, Boolean>()
+
+    private fun canOpen(url: String): Boolean = openableLinks.getOrPut(url) { canOpenTrailer(url) }
 
     /**
      * True once the first [publishAllEpisodes] has landed (success or failure), the per-episode
@@ -245,6 +266,7 @@ class DetailViewModel(
 
     fun setActive(active: Boolean) {
         _active.value = active
+        if (!active) pillJob?.cancel()
     }
 
     /**
@@ -381,9 +403,26 @@ class DetailViewModel(
         val live = async { runCatchingCancellable { gateway.getItemDetail(itemId) }.getOrNull() }
         val local = runCatchingCancellable { gateway.itemDetailLocal(itemId) }.getOrNull()
         // Never over a record the live fetch already delivered.
-        if (local != null) _state.update { if (it.itemDetailLoaded) it else it.copy(itemDetail = local) }
+        if (local != null && !_state.value.itemDetailLoaded) publishItemDetail(local, settled = false)
         val detail = live.await()
-        _state.update { it.copy(itemDetail = detail ?: it.itemDetail, itemDetailLoaded = true) }
+        publishItemDetail(detail ?: _state.value.itemDetail, settled = true)
+    }
+
+    /**
+     * The only writer of [DetailUiState.itemDetail]. docs/19 §1.3: the pill and the Extras row derive
+     * once, from the settled record; the mirror record never carries extras counts or links.
+     */
+    private fun publishItemDetail(detail: ItemDetail?, settled: Boolean) {
+        val pill = if (settled) pillTrailer(card.itemType, detail, ::canOpen) else null
+        val available = settled && extrasAvailable(card.itemType, detail, ::canOpen)
+        _state.update {
+            it.copy(
+                itemDetail = detail,
+                itemDetailLoaded = it.itemDetailLoaded || settled,
+                pillTrailer = pill,
+                extrasAvailable = available,
+            )
+        }
     }
 
     /** Fails open to empty; [DetailFormatting.dedupeById] guards a server-duplicated title. */
@@ -671,10 +710,33 @@ class DetailViewModel(
             isAdministrator = state.isAdministrator,
             seriesCard = seriesCard,
             highlightedSeasonNumber = state.seasons.firstOrNull { it.id == state.selectedSeasonId }?.indexNumber,
+            extrasAvailable = state.extrasAvailable,
         )
         val model = buildMenu(strings, input)
         randomPool = scopeSeason?.let { scopeEpisodes } ?: state.allEpisodes
         _state.update { it.copy(menu = MenuUiState(model = model, level = MenuLevel.FIRST, scopeSeasonNumber = scopeSeason?.indexNumber)) }
+        if (state.extrasAvailable) fetchExtrasIfNeeded()
+    }
+
+    /** docs/19 §1.3: fetched on the first open with the row present, again only after a failure. */
+    private fun fetchExtrasIfNeeded() {
+        if (_state.value.extras.let { it is ExtrasState.Idle || it is ExtrasState.Failed }) fetchExtras()
+    }
+
+    /** Loads only the endpoints [DetailUiState.itemDetail] counted, both at once; any failure fails the level. */
+    private fun fetchExtras() {
+        val detail = _state.value.itemDetail ?: return
+        _state.update { it.copy(extras = ExtrasState.Loading) }
+        viewModelScope.launch {
+            val result = runCatchingCancellable {
+                coroutineScope {
+                    val trailers = async { if (detail.localTrailerCount > 0) gateway.localTrailers(card.id) else emptyList<ExtraItem>() }
+                    val features = async { if (detail.specialFeatureCount > 0) gateway.specialFeatures(card.id) else emptyList<ExtraItem>() }
+                    buildExtrasList(card.itemType, trailers.await(), detail.remoteTrailers, features.await(), ::canOpen)
+                }
+            }
+            _state.update { it.copy(extras = result.fold(onSuccess = { entries -> ExtrasState.Loaded(entries) }, onFailure = { ExtrasState.Failed })) }
+        }
     }
 
     /** Back/Left/Select on a row, or an action completing -- closes the panel and confirm block. */
@@ -690,6 +752,58 @@ class DetailViewModel(
     /** Back from collections -- returns to first level (docs/19 §1.3); panel remembers refocus. */
     fun backFromCollections() {
         _state.update { it.copy(menu = it.menu?.copy(level = MenuLevel.FIRST)) }
+    }
+
+    /** Back from the extras level -- returns to the first level, where the panel refocuses the Extras row (docs/19 §1.3). */
+    fun backFromExtras() {
+        _state.update { it.copy(menu = it.menu?.copy(level = MenuLevel.FIRST)) }
+    }
+
+    /**
+     * docs/19 §1.3: a server item plays from the start through the shared hand-off; a link closes the
+     * menu and hands [DetailScreen] its url. Either way the next open starts at the first level.
+     */
+    fun selectExtra(entry: ExtraEntry) {
+        when (entry) {
+            is ExtraEntry.Local -> startPlayback(entry.item.id, startFromBeginning = true)
+            is ExtraEntry.Remote -> {
+                pillJob?.cancel()
+                _state.update { it.copy(menu = null, pendingTrailerUrl = entry.url) }
+            }
+        }
+    }
+
+    /**
+     * The Movie Trailer pill: a link is handed to [DetailScreen]; a server trailer is looked up fresh
+     * and played from the start. A press while the lookup runs is ignored; an empty answer or a failure toasts.
+     */
+    fun playPillTrailer() {
+        when (val pill = _state.value.pillTrailer) {
+            null -> Unit
+            is PillTrailer.Remote -> _state.update { it.copy(menu = null, pendingTrailerUrl = pill.url) }
+            PillTrailer.Local -> {
+                if (pillJob?.isActive == true) return
+                pillJob = viewModelScope.launch {
+                    runCatchingCancellable { gateway.localTrailers(card.id) }.fold(
+                        onSuccess = { trailers ->
+                            val first = trailers.firstOrNull()
+                            if (first != null) handOffPlayback(first.id, startFromBeginning = true) else showToast(strings.get(R.string.trailer_unavailable))
+                        },
+                        onFailure = { showToast(serverUnreachable()) },
+                    )
+                }
+            }
+        }
+    }
+
+    /** The primary Play pill starts its own playback outside this view model; a slow trailer lookup must not follow it. */
+    fun cancelTrailerLookup() {
+        pillJob?.cancel()
+    }
+
+    /** [DetailScreen] calls this once it has opened [DetailUiState.pendingTrailerUrl]. */
+    fun consumePendingTrailer() {
+        _state.update { it.copy(pendingTrailerUrl = null) }
     }
 
     /**
@@ -735,8 +849,15 @@ class DetailViewModel(
                 if (target != null) startPlayback(target.id, startFromBeginning = false) else closeMenu()
             }
             is MenuAction.GoToSeries -> _state.update { it.copy(menu = null, pendingSeriesNavigation = action.series) }
-            is MenuAction.WatchTogether -> _state.update { it.copy(menu = null, pendingWatchTogether = action) }
+            is MenuAction.WatchTogether -> {
+                pillJob?.cancel()
+                _state.update { it.copy(menu = null, pendingWatchTogether = action) }
+            }
             MenuAction.AddToCollection -> enterCollections()
+            MenuAction.Extras -> {
+                _state.update { it.copy(menu = it.menu?.copy(level = MenuLevel.EXTRAS)) }
+                fetchExtrasIfNeeded()
+            }
             MenuAction.RefreshMetadata -> refreshMetadata()
         }
     }
@@ -795,6 +916,12 @@ class DetailViewModel(
 
     /** Closes menu, hands [DetailScreen] a playback target (§1.4: Play navigates, no toast). */
     private fun startPlayback(targetId: String, startFromBeginning: Boolean) {
+        pillJob?.cancel()
+        handOffPlayback(targetId, startFromBeginning)
+    }
+
+    /** [startPlayback] without cancelling [pillJob], for the pill's own success path. */
+    private fun handOffPlayback(targetId: String, startFromBeginning: Boolean) {
         _state.update { it.copy(menu = null, pendingPlayback = PendingPlayback(targetId, startFromBeginning)) }
     }
 
@@ -839,11 +966,13 @@ class DetailViewModelFactory(
     private val gateway: CoreGateway,
     private val card: Card,
     private val strings: UiStrings,
+    /** The application context [canOpenTrailer] resolves handlers against. */
+    private val appContext: Context,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(DetailViewModel::class.java))
-        return DetailViewModel(gateway, card, strings) as T
+        return DetailViewModel(gateway, card, strings, canOpenTrailer = { url -> canOpenTrailer(appContext, url) }) as T
     }
 }
 

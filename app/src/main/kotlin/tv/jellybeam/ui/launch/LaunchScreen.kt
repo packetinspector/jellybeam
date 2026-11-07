@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
@@ -19,6 +20,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import tv.jellybeam.AccentScheme
+import tv.jellybeam.AccentSchemes
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
@@ -33,6 +36,13 @@ import tv.jellybeam.ui.theme.JellybeamWordmark
  */
 @Composable
 fun LaunchScreen(host: String?, unreachable: Boolean, modifier: Modifier = Modifier) {
+    CompositionLocalProvider(LocalAccent provides launchAccent()) {
+        LaunchContent(host, unreachable, modifier)
+    }
+}
+
+@Composable
+private fun LaunchContent(host: String?, unreachable: Boolean, modifier: Modifier) {
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -67,3 +77,13 @@ fun launchStatusText(strings: UiStrings, host: String?, unreachable: Boolean): S
     val prefix = strings.get(if (unreachable) R.string.launch_server_unreachable else R.string.launch_connecting)
     return if (host != null) "$prefix · $host" else prefix
 }
+
+/** §6.3: the launch screen is the brand mark, so it is always the default flavour, whatever accent is picked. */
+fun launchAccent(): AccentScheme = AccentSchemes.first()
+
+/** §6.3: the longest the launch screen holds for the Home prefetch; a slower first load shows Home's skeleton. */
+const val LAUNCH_HOLD_MAX_MS = 1_000L
+
+/** §6.3: hold only on a cold start landing on Home itself, so external launches and a startup library never wait. */
+fun holdLaunchForHome(coldStart: Boolean, externalLaunch: Boolean, startupLibrary: Boolean): Boolean =
+    coldStart && !externalLaunch && !startupLibrary

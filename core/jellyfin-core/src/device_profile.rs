@@ -14,6 +14,10 @@ const TRANSCODE_AUDIO_CODECS: &str = "aac,ac3";
 /// 5.1 baseline for the transcoded fallback stream; direct play keeps the source's real layout.
 const TRANSCODE_MAX_AUDIO_CHANNELS: &str = "6";
 const HLS_SEGMENT_LENGTH_SECS: i32 = 6;
+/// docs/feature-dev/music-design-brief.md §2 Formats: a song this TV can't play becomes a
+/// progressive MP3 (seekable, gapless-tagged), never per-track HLS; 320 kbps is MP3's ceiling.
+const AUDIO_TRANSCODE_CODEC: &str = "mp3";
+const AUDIO_TRANSCODE_BITRATE: i32 = 320_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DlnaProfileType {
@@ -409,6 +413,43 @@ const ANDROID_BITMAP_SUBTITLE_FORMATS: &[&str] = &["pgssub", "dvdsub"];
 /// transcodes. `External` only through [`allow_ass_sidecars`].
 const ANDROID_ASS_SUBTITLE_FORMATS: &[&str] = &["ass", "ssa"];
 
+/// docs/feature-dev/music-design-brief.md §2 Formats: audio files Media3 demuxes; the codecs
+/// are [`ANDROID_DIRECT_PLAY_AUDIO_CODECS`]. DSD (`dsf`/`dff`) and AIFF stay off, so they transcode.
+const ANDROID_DIRECT_PLAY_AUDIO_CONTAINERS: &[&str] = &[
+    "flac", "mp3", "m4a", "mp4", "m4b", "aac", "ogg", "oga", "opus", "webm", "wav", "mka",
+];
+
+fn android_audio_direct_play_profile() -> DirectPlayProfile {
+    DirectPlayProfile {
+        container: Some(ANDROID_DIRECT_PLAY_AUDIO_CONTAINERS.join(",")),
+        audio_codec: Some(ANDROID_DIRECT_PLAY_AUDIO_CODECS.join(",")),
+        video_codec: None,
+        kind: Some(DlnaProfileType::Audio),
+    }
+}
+
+fn audio_transcoding_profile() -> TranscodingProfile {
+    TranscodingProfile {
+        container: Some(AUDIO_TRANSCODE_CODEC.to_string()),
+        kind: Some(DlnaProfileType::Audio),
+        video_codec: None,
+        audio_codec: Some(AUDIO_TRANSCODE_CODEC.to_string()),
+        protocol: Some(MediaStreamProtocol::Http),
+        estimate_content_length: false,
+        enable_mpegts_m2_ts_mode: false,
+        transcode_seek_info: Some(TranscodeSeekInfo::Auto),
+        copy_timestamps: false,
+        context: Some(EncodingContext::Streaming),
+        enable_subtitles_in_manifest: false,
+        max_audio_channels: Some("2".to_string()),
+        min_segments: 0,
+        segment_length: 0,
+        break_on_non_key_frames: None,
+        conditions: Vec::new(),
+        enable_audio_vbr_encoding: false,
+    }
+}
+
 /// Builds Jellybeam TV's device profile for the given probed capabilities (named "Jellybeam TV" so
 /// the server can disambiguate it from this app's other clients). `tolerate_mislabeled_levels` defaults `true`.
 pub fn android_tv_profile(
@@ -424,11 +465,15 @@ pub fn android_tv_profile(
                 .unwrap_or(UNCAPPED_STREAMING_BITRATE),
         )),
         max_static_bitrate: None,
-        music_streaming_transcoding_bitrate: None,
+        music_streaming_transcoding_bitrate: Some(AUDIO_TRANSCODE_BITRATE),
         max_static_music_bitrate: None,
-        direct_play_profiles: vec![android_direct_play_profile(caps)],
+        // The server matches a profile by its `Type`, so the audio entries never touch video.
+        direct_play_profiles: vec![
+            android_direct_play_profile(caps),
+            android_audio_direct_play_profile(),
+        ],
         // HLS/ts fallback, reached only when direct play/stream both fail.
-        transcoding_profiles: vec![transcoding_profile(caps)],
+        transcoding_profiles: vec![transcoding_profile(caps), audio_transcoding_profile()],
         container_profiles: Vec::new(),
         codec_profiles: android_codec_profiles(caps, tolerate_mislabeled_levels),
         subtitle_profiles: android_subtitle_profiles(),
@@ -715,6 +760,71 @@ mod tests {
         for required in ["dts", "dca", "truehd"] {
             assert!(ANDROID_DIRECT_PLAY_AUDIO_CODECS.contains(&required));
         }
+    }
+
+    /// Whether a song of `container`/`codec` direct plays, matched the way the server matches a
+    /// `Type: Audio` DirectPlayProfile: any of the source's comma-listed containers, the codec.
+    fn audio_direct_plays(profile: &RawDeviceProfile, container: &str, codec: &str) -> bool {
+        let listed = |list: &Option<String>, value: &str| {
+            list.as_deref()
+                .is_some_and(|list| list.split(',').any(|entry| entry == value))
+        };
+        profile
+            .direct_play_profiles
+            .iter()
+            .filter(|p| p.kind == Some(DlnaProfileType::Audio))
+            .any(|p| {
+                container.split(',').any(|c| listed(&p.container, c))
+                    && listed(&p.audio_codec, codec)
+            })
+    }
+
+    /// docs/feature-dev/music-design-brief.md §2 Formats: FLAC, ALAC, Opus and MP3 direct play;
+    /// DSD and AIFF fall to the audio transcode, which is progressive MP3.
+    #[test]
+    fn songs_direct_play_by_format_and_dsd_or_aiff_transcode() {
+        let profile = android_tv_profile(&AndroidTvCaps::default(), true);
+        let rows = [
+            ("flac", "flac", true),
+            ("mov,mp4,m4a,3gp,3g2,mj2", "alac", true),
+            ("mov,mp4,m4a,3gp,3g2,mj2", "aac", true),
+            ("ogg", "opus", true),
+            ("opus", "opus", true),
+            ("mp3", "mp3", true),
+            ("wav", "pcm_s16le", true),
+            ("dsf", "dsd_lsbf_planar", false),
+            ("dff", "dsd_msbf", false),
+            ("aiff", "pcm_s16be", false),
+        ];
+        for (container, codec, direct) in rows {
+            assert_eq!(
+                audio_direct_plays(&profile, container, codec),
+                direct,
+                "{container}/{codec}"
+            );
+        }
+        let audio_targets: Vec<_> = profile
+            .transcoding_profiles
+            .iter()
+            .filter(|p| p.kind == Some(DlnaProfileType::Audio))
+            .collect();
+        assert_eq!(audio_targets.len(), 1);
+        assert_eq!(audio_targets[0].container.as_deref(), Some("mp3"));
+        assert_eq!(audio_targets[0].protocol, Some(MediaStreamProtocol::Http));
+    }
+
+    /// The audio entries sit after the video ones, which stay as they were.
+    #[test]
+    fn the_video_profile_entries_lead_and_are_unchanged_by_audio() {
+        let v = android_json(&AndroidTvCaps::default(), true);
+        assert_eq!(v["DirectPlayProfiles"][0]["Type"], "Video");
+        assert_eq!(
+            v["DirectPlayProfiles"][0]["Container"],
+            ANDROID_DIRECT_PLAY_CONTAINERS.join(",")
+        );
+        assert_eq!(v["TranscodingProfiles"][0]["Type"], "Video");
+        assert_eq!(v["DirectPlayProfiles"][1]["Type"], "Audio");
+        assert_eq!(v["TranscodingProfiles"][1]["Type"], "Audio");
     }
 
     fn ass_methods(profile: &RawDeviceProfile) -> Vec<Vec<String>> {

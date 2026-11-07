@@ -211,6 +211,21 @@ class HomeFeedTest {
     }
 
     @Test
+    fun `an empty prefetch during the first sync keeps loading`() = runTest {
+        val gateway = FakeHomeGateway(homeSnapshotResult = classicSnapshot(), isSyncingResult = true)
+        val warmup = LaunchWarmup(signedIn(gateway), backgroundScope)
+        runCurrent()
+
+        val feed = newFeed(gateway, launchWarmup = warmup)
+        try {
+            runCurrent()
+            assertTrue("an empty mirror mid-sync is not an empty library", feed.state.value.chrome.isLoading)
+        } finally {
+            feed.close()
+        }
+    }
+
+    @Test
     fun `a prefetch the mirror has since changed under is followed by one real refresh`() = runTest {
         val gateway = FakeHomeGateway()
         val warmup = LaunchWarmup(signedIn(gateway), backgroundScope)

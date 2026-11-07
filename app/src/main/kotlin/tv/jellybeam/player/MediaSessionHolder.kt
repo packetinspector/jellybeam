@@ -43,11 +43,11 @@ class MediaSessionHolder(
 internal fun sessionShouldSurviveStop(inPip: Boolean, finishing: Boolean): Boolean = inPip && !finishing
 
 /**
- * docs/17 §2: every controller gets exactly [ALLOWED_COMMANDS], trusted or not, since remote remappers and the cast
+ * docs/17 §2: every controller gets exactly [allowed], trusted or not, since remote remappers and the cast
  * shell are unverifiable apps whose default grant is read-only; Media3 refuses every other call before the shared player.
  */
-internal fun grantedCommands(default: ConnectionResult): ConnectionResult =
-    ConnectionResult.accept(default.availableSessionCommands, allowedCommands(ConnectionResult.DEFAULT_PLAYER_COMMANDS))
+internal fun grantedCommands(default: ConnectionResult, allowed: IntArray = ALLOWED_COMMANDS): ConnectionResult =
+    ConnectionResult.accept(default.availableSessionCommands, allowedCommands(ConnectionResult.DEFAULT_PLAYER_COMMANDS, allowed))
 
 /** Playback, stop, in-item seeks and the reads the session publishes; nothing that changes the queue, tracks, volume or surface. */
 internal val ALLOWED_COMMANDS: IntArray = intArrayOf(
@@ -64,9 +64,17 @@ internal val ALLOWED_COMMANDS: IntArray = intArrayOf(
     Player.COMMAND_GET_DEVICE_VOLUME,
 )
 
-/** The [ALLOWED_COMMANDS] that [commands] has. */
-internal fun allowedCommands(commands: Player.Commands): Player.Commands =
-    Player.Commands.Builder().apply { for (command in ALLOWED_COMMANDS) addIf(command, commands.contains(command)) }.build()
+/** Music brief §1.3: a music queue also takes next and previous track from the remote and the Now Playing card. */
+internal val MUSIC_COMMANDS: IntArray = ALLOWED_COMMANDS + intArrayOf(
+    Player.COMMAND_SEEK_TO_NEXT,
+    Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+    Player.COMMAND_SEEK_TO_PREVIOUS,
+    Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+)
+
+/** The [allowed] commands that [commands] has. */
+internal fun allowedCommands(commands: Player.Commands, allowed: IntArray = ALLOWED_COMMANDS): Player.Commands =
+    Player.Commands.Builder().apply { for (command in allowed) addIf(command, commands.contains(command)) }.build()
 
 /**
  * docs/17 §2: the commands a remote or Assistant sends the session, answered by [router]. Reports only

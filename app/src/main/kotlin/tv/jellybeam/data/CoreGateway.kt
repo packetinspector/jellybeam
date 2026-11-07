@@ -30,7 +30,13 @@ import java.util.concurrent.atomic.AtomicLong
 import uniffi.jellybeam_core.AccountEpochs
 import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
+import uniffi.jellybeam_core.AlbumSummary
+import uniffi.jellybeam_core.ArtistScope
 import uniffi.jellybeam_core.AssOverlay
+import uniffi.jellybeam_core.AudioFacts
+import uniffi.jellybeam_core.Lyrics
+import uniffi.jellybeam_core.AudioEnd
+import uniffi.jellybeam_core.AudioTrackPlan
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.ChangeListener
@@ -39,6 +45,7 @@ import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.DeviceCaps
 import uniffi.jellybeam_core.DiscoveredServer
 import uniffi.jellybeam_core.EpisodeNeighbors
+import uniffi.jellybeam_core.ExtraItem
 import uniffi.jellybeam_core.FailedTrackFfi
 import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.GridCounts
@@ -51,12 +58,17 @@ import uniffi.jellybeam_core.ImageKind
 import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.JellybeamCoreInterface
 import uniffi.jellybeam_core.LibraryGridPrefs
+import uniffi.jellybeam_core.LiveMusicGenre
 import uniffi.jellybeam_core.LiveSort
 import uniffi.jellybeam_core.MediaSegment
+import uniffi.jellybeam_core.MixSeedFfi
+import uniffi.jellybeam_core.MusicArtistRow
+import uniffi.jellybeam_core.MusicGenreRow
 import uniffi.jellybeam_core.PersonPage
 import uniffi.jellybeam_core.PlaybackOsdDetail
 import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.PlaybackRequest
+import uniffi.jellybeam_core.PlaylistEntry
 import uniffi.jellybeam_core.QuickConnectSession
 import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SeerrBrowseFilters
@@ -77,6 +89,7 @@ import uniffi.jellybeam_core.SeerrTvDetail
 import uniffi.jellybeam_core.ServerDetails
 import uniffi.jellybeam_core.ServerInfoSnapshot
 import uniffi.jellybeam_core.Settings
+import uniffi.jellybeam_core.SongSource
 import uniffi.jellybeam_core.SortOrder
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SyncPlayInput
@@ -296,6 +309,14 @@ interface CoreGateway {
     @Throws(CoreException::class)
     suspend fun getSimilar(itemId: String, limit: UInt): List<Card>
 
+    /** docs/19 §1.3: the item's server-hosted trailers, fetched only when its detail counted some. */
+    @Throws(CoreException::class)
+    suspend fun localTrailers(itemId: String): List<ExtraItem>
+
+    /** docs/19 §1.3: the item's special features (behind the scenes, featurettes, ...), same trigger as [localTrailers]. */
+    @Throws(CoreException::class)
+    suspend fun specialFeatures(itemId: String): List<ExtraItem>
+
     /** Skip-intro/credits markers for [itemId] (docs/12 "Skip intro/credits"). Fails open to
      * an empty list; a markers fetch must never block or error out playback.
      */
@@ -469,6 +490,98 @@ interface CoreGateway {
      * no position worth persisting. Same lost-race contract as [stopPlayback].
      */
     suspend fun abandonPlayback(playSessionId: String)
+
+    /** Music brief §1.3: stream plans for the next [itemIds] of a queue, in order, at most 100, on [accountEpoch]'s account. */
+    @Throws(CoreException::class)
+    suspend fun prepareAudioQueue(itemIds: List<String>, accountEpoch: ULong): List<AudioTrackPlan>
+
+    /** docs/18 §2.1: ends [ends] and starts [track]'s report under one admission of [request]; returns its play session id. */
+    @Throws(CoreException::class)
+    suspend fun startAudioTrack(track: AudioTrackPlan, queueIds: List<String>, request: PlaybackRequest, ends: AudioEnd?): String
+
+    /** Music brief §1: an album's tracks in disc and track order from the mirror; `null` when it can't answer. */
+    suspend fun albumTracks(albumId: String, offset: UInt, limit: UInt): List<Card>?
+
+    /** Music brief §1: one page of a song list in its source's order from the mirror; `null` when it can't answer. */
+    suspend fun musicSongs(source: SongSource, offset: UInt, limit: UInt): List<Card>?
+
+    @Throws(CoreException::class)
+    suspend fun playlistItems(playlistId: String, offset: UInt, limit: UInt): List<PlaylistEntry>
+
+    /** Music brief §1: up to 200 tracks around [seed]; empty is "no mix yet". */
+    @Throws(CoreException::class)
+    suspend fun instantMix(seed: MixSeedFfi): List<Card>
+
+    /** Handoff §9: any mirrored song or album carries a served gain, which shows the Normalisation switch; `false` before the mirror opens. */
+    suspend fun musicHasNormalizationGain(): Boolean
+
+    /** Handoff §4 D: a song list's length and its A–Z runs, from the mirror; `null` when it can't answer. */
+    suspend fun musicSongCount(source: SongSource): ULong?
+    suspend fun musicSongGroups(source: SongSource): List<GridGroup>?
+
+    /** Handoff §4 C header counts from the mirror; `null` when it can't answer. */
+    suspend fun albumSummary(albumId: String): AlbumSummary?
+
+    /** Handoff §4 A Artists tab: one page, the count and the A–Z runs for [scope]; `null` when the mirror can't answer. */
+    suspend fun musicArtists(viewId: String, scope: ArtistScope, offset: UInt, limit: UInt): List<MusicArtistRow>?
+    suspend fun musicArtistCount(viewId: String, scope: ArtistScope): ULong?
+    suspend fun musicArtistGroups(viewId: String, scope: ArtistScope): List<GridGroup>?
+
+    /** Handoff §4 B header; `null` when the mirror knows no such artist. */
+    @Throws(CoreException::class)
+    suspend fun artistSummary(artistId: String): MusicArtistRow?
+
+    /** Handoff §4 B shelves and Most played from the mirror; `null` when it can't answer. */
+    suspend fun artistAlbums(artistId: String): List<Card>?
+    suspend fun artistAppearsOn(artistId: String): List<Card>?
+    suspend fun artistMostPlayed(artistId: String, limit: UInt): List<Card>?
+
+    /** Handoff §4 A Genres tab: mirror names and counts (`null` when it can't answer), and the live list that carries art. */
+    suspend fun musicGenres(viewId: String): List<MusicGenreRow>?
+
+    @Throws(CoreException::class)
+    suspend fun musicGenresLive(viewId: String, offset: UInt, limit: UInt): List<LiveMusicGenre>
+
+    /** Handoff §4 A Playlists tab, live: one page, most recently changed first, and whether any exists. */
+    @Throws(CoreException::class)
+    suspend fun playlists(offset: UInt, limit: UInt): List<Card>
+
+    @Throws(CoreException::class)
+    suspend fun hasPlaylists(): Boolean
+
+    /** Handoff §4 E2 `IN PLAYLIST`: [playlistId]'s entries holding [itemId], live; empty when it isn't there. */
+    @Throws(CoreException::class)
+    suspend fun playlistEntryIds(playlistId: String, itemId: String): List<String>
+
+    /** Handoff §4 E3: a new audio playlist named verbatim, holding [itemIds]; returns its id. */
+    @Throws(CoreException::class)
+    suspend fun createPlaylist(name: String, itemIds: List<String>): String
+
+    /** Handoff §4 E2: appends [itemIds], duplicates allowed. */
+    @Throws(CoreException::class)
+    suspend fun addToPlaylist(playlistId: String, itemIds: List<String>)
+
+    /** Handoff §4 E: removes entries by their `PlaylistItemId`. */
+    @Throws(CoreException::class)
+    suspend fun removeFromPlaylist(playlistId: String, entryIds: List<String>)
+
+    /** Handoff §4 E4: moves entry [entryId] so it sits at [newIndex] of the resulting order. */
+    @Throws(CoreException::class)
+    suspend fun movePlaylistItem(playlistId: String, entryId: String, newIndex: UInt)
+
+    /**
+     * docs/29 §4: the id of each playlist an add or remove just changed, replay 0; a move is left out,
+     * since only the playlist's own page moves rows and it already shows the new order.
+     */
+    fun playlistEdits(): Flow<String>
+
+    /** Handoff §6: the album capsule's inputs from one track's streams, live, on account [accountEpoch] (`null` is the current one). */
+    @Throws(CoreException::class)
+    suspend fun audioFacts(itemId: String, accountEpoch: ULong? = null): AudioFacts
+
+    /** Handoff §4 F2: [itemId]'s lyrics, live, on the player's account [accountEpoch]; [Lyrics.None] hides the pill. */
+    @Throws(CoreException::class)
+    suspend fun lyrics(itemId: String, accountEpoch: ULong): Lyrics
 
     /** Automatic track selection (docs/09 step 3): resolves an audio/subtitle decision for
      * [tracks] against `Settings.language` and [seriesId]'s remembered choice (`null` for a
@@ -681,7 +794,15 @@ interface CoreGateway {
     @Throws(CoreException::class)
     suspend fun seerrMyRequests(): List<SeerrMyRequest>
 
-    /** Bumps after every Seerr request, cancel, connect and disconnect that changed the server (a landed change with an unreadable detail included); the drawer's Discover entry follows it (docs/14). */
+    /** The signed-in Seerr user's watchlist, newest first; empty under an API-key connection (docs/14 Watchlist). */
+    @Throws(CoreException::class)
+    suspend fun seerrWatchlist(): List<SeerrCard>
+
+    /** Adds or removes one title (idempotent), bumping [seerrRevision] on success; fails under an API-key connection (docs/14 Watchlist). */
+    @Throws(CoreException::class)
+    suspend fun seerrSetWatchlist(card: SeerrCard, on: Boolean)
+
+    /** Bumps after every Seerr request, cancel, watchlist change, connect and disconnect that changed the server (a landed change with an unreadable detail included); the drawer's Discover entry follows it (docs/14). */
     val seerrRevision: StateFlow<Long>
 
     // -- Watch Together (docs/28) ----------------------------------------------
@@ -947,6 +1068,12 @@ internal class RealCoreGateway(
     override suspend fun getSimilar(itemId: String, limit: UInt): List<Card> =
         ffi("ffi.getSimilar") { getSimilar(itemId, limit) }
 
+    override suspend fun localTrailers(itemId: String): List<ExtraItem> =
+        ffi("ffi.localTrailers") { localTrailers(itemId) }
+
+    override suspend fun specialFeatures(itemId: String): List<ExtraItem> =
+        ffi("ffi.specialFeatures") { specialFeatures(itemId) }
+
     override suspend fun getMediaSegments(itemId: String, accountEpoch: ULong?): List<MediaSegment> =
         ffi("ffi.getMediaSegments") { getMediaSegments(itemId, accountEpoch) }
 
@@ -995,6 +1122,8 @@ internal class RealCoreGateway(
     override fun imageUrl(itemId: String, kind: ImageKind, tag: String, maxWidth: UInt, accountEpoch: ULong?): String? {
         if (!core.isCompleted) return null
         if (accountEpoch == null) return currentUrlBase()?.url(itemId, kind, tag, maxWidth)
+        // The current account's own epoch formats in Kotlin too; only another account's crosses FFI.
+        currentUrlBase()?.takeIf { it.epoch == accountEpoch }?.let { return it.url(itemId, kind, tag, maxWidth) }
         return imageUrlViaCore(itemId, kind, tag, maxWidth, accountEpoch)
     }
 
@@ -1141,6 +1270,87 @@ internal class RealCoreGateway(
 
     override suspend fun abandonPlayback(playSessionId: String) =
         ffi("ffi.abandonPlayback") { abandonPlayback(playSessionId) }
+
+    override suspend fun prepareAudioQueue(itemIds: List<String>, accountEpoch: ULong): List<AudioTrackPlan> =
+        ffi("ffi.prepareAudioQueue") { prepareAudioQueue(itemIds, accountEpoch) }
+
+    override suspend fun startAudioTrack(track: AudioTrackPlan, queueIds: List<String>, request: PlaybackRequest, ends: AudioEnd?): String =
+        ffi("ffi.startAudioTrack") { startAudioTrack(track, queueIds, request, ends) }
+
+    override suspend fun albumTracks(albumId: String, offset: UInt, limit: UInt): List<Card>? =
+        ffi("ffi.albumTracks") { albumTracks(albumId, offset, limit) }
+
+    override suspend fun musicSongs(source: SongSource, offset: UInt, limit: UInt): List<Card>? =
+        ffi("ffi.musicSongs") { musicSongs(source, offset, limit) }
+
+    override suspend fun playlistItems(playlistId: String, offset: UInt, limit: UInt): List<PlaylistEntry> =
+        ffi("ffi.playlistItems") { playlistItems(playlistId, offset, limit) }
+
+    override suspend fun instantMix(seed: MixSeedFfi): List<Card> =
+        ffi("ffi.instantMix") { instantMix(seed) }
+
+    override suspend fun musicHasNormalizationGain(): Boolean =
+        ffi("ffi.musicHasNormalizationGain") { musicHasNormalizationGain() }
+
+    override suspend fun musicSongCount(source: SongSource): ULong? = ffi("ffi.musicSongCount") { musicSongCount(source) }
+
+    override suspend fun musicSongGroups(source: SongSource): List<GridGroup>? = ffi("ffi.musicSongGroups") { musicSongGroups(source) }
+
+    override suspend fun albumSummary(albumId: String): AlbumSummary? = ffi("ffi.albumSummary") { albumSummary(albumId) }
+
+    override suspend fun musicArtists(viewId: String, scope: ArtistScope, offset: UInt, limit: UInt): List<MusicArtistRow>? =
+        ffi("ffi.musicArtists") { musicArtists(viewId, scope, offset, limit) }
+
+    override suspend fun musicArtistCount(viewId: String, scope: ArtistScope): ULong? =
+        ffi("ffi.musicArtistCount") { musicArtistCount(viewId, scope) }
+
+    override suspend fun musicArtistGroups(viewId: String, scope: ArtistScope): List<GridGroup>? =
+        ffi("ffi.musicArtistGroups") { musicArtistGroups(viewId, scope) }
+
+    override suspend fun artistSummary(artistId: String): MusicArtistRow? = ffi("ffi.artistSummary") { artistSummary(artistId) }
+
+    override suspend fun artistAlbums(artistId: String): List<Card>? = ffi("ffi.artistAlbums") { artistAlbums(artistId) }
+
+    override suspend fun artistAppearsOn(artistId: String): List<Card>? = ffi("ffi.artistAppearsOn") { artistAppearsOn(artistId) }
+
+    override suspend fun artistMostPlayed(artistId: String, limit: UInt): List<Card>? =
+        ffi("ffi.artistMostPlayed") { artistMostPlayed(artistId, limit) }
+
+    override suspend fun musicGenres(viewId: String): List<MusicGenreRow>? = ffi("ffi.musicGenres") { musicGenres(viewId) }
+
+    override suspend fun musicGenresLive(viewId: String, offset: UInt, limit: UInt): List<LiveMusicGenre> =
+        ffi("ffi.musicGenresLive") { musicGenresLive(viewId, offset, limit) }
+
+    override suspend fun playlists(offset: UInt, limit: UInt): List<Card> = ffi("ffi.playlists") { playlists(offset, limit) }
+
+    override suspend fun hasPlaylists(): Boolean = ffi("ffi.hasPlaylists") { hasPlaylists() }
+
+    override suspend fun playlistEntryIds(playlistId: String, itemId: String): List<String> =
+        ffi("ffi.playlistEntryIds") { playlistEntryIds(playlistId, itemId) }
+
+    override suspend fun createPlaylist(name: String, itemIds: List<String>): String = ffi("ffi.createPlaylist") { createPlaylist(name, itemIds) }
+
+    override suspend fun addToPlaylist(playlistId: String, itemIds: List<String>) {
+        ffi("ffi.addToPlaylist") { addToPlaylist(playlistId, itemIds) }
+        _playlistEdits.tryEmit(playlistId)
+    }
+
+    override suspend fun removeFromPlaylist(playlistId: String, entryIds: List<String>) {
+        ffi("ffi.removeFromPlaylist") { removeFromPlaylist(playlistId, entryIds) }
+        _playlistEdits.tryEmit(playlistId)
+    }
+
+    /** Drop-oldest is safe: a page that hears any edit re-reads its whole playlist. */
+    private val _playlistEdits = MutableSharedFlow<String>(extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    override fun playlistEdits(): Flow<String> = _playlistEdits.asSharedFlow()
+
+    override suspend fun movePlaylistItem(playlistId: String, entryId: String, newIndex: UInt) =
+        ffi("ffi.movePlaylistItem") { movePlaylistItem(playlistId, entryId, newIndex) }
+
+    override suspend fun audioFacts(itemId: String, accountEpoch: ULong?): AudioFacts = ffi("ffi.audioFacts") { audioFacts(itemId, accountEpoch) }
+
+    override suspend fun lyrics(itemId: String, accountEpoch: ULong): Lyrics = ffi("ffi.lyrics") { lyrics(itemId, accountEpoch) }
 
     override suspend fun resolveTracks(seriesId: String?, tracks: List<TrackInfo>): TrackDecisionFfi =
         ffi("ffi.resolveTracks") { resolveTracks(seriesId, tracks) }
@@ -1299,6 +1509,12 @@ internal class RealCoreGateway(
 
     override suspend fun seerrMyRequests(): List<SeerrMyRequest> =
         ffi("ffi.seerrMyRequests") { seerrMyRequests() }
+
+    override suspend fun seerrWatchlist(): List<SeerrCard> =
+        ffi("ffi.seerrWatchlist") { seerrWatchlist() }
+
+    override suspend fun seerrSetWatchlist(card: SeerrCard, on: Boolean) =
+        ffi("ffi.seerrSetWatchlist") { seerrSetWatchlist(card, on); bumpSeerrRevision() }
 
     private val _seerrRevision = MutableStateFlow(0L)
     override val seerrRevision: StateFlow<Long> = _seerrRevision.asStateFlow()

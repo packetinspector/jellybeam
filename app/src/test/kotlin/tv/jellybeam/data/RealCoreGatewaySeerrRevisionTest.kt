@@ -57,6 +57,7 @@ class RealCoreGatewaySeerrRevisionTest {
             activeRequest = null,
             canRequest = true,
             canRequest4k = false,
+            onWatchlist = null,
         ),
     )
 

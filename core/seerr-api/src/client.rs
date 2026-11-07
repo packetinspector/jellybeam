@@ -438,6 +438,24 @@ impl SeerrClient {
         Ok(())
     }
 
+    /// Like [`Self::request_no_content`], but `already` means the change is already in place
+    /// (`Ok`).
+    async fn request_idempotent(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<serde_json::Value>,
+        already: reqwest::StatusCode,
+    ) -> Result<(), SeerrError> {
+        let resp = self.send_with_relogin(method, path, query, body).await?;
+        if resp.status() == already {
+            return Ok(());
+        }
+        check_status(resp).await?;
+        Ok(())
+    }
+
     pub async fn public_settings(&self) -> Result<PublicSettings, SeerrError> {
         self.request_json(reqwest::Method::GET, "/settings/public", &[], None)
             .await
@@ -725,6 +743,52 @@ impl SeerrClient {
     pub async fn request_delete(&self, request_id: i64) -> Result<(), SeerrError> {
         self.request_no_content(reqwest::Method::DELETE, &format!("/request/{request_id}"))
             .await
+    }
+
+    /// `POST /watchlist`; a 409 (already listed) is success (docs/14 Watchlist).
+    pub async fn watchlist_add(
+        &self,
+        tmdb_id: i64,
+        media_type: &str,
+        title: &str,
+    ) -> Result<(), SeerrError> {
+        let body = serde_json::json!({"tmdbId": tmdb_id, "mediaType": media_type, "title": title});
+        self.request_idempotent(
+            reqwest::Method::POST,
+            "/watchlist",
+            &[],
+            Some(body),
+            reqwest::StatusCode::CONFLICT,
+        )
+        .await
+    }
+
+    /// `DELETE /watchlist/{id}?mediaType=`; a 404 (not listed) is success (docs/14 Watchlist).
+    pub async fn watchlist_remove(&self, tmdb_id: i64, media_type: &str) -> Result<(), SeerrError> {
+        self.request_idempotent(
+            reqwest::Method::DELETE,
+            &format!("/watchlist/{tmdb_id}"),
+            &[("mediaType", media_type.to_string())],
+            None,
+            reqwest::StatusCode::NOT_FOUND,
+        )
+        .await
+    }
+
+    /// `GET /discover/watchlist`: the session user's list, oldest first.
+    pub async fn watchlist(&self, page: i64) -> Result<WatchlistPage, SeerrError> {
+        self.request_json(
+            reqwest::Method::GET,
+            "/discover/watchlist",
+            &[("page", page.to_string())],
+            None,
+        )
+        .await
+    }
+
+    /// Whether this connection acts as the API key's owner rather than the signed-in user.
+    pub fn is_api_key(&self) -> bool {
+        matches!(self.inner.auth, AuthState::ApiKey(_))
     }
 
     /// `GET /request?take=&skip=&requestedBy=<user id>`. The server only

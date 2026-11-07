@@ -1,8 +1,10 @@
 package tv.jellybeam.ui.discover
 
+import tv.jellybeam.R
 import uniffi.jellybeam_core.SeerrActiveRequest
 import uniffi.jellybeam_core.SeerrAvailability
 import uniffi.jellybeam_core.SeerrCard
+import uniffi.jellybeam_core.SeerrHomeRow
 import uniffi.jellybeam_core.SeerrMediaType
 import uniffi.jellybeam_core.SeerrRequestDetail
 import uniffi.jellybeam_core.SeerrSeasonStatus
@@ -113,11 +115,38 @@ fun canSubmitSeasonRequest(seasons: List<SeerrSeasonStatus>, selection: SeasonSe
 /** The stable key every Discover poster grid/shelf keys its cells by, kept in one place. */
 fun seerrCardKey(mediaType: SeerrMediaType, tmdbId: Long): String = "$mediaType-$tmdbId"
 
+/** A shelf card's focus-memory key (docs/15 §2). */
+internal fun discoverCardFocusKey(rowId: String, card: SeerrCard): String =
+    "shelf:$rowId/card:${seerrCardKey(card.mediaType, card.tmdbId)}"
+
+/**
+ * Where focus lands when [staleKey] no longer resolves (docs/15 §2 rule 3, §3): the card nearest the
+ * viewport start in its shelf, or in the first shelf with cards when that shelf is gone; `null` (the
+ * first action chip) for a chip or fresh entry. [firstVisibleIndex] answers per row id.
+ */
+internal fun discoverRefocusKey(rows: List<SeerrHomeRow>, staleKey: String?, firstVisibleIndex: (rowId: String) -> Int): String? {
+    val staleRowId = staleKey?.takeIf { it.startsWith("shelf:") }?.removePrefix("shelf:")?.substringBefore("/card:") ?: return null
+    val row = rows.firstOrNull { it.id == staleRowId && it.cards.isNotEmpty() } ?: rows.firstOrNull { it.cards.isNotEmpty() } ?: return null
+    return discoverCardFocusKey(row.id, row.cards[firstVisibleIndex(row.id).coerceIn(0, row.cards.lastIndex)])
+}
+
 /** Drops every later card whose [seerrCardKey] already appeared, keeping order (docs/14): a
  * LazyGrid/LazyRow throws on a repeated key, and Seerr repeats items across popularity-sorted
  * pages and in a person's cast-plus-crew credits. */
 fun distinctSeerrCards(cards: List<SeerrCard>): List<SeerrCard> =
     cards.distinctBy { seerrCardKey(it.mediaType, it.tmdbId) }
+
+// -- Home shelves ---------------------------------------------------------------
+
+/** Row id of the watchlist shelf; never one of Rust's home row ids. */
+internal const val WATCHLIST_ROW_ID = "watchlist"
+
+/** The shelves Discover home shows (docs/14 Watchlist): a non-empty watchlist first, then the home rows; every shelf's repeated cards dropped. */
+internal fun discoverRows(watchlist: List<SeerrCard>, watchlistTitle: String, home: List<SeerrHomeRow>): List<SeerrHomeRow> {
+    val homeRows = home.map { it.copy(cards = distinctSeerrCards(it.cards)) }
+    if (watchlist.isEmpty()) return homeRows
+    return listOf(SeerrHomeRow(id = WATCHLIST_ROW_ID, title = watchlistTitle, cards = distinctSeerrCards(watchlist))) + homeRows
+}
 
 // -- Post-mutation detail merge ----------------------------------------------
 
@@ -128,20 +157,22 @@ private class RequestFields(
     val canRequest: Boolean,
     val canRequest4k: Boolean,
     val seasons: List<SeerrSeasonStatus>,
+    val onWatchlist: Boolean?,
 )
 
 /**
- * Takes a submit/cancel's returned request fields (card, active request, requestability and, for
- * TV, seasons) into the detail on screen; the returned detail has no similar/recommendations/scores,
+ * Takes a submit/cancel's returned request fields (card, active request, requestability, watchlist
+ * flag and, for TV, seasons) into the detail on screen; the returned detail has no similar/recommendations/scores,
  * so everything else stays (docs/14 Request semantics).
  */
 internal fun DiscoverDetailUiState.withMutation(detail: SeerrRequestDetail): DiscoverDetailUiState {
     val fields = when (detail) {
-        is SeerrRequestDetail.Movie -> detail.detail.let { RequestFields(it.card, it.activeRequest, it.canRequest, it.canRequest4k, seasons) }
-        is SeerrRequestDetail.Tv -> detail.detail.let { RequestFields(it.card, it.activeRequest, it.canRequest, it.canRequest4k, it.seasons) }
+        is SeerrRequestDetail.Movie -> detail.detail.let { RequestFields(it.card, it.activeRequest, it.canRequest, it.canRequest4k, seasons, it.onWatchlist) }
+        is SeerrRequestDetail.Tv -> detail.detail.let { RequestFields(it.card, it.activeRequest, it.canRequest, it.canRequest4k, it.seasons, it.onWatchlist) }
     }
     return copy(
         card = fields.card,
+        onWatchlist = fields.onWatchlist,
         activeRequest = fields.activeRequest,
         canRequest = fields.canRequest,
         canRequest4k = fields.canRequest4k,
@@ -166,6 +197,7 @@ internal const val ACTION_GO_TO_LIBRARY = "go-to-library"
 internal const val ACTION_CANCEL_REQUEST = "cancel-request"
 internal const val ACTION_REQUEST = "request"
 internal const val ACTION_REQUEST_4K = "request-4k"
+internal const val ACTION_WATCHLIST = "watchlist"
 internal const val ACTION_TRAILER = "trailer"
 
 /** One action-row pill as the state decides it; a non-[actionable] pill stays focusable but ignores Select (docs/15 §4). */
@@ -178,8 +210,17 @@ internal fun DiscoverDetailUiState.actionSlots(): List<ActionSlot> = buildList {
     if (activeRequest != null) add(ActionSlot(ACTION_CANCEL_REQUEST, actionable = !busy))
     if (canRequest) add(ActionSlot(ACTION_REQUEST, actionable = !busy, primary = libraryItem == null))
     if (canRequest4k) add(ActionSlot(ACTION_REQUEST_4K, actionable = !busy))
+    // Absent when the watchlist is unavailable (API-key connection), docs/14 Watchlist.
+    if (onWatchlist != null) add(ActionSlot(ACTION_WATCHLIST, actionable = !busy))
     if (trailerUrl != null) add(ActionSlot(ACTION_TRAILER, actionable = true))
 }
+
+/** The watchlist pill's label for the state it shows. */
+internal fun watchlistActionLabel(onWatchlist: Boolean): Int =
+    if (onWatchlist) R.string.discover_action_on_watchlist else R.string.discover_action_add_to_watchlist
+
+/** The state a toggle asks the server for, or `null` when the watchlist is unavailable. */
+internal fun DiscoverDetailUiState.watchlistToggleTarget(): Boolean? = onWatchlist?.not()
 
 /** Focus keys (`"action:<id>"`) of every pill on the row, busy or not: none ever drops out of focus (docs/15 §4). */
 internal fun DiscoverDetailUiState.actionKeys(): List<String> = actionSlots().map { "action:${it.id}" }

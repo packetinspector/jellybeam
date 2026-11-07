@@ -1,7 +1,7 @@
 //! `BaseItemDto` -> mirror column extraction; the only place the blob is parsed on the write
 //! path (never browse/read).
 
-use jellyfin_api::models::{BaseItemDto, LocationType};
+use jellyfin_api::models::{BaseItemDto, LocationType, NameGuidPair};
 
 /// Column values extracted from a `BaseItemDto`, ready to bind into an `items` upsert.
 pub(crate) struct ItemColumns {
@@ -52,6 +52,40 @@ pub(crate) struct ItemColumns {
     /// CLAUDE.md); written to `item_genres` under the same authoritative-when-present guard
     /// as `played`/`library_id`.
     pub genres: Vec<String>,
+    /// docs/feature-dev/music-design-brief.md §1.2: `Album`, `AlbumId`, `AlbumArtist` and
+    /// `AlbumPrimaryImageTag`, verbatim; `None` outside music.
+    pub album: Option<String>,
+    pub album_id: Option<String>,
+    pub album_artist: Option<String>,
+    pub album_primary_tag: Option<String>,
+    /// `HasLyrics`; `None` means the DTO didn't say, so the upsert keeps the stored value.
+    pub has_lyrics: Option<bool>,
+    /// §1.3: `NormalizationGain`/`AlbumNormalizationGain` (dB), same `None` rule as `has_lyrics`.
+    pub normalization_gain: Option<f64>,
+    pub album_normalization_gain: Option<f64>,
+    /// §1.2: `AlbumArtists` then `ArtistItems`, each in server order; replaces `item_artists`
+    /// outright on every upsert, like `genres`.
+    pub artists: Vec<ArtistLink>,
+    /// `MediaType` verbatim; see `CardRow::media_type`.
+    pub media_type: Option<String>,
+}
+
+/// `item_artists.role`: which list of the DTO an artist came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtistRole {
+    /// `AlbumArtists`.
+    AlbumArtist = 0,
+    /// `ArtistItems` (the track's own performers).
+    TrackArtist = 1,
+}
+
+/// One `item_artists` row: `ord` is the position within its role's list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArtistLink {
+    pub role: ArtistRole,
+    pub ord: i64,
+    pub artist_id: Option<String>,
+    pub name: Option<String>,
 }
 
 /// FTS5 index text for one item (the `search` virtual table's columns, in order).
@@ -151,6 +185,26 @@ pub(crate) fn extract_columns(item: &BaseItemDto) -> Option<ItemColumns> {
         series_name: item.series_name.clone(),
         series_status: item.status.clone(),
         genres: item.genres.clone(),
+        album: item.album.clone(),
+        album_id: item.album_id.map(|u| u.to_string()),
+        album_artist: item.album_artist.clone(),
+        album_primary_tag: item.album_primary_image_tag.clone(),
+        has_lyrics: item.has_lyrics,
+        normalization_gain: item.normalization_gain.map(f64::from),
+        album_normalization_gain: item.album_normalization_gain.map(f64::from),
+        artists: artist_links(ArtistRole::AlbumArtist, &item.album_artists)
+            .chain(artist_links(ArtistRole::TrackArtist, &item.artist_items))
+            .collect(),
+        media_type: item.media_type.map(|m| m.to_string()),
+    })
+}
+
+fn artist_links(role: ArtistRole, pairs: &[NameGuidPair]) -> impl Iterator<Item = ArtistLink> + '_ {
+    pairs.iter().zip(0..).map(move |(pair, ord)| ArtistLink {
+        role,
+        ord,
+        artist_id: pair.id.map(|u| u.to_string()),
+        name: pair.name.clone(),
     })
 }
 
@@ -368,6 +422,76 @@ mod tests {
         assert_eq!(
             cols.genres,
             vec!["Science Fiction".to_string(), "Drama".to_string()]
+        );
+    }
+
+    /// docs/feature-dev/music-design-brief.md §1.2: a compilation track keeps its album link,
+    /// the verbatim album artist and each list of artists in server order.
+    #[test]
+    fn music_columns_and_artist_links_extracted_verbatim_in_order() {
+        let item: BaseItemDto = serde_json::from_value(serde_json::json!({
+            "Id": "00000000-0000-4000-8000-000000000101",
+            "Name": "Comp Track",
+            "Type": "Audio",
+            "Album": "Comp Album",
+            "AlbumId": "00000000-0000-4000-8000-000000000201",
+            "AlbumArtist": "Various Artists",
+            "AlbumPrimaryImageTag": "album-tag",
+            "HasLyrics": true,
+            "NormalizationGain": -6.5,
+            "AlbumArtists": [{ "Name": "Various Artists", "Id": "00000000-0000-4000-8000-000000000301" }],
+            "ArtistItems": [
+                { "Name": "Zed Performer", "Id": "00000000-0000-4000-8000-000000000302" },
+                { "Name": "Solo Singer", "Id": "00000000-0000-4000-8000-000000000303" }
+            ]
+        }))
+        .expect("dto");
+        let cols = extract_columns(&item).expect("has id");
+        assert_eq!(cols.album.as_deref(), Some("Comp Album"));
+        assert_eq!(
+            cols.album_id.as_deref(),
+            Some("00000000-0000-4000-8000-000000000201")
+        );
+        assert_eq!(cols.album_artist.as_deref(), Some("Various Artists"));
+        assert_eq!(cols.album_primary_tag.as_deref(), Some("album-tag"));
+        assert_eq!(cols.has_lyrics, Some(true));
+        assert_eq!(cols.normalization_gain, Some(-6.5));
+        assert_eq!(cols.album_normalization_gain, None);
+        let link = |role, ord, id: &str, name: &str| ArtistLink {
+            role,
+            ord,
+            artist_id: Some(format!("00000000-0000-4000-8000-000000000{id}")),
+            name: Some(name.to_string()),
+        };
+        assert_eq!(
+            cols.artists,
+            vec![
+                link(ArtistRole::AlbumArtist, 0, "301", "Various Artists"),
+                link(ArtistRole::TrackArtist, 0, "302", "Zed Performer"),
+                link(ArtistRole::TrackArtist, 1, "303", "Solo Singer"),
+            ]
+        );
+    }
+
+    #[test]
+    fn music_columns_default_to_none_outside_music() {
+        let cols = extract_columns(&base_item()).expect("has id");
+        assert_eq!(cols.album_id, None);
+        assert_eq!(cols.has_lyrics, None);
+        assert!(cols.artists.is_empty());
+    }
+
+    /// A playlist's `MediaType` is stored verbatim, so its card can tell music from video.
+    #[test]
+    fn media_type_extracted_verbatim_and_none_when_unsent() {
+        let mut playlist = base_item();
+        playlist.type_ = Some(BaseItemKind::Playlist);
+        playlist.media_type = Some(jellyfin_api::models::MediaType::Audio);
+        let cols = extract_columns(&playlist).expect("has id");
+        assert_eq!(cols.media_type.as_deref(), Some("Audio"));
+        assert_eq!(
+            extract_columns(&base_item()).expect("has id").media_type,
+            None
         );
     }
 

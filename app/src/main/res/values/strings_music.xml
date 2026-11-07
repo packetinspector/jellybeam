@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Music UI text (docs/27 §3). All-caps mono labels are stored in sentence case and cased in code with
+     uppercaseUi(); server names are passed in verbatim and never cased. -->
+<resources>
+    <!-- Drawer entry shown only while music plays or is paused, directly under Home. -->
+    <string name="music_now_playing">Now playing</string>
+    <!-- The drawer entry's second line: the song title, then its artist. -->
+    <string name="music_now_playing_line">%1$s · %2$s</string>
+
+    <!-- Music bar line 2 after a network failure; it stays until playback resumes (cased up in code). -->
+    <string name="music_bar_connection_lost">Connection lost │ Paused</string>
+    <!-- Music bar time readout: elapsed, then the track length. -->
+    <string name="music_time_pair" translatable="false">%1$s / %2$s</string>
+
+    <!-- Track row tag for a song with lyrics. -->
+    <string name="music_row_lyrics_tag" translatable="false">LRC</string>
+    <!-- Queue strip end label: this many tracks are not drawn. -->
+    <string name="music_strip_more" translatable="false">… +%1$d</string>
+    <!-- Library landing (docs/29 §9 A): the page title and its tabs, which switch on OK. -->
+    <string name="music_title">Music</string>
+    <string name="music_tab_albums">Albums</string>
+    <string name="music_tab_artists">Artists</string>
+    <string name="music_tab_songs">Songs</string>
+    <string name="music_tab_playlists">Playlists</string>
+    <string name="music_tab_genres">Genres</string>
+    <!-- Artists tab toggle label before Album artists and All artists (cased up in code). -->
+    <string name="music_show">Show</string>
+    <string name="music_album_artists">Album artists</string>
+    <string name="music_all_artists">All artists</string>
+    <!-- Playlists tab first cell and its subline. -->
+    <string name="music_new_playlist">New playlist</string>
+    <string name="music_new_playlist_hint">Name it, then add songs</string>
+
+    <!-- Sort strip after the tab row: the count, then the fixed order (cased up in code). No arrow: music orders are fixed, so nothing may read as a sort control. -->
+    <string name="music_sort_strip" translatable="false">%1$s │ %2$s</string>
+    <string name="music_sort_name">Name</string>
+    <string name="music_sort_recently_changed">Recently changed</string>
+    <string name="music_sort_last_played">Last played</string>
+    <string name="music_sort_date_added">Date added</string>
+    <plurals name="music_count_albums">
+        <item quantity="one">%1$s album</item>
+        <item quantity="other">%1$s albums</item>
+    </plurals>
+    <plurals name="music_count_artists">
+        <item quantity="one">%1$s artist</item>
+        <item quantity="other">%1$s artists</item>
+    </plurals>
+    <plurals name="music_count_songs">
+        <item quantity="one">%1$s song</item>
+        <item quantity="other">%1$s songs</item>
+    </plurals>
+    <plurals name="music_count_playlists">
+        <item quantity="one">%1$s playlist</item>
+        <item quantity="other">%1$s playlists</item>
+    </plurals>
+    <plurals name="music_count_genres">
+        <item quantity="one">%1$s genre</item>
+        <item quantity="other">%1$s genres</item>
+    </plurals>
+    <plurals name="music_count_tracks">
+        <item quantity="one">%1$s track</item>
+        <item quantity="other">%1$s tracks</item>
+    </plurals>
+    <!-- Artist page header for a performer credited only per track: "Appears on 1 album". -->
+    <plurals name="music_appears_on_albums">
+        <item quantity="one">Appears on %1$s album</item>
+        <item quantity="other">Appears on %1$s albums</item>
+    </plurals>
+    <!-- Artist circle subline for a per-track performer (cased up in code). -->
+    <string name="music_appears_on_n">Appears on %1$s</string>
+    <!-- A length: minutes, or hours and minutes. -->
+    <string name="music_minutes">%1$d min</string>
+    <string name="music_hours_minutes">%1$d h %2$02d min</string>
+
+    <!-- Focused-item facts, top right of the landing (mono labels, cased up in code). -->
+    <string name="music_fact_tracks">Tracks</string>
+    <string name="music_fact_length">Length</string>
+    <string name="music_fact_added">Added</string>
+    <string name="music_fact_albums">Albums</string>
+    <string name="music_fact_songs">Songs</string>
+    <string name="music_fact_appears_on">Appears on</string>
+    <!-- A card or facts subline: two verbatim values, such as the album artist and the year. -->
+    <string name="music_pair" translatable="false">%1$s · %2$s</string>
+
+    <!-- Page eyebrows (mono, cased up in code). -->
+    <string name="music_eyebrow_artist">Artist</string>
+    <string name="music_eyebrow_album">Album</string>
+    <string name="music_eyebrow_playlist">Playlist</string>
+    <!-- Album page eyebrow with the date the server added it. -->
+    <string name="music_eyebrow_added">%1$s │ Added %2$s</string>
+    <!-- Playlist page eyebrow with the date it last changed. -->
+    <string name="music_eyebrow_changed">%1$s │ Changed %2$s</string>
+
+    <!-- Page actions. -->
+    <string name="music_play_all">Play all</string>
+    <string name="music_play">Play</string>
+    <string name="music_shuffle">Shuffle</string>
+    <string name="music_instant_mix">Instant Mix</string>
+    <string name="music_favorite_add">Add to favorites</string>
+    <string name="music_favorite_remove">Remove from favorites</string>
+    <string name="music_more_actions">More actions</string>
+    <string name="music_most_played">Most played</string>
+    <string name="music_appears_on">Appears on</string>
+    <!-- Album page disc header when the album has more than one disc (cased up in code). -->
+    <string name="music_disc">Disc %1$d</string>
+
+    <!-- Song list column headers (mono, cased up in code). -->
+    <string name="music_col_title">Title</string>
+    <string name="music_col_artist">Artist</string>
+    <string name="music_col_album">Album</string>
+    <string name="music_col_title_artist_album">Title · Artist · Album</string>
+    <string name="music_col_title_album">Title · Album</string>
+    <string name="music_col_played">Played</string>
+    <string name="music_col_added">Added</string>
+    <string name="music_col_year">Year</string>
+    <string name="music_col_time">Time</string>
+    <!-- Song list titles for the fixed sources. -->
+    <string name="music_songs_favorites">Favorite songs</string>
+    <string name="music_songs_recent">Recently played</string>
+    <!-- Song list played column: how long ago (cased up in code). -->
+    <string name="music_ago_minutes">%1$d min ago</string>
+    <string name="music_ago_hours">%1$d h ago</string>
+    <string name="music_ago_yesterday">Yesterday</string>
+    <plurals name="music_ago_days">
+        <item quantity="one">%1$d day ago</item>
+        <item quantity="other">%1$d days ago</item>
+    </plurals>
+    <!-- Song list added column (cased up in code). -->
+    <string name="music_added_on">Added %1$s</string>
+
+    <!-- Empty states (docs/29 §10 S2): one factual line per tab or list. -->
+    <string name="music_empty_library">This library has no music yet.</string>
+    <string name="music_empty_playlists">No playlists yet.</string>
+    <string name="music_empty_favorites">No favorite songs yet.</string>
+    <string name="music_empty_played">Nothing played yet.</string>
+    <!-- Unreachable state (docs/29 §10 S3): the host, then when it was last tried (cased up in code). -->
+    <string name="music_unreachable">Couldn\'t reach %1$s.</string>
+    <string name="music_unreachable_server">Couldn\'t reach the server.</string>
+    <string name="music_last_tried">Last tried %1$s</string>
+    <string name="music_retry">Retry</string>
+
+    <!-- Now Playing (docs/29 §9 F). Mono labels are cased up in code; names beside them stay verbatim. -->
+    <string name="music_playing_from">Playing from</string>
+    <!-- The track's place on its album: disc and track number, or the track number alone. -->
+    <string name="music_disc_track">Disc %1$d, track %2$d</string>
+    <string name="music_track_n">Track %1$d</string>
+    <!-- Queue line: the playing song's place in the queue (cased up in code). -->
+    <string name="music_queue_position">Queue │ %1$d of %2$d</string>
+    <string name="music_shuffled">Shuffled</string>
+    <!-- Time row: when the playing song ends, as a clock time. -->
+    <string name="music_ends_at">Ends %1$s</string>
+    <string name="music_paused">Paused</string>
+    <!-- Ambient screen while paused (docs/29 §6 M2): the paused position (cased up in code). -->
+    <string name="music_paused_at">Paused │ %1$s</string>
+    <!-- Time row while the queue strip is focused: the seek step in seconds. -->
+    <string name="music_seek_step">◂ %1$d s ▸</string>
+    <!-- The next song's label on Now Playing, and the Queue screen's title. -->
+    <string name="music_up_next">Up next</string>
+    <string name="music_queue">Queue</string>
+    <string name="music_lyrics">Lyrics</string>
+
+    <!-- Queue screen (docs/29 §9 H). -->
+    <!-- The time the queue still plays for, after its song count (cased up in code). -->
+    <string name="music_left">%1$s left</string>
+    <string name="music_next_in_queue">Next in queue · %1$d · Plays before the rest of the %2$s</string>
+    <!-- Precedes the source's verbatim name and its song count. -->
+    <string name="music_next_from">Next from</string>
+    <string name="music_shuffled_order">Shuffled order</string>
+    <!-- What the rest of the queue comes from, ending the Next in queue header. -->
+    <string name="music_source_album">album</string>
+    <string name="music_source_artist">artist</string>
+    <string name="music_source_playlist">playlist</string>
+    <string name="music_source_mix">mix</string>
+    <string name="music_source_list">list</string>
+    <string name="music_shuffle_state">Shuffle │ %1$s</string>
+    <string name="music_repeat_state">Repeat │ %1$s</string>
+    <string name="music_on">On</string>
+    <string name="music_off">Off</string>
+    <string name="music_repeat_all">All</string>
+    <string name="music_repeat_one">One</string>
+    <string name="music_clear_queue">Clear queue</string>
+    <!-- Queue row tags and its row menu. -->
+    <string name="music_play_next">Play next</string>
+    <string name="music_tag_added">Added</string>
+    <string name="music_move">Move</string>
+    <string name="music_remove">Remove</string>
+    <string name="music_go_to_album">Go to album</string>
+    <!-- docs/29 §9 L1: the action menu. -->
+    <string name="music_menu_this_song">This song</string>
+    <string name="music_menu_this_album">This album</string>
+    <string name="music_menu_this_artist">This artist</string>
+    <string name="music_menu_this_playlist">This playlist</string>
+    <string name="music_go_to_artist">Go to artist</string>
+    <string name="music_reorder_songs">Reorder songs</string>
+    <!-- docs/29 §9 E4: the banner while reordering a playlist; the label, then the keys (both cased up in code). -->
+    <string name="music_reordering">Reordering</string>
+    <string name="music_reorder_keys">▲▼ Move │ OK drop │ Back cancel</string>
+    <!-- Precedes the verbatim song name when the server refused a move (cased up in code). -->
+    <string name="music_reorder_failed">Couldn\'t move</string>
+    <string name="music_add_to_queue">Add to queue</string>
+    <string name="music_add_to_playlist">Add to playlist</string>
+    <string name="music_remove_from_playlist">Remove from playlist</string>
+    <!-- docs/29 §9 E2/E3: add to playlist and a new one. -->
+    <string name="music_all_playlists">All playlists…</string>
+    <string name="music_in_playlist">In playlist</string>
+    <string name="music_new_playlist_name_it">Name it</string>
+    <string name="music_new_playlist_adds">%1$s is added once it exists.</string>
+    <string name="music_create_and_add">Create and add</string>
+    <!-- docs/29 §9 A: the Playlists tab's New playlist panel creates an empty playlist. -->
+    <string name="music_create">Create</string>
+    <string name="music_couldnt_create">Couldn\'t create the playlist. Try again.</string>
+    <string name="music_cancel">Cancel</string>
+    <!-- docs/29 §8.4: the bar's confirmations; a name follows the mono label verbatim. -->
+    <string name="music_notice_added_to_queue">Added to queue</string>
+    <string name="music_notice_playing_next">Playing next</string>
+    <string name="music_notice_added_to">Added to</string>
+    <string name="music_notice_added_again">Already in · added again</string>
+    <string name="music_notice_couldnt_add_to">Couldn\'t add to</string>
+    <string name="music_notice_enqueue_failed">Couldn\'t add to the queue</string>
+    <string name="music_notice_start_failed">Couldn\'t start the music</string>
+    <!-- docs/29 §9 I1/I2: Instant Mix while it builds and when there is none. -->
+    <string name="music_building_mix">Building Instant Mix</string>
+    <string name="music_no_mix_song">No mix for this song yet</string>
+    <string name="music_no_mix_album">No mix for this album yet</string>
+    <string name="music_no_mix_artist">No mix for this artist yet</string>
+    <string name="music_no_mix_playlist">No mix for this playlist yet</string>
+    <string name="music_no_mix_genre">No mix for this genre yet</string>
+    <!-- docs/29 §9 D1/B1: play counts. -->
+    <string name="music_col_plays">Plays</string>
+    <string name="music_fact_played">Played</string>
+    <plurals name="music_count_plays">
+        <item quantity="one">%1$s play</item>
+        <item quantity="other">%1$s plays</item>
+    </plurals>
+    <plurals name="music_played_times">
+        <item quantity="one">%1$s time</item>
+        <item quantity="other">%1$s times</item>
+    </plurals>
+</resources>

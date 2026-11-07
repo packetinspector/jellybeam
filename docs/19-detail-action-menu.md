@@ -12,7 +12,7 @@ Decisions, where the design was left open:
 | Question | Decision |
 |---|---|
 | Episode page "View Series" pill | **Removed.** The menu's Library › Go to series row is the one path. |
-| Trailer pill (frames show it at position three) | **Not in this work.** Stays Planned in docs/13. The row is Play · `···`. |
+| Trailer pill (frames show it at position three) | **Movie pages only** (§1.6): Play · `···` · Trailer. Series trailers, every special feature and a movie's further trailers live in the menu's Trailers & extras level. |
 | Advanced › Media information | **Dropped, group and all.** The spec capsule in the eyebrow already carries the file facts. The menu has three groups (frame 17 still draws an Advanced group; that decision stands). |
 | Collections list source | **Session cache in the core.** One live BoxSet list per session, warmed on the first detail page open, re-read after ten minutes. |
 
@@ -48,7 +48,7 @@ Decisions, where the design was left open:
 | Group | Movie | Series | Season scope | Episode |
 |---|---|---|---|---|
 | This title | Mark as watched `NEVER PLAYED` *or* Mark as unwatched · Add to / Remove from favorites | Mark series as watched `N EPISODES` · Mark series as unwatched `N EPISODES` · favorite | Mark season as watched `N EPISODES` · Mark season as unwatched `N EPISODES` · favorite `SERIES` | Mark as watched `NEVER PLAYED` *or* unwatched · favorite |
-| Playback | Play from the beginning · Watch together | Play next unwatched `E8`/`S2 E6` · Play from the beginning · Play something random `FROM N` · Watch together | Play next unwatched `E{n}` · Play something random `FROM N` · Watch together | Play from the beginning · Watch together |
+| Playback | Play from the beginning · Watch together · Trailers & extras `▸` | Play next unwatched `E8`/`S2 E6` · Play from the beginning · Play something random `FROM N` · Watch together · Trailers & extras `▸` | Play next unwatched `E{n}` · Play something random `FROM N` · Watch together · Trailers & extras `▸` (the series') | Play from the beginning · Watch together · Trailers & extras `▸` |
 | Library | Add to collection `▸` · Refresh metadata | Add to collection `▸` · Refresh metadata | Refresh metadata `SERIES` | Go to series · Add to collection `▸` · Refresh metadata |
 
 `NEVER PLAYED` appears on the single-item Mark as watched row only when the
@@ -72,6 +72,7 @@ fetch on open):
 | Go to series | episode with a known `seriesId`; opens the series page (`DetailFormatting.seriesCardFrom`). Label `Go to series` with the series name as trailing subtext, verbatim, not re-cased. |
 | Add to collection | movie, series, episode; the session collections list is non-empty. Absent in season scope and while the list is unknown or empty. |
 | Refresh metadata | the signed-in user is an administrator (`isAdministrator()`, cached per session). |
+| Trailers & extras | from the detail record's counts alone (§1.6): Movie: local trailers + openable remote trailers > 1, or any special feature (the pill plays the first trailer). Series, season scope, Episode: any of the three. Never on a collection. |
 
 A collection (BoxSet) page (docs/11 §Collection) uses the same table with
 only two rows present: Add to / Remove from favorites, and Refresh metadata
@@ -207,6 +208,34 @@ reconciles when the server's `LibraryChanged` arrives.
   open, and that panel must neither eat Back nor hold focus until the page
   is top again, when it re-seeds its row.
 
+### 1.6 Trailers and extras
+
+- **The pill.** Movie pages only, at position three after the door, the
+  outlined secondary pill (transparent, 1dp Hairline border, filled only
+  while focused), focus key `action:trailer`. Present when the movie has a
+  local trailer (`LocalTrailerCount > 0`), else a remote trailer an installed
+  app can open. A local trailer wins: the press fetches
+  `/Items/{id}/LocalTrailers` and plays the first in server order. A press
+  while that lookup runs is ignored.
+- **The level.** The Trailers & extras row drills into a second level shaped
+  like Add to collection (§1.3): kicker `◂ TRAILERS & EXTRAS`, heading band
+  `N EXTRAS` (`LOADING` until the list lands, the failure line if it fails),
+  scrolls, Back goes up one level. Order: local trailers in server order,
+  then openable remote trailers, then special features by type (Behind the
+  scenes, Featurette, Interview, Scene, Deleted scene, Short, Clip, Sample,
+  anything else) and name. A movie's list drops the trailer the pill plays.
+  Theme songs are never listed. Labels are the server's `Name` verbatim
+  (`Trailer` / `Extra` when blank); the state column names the kind
+  (`TRAILER`, `YOUTUBE`, `BEHIND THE SCENES`, …).
+- **Fetch.** Never on page open. The first menu open with the row present
+  fetches only the endpoints whose count is above zero; a failure retries
+  on the next open; a changed detail record (counts or links) resets it.
+- **Play.** A local trailer or extra plays from the start through the usual
+  hand-off to `PlaybackActivity`. It is its own item, so the title's resume
+  point, Next Up and Continue Watching never move, and autoplay never runs
+  (Next Up applies to episodes only). A remote trailer opens through the
+  trailer opener (docs/14 §Trailer).
+
 ---
 
 ## 2. Rust core
@@ -268,6 +297,20 @@ taken (`remove_session`, `switch_session`, `sign_in`, `restore_session`).
 | `collection_ids_containing(item_id) -> Vec<String>` | Mirror read: `SELECT collection_id FROM collection_members WHERE item_id = ?`. Empty when the mirror has no membership rows (no Collections library view synced). |
 | `refresh_metadata(item_id) -> Result<(), CoreError>` | Server call, nothing else. |
 | `is_administrator() -> Result<bool, CoreError>` | `current_user().policy.is_administrator`, cached per session. |
+
+`ItemDetail` also carries `local_trailer_count`, `special_feature_count`
+and `remote_trailers: Vec<RemoteTrailer { name?, url }>` (§1.6), read with
+the detail request's `Fields=RemoteTrailers,LocalTrailerCount,SpecialFeatureCount`
+(JF 12 omits all three unless asked). `local_trailers(item_id)` and
+`special_features(item_id)` return `Vec<ExtraItem { id, name, extra_type?,
+run_time_ticks? }>` in server order from:
+
+| Call | Shape (synthetic values) |
+|---|---|
+| `GET /Items/{id}/LocalTrailers?userId=` | bare array: `[{"Id":"…","Name":"Trailer","Type":"Trailer","ExtraType":"Trailer","RunTimeTicks":600000000}]` |
+| `GET /Items/{id}/SpecialFeatures?userId=` | bare array: `[{"Id":"…","Name":"Making Of","Type":"Video","ExtraType":"BehindTheScenes","RunTimeTicks":300000000}]` |
+
+`/Items/{id}/Extras` is a 404 on JF 12.
 
 Every method: `NotSignedIn` without a client, `MirrorNotOpen` where the
 mirror is needed, `Unauthorized`/`Api` from the client as today.

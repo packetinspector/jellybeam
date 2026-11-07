@@ -112,6 +112,33 @@ pub struct ReportContext {
     /// [`ReportingSession::start`] -- a play-method change mid-session
     /// starts a fresh `ReportingSession` instead.
     pub play_method: jellyfin_api::ReportPlayMethod,
+    pub media: ReportMedia,
+}
+
+/// docs/feature-dev/music-design-brief.md §1.3: what a session plays. Audio names its queue on
+/// every Start/Progress and keeps no resume position (the server keeps none for songs).
+#[derive(Debug, Clone)]
+pub enum ReportMedia {
+    Video,
+    /// `queue`: the queue's item ids in play order, the playing track among them.
+    Audio {
+        queue: std::sync::Arc<[String]>,
+    },
+}
+
+impl ReportMedia {
+    /// Whether its stop leaves a resume position: video's does; a song's never does (handoff Q7).
+    pub fn keeps_resume_position(&self) -> bool {
+        matches!(self, Self::Video)
+    }
+
+    /// The `NowPlayingQueue` its reports carry; empty for video.
+    pub(crate) fn now_playing_queue(&self) -> std::sync::Arc<[String]> {
+        match self {
+            Self::Video => std::sync::Arc::default(),
+            Self::Audio { queue } => queue.clone(),
+        }
+    }
 }
 
 /// Forwarded server events plus the reconcile trigger emitted by [`EventBus::spawn`]; connection

@@ -341,6 +341,16 @@ internal fun PlaybackSectionContent(state: SettingsUiState, viewModel: SettingsV
             key = "playback/mini_player",
             enabled = miniPlayerSupported,
         )
+        if (normalizationRowShown(state)) {
+            // docs/29 §1: per-track gain from the server, applied by the music player; off by default.
+            ToggleRow(
+                label = stringResource(R.string.settings_normalize_volume),
+                description = stringResource(R.string.settings_desc_playback_normalize_volume),
+                value = settings.normalizationEnabled,
+                onToggle = viewModel::toggleNormalization,
+                key = "playback/normalize_volume",
+            )
+        }
 
         SectionHeader(stringResource(R.string.settings_still_watching_group))
         StillWatchingGroup(state = state, viewModel = viewModel)

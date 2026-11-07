@@ -20,10 +20,10 @@ use crate::syncplay::{rejoin_event, sync_play_feed, StepCtx, SyncPlayOwner};
 use crate::track_prefs::TrackPrefsFile;
 use crate::types::{
     AccountIdentity, AccountInfo, BrowseRead, Card, ChangeEvent, CollectionInfo, DeviceCaps,
-    EpisodeNeighbors, FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort, ImageKind,
-    ImageUrlPrefix, ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MirrorItemCounts,
-    MirrorLibrary, MirrorStats, PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan, PlaybackRequest,
-    QuickConnectSession, ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus,
+    EpisodeNeighbors, ExtraItem, FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort,
+    ImageKind, ImageUrlPrefix, ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment,
+    MirrorItemCounts, MirrorLibrary, MirrorStats, PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan,
+    PlaybackRequest, QuickConnectSession, ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus,
     TrackDecisionFfi, TrackInfo, TrackKindFfi, TrackMemoryFfi, ViewSnapshot,
 };
 use crate::{device_id, library_prefs, session, settings, signin, track_prefs};
@@ -178,9 +178,9 @@ impl Retiring {
 /// The account a taken session belongs to, read under the lock that took it, so its final writes
 /// (mirror position) never reach an account that replaced it.
 #[derive(Clone)]
-struct SessionAccount {
-    mirror: Option<media_cache::Mirror>,
-    client: Option<jellyfin_api::JellyfinClient>,
+pub(crate) struct SessionAccount {
+    pub(crate) mirror: Option<media_cache::Mirror>,
+    pub(crate) client: Option<jellyfin_api::JellyfinClient>,
     /// Which saved account this is, so removing it can end its playback.
     mirror_dir: Option<String>,
 }
@@ -407,7 +407,7 @@ fn installed_session_locked<'a>(
 }
 
 /// What [`JellybeamCore::take_session_or_revoke_locked`] took for a stop/abandon.
-enum Taken {
+pub(crate) enum Taken {
     /// The installed session.
     Active(jellyfin_core::ReportingSession),
     /// A pending fallback's retired session, with the fallback's position.
@@ -845,7 +845,7 @@ pub struct JellybeamCore {
     /// A report that won the state lock before `stop_playback` also takes
     /// this lock before releasing state, so the final write can never be
     /// overwritten by that older in-flight checkpoint.
-    playback_write: Mutex<()>,
+    pub(crate) playback_write: Mutex<()>,
     /// Last revision of `State::library_grid_prefs` actually written to disk
     /// by [`Self::persist_library_grid_prefs`]. A dedicated lock, never held
     /// with `state`, so a save in flight never blocks `image_url`/
@@ -1741,6 +1741,10 @@ impl JellybeamCore {
                         "ProductionYear".to_string(),
                         "EndDate".to_string(),
                         "Status".to_string(),
+                        // docs/19 §2: JF12 omits all three unless requested.
+                        "RemoteTrailers".to_string(),
+                        "LocalTrailerCount".to_string(),
+                        "SpecialFeatureCount".to_string(),
                     ],
                     limit: 1,
                     ..jellyfin_api::ItemQuery::default()
@@ -1780,6 +1784,27 @@ impl JellybeamCore {
         Ok(items
             .iter()
             .filter_map(|dto| Card::try_from(dto).ok())
+            .collect())
+    }
+
+    /// docs/19 §2: the item's local trailers, server order; live, needs a signed-in client, no
+    /// mirror. A result missing its own `Id` is dropped rather than failing the call.
+    pub fn local_trailers(&self, item_id: String) -> Result<Vec<ExtraItem>, CoreError> {
+        let client = self.require_client()?;
+        let items = self.runtime.block_on(client.local_trailers(&item_id))?;
+        Ok(items
+            .iter()
+            .filter_map(|dto| ExtraItem::try_from(dto).ok())
+            .collect())
+    }
+
+    /// docs/19 §2: the item's special features, same shape as [`Self::local_trailers`].
+    pub fn special_features(&self, item_id: String) -> Result<Vec<ExtraItem>, CoreError> {
+        let client = self.require_client()?;
+        let items = self.runtime.block_on(client.special_features(&item_id))?;
+        Ok(items
+            .iter()
+            .filter_map(|dto| ExtraItem::try_from(dto).ok())
             .collect())
     }
 
@@ -2146,10 +2171,13 @@ impl JellybeamCore {
             };
             session.on_position(ticks);
             let item_id = session.context().item_id.clone();
+            // docs/feature-dev/music-design-brief.md §1.2: a song keeps no resume position.
+            let keeps_resume = session.context().media.keeps_resume_position();
 
-            if state
-                .local_progress_checkpoint
-                .should_commit(ticks, Instant::now())
+            if keeps_resume
+                && state
+                    .local_progress_checkpoint
+                    .should_commit(ticks, Instant::now())
             {
                 Self::playback_account_locked(&state).mirror.map(|mirror| {
                     // Acquired while `state` is still held: see the field's
@@ -2210,13 +2238,7 @@ impl JellybeamCore {
                 Some(Taken::Active(session) | Taken::Retired(session, _)) => session,
                 None => return,
             };
-            // Kept under the lock that took the session, so a create sees the playback or its stop;
-            // the stop's report task settles it.
-            let (settled_tx, settled_rx) = tokio::sync::oneshot::channel::<()>();
-            let finals = &mut state.playback_owner.final_stops;
-            let pending = Err(tokio::sync::oneshot::error::TryRecvError::Empty);
-            finals.retain_mut(|rx| rx.try_recv() == pending);
-            finals.push(settled_rx);
+            let settled_tx = Self::track_final_stop_locked(&mut state);
             (session, Self::playback_account_locked(&state), settled_tx)
         };
 
@@ -2226,7 +2248,7 @@ impl JellybeamCore {
             session,
             position_ticks,
             account,
-            Some(settled_tx),
+            vec![settled_tx],
         );
     }
 
@@ -2343,6 +2365,7 @@ impl JellybeamCore {
                 media_source_id: media_source_id.clone(),
                 play_session_id: play_session_id.clone(),
                 play_method: jellyfin_api::ReportPlayMethod::Transcode,
+                media: jellyfin_core::ReportMedia::Video,
             };
             let (sidecars, sidecar_tracks) =
                 Self::session_sidecars(&client, &source, &play_session_id);
@@ -2397,7 +2420,7 @@ impl JellybeamCore {
                     retiring.session,
                     ticks,
                     account,
-                    None,
+                    Vec::new(),
                 );
             }
         }
@@ -2427,7 +2450,7 @@ impl JellybeamCore {
                     session,
                     ticks,
                     account,
-                    None,
+                    Vec::new(),
                 );
             }
             None => {}
@@ -2884,6 +2907,14 @@ impl JellybeamCore {
     }
 }
 
+/// What [`JellybeamCore::install_claimed_session_locked`] replaced, carried out of the lock so
+/// [`JellybeamCore::end_replaced`] ends it with the account it belongs to.
+pub(crate) struct Replaced {
+    previous: Option<jellyfin_core::ReportingSession>,
+    retired: Option<Retiring>,
+    account: SessionAccount,
+}
+
 /// [`JellybeamCore::negotiate_playback_source`]'s return shape: source, url,
 /// `play_session_id`, play method, transcode reason, server verdict.
 type NegotiatedSource = (
@@ -3277,6 +3308,7 @@ impl JellybeamCore {
             media_source_id: media_source_id.clone(),
             play_session_id: play_session_id.clone(),
             play_method: report_play_method,
+            media: jellyfin_core::ReportMedia::Video,
         };
         // Started fresh every call, cache hit or not -- a preload never starts a reporting session.
         let (sidecars, sidecar_tracks) = Self::session_sidecars(&client, &source, &play_session_id);
@@ -3319,7 +3351,10 @@ impl JellybeamCore {
 
     /// docs/18 §2.1: the account a request minted under `epoch` plays on -- the current one, or
     /// the parked one its playback kept; any other epoch is [`CoreError::AccountChanged`].
-    fn account_for_epoch_locked(state: &State, epoch: u64) -> Result<SessionAccount, CoreError> {
+    pub(crate) fn account_for_epoch_locked(
+        state: &State,
+        epoch: u64,
+    ) -> Result<SessionAccount, CoreError> {
         if epoch == state.account.epoch {
             return Ok(SessionAccount::of(state));
         }
@@ -3332,8 +3367,35 @@ impl JellybeamCore {
             .ok_or(CoreError::AccountChanged)
     }
 
+    /// docs/18 §2.1: the client of the account `epoch` names, with the device profile and the
+    /// quality a negotiation on it uses, read under one lock.
+    pub(crate) fn negotiation_inputs(
+        &self,
+        epoch: u64,
+    ) -> Result<
+        (
+            jellyfin_api::JellyfinClient,
+            jellyfin_api::models::DeviceProfile,
+            PlaybackQuality,
+        ),
+        CoreError,
+    > {
+        let state = self.lock_state();
+        let client = Self::account_for_epoch_locked(&state, epoch)?
+            .client
+            .ok_or(CoreError::NotSignedIn)?;
+        let quality = state.settings.playback_quality;
+        let profile = build_android_profile_for_quality(
+            &state.caps,
+            state.settings.tolerate_mislabeled_levels,
+            &quality,
+            false,
+        );
+        Ok((client, profile, quality))
+    }
+
     /// [`Self::account_for_epoch_locked`] for a player read; `None` is the current account.
-    fn read_account(&self, epoch: Option<u64>) -> Result<SessionAccount, CoreError> {
+    pub(crate) fn read_account(&self, epoch: Option<u64>) -> Result<SessionAccount, CoreError> {
         let state = self.lock_state();
         match epoch {
             None => Ok(SessionAccount::of(&state)),
@@ -3356,7 +3418,7 @@ impl JellybeamCore {
                 session,
                 ticks,
                 reset.account.clone(),
-                Some(settled_tx),
+                vec![settled_tx],
             );
             settled_rx
         };
@@ -3371,7 +3433,11 @@ impl JellybeamCore {
             pending.push(end(retiring.session, ticks));
         }
         match reset.reporting {
-            Some(session) if session.last_position() > 0 => {
+            // A song keeps no resume point a Stopped at 0 could overwrite, so it always stops.
+            Some(session)
+                if session.last_position() > 0
+                    || !session.context().media.keeps_resume_position() =>
+            {
                 let ticks = session.last_position();
                 pending.push(end(session, ticks));
             }
@@ -3540,7 +3606,7 @@ impl JellybeamCore {
     /// docs/18 §2.1: admits `request` as the playback owner. A request from another account epoch
     /// is refused as [`CoreError::AccountChanged`]; one not newer than the last admitted as stale.
     /// `retires` names the session a fallback stopped, so a late stop/abandon of it can revoke.
-    fn admit_playback_request(
+    pub(crate) fn admit_playback_request(
         state: &mut State,
         request: PlaybackRequest,
         retires: Option<String>,
@@ -3569,6 +3635,17 @@ impl JellybeamCore {
         Ok(claim)
     }
 
+    /// docs/28 §3.3: registers a stop's final Stopped, kept under the lock that took the session
+    /// so a create sees the playback or its stop; the returned sender settles it.
+    pub(crate) fn track_final_stop_locked(state: &mut State) -> tokio::sync::oneshot::Sender<()> {
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel::<()>();
+        let finals = &mut state.playback_owner.final_stops;
+        let pending = Err(tokio::sync::oneshot::error::TryRecvError::Empty);
+        finals.retain_mut(|rx| rx.try_recv() == pending);
+        finals.push(settled_rx);
+        settled_tx
+    }
+
     /// docs/18 §2.1: installs a reporting session for `claim` if it is still the owner, starting
     /// it only then (a refused negotiation never sends Start). The sidecars go in with it, and any
     /// session still installed is abandoned outside the lock.
@@ -3579,31 +3656,62 @@ impl JellybeamCore {
         ctx: jellyfin_core::ReportContext,
         sidecars: Option<crate::types::SessionSidecars>,
     ) -> Result<(), CoreError> {
-        let (previous, retired, account) = {
+        let replaced = {
             let mut state = self.lock_state();
-            if state.playback_owner.claim.as_ref() != Some(claim) {
-                return Err(CoreError::StalePlaybackSession);
-            }
-            state.playback_owner.claim = None;
-            state.playback_owner.installed_replaces = claim.retires.clone();
-            let retired = state.playback_owner.retiring.take();
-            // `ReportingSession::start` spawns its actor and needs a runtime context, which a
-            // preload cache hit never entered.
-            let session = {
-                let _runtime_guard = self.runtime.enter();
-                jellyfin_core::ReportingSession::start(client.clone(), ctx)
-            };
-            state.local_progress_checkpoint.reset();
-            // The sidecars live and die with the session (docs/18 §3.2): one install, one clear.
-            state.sidecars = sidecars;
-            // What it replaces belongs to the playback before it; a claim on the current account
-            // starts a playback of its own, so nothing is parked any more.
-            let account = Self::playback_account_locked(&state);
-            if claim.epoch == state.account.epoch {
-                state.playback_owner.parked = None;
-            }
-            (state.reporting.replace(session), retired, account)
+            Self::install_claimed_session_locked(
+                &mut state,
+                claim,
+                || {
+                    // `ReportingSession::start` spawns its actor and needs a runtime context,
+                    // which a preload cache hit never entered.
+                    let _runtime_guard = self.runtime.enter();
+                    jellyfin_core::ReportingSession::start(client.clone(), ctx)
+                },
+                sidecars,
+            )?
         };
+        self.end_replaced(replaced, claim);
+        Ok(())
+    }
+
+    /// [`Self::install_claimed_session`] under the caller's lock; `start` runs only once `claim`
+    /// is found still the owner.
+    pub(crate) fn install_claimed_session_locked(
+        state: &mut State,
+        claim: &PlaybackClaim,
+        start: impl FnOnce() -> jellyfin_core::ReportingSession,
+        sidecars: Option<crate::types::SessionSidecars>,
+    ) -> Result<Replaced, CoreError> {
+        if state.playback_owner.claim.as_ref() != Some(claim) {
+            return Err(CoreError::StalePlaybackSession);
+        }
+        state.playback_owner.claim = None;
+        state.playback_owner.installed_replaces = claim.retires.clone();
+        let retired = state.playback_owner.retiring.take();
+        let session = start();
+        state.local_progress_checkpoint.reset();
+        // The sidecars live and die with the session (docs/18 §3.2): one install, one clear.
+        state.sidecars = sidecars;
+        // What it replaces belongs to the playback before it; a claim on the current account
+        // starts a playback of its own, so nothing is parked any more.
+        let account = Self::playback_account_locked(state);
+        if claim.epoch == state.account.epoch {
+            state.playback_owner.parked = None;
+        }
+        Ok(Replaced {
+            previous: state.reporting.replace(session),
+            retired,
+            account,
+        })
+    }
+
+    /// Ends outside the lock what an install of `claim` replaced.
+    pub(crate) fn end_replaced(&self, replaced: Replaced, claim: &PlaybackClaim) {
+        let Replaced {
+            previous,
+            retired,
+            account,
+        } = replaced;
         if let Some(previous) = previous {
             previous.abandon();
         }
@@ -3623,16 +3731,18 @@ impl JellybeamCore {
                 retired.session,
                 ticks,
                 account,
-                None,
+                Vec::new(),
             );
         }
-        Ok(())
     }
 
     /// docs/18 §2.1: takes the reporting session if `play_session_id` names it or the session it
     /// replaced; otherwise revokes a pending fallback that retired that session. Never touches a
     /// newer request's claim.
-    fn take_session_or_revoke_locked(state: &mut State, play_session_id: &str) -> Option<Taken> {
+    pub(crate) fn take_session_or_revoke_locked(
+        state: &mut State,
+        play_session_id: &str,
+    ) -> Option<Taken> {
         let is_current = state.reporting.as_ref().is_some_and(|active| {
             active.context().play_session_id == play_session_id
                 || state.playback_owner.installed_replaces.as_deref() == Some(play_session_id)
@@ -3664,19 +3774,20 @@ impl JellybeamCore {
     }
 
     /// docs/18 §2.1: the one stop path of `stop_playback`, `abandon_playback`, a transcode
-    /// fallback's retired session, a replaced claim and an account reset. Fires the session's
-    /// final Stopped (not awaited) and commits the position to `account`'s mirror before
-    /// returning; `settled_tx`, when a caller waits on that report, fires once it has landed or
-    /// been given up (`None`: nobody waits).
-    fn stop_session_and_sync_mirror(
+    /// fallback's retired session, a replaced claim, an account reset and a song's end. Fires
+    /// the session's final Stopped (not awaited) and commits the position to `account`'s mirror
+    /// before returning (a song commits none, music brief §1.2); each of `settled` fires once
+    /// that report has landed or been given up.
+    pub(crate) fn stop_session_and_sync_mirror(
         runtime: &tokio::runtime::Runtime,
         playback_write: &Mutex<()>,
         session: jellyfin_core::ReportingSession,
         position_ticks: i64,
         account: SessionAccount,
-        settled_tx: Option<tokio::sync::oneshot::Sender<()>>,
+        settled: Vec<tokio::sync::oneshot::Sender<()>>,
     ) {
         let SessionAccount { mirror, .. } = account;
+        let mirror = mirror.filter(|_| session.context().media.keeps_resume_position());
         let item_id = session.context().item_id.clone();
         // The server recounts an episode's season/series only once the
         // Stopped report lands, and its `UserDataChanged` event omits the
@@ -3700,7 +3811,7 @@ impl JellybeamCore {
             // Waits for the Stopped to land, retries included: a recount before it reads the old
             // counts. A delivery cancelled by a newer action is recounted by that action instead.
             let cancelled = stop.await.settled().await;
-            if let Some(settled_tx) = settled_tx {
+            for settled_tx in settled {
                 let _ = settled_tx.send(());
             }
             if cancelled {
@@ -4116,7 +4227,7 @@ impl JellybeamCore {
     /// The one place that turns "no mirror open" into [`CoreError`]. Plain
     /// snapshot getters have no `Result` in their signature and fall back to
     /// an empty/default value instead of propagating it.
-    fn require_mirror(&self) -> Result<media_cache::Mirror, CoreError> {
+    pub(crate) fn require_mirror(&self) -> Result<media_cache::Mirror, CoreError> {
         self.lock_state()
             .account
             .bundle()
@@ -5299,7 +5410,7 @@ pub(crate) mod tests {
 
         /// The request a Kotlin caller would mint next: one past the highest admitted seq, under
         /// the current account epoch.
-        fn next_request(&self) -> PlaybackRequest {
+        pub(crate) fn next_request(&self) -> PlaybackRequest {
             let state = self.lock_state();
             PlaybackRequest {
                 seq: state.playback_owner.highest_seq + 1,
@@ -5754,6 +5865,137 @@ pub(crate) mod tests {
             .get_similar("item-1".to_string(), 16)
             .expect_err("no client yet");
         assert!(matches!(err, CoreError::NotSignedIn));
+    }
+
+    #[test]
+    fn local_trailers_and_special_features_before_sign_in_are_not_signed_in() {
+        let (_dir, core) = core_in_tempdir();
+        let err = core
+            .local_trailers("item-1".to_string())
+            .expect_err("no client yet");
+        assert!(matches!(err, CoreError::NotSignedIn));
+        let err = core
+            .special_features("item-1".to_string())
+            .expect_err("no client yet");
+        assert!(matches!(err, CoreError::NotSignedIn));
+    }
+
+    /// JF12 omits the trailer fields unless the `fields` list names them (docs/19 §2).
+    #[test]
+    fn get_item_detail_requests_the_trailer_fields_and_maps_them() {
+        let (_dir, core) = core_in_tempdir();
+        let server = core.runtime.block_on(RouteMockServer::start());
+        server.route(
+            "GET",
+            "/Items",
+            200,
+            serde_json::json!({
+                "Items": [{
+                    "Id": "00000000-0000-4000-8000-000000000a05",
+                    "Name": "Sample Movie",
+                    "Type": "Movie",
+                    "LocalTrailerCount": 1,
+                    "SpecialFeatureCount": 3,
+                    "RemoteTrailers": [{"Name": "Teaser", "Url": "https://trailers.test/v/1"}]
+                }],
+                "TotalRecordCount": 1,
+                "StartIndex": 0
+            }),
+        );
+        install_without_refresh(&core, &server.base_url);
+
+        let detail = core
+            .get_item_detail("00000000-0000-4000-8000-000000000a05".to_string(), None)
+            .expect("mock server responds 200");
+
+        for field in ["RemoteTrailers", "LocalTrailerCount", "SpecialFeatureCount"] {
+            assert_eq!(
+                server.hit_count_containing("GET", field),
+                1,
+                "the item request's fields must name {field}"
+            );
+        }
+        assert_eq!(
+            (detail.local_trailer_count, detail.special_feature_count),
+            (1, 3)
+        );
+        assert_eq!(detail.remote_trailers.len(), 1);
+        assert_eq!(detail.remote_trailers[0].url, "https://trailers.test/v/1");
+    }
+
+    /// Both extras exports hit their own endpoint and map the bare array in server order,
+    /// dropping an entry without an `Id`.
+    #[test]
+    fn local_trailers_and_special_features_map_the_array_in_server_order() {
+        let (_dir, core) = core_in_tempdir();
+        let server = core.runtime.block_on(RouteMockServer::start());
+        server.route(
+            "GET",
+            "/Items/item-1/LocalTrailers",
+            200,
+            serde_json::json!([
+                {"Name": "Trailer", "Id": "00000000-0000-4000-8000-000000000a01",
+                 "ExtraType": "Trailer", "RunTimeTicks": 600230000},
+                {"Name": "Orphan", "ExtraType": "Trailer"},
+                {"Id": "00000000-0000-4000-8000-000000000a02"}
+            ]),
+        );
+        server.route(
+            "GET",
+            "/Items/item-1/SpecialFeatures",
+            200,
+            serde_json::json!([
+                {"Name": "Making Of", "Id": "00000000-0000-4000-8000-000000000a03",
+                 "ExtraType": "BehindTheScenes", "RunTimeTicks": 300230000},
+                {"Name": "Cut Scene", "Id": "00000000-0000-4000-8000-000000000a04",
+                 "ExtraType": "DeletedScene"}
+            ]),
+        );
+        install_without_refresh(&core, &server.base_url);
+
+        let trailers = core
+            .local_trailers("item-1".to_string())
+            .expect("mock server responds 200");
+        assert_eq!(
+            trailers,
+            vec![
+                ExtraItem {
+                    id: "00000000-0000-4000-8000-000000000a01".to_string(),
+                    name: "Trailer".to_string(),
+                    extra_type: Some("Trailer".to_string()),
+                    run_time_ticks: Some(600_230_000),
+                },
+                ExtraItem {
+                    id: "00000000-0000-4000-8000-000000000a02".to_string(),
+                    name: String::new(),
+                    extra_type: None,
+                    run_time_ticks: None,
+                },
+            ]
+        );
+        assert_eq!(
+            server.hit_count_containing("GET", "/Items/item-1/LocalTrailers"),
+            1
+        );
+
+        let features = core
+            .special_features("item-1".to_string())
+            .expect("mock server responds 200");
+        let kinds: Vec<_> = features
+            .iter()
+            .map(|extra| (extra.name.as_str(), extra.extra_type.as_deref()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("Making Of", Some("BehindTheScenes")),
+                ("Cut Scene", Some("DeletedScene"))
+            ]
+        );
+        assert_eq!(
+            server.hit_count_containing("GET", "/Items/item-1/SpecialFeatures"),
+            1
+        );
     }
 
     #[test]
@@ -9488,6 +9730,7 @@ pub(crate) mod tests {
             media_source_id: "ms-1".to_string(),
             play_session_id: "attempt-a".to_string(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+            media: jellyfin_core::ReportMedia::Video,
         };
         let older = admit(&core);
         let _newer = admit(&core);
@@ -9524,6 +9767,7 @@ pub(crate) mod tests {
             media_source_id: "ms-1".to_string(),
             play_session_id: "attempt-a".to_string(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+            media: jellyfin_core::ReportMedia::Video,
         };
         let claim = admit(&core);
         core.install_claimed_session(&claim, &client, ctx, Some(test_sidecars("attempt-a")))
@@ -9698,7 +9942,7 @@ pub(crate) mod tests {
     }
 
     /// Switches to a second saved account on another server; returns its list index.
-    fn switch_to_other_account(core: &JellybeamCore) -> u32 {
+    pub(crate) fn switch_to_other_account(core: &JellybeamCore) -> u32 {
         let other = seed_session(core.data_dir(), "http://other-server.invalid", "u-other");
         let index = index_of(core, &other);
         core.switch_session(index).expect("switches");
@@ -11013,6 +11257,7 @@ pub(crate) mod tests {
                 media_source_id: "ms-1".to_string(),
                 play_session_id: "attempt-a".to_string(),
                 play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+                media: jellyfin_core::ReportMedia::Video,
             };
             let claim = admit(&core);
             core.install_claimed_session(&claim, &client, ctx, Some(test_sidecars("attempt-a")))
@@ -12544,7 +12789,7 @@ pub(crate) mod tests {
     }
 
     /// A signed-in core with one unplayed 120-minute movie seeded into the mirror.
-    fn end_grace_movie_fixture(
+    pub(crate) fn end_grace_movie_fixture(
         view_id: &str,
         movie_id: &str,
     ) -> (tempfile::TempDir, Arc<JellybeamCore>, RouteMockServer) {
@@ -13183,7 +13428,7 @@ pub(crate) mod tests {
     }
 
     /// A mirror row for [`final_report`]: an item of `item_type` with the given runtime.
-    fn grace_row(item_type: &str, runtime_ticks: Option<i64>) -> media_cache::CardRow {
+    pub(crate) fn grace_row(item_type: &str, runtime_ticks: Option<i64>) -> media_cache::CardRow {
         media_cache::CardRow {
             id: "00000000-0000-0000-0000-0000000000f1".to_string(),
             item_type: item_type.to_string(),
@@ -13213,6 +13458,17 @@ pub(crate) mod tests {
             library_id: None,
             is_favorite: false,
             date_created: None,
+            album: None,
+            album_id: None,
+            album_artist: None,
+            artists: Vec::new(),
+            has_lyrics: false,
+            album_primary_tag: None,
+            normalization_gain: None,
+            album_normalization_gain: None,
+            play_count: 0,
+            album_artist_id: None,
+            media_type: None,
         }
     }
 

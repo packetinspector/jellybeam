@@ -35,6 +35,8 @@ data class SearchUiState(
     val discover: DiscoverSection = DiscoverSection.Hidden,
     /** Seerr is connected, so the empty hint names Discover too. */
     val discoverEnabled: Boolean = false,
+    /** docs/29 §9 K3: the library kinds [results] came from, read with them so the no-results line names them. */
+    val searched: List<SearchedKind> = emptyList(),
 )
 
 /**
@@ -128,7 +130,8 @@ class SearchViewModel(private val gateway: CoreGateway) : ViewModel() {
         viewModelScope.launch {
             val results = gateway.search(query, SEARCH_LIMIT)
             if (generation == latestGeneration) {
-                _state.update { it.copy(isSearching = false, results = results, discover = displayed(discoverRaw, results)) }
+                val searched = searchedKinds(gateway.viewsState.value)
+                _state.update { it.copy(isSearching = false, results = results, discover = displayed(discoverRaw, results), searched = searched) }
             }
         }
     }

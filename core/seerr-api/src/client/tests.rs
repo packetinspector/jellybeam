@@ -664,3 +664,207 @@ async fn search_sends_a_space_as_percent_twenty() {
         "/api/v1/search?query=harbor%20lights&page=1"
     );
 }
+
+// --- Watchlist (docs/14 Watchlist) ------------------------------------------
+
+impl ScriptedResponse {
+    fn status(status_line: &'static str, body: &str) -> Self {
+        ScriptedResponse {
+            status_line,
+            headers: Vec::new(),
+            body: body.to_string(),
+        }
+    }
+}
+
+/// A cookie-authenticated client against `base`; the mock's first response must be the login.
+async fn cookie_client(base: &str) -> SeerrClient {
+    let (connect_timeout, request_timeout) = probe_timeouts();
+    let (client, _user) = SeerrClient::login(LoginArgs {
+        base_url: base,
+        method: SeerrAuthMethod::Jellyfin,
+        identity: "alice",
+        secret: "hunter2",
+        connect_timeout,
+        request_timeout,
+    })
+    .await
+    .expect("login should succeed");
+    client
+}
+
+fn login_response() -> ScriptedResponse {
+    ScriptedResponse::ok_json(sample_user_json(1)).with_cookie("c")
+}
+
+#[tokio::test]
+async fn watchlist_add_posts_the_tmdb_id_media_type_and_title() {
+    let (base, captured) = scripted_server(vec![
+        login_response(),
+        ScriptedResponse::status("201 Created", "{}"),
+    ])
+    .await;
+    let client = cookie_client(&base).await;
+
+    client
+        .watchlist_add(42, "movie", "Synthetic Title")
+        .await
+        .expect("a 201 is success");
+
+    let requests = captured.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/v1/watchlist");
+    let body: serde_json::Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({"tmdbId": 42, "mediaType": "movie", "title": "Synthetic Title"})
+    );
+}
+
+#[tokio::test]
+async fn watchlist_add_409_is_already_there_not_an_error() {
+    let (base, _captured) = scripted_server(vec![
+        login_response(),
+        ScriptedResponse::status("409 Conflict", r#"{"message":""}"#),
+    ])
+    .await;
+    let client = cookie_client(&base).await;
+
+    client
+        .watchlist_add(42, "tv", "Synthetic Show")
+        .await
+        .expect("a duplicate add is idempotent");
+}
+
+#[tokio::test]
+async fn watchlist_remove_deletes_with_the_media_type_query() {
+    let (base, captured) = scripted_server(vec![
+        login_response(),
+        ScriptedResponse::status("204 No Content", ""),
+    ])
+    .await;
+    let client = cookie_client(&base).await;
+
+    client
+        .watchlist_remove(42, "tv")
+        .await
+        .expect("a 204 is success");
+
+    let requests = captured.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(requests[1].method, "DELETE");
+    assert_eq!(requests[1].path, "/api/v1/watchlist/42?mediaType=tv");
+}
+
+#[tokio::test]
+async fn watchlist_remove_404_is_already_gone_not_an_error() {
+    let (base, _captured) = scripted_server(vec![
+        login_response(),
+        ScriptedResponse::status("404 Not Found", r#"{"message":"not Found"}"#),
+    ])
+    .await;
+    let client = cookie_client(&base).await;
+
+    client
+        .watchlist_remove(42, "movie")
+        .await
+        .expect("removing an absent row is idempotent");
+}
+
+#[tokio::test]
+async fn watchlist_remove_500_is_an_error() {
+    let (base, _captured) = scripted_server(vec![
+        login_response(),
+        ScriptedResponse::status("500 Internal Server Error", "{}"),
+    ])
+    .await;
+    let client = cookie_client(&base).await;
+
+    let result = client.watchlist_remove(42, "movie").await;
+
+    assert!(
+        matches!(result, Err(SeerrError::Status { code: 500, .. })),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn watchlist_sends_the_page_param_and_decodes_items() {
+    let (base, captured) = scripted_server(vec![
+        login_response(),
+        ScriptedResponse::ok_json(
+            r#"{"page":2,"totalPages":2,"totalResults":2,"results":[
+                {"id":1,"tmdbId":10,"mediaType":"movie","title":"","ratingKey":"x"},
+                {"id":2,"tmdbId":20,"mediaType":"tv","title":"Synthetic Show"}]}"#,
+        ),
+    ])
+    .await;
+    let client = cookie_client(&base).await;
+
+    let page = client.watchlist(2).await.expect("watchlist should decode");
+
+    let requests = captured.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(requests[1].path, "/api/v1/discover/watchlist?page=2");
+    let items: Vec<_> = page
+        .results
+        .iter()
+        .map(|i| (i.tmdb_id, i.media_type.as_deref()))
+        .collect();
+    assert_eq!(
+        items,
+        vec![(Some(10), Some("movie")), (Some(20), Some("tv"))]
+    );
+}
+
+#[tokio::test]
+async fn details_decode_on_user_watchlist_and_default_to_false() {
+    let (base, _captured) = scripted_server(vec![
+        login_response(),
+        ScriptedResponse::ok_json(r#"{"id":1,"title":"A","onUserWatchlist":true}"#),
+        ScriptedResponse::ok_json(r#"{"id":1,"title":"A"}"#),
+        ScriptedResponse::ok_json(r#"{"id":2,"name":"B","onUserWatchlist":true}"#),
+        ScriptedResponse::ok_json(r#"{"id":2,"name":"B"}"#),
+    ])
+    .await;
+    let client = cookie_client(&base).await;
+
+    assert!(
+        client
+            .movie_details(1)
+            .await
+            .expect("movie")
+            .on_user_watchlist
+    );
+    assert!(
+        !client
+            .movie_details(1)
+            .await
+            .expect("movie")
+            .on_user_watchlist
+    );
+    assert!(client.tv_details(2).await.expect("tv").on_user_watchlist);
+    assert!(!client.tv_details(2).await.expect("tv").on_user_watchlist);
+}
+
+#[tokio::test]
+async fn is_api_key_tells_the_auth_method() {
+    let (base, _captured) = scripted_server(vec![
+        ScriptedResponse::ok_json(sample_user_json(7)),
+        login_response(),
+    ])
+    .await;
+    let (connect_timeout, request_timeout) = probe_timeouts();
+    let (keyed, _user) = SeerrClient::login(LoginArgs {
+        base_url: &base,
+        method: SeerrAuthMethod::ApiKey,
+        identity: "",
+        secret: "synthetic-key",
+        connect_timeout,
+        request_timeout,
+    })
+    .await
+    .expect("api key login should succeed");
+    let cookie = cookie_client(&base).await;
+
+    assert!(keyed.is_api_key());
+    assert!(!cookie.is_api_key());
+}

@@ -94,8 +94,8 @@ it, ranked by contribution to "feels like Jellybeam".
     ~~Secondary "Start from beginning" pill only when progress exists — same
     44px box as primary (transparent, 1px HAIRLINE border, PANNA-2 label),
     same row, wraps.~~ Superseded by docs/19: the `···` menu at
-    position two owns "Play from the beginning"; no secondary pill on the
-    row. Disabled: offline → "Server offline"; virtual → status
+    position two owns "Play from the beginning"; the only secondary pill
+    is a movie's Trailer at position three (docs/19 §1.6). Disabled: offline → "Server offline"; virtual → status
     label; SURFACE_OVERLAY fill + TERTIARY text + reason line beneath.
     Primary: PISTACCHIO pill, NOTTE label, Archivo 700, h44, min-w 140.
 12. **Season picker = tab strip with a 3px PISTACCHIO underline** (no filled

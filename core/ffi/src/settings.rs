@@ -504,6 +504,10 @@ pub struct Settings {
     #[serde(default = "default_accent_color")]
     #[uniffi(default = "pistacchio")]
     pub accent_color: String,
+    /// Handoff §9 Playback › Normalisation: apply each track's served gain; off by default.
+    #[serde(default)]
+    #[uniffi(default = false)]
+    pub normalization_enabled: bool,
 }
 
 impl Default for Settings {
@@ -555,6 +559,7 @@ impl Default for Settings {
             crash_reports_enabled: default_crash_reports_enabled(),
             home_layout: HomeLayout::default(),
             accent_color: default_accent_color(),
+            normalization_enabled: false,
         }
     }
 }
@@ -714,7 +719,30 @@ mod tests {
             crash_reports_enabled: false,
             home_layout: HomeLayout::Classic,
             accent_color: "oceano".to_owned(),
+            normalization_enabled: true,
         }
+    }
+
+    /// Handoff §9: a settings.json written before the normalisation switch loads it off, one
+    /// still holding the retired `normalization_seen` key loads, and the switch round-trips.
+    #[test]
+    fn normalization_settings_default_off_and_round_trip() {
+        let mut raw = legacy_base();
+        raw["show_clock"] = json!(false);
+        raw["normalization_seen"] = json!(true);
+        let loaded = load_from_json(raw);
+        assert!(!loaded.normalization_enabled);
+        assert!(!loaded.show_clock, "the retired key costs no other setting");
+
+        let original = Settings {
+            normalization_enabled: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_value(&original).expect("serialize");
+        assert_eq!(json["normalization_enabled"], true);
+        assert!(json.get("normalization_seen").is_none());
+        let loaded: Settings = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(loaded, original);
     }
 
     /// docs/25 §4.2: a stored layout this build doesn't know loads as the default, and the

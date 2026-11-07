@@ -17,10 +17,12 @@ pub mod dns;
 // impls clippy flags. Allowed here so the waiver survives regeneration.
 #[allow(clippy::derivable_impls)]
 pub mod models;
+mod music;
 mod syncplay;
 mod util;
 mod ws;
 
+pub use music::{LyricLine, MixSeed, PlaylistItemsShape};
 pub use syncplay::{GroupUpdate, SyncPlayEvent};
 
 /// Fuzzing-only re-exports. `cargo fuzz` builds with `--cfg fuzzing`, so
@@ -421,6 +423,8 @@ pub struct ItemQuery {
     pub is_played: Option<bool>,
     /// `personIds` query param: items crediting any of these person ids. Empty omits it.
     pub person_ids: Vec<String>,
+    /// `mediaTypes` query param (`Audio`, `Video`, ...): a playlist's media type. Empty omits it.
+    pub media_types: Vec<String>,
 }
 
 impl ItemQuery {
@@ -782,6 +786,9 @@ impl JellyfinClient {
         if !q.person_ids.is_empty() {
             query.push(("personIds", q.person_ids.join(",")));
         }
+        if !q.media_types.is_empty() {
+            query.push(("mediaTypes", q.media_types.join(",")));
+        }
         if let Some(min_date_last_saved) = &q.min_date_last_saved {
             query.push(("minDateLastSaved", min_date_last_saved.clone()));
             // Not a second filter: see `ItemQuery::min_date_last_saved`'s doc comment (10.10.x 500s
@@ -904,6 +911,28 @@ impl JellyfinClient {
         self.push_user_id(&mut query);
         let result: ItemsResult = self.get(&path, &query).await?;
         Ok(result.items)
+    }
+
+    /// `GET /Items/{itemId}/LocalTrailers`: trailers stored beside the item; the body is a bare
+    /// array, not an `ItemsResult`.
+    pub async fn local_trailers(&self, item_id: &str) -> Result<Vec<BaseItemDto>, ApiError> {
+        self.item_extras(item_id, "LocalTrailers").await
+    }
+
+    /// `GET /Items/{itemId}/SpecialFeatures`: extras (featurettes, deleted scenes, ...); bare array.
+    pub async fn special_features(&self, item_id: &str) -> Result<Vec<BaseItemDto>, ApiError> {
+        self.item_extras(item_id, "SpecialFeatures").await
+    }
+
+    async fn item_extras(
+        &self,
+        item_id: &str,
+        endpoint: &str,
+    ) -> Result<Vec<BaseItemDto>, ApiError> {
+        let path = format!("/Items/{}/{endpoint}", percent_encode(item_id));
+        let mut query: Vec<(&str, String)> = Vec::new();
+        self.push_user_id(&mut query);
+        self.get(&path, &query).await
     }
 
     pub async fn get_playback_info(
@@ -1281,6 +1310,18 @@ impl JellyfinClient {
         )
     }
 
+    /// docs/feature-dev/music-design-brief.md §1.3: an audio source's static file, carrying
+    /// `ApiKey` exactly as [`Self::stream_url`] does. Never log the result.
+    pub fn audio_stream_url(&self, item_id: &str, media_source_id: &str) -> String {
+        format!(
+            "{}/Audio/{}/stream?static=true&mediaSourceId={}&ApiKey={}",
+            self.inner.base_url,
+            percent_encode(item_id),
+            percent_encode(media_source_id),
+            percent_encode(&self.inner.token),
+        )
+    }
+
     /// Absolute, authenticated URL for a `MediaStream` `DeliveryUrl` (docs/18 §3.2): carries
     /// `ApiKey` the way [`Self::stream_url`] does. `None` for an off-server absolute URL, so
     /// the token never reaches a third-party host. Never log the result.
@@ -1440,6 +1481,10 @@ pub struct PlaybackReport {
     /// docs/18-playback-quality.md §2: sent as `"PlayMethod"` on Start/Progress only -- Stopped
     /// kills a transcode job via `PlaySessionId` alone, so [`StopBody`] has no need for this.
     pub play_method: ReportPlayMethod,
+    /// docs/feature-dev/music-design-brief.md §1.3: the item ids of the queue playing, sent as
+    /// `NowPlayingQueue` on Start (all of it) and Progress (a window, [`queue_window`]) so other
+    /// clients see it; empty sends none (video).
+    pub now_playing_queue: std::sync::Arc<[String]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1522,6 +1567,18 @@ struct StartProgressBody<'a> {
     /// docs/18-playback-quality.md §2: Start/Progress only, never [`StopBody`].
     #[serde(rename = "PlayMethod")]
     play_method: &'static str,
+    #[serde(rename = "NowPlayingQueue", skip_serializing_if = "Vec::is_empty")]
+    now_playing_queue: Vec<QueueEntry<'a>>,
+}
+
+/// One `NowPlayingQueue` entry: `PlaylistItemId` numbers the queue position, so an item queued
+/// twice stays two entries.
+#[derive(Debug, serde::Serialize)]
+struct QueueEntry<'a> {
+    #[serde(rename = "Id")]
+    id: &'a str,
+    #[serde(rename = "PlaylistItemId")]
+    playlist_item_id: String,
 }
 
 /// Request body for `POST /Sessions/Playing/Stopped`.
@@ -1550,7 +1607,33 @@ fn start_progress_body(report: &PlaybackReport) -> StartProgressBody<'_> {
         play_session_id: &report.play_session_id,
         can_seek: true,
         play_method: report.play_method.as_wire_str(),
+        now_playing_queue: queue_window(report)
+            .map(|n| QueueEntry {
+                id: &report.now_playing_queue[n],
+                playlist_item_id: format!("playlistItem{n}"),
+            })
+            .collect(),
     }
+}
+
+/// Entries a Progress report names before / after the playing one; Start names them all.
+const PROGRESS_QUEUE_BEFORE: usize = 5;
+const PROGRESS_QUEUE_AFTER: usize = 50;
+
+/// The queue positions `report` sends: all on Start, a window around the playing entry on
+/// Progress so a long queue isn't re-posted every few seconds. The playing entry is the first
+/// one holding `item_id` (0 when none does).
+fn queue_window(report: &PlaybackReport) -> std::ops::Range<usize> {
+    let queue = &report.now_playing_queue;
+    if !matches!(report.kind, PlaybackReportKind::Progress) {
+        return 0..queue.len();
+    }
+    let playing = queue
+        .iter()
+        .position(|id| *id == report.item_id)
+        .unwrap_or(0);
+    playing.saturating_sub(PROGRESS_QUEUE_BEFORE)
+        ..(playing + PROGRESS_QUEUE_AFTER + 1).min(queue.len())
 }
 
 fn stop_body(report: &PlaybackReport) -> StopBody<'_> {
@@ -1602,6 +1685,43 @@ pub(crate) mod test_server {
             let _ = stream.shutdown().await;
         });
         (format!("http://{addr}"), rx)
+    }
+
+    /// Like [`capturing_server`] but answers every request with `status_line` and an empty body;
+    /// the request lines ("METHOD target HTTP/1.1") accumulate in arrival order.
+    pub(crate) async fn recording_server(
+        status_line: &str,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = lines.clone();
+        let response =
+            format!("HTTP/1.1 {status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    buf.extend_from_slice(&chunk[..n]);
+                    if n == 0 || request_complete(&buf) {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&buf);
+                let line = request.lines().next().unwrap_or_default().to_string();
+                recorded
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(line);
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), lines)
     }
 
     /// Headers are in and the body has reached `Content-Length` (0 when absent).
@@ -1702,6 +1822,7 @@ mod tests {
             subtitle_stream_index: None,
             play_session_id: "session-1".to_string(),
             play_method: ReportPlayMethod::DirectPlay,
+            now_playing_queue: Default::default(),
         }
     }
 
@@ -1753,6 +1874,88 @@ mod tests {
         };
         let value = serde_json::to_value(start_progress_body(&report)).expect("serializes");
         assert_eq!(value["PlayMethod"], "Transcode");
+    }
+
+    /// docs/feature-dev/music-design-brief.md §1.3: an audio report names its queue in order,
+    /// a repeated item as its own entry; the Stopped body carries none.
+    #[test]
+    fn an_audio_report_sends_its_queue_as_now_playing_queue() {
+        let report = PlaybackReport {
+            now_playing_queue: vec!["song-1".to_string(), "song-2".into(), "song-1".into()].into(),
+            ..sample_report(PlaybackReportKind::Start)
+        };
+        let value = serde_json::to_value(start_progress_body(&report)).expect("serializes");
+        assert_eq!(
+            value["NowPlayingQueue"],
+            serde_json::json!([
+                { "Id": "song-1", "PlaylistItemId": "playlistItem0" },
+                { "Id": "song-2", "PlaylistItemId": "playlistItem1" },
+                { "Id": "song-1", "PlaylistItemId": "playlistItem2" },
+            ])
+        );
+        let stopped = PlaybackReport {
+            kind: PlaybackReportKind::Stopped,
+            ..report
+        };
+        let value = serde_json::to_value(stop_body(&stopped)).expect("serializes");
+        assert!(value.get("NowPlayingQueue").is_none(), "{value}");
+    }
+
+    /// docs/feature-dev/music-design-brief.md §1.3: Start names the whole queue; Progress, sent
+    /// every few seconds, names only 5 entries before the playing one and 50 after, each keeping
+    /// its queue position as `PlaylistItemId`.
+    #[test]
+    fn progress_sends_a_window_of_the_queue_and_start_sends_all_of_it() {
+        let queue: std::sync::Arc<[String]> = (0..200).map(|n| format!("song-{n:03}")).collect();
+        let sent = |kind, playing: &str| -> Vec<(String, String)> {
+            let report = PlaybackReport {
+                item_id: playing.to_string(),
+                now_playing_queue: queue.clone(),
+                ..sample_report(kind)
+            };
+            let value = serde_json::to_value(start_progress_body(&report)).expect("serializes");
+            value["NowPlayingQueue"]
+                .as_array()
+                .expect("queue")
+                .iter()
+                .map(|e| {
+                    (
+                        e["Id"].as_str().expect("id").to_string(),
+                        e["PlaylistItemId"].as_str().expect("entry").to_string(),
+                    )
+                })
+                .collect()
+        };
+        let span = |from: usize, to: usize| -> Vec<(String, String)> {
+            (from..to)
+                .map(|n| (format!("song-{n:03}"), format!("playlistItem{n}")))
+                .collect()
+        };
+        assert_eq!(sent(PlaybackReportKind::Start, "song-100"), span(0, 200));
+        let rows = [
+            ("song-100", span(95, 151)),
+            ("song-002", span(0, 53)),
+            ("song-199", span(194, 200)),
+            ("not-queued", span(0, 51)),
+        ];
+        for (playing, expected) in rows {
+            assert_eq!(
+                sent(PlaybackReportKind::Progress, playing),
+                expected,
+                "{playing}"
+            );
+        }
+    }
+
+    /// The audio static route carries the token as `ApiKey`, like the video stream, never
+    /// the `api_key` form Jellyfin 12 refuses.
+    #[test]
+    fn audio_stream_url_uses_the_audio_static_route_with_api_key() {
+        let client = JellyfinClient::from_token("http://localhost:8096", sample_identity(), "tok");
+        assert_eq!(
+            client.audio_stream_url("song 1", "ms-1"),
+            "http://localhost:8096/Audio/song%201/stream?static=true&mediaSourceId=ms-1&ApiKey=tok"
+        );
     }
 
     #[test]
@@ -2468,6 +2671,63 @@ mod tests {
         );
     }
 
+    /// docs/feature-dev/music-design-brief.md §1.3: over the wire, Start and Progress are JSON
+    /// POSTs whose `NowPlayingQueue` is `[{Id, PlaylistItemId}]` (the server's `QueueItem[]`),
+    /// ids passed through verbatim; Stopped sends none.
+    #[tokio::test]
+    async fn start_and_progress_post_the_queue_as_json_and_stopped_does_not() {
+        let song_a = "00000000-0000-4000-8000-000000000a01";
+        let song_b = "00000000-0000-4000-8000-000000000a02";
+        let report = |kind| PlaybackReport {
+            now_playing_queue: vec![song_a.to_string(), song_b.into()].into(),
+            ..sample_report(kind)
+        };
+        let queue = serde_json::json!([
+            { "Id": song_a, "PlaylistItemId": "playlistItem0" },
+            { "Id": song_b, "PlaylistItemId": "playlistItem1" },
+        ]);
+        let rows = [
+            (PlaybackReportKind::Start, "/Sessions/Playing", true),
+            (
+                PlaybackReportKind::Progress,
+                "/Sessions/Playing/Progress",
+                true,
+            ),
+            (
+                PlaybackReportKind::Stopped,
+                "/Sessions/Playing/Stopped",
+                false,
+            ),
+        ];
+        for (kind, path, has_queue) in rows {
+            let (base_url, rx) =
+                test_server::capturing_server("204 No Content", String::new()).await;
+            let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+            client
+                .report_playback(report(kind))
+                .await
+                .expect("report against mock server");
+            let request = rx.await.expect("mock server captured a request");
+            let (head, body) = request.split_once("\r\n\r\n").expect("head and body");
+            assert_eq!(
+                head.lines().next(),
+                Some(format!("POST {path} HTTP/1.1").as_str()),
+                "{kind:?}"
+            );
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains("content-type: application/json"),
+                "{kind:?}: {head}"
+            );
+            let body: serde_json::Value = serde_json::from_str(body).expect("JSON body");
+            assert_eq!(
+                body.get("NowPlayingQueue"),
+                has_queue.then_some(&queue),
+                "{kind:?}: {body}"
+            );
+        }
+    }
+
     // --- ItemQuery.sort_order -> `sortOrder` query param ----------------
 
     #[tokio::test]
@@ -3044,6 +3304,86 @@ mod tests {
 
         let err = client
             .get_similar("item-1", 8)
+            .await
+            .expect_err("500 must surface as an error");
+        assert!(
+            matches!(err, ApiError::Status { code: 500, .. }),
+            "unexpected error variant: {err:?}"
+        );
+    }
+
+    // --- local_trailers / special_features ---------------------------------
+
+    const EXTRAS_BODY: &str = r#"[
+        {"Name":"Trailer","Id":"00000000-0000-4000-8000-000000000a01","Type":"Trailer","ExtraType":"Trailer","MediaType":"Video","RunTimeTicks":600230000},
+        {"Name":"Making Of","Id":"00000000-0000-4000-8000-000000000a02","Type":"Video","ExtraType":"BehindTheScenes","RunTimeTicks":300230000}
+    ]"#;
+
+    #[tokio::test]
+    async fn local_trailers_gets_the_bare_array_with_user_id_and_encoded_path() {
+        let (base_url, rx) = test_server::capturing_server("200 OK", EXTRAS_BODY.to_string()).await;
+        let client =
+            JellyfinClient::from_token(&base_url, sample_identity(), "tok").with_user_id("user-9");
+
+        let items = client
+            .local_trailers("item 1")
+            .await
+            .expect("local_trailers against mock server");
+
+        let request = rx.await.expect("mock server captured a request");
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.starts_with("GET /Items/item%201/LocalTrailers?"),
+            "unexpected request line: {request_line}"
+        );
+        assert!(request_line.contains("userId=user-9"), "{request_line}");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name.as_deref(), Some("Trailer"));
+        assert_eq!(items[0].extra_type, Some(models::ExtraType::Trailer));
+        assert_eq!(items[0].run_time_ticks, Some(600_230_000));
+        assert_eq!(
+            items[1].extra_type,
+            Some(models::ExtraType::BehindTheScenes)
+        );
+    }
+
+    #[tokio::test]
+    async fn special_features_gets_the_bare_array_with_user_id_and_encoded_path() {
+        let (base_url, rx) = test_server::capturing_server("200 OK", EXTRAS_BODY.to_string()).await;
+        let client =
+            JellyfinClient::from_token(&base_url, sample_identity(), "tok").with_user_id("user-9");
+
+        let items = client
+            .special_features("item 1")
+            .await
+            .expect("special_features against mock server");
+
+        let request = rx.await.expect("mock server captured a request");
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.starts_with("GET /Items/item%201/SpecialFeatures?"),
+            "unexpected request line: {request_line}"
+        );
+        assert!(request_line.contains("userId=user-9"), "{request_line}");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].name.as_deref(), Some("Making Of"));
+    }
+
+    #[tokio::test]
+    async fn local_trailers_accepts_an_empty_array_and_surfaces_non_2xx() {
+        let (base_url, _rx) = test_server::capturing_server("200 OK", "[]".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        assert!(client
+            .local_trailers("item-1")
+            .await
+            .expect("empty")
+            .is_empty());
+
+        let (base_url, _rx) =
+            test_server::capturing_server("500 Internal Server Error", "boom".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        let err = client
+            .special_features("item-1")
             .await
             .expect_err("500 must surface as an error");
         assert!(

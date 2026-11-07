@@ -15,6 +15,8 @@ mod error;
 pub mod glide;
 mod home;
 mod library_prefs;
+mod music;
+mod music_playback;
 mod next_episode;
 mod object;
 mod persistence;
@@ -37,6 +39,13 @@ pub use discovery::DiscoveredServer;
 pub use error::{CallbackError, CoreError};
 pub use glide::GlideDirection;
 pub use home::{ClassicHome, HomeLayout, HomeShelf, HomeSnapshot, ShelfSource};
+pub use music::{
+    music_spec_line, AudioFacts, LiveMusicGenre, Lyrics, MixSeedFfi, PlaylistEntry,
+    SpecLineContext, SyncedLyricLine,
+};
+pub use music_playback::{
+    music_transcode_line, AudioEnd, AudioStream, AudioTrackPlan, AudioTranscode,
+};
 pub use object::{ChangeListener, JellybeamCore};
 pub use person::{PersonPage, TitleTmdbRef};
 pub use seerr_types::{
@@ -58,15 +67,16 @@ pub use syncplay::{
     SyncPlayRole, SyncPlaySeverity, SyncPlaySnapshot, SyncPlayUpdate,
 };
 pub use types::{
-    AccountIdentity, AccountInfo, AudioSpatialKind, BrowseRead, Card, ChangeEvent, ChapterInfoFfi,
-    Decade, DeviceCaps, EmbeddedSubtitleFfi, EpisodeNeighbors, ExternalSubtitleFfi, FailedTrackFfi,
-    GridCounts, GridFilters, GridGroup, GridSort, GridSortField, ImageKind, ImageUrlPrefix,
-    ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment, MediaSegmentKind, MediaStreamInfo,
-    MediaStreamKind, MirrorItemCounts, MirrorLibrary, MirrorStats, PersonInfo, PlayMethodFfi,
-    PlaybackOsdDetail, PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails,
-    ServerInfoSnapshot, SortOrder, StatusFilter, SubtitleActionFfi, SubtitleDeliveryFfi,
-    TrackDecisionFfi, TrackInfo, TrackKindFfi, TrackMemoryFfi, TrickplayMetaFfi, TrickplayTileFfi,
-    VideoCaps, VideoCodecId, ViewSnapshot, WatchedFilter,
+    AccountIdentity, AccountInfo, AlbumSummary, ArtistScope, AudioSpatialKind, BrowseRead, Card,
+    ChangeEvent, ChapterInfoFfi, Decade, DeviceCaps, EmbeddedSubtitleFfi, EpisodeNeighbors,
+    ExternalSubtitleFfi, FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort,
+    GridSortField, ImageKind, ImageUrlPrefix, ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment,
+    MediaSegmentKind, MediaStreamInfo, MediaStreamKind, MirrorItemCounts, MirrorLibrary,
+    MirrorStats, MusicArtistRow, MusicGenreRow, PersonInfo, PlayMethodFfi, PlaybackOsdDetail,
+    PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails, ServerInfoSnapshot,
+    SongSource, SortOrder, StatusFilter, SubtitleActionFfi, SubtitleDeliveryFfi, TrackDecisionFfi,
+    TrackInfo, TrackKindFfi, TrackMemoryFfi, TrickplayMetaFfi, TrickplayTileFfi, VideoCaps,
+    VideoCodecId, ViewSnapshot, WatchedFilter,
 };
 
 /// docs/16 §2.7: the drawer's Favorites page as a library view; Kotlin recognises it by

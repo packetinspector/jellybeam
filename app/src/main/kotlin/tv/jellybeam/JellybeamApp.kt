@@ -38,6 +38,11 @@ import tv.jellybeam.player.DeviceCapsProbe
 import tv.jellybeam.player.OkHttpSheetFetcher
 import tv.jellybeam.player.SheetFetcher
 import tv.jellybeam.player.PlayerHolder
+import tv.jellybeam.player.music.AndroidMusicServiceHost
+import tv.jellybeam.player.music.MusicPlaybackOwner
+import tv.jellybeam.player.playbackActivityTracker
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
 import java.io.File
 import java.util.Collections
 import java.util.IdentityHashMap
@@ -50,6 +55,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.Call
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
@@ -68,10 +74,37 @@ object AppGraph {
     private val updateOwner = lazy { tv.jellybeam.updates.UpdateCoordinator(appContext) }
     val updates: tv.jellybeam.updates.UpdateCoordinator get() = updateOwner.value
     fun updateOwnerIfStarted(): tv.jellybeam.updates.UpdateCoordinator? = if (updateOwner.isInitialized()) updateOwner.value else null
+
+    /** docs/17 §3: a video start stops music first, then passes the update owner's gate. */
     fun beforePlayback(launch: () -> Unit) {
-        val owner = updateOwnerIfStarted()
-        if (owner == null) launch() else owner.launchPlayback(launch)
+        val video = {
+            val owner = updateOwnerIfStarted()
+            if (owner == null) launch() else owner.launchPlayback(launch)
+        }
+        val music = musicOwnerIfStarted()
+        if (music == null) video() else music.stopForVideo(video)
     }
+
+    private val _musicStarted = mutableStateOf<MusicPlaybackOwner?>(null)
+
+    /** Music brief §1.3: the music owner once anything asked for music; `null` until then. Snapshot state, so Compose reads it with no collector running. */
+    internal val musicStarted: State<MusicPlaybackOwner?> get() = _musicStarted
+
+    /** Built by the first music request only, so an unused feature costs nothing. */
+    private val musicOwner = lazy {
+        MusicPlaybackOwner(
+            gateway = gateway,
+            parent = processScope,
+            host = AndroidMusicServiceHost(appContext),
+            closeVideo = {
+                playbackActivityTracker.stopForGroup()
+                playbackActivityTracker.awaitFinalStops()
+            },
+            holdsPlaybackChanged = { updateOwnerIfStarted()?.playbackChanged(playbackActivityTracker.isActive) },
+        ).also { _musicStarted.value = it }
+    }
+    internal val music: MusicPlaybackOwner get() = musicOwner.value
+    internal fun musicOwnerIfStarted(): MusicPlaybackOwner? = if (musicOwner.isInitialized()) musicOwner.value else null
 
     private lateinit var appContext: Context
 
@@ -139,6 +172,9 @@ object AppGraph {
             .callTimeout(0, TimeUnit.SECONDS)
             .build()
     }
+
+    /** [httpClient]'s pool for the music player's stream requests. */
+    internal val playerCallFactory: Call.Factory get() = httpClient
 
     /** Coil's client, from [imageHttpClient]. */
     internal val artHttpClient: OkHttpClient by lazy { imageHttpClient(httpClient) }

@@ -1,6 +1,7 @@
 package tv.jellybeam.ui.cards
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /** Pure-logic coverage for [shelfBringIntoViewScrollDistance] (bugs 1/2). The Compose/LazyRow
@@ -78,5 +79,29 @@ class RowScrollTest {
     fun `a chip already inside both margins does not scroll`() {
         assertEquals(0f, edgeMarginScrollDistance(offset = 6f, size = 80f, containerSize = 1000f, marginPx = 6f), 0f)
         assertEquals(0f, edgeMarginScrollDistance(offset = 914f, size = 80f, containerSize = 1000f, marginPx = 6f), 0f)
+    }
+
+    // -- shelfEntryIndex (docs/15 §2: Down into a shelf lands on its first visible card; Detail and Discover shelves) ----------
+
+    @Test
+    fun `shelfEntryIndex at rest lands on the first item and is stable across repeated entries`() {
+        assertEquals(0, shelfEntryIndex(0, 0, 10))
+        assertEquals(1, shelfEntryIndex(1, 0, 10))
+        assertEquals(1, shelfEntryIndex(1, 0, 10))
+    }
+
+    @Test
+    fun `shelfEntryIndex skips a partly scrolled-off first item`() {
+        assertEquals(2, shelfEntryIndex(1, 50, 10))
+    }
+
+    @Test
+    fun `shelfEntryIndex clamps to the last item`() {
+        assertEquals(9, shelfEntryIndex(9, 10, 10))
+    }
+
+    @Test
+    fun `shelfEntryIndex is null for an empty shelf`() {
+        assertNull(shelfEntryIndex(0, 0, 0))
     }
 }

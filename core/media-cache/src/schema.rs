@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS items (
     -- Series, NULL elsewhere), part of the default DTO. Backs the library grid's Status
     -- filter (`query::library_grid`). Schema v12.
     series_status TEXT,
+    -- docs/feature-dev/music-design-brief.md §1.2: an Audio row's album link and verbatim
+    -- `Album`/`AlbumArtist` strings, default DTO fields, so music browses need no request.
+    album TEXT,
+    album_id TEXT,
+    album_artist TEXT,
+    album_primary_tag TEXT,
+    has_lyrics INTEGER,
+    -- §1.3: not served today; kept when a ReplayGain/LUFS-tagged server sends it.
+    normalization_gain REAL,
+    album_normalization_gain REAL,
+    -- `MediaType` verbatim: a Playlist card opens the music page only when it is "Audio".
+    media_type TEXT,
     dto BLOB NOT NULL,
     -- Local write clock (unix millis): the stale-write guard of the favorites and user-state
     -- sweeps, an index tiebreaker; not server-meaningful, so user-facing lists don't sort by it.
@@ -115,6 +127,16 @@ CREATE INDEX IF NOT EXISTS idx_items_grid_name ON items(parent_id, sort_name COL
 CREATE INDEX IF NOT EXISTS idx_items_grid_added ON items(parent_id, date_created, sort_name COLLATE NOCASE, id);
 CREATE INDEX IF NOT EXISTS idx_items_grid_year ON items(parent_id, production_year, sort_name COLLATE NOCASE, id);
 CREATE INDEX IF NOT EXISTS idx_items_grid_runtime ON items(parent_id, NULLIF(runtime_ticks, 0), sort_name COLLATE NOCASE, id);
+-- Music (schema v18): partial, so a library without music pays nothing on its writes.
+CREATE INDEX IF NOT EXISTS idx_items_album_tracks ON items(album_id, parent_index_number, index_number)
+    WHERE album_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_items_songs_name ON items(library_id, sort_name COLLATE NOCASE, id)
+    WHERE item_type = 'Audio';
+-- `music::has_normalization_gain`: empty without served gains, so a video-only mirror's probe seeks.
+CREATE INDEX IF NOT EXISTS idx_items_gain ON items(normalization_gain)
+    WHERE normalization_gain IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_items_album_gain ON items(album_normalization_gain)
+    WHERE album_normalization_gain IS NOT NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(
     name, original_title, series_name,
@@ -149,6 +171,19 @@ CREATE TABLE IF NOT EXISTS item_genres (
 -- Serves the Genre filter's `EXISTS` lookup from the genre side, and `library_genres`'s
 -- `DISTINCT genre` listing.
 CREATE INDEX IF NOT EXISTS idx_item_genres_genre ON item_genres(genre, item_id);
+
+-- docs/feature-dev/music-design-brief.md §1.2: an item's `AlbumArtists` (role 0) and
+-- `ArtistItems` (role 1) in server order (`ord`); per-track performers exist only here, never
+-- as `MusicArtist` rows. `name` is verbatim; `artist_id` is NULL when the server sent none.
+CREATE TABLE IF NOT EXISTS item_artists (
+    item_id   TEXT NOT NULL,
+    artist_id TEXT,
+    name      TEXT,
+    role      INTEGER NOT NULL,
+    ord       INTEGER NOT NULL,
+    PRIMARY KEY (item_id, role, ord)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_item_artists_artist ON item_artists(artist_id, role, item_id);
 "#;
 
 fn db_err(e: impl std::fmt::Display) -> CacheError {

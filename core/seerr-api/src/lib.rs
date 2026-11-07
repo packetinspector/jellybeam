@@ -16,5 +16,5 @@ pub use error::SeerrError;
 pub use models::{
     CreditCast, CreditCrew, MediaInfo, MediaRequest, MediaResult, MovieDetails, PublicSettings,
     RelatedVideo, RequestCreateBody, RequestUpdateBody, RequestUser, Season, ServarrInstance,
-    ServiceDetail, TvDetails, User,
+    ServiceDetail, TvDetails, User, WatchlistItem, WatchlistPage,
 };

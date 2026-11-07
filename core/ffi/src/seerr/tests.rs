@@ -1429,12 +1429,26 @@ const ME: &str = r#"{"id":1,"username":"jellybeam-test-user"}"#;
 
 /// Builds an API-key handle against `base` and installs it as the live one.
 fn install_api_key_handle(core: &JellybeamCore, base: &str) -> SeerrHandle {
+    install_handle(core, base, seerr_api::SeerrAuthMethod::ApiKey)
+}
+
+/// [`install_api_key_handle`] for a signed-in (cookie) user: the mock must answer
+/// `POST /api/v1/auth/jellyfin` with a cookie.
+fn install_cookie_handle(core: &JellybeamCore, base: &str) -> SeerrHandle {
+    install_handle(core, base, seerr_api::SeerrAuthMethod::Jellyfin)
+}
+
+fn install_handle(
+    core: &JellybeamCore,
+    base: &str,
+    method: seerr_api::SeerrAuthMethod,
+) -> SeerrHandle {
     let (client, user) = core
         .runtime()
         .block_on(seerr_api::SeerrClient::login(seerr_api::LoginArgs {
             base_url: base,
-            method: seerr_api::SeerrAuthMethod::ApiKey,
-            identity: "",
+            method,
+            identity: "alice",
             secret: "test-key",
             connect_timeout: Duration::from_secs(2),
             request_timeout: Duration::from_secs(30),
@@ -2109,4 +2123,398 @@ fn a_connect_does_not_wait_out_a_slow_public_settings_read() {
         elapsed < Duration::from_millis(1500),
         "the connect waited {elapsed:?} for /settings/public"
     );
+}
+
+// --- 13. Watchlist (docs/14 Watchlist) ------------------------------------------
+
+/// Routed mock for a signed-in user whose watchlist holds, oldest first: movie 1, tv 2, movie 3
+/// (unresolvable: its detail 404s), and a row with no media type.
+fn watchlist_routes(req: &MockReq) -> MockReply {
+    match (req.method.as_str(), req.route()) {
+        ("POST", "/api/v1/auth/jellyfin") => MockReply::json(200, ME).cookie("c"),
+        (_, "/api/v1/auth/me") => MockReply::json(200, ME),
+        ("GET", "/api/v1/discover/watchlist") => MockReply::json(
+            200,
+            r#"{"page":1,"totalPages":1,"totalResults":4,"results":[
+                {"id":1,"tmdbId":1,"mediaType":"movie","title":""},
+                {"id":2,"tmdbId":2,"mediaType":"tv","title":"x"},
+                {"id":3,"tmdbId":3,"mediaType":"movie","title":"gone"},
+                {"id":4,"tmdbId":4,"title":"no kind"}]}"#,
+        ),
+        ("GET", "/api/v1/movie/1") => MockReply::json(
+            200,
+            r#"{"id":1,"title":"Synthetic Movie","onUserWatchlist":true}"#,
+        ),
+        ("GET", "/api/v1/tv/2") => MockReply::json(
+            200,
+            r#"{"id":2,"name":"Synthetic Show","onUserWatchlist":true}"#,
+        ),
+        ("POST", "/api/v1/watchlist") => MockReply::json(201, "{}"),
+        ("DELETE", "/api/v1/watchlist/1") => MockReply::json(200, ""),
+        _ => MockReply::json(404, "{}"),
+    }
+}
+
+#[test]
+fn seerr_watchlist_lists_newest_first_and_drops_unresolvable_items() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, _log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    install_cookie_handle(&core, &base);
+
+    let cards = core.seerr_watchlist().expect("the watchlist resolves");
+
+    let titles: Vec<_> = cards
+        .iter()
+        .map(|c| (c.media_type, c.title.as_str()))
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            (SeerrMediaType::Tv, "Synthetic Show"),
+            (SeerrMediaType::Movie, "Synthetic Movie"),
+        ],
+        "newest first; the 404 detail and the kindless row are dropped"
+    );
+}
+
+#[test]
+fn seerr_watchlist_under_api_key_is_empty_without_a_request() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    install_api_key_handle(&core, &base);
+    let before = mock_total(&log);
+
+    let cards = core.seerr_watchlist().expect("an API-key list is empty");
+
+    assert!(cards.is_empty());
+    assert_eq!(mock_total(&log), before, "no request may leave the core");
+}
+
+fn wl_card(media_type: SeerrMediaType, tmdb_id: i64, title: &str) -> SeerrCard {
+    SeerrCard {
+        media_type,
+        tmdb_id,
+        title: title.to_string(),
+        year: None,
+        overview: None,
+        poster_url: None,
+        backdrop_url: None,
+        availability: SeerrAvailability::NotRequested,
+        jellyfin_item_id: None,
+    }
+}
+
+#[test]
+fn a_landed_toggle_edits_the_cached_shelf_without_a_refetch() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    install_cookie_handle(&core, &base);
+
+    core.seerr_watchlist().expect("first read");
+    core.seerr_watchlist().expect("second read");
+    assert_eq!(
+        mock_count(&log, "GET", "/api/v1/discover/watchlist"),
+        1,
+        "the second read is served from the cache"
+    );
+
+    core.seerr_set_watchlist(wl_card(SeerrMediaType::Movie, 1, "Synthetic Movie"), false)
+        .expect("remove");
+    let after_remove = core.seerr_watchlist().expect("read after the remove");
+    assert!(
+        !after_remove
+            .iter()
+            .any(|c| c.tmdb_id == 1 && c.media_type == SeerrMediaType::Movie),
+        "the removed card is gone at once"
+    );
+
+    core.seerr_set_watchlist(wl_card(SeerrMediaType::Movie, 9, "Added Movie"), true)
+        .expect("add");
+    let after_add = core.seerr_watchlist().expect("read after the add");
+    assert_eq!(
+        after_add.first().map(|c| c.tmdb_id),
+        Some(9),
+        "the added card leads"
+    );
+    assert_eq!(
+        mock_count(&log, "GET", "/api/v1/discover/watchlist"),
+        1,
+        "neither toggle refetches the list"
+    );
+}
+
+#[test]
+fn a_toggle_with_no_cached_shelf_leaves_the_next_read_to_fetch() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    install_cookie_handle(&core, &base);
+
+    core.seerr_set_watchlist(wl_card(SeerrMediaType::Movie, 9, "Added Movie"), true)
+        .expect("add");
+    core.seerr_watchlist().expect("first read");
+
+    assert_eq!(mock_count(&log, "GET", "/api/v1/discover/watchlist"), 1);
+}
+
+#[test]
+fn a_fetch_in_flight_across_a_toggle_never_overwrites_the_edited_shelf() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, _log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    let handle = install_cookie_handle(&core, &base);
+    let now = Instant::now();
+    let kept = wl_card(SeerrMediaType::Movie, 1, "Kept");
+    let removed = wl_card(SeerrMediaType::Movie, 2, "Removed");
+    handle.cache_watchlist(
+        handle.home_generation(),
+        now,
+        vec![kept.clone(), removed.clone()],
+    );
+
+    let in_flight = handle.home_generation();
+    handle.apply_watchlist_toggle(&removed, false);
+    handle.cache_watchlist(in_flight, now, vec![kept.clone(), removed]);
+
+    assert_eq!(handle.cached_watchlist(now), Some(vec![kept]));
+}
+
+#[test]
+fn an_edited_shelf_still_expires_on_its_first_stamp() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, _log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    let handle = install_cookie_handle(&core, &base);
+    let t0 = Instant::now();
+    let kept = wl_card(SeerrMediaType::Movie, 1, "Kept");
+    let removed = wl_card(SeerrMediaType::Movie, 2, "Removed");
+    handle.cache_watchlist(
+        handle.home_generation(),
+        t0,
+        vec![kept.clone(), removed.clone()],
+    );
+
+    handle.apply_watchlist_toggle(&removed, false);
+
+    assert_eq!(
+        handle.cached_watchlist(t0 + Duration::from_secs(30)),
+        Some(vec![kept])
+    );
+    assert_eq!(
+        handle.cached_watchlist(t0 + Duration::from_secs(61)),
+        None,
+        "a toggle never extends the TTL"
+    );
+}
+
+#[test]
+fn watchlist_after_toggle_removes_or_leads_and_stays_capped() {
+    let shelf: Vec<SeerrCard> = (1..=20)
+        .map(|id| wl_card(SeerrMediaType::Movie, id, "m"))
+        .collect();
+    let tv_twin = wl_card(SeerrMediaType::Tv, 5, "t");
+
+    let removed = watchlist_after_toggle(
+        shelf.clone(),
+        &wl_card(SeerrMediaType::Movie, 5, "m"),
+        false,
+    );
+    assert_eq!(removed.len(), 19);
+    assert!(!removed.iter().any(|c| c.tmdb_id == 5));
+
+    let added = watchlist_after_toggle(shelf.clone(), &tv_twin, true);
+    assert_eq!(added.len(), 20, "capped at one page");
+    assert_eq!(added[0], tv_twin);
+    assert!(
+        added
+            .iter()
+            .any(|c| c.tmdb_id == 5 && c.media_type == SeerrMediaType::Movie),
+        "a movie and a show may share a TMDB id"
+    );
+
+    let re_added = watchlist_after_toggle(shelf, &wl_card(SeerrMediaType::Movie, 7, "m"), true);
+    assert_eq!(re_added[0].tmdb_id, 7);
+    assert_eq!(
+        re_added.iter().filter(|c| c.tmdb_id == 7).count(),
+        1,
+        "never twice"
+    );
+}
+
+#[test]
+fn a_watchlist_fetch_that_straddles_an_invalidation_is_not_cached() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, _log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    let handle = install_cookie_handle(&core, &base);
+    let now = Instant::now();
+
+    let generation = handle.home_generation();
+    handle.invalidate_home();
+    handle.cache_watchlist(generation, now, Vec::new());
+    assert!(handle.cached_watchlist(now).is_none(), "stale generation");
+
+    handle.cache_watchlist(handle.home_generation(), now, Vec::new());
+    assert!(handle.cached_watchlist(now).is_some());
+    handle.invalidate_home();
+    assert!(
+        handle.cached_watchlist(now).is_none(),
+        "invalidate_home clears the watchlist too"
+    );
+}
+
+#[test]
+fn cache_freshness_is_a_pure_ttl_check() {
+    let at = Instant::now();
+    let table = [
+        (Duration::ZERO, true),
+        (HOME_CACHE_TTL - Duration::from_millis(1), true),
+        (HOME_CACHE_TTL, false),
+        (HOME_CACHE_TTL * 2, false),
+    ];
+    for (age, fresh) in table {
+        assert_eq!(cache_is_fresh(at, at + age), fresh, "age {age:?}");
+    }
+}
+
+#[test]
+fn seerr_set_watchlist_posts_and_deletes_with_the_wire_media_type() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    install_cookie_handle(&core, &base);
+
+    core.seerr_set_watchlist(wl_card(SeerrMediaType::Tv, 2, "Synthetic Show"), true)
+        .expect("add");
+    core.seerr_set_watchlist(wl_card(SeerrMediaType::Movie, 1, ""), false)
+        .expect("remove");
+
+    let log = log.lock().unwrap_or_else(|e| e.into_inner());
+    let add = log
+        .iter()
+        .find(|r| r.method == "POST" && r.route() == "/api/v1/watchlist")
+        .expect("an add request");
+    let body: serde_json::Value = serde_json::from_str(&add.body).expect("json");
+    assert_eq!(
+        body,
+        serde_json::json!({"tmdbId": 2, "mediaType": "tv", "title": "Synthetic Show"})
+    );
+    assert!(
+        log.iter()
+            .any(|r| r.method == "DELETE" && r.path == "/api/v1/watchlist/1?mediaType=movie"),
+        "a remove request carries the media type"
+    );
+}
+
+#[test]
+fn seerr_set_watchlist_under_api_key_is_refused_without_a_request() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    install_api_key_handle(&core, &base);
+    let before = mock_total(&log);
+
+    let result = core.seerr_set_watchlist(wl_card(SeerrMediaType::Movie, 1, "x"), true);
+
+    assert!(matches!(result, Err(CoreError::Api { .. })), "{result:?}");
+    assert_eq!(mock_total(&log), before);
+}
+
+#[test]
+fn a_failed_set_watchlist_keeps_the_cached_list() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, log) = core.runtime().block_on(routed_seerr_server(|req| {
+        if req.method == "POST" && req.route() == "/api/v1/watchlist" {
+            MockReply::json(500, "{}")
+        } else {
+            watchlist_routes(req)
+        }
+    }));
+    install_cookie_handle(&core, &base);
+    core.seerr_watchlist().expect("first read");
+
+    let result = core.seerr_set_watchlist(wl_card(SeerrMediaType::Movie, 1, "x"), true);
+    core.seerr_watchlist().expect("second read");
+
+    assert!(result.is_err());
+    assert_eq!(mock_count(&log, "GET", "/api/v1/discover/watchlist"), 1);
+}
+
+#[test]
+fn on_watchlist_is_unavailable_under_api_key_and_the_users_flag_otherwise() {
+    let table = [
+        (true, true, None),
+        (true, false, None),
+        (false, true, Some(true)),
+        (false, false, Some(false)),
+    ];
+    for (is_api_key, flag, expected) in table {
+        assert_eq!(on_watchlist_for(is_api_key, flag), expected);
+    }
+}
+
+#[test]
+fn seerr_movie_carries_the_users_watchlist_flag_under_a_cookie_session_only() {
+    let (_dir, core) = core_in_tempdir();
+    let (base, _log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    install_cookie_handle(&core, &base);
+    assert_eq!(
+        core.seerr_movie(1).expect("detail").on_watchlist,
+        Some(true)
+    );
+    assert_eq!(core.seerr_tv(2).expect("detail").on_watchlist, Some(true));
+
+    let (_dir, core) = core_in_tempdir();
+    let (base, _log) = core
+        .runtime()
+        .block_on(routed_seerr_server(watchlist_routes));
+    install_api_key_handle(&core, &base);
+    assert_eq!(core.seerr_movie(1).expect("detail").on_watchlist, None);
+}
+
+#[test]
+fn watchlist_tail_pages_cover_the_newest_twenty_rows() {
+    assert_eq!(
+        watchlist_tail_pages(0),
+        vec![1],
+        "an empty list still reads page 1"
+    );
+    assert_eq!(watchlist_tail_pages(1), vec![1]);
+    assert_eq!(watchlist_tail_pages(2), vec![1, 2]);
+    assert_eq!(
+        watchlist_tail_pages(5),
+        vec![4, 5],
+        "a short last page needs the one before"
+    );
+}
+
+#[test]
+fn newest_watchlist_rows_are_the_last_twenty_newest_first() {
+    let rows: Vec<seerr_api::WatchlistItem> = (1..=23)
+        .map(|id| seerr_api::WatchlistItem {
+            tmdb_id: Some(id),
+            media_type: Some("movie".to_string()),
+        })
+        .collect();
+
+    let ids: Vec<i64> = newest_watchlist_rows(rows)
+        .into_iter()
+        .filter_map(|row| row.tmdb_id)
+        .collect();
+
+    assert_eq!(ids, (4..=23).rev().collect::<Vec<i64>>());
 }

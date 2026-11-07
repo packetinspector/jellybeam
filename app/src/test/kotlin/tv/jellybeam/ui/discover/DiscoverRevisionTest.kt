@@ -73,6 +73,7 @@ class DiscoverRevisionTest {
         activeRequest = activeRequest,
         canRequest = activeRequest == null,
         canRequest4k = false,
+        onWatchlist = null,
     )
 
     private fun connectedStatus() = SeerrStatus(

@@ -210,6 +210,9 @@ pub struct SeerrMovieDetail {
     pub active_request: Option<SeerrActiveRequest>,
     pub can_request: bool,
     pub can_request_4k: bool,
+    /// Whether the signed-in user has this title on their Seerr watchlist; `None` = watchlist
+    /// unavailable (an API-key connection acts as the key owner, docs/14 Watchlist).
+    pub on_watchlist: Option<bool>,
 }
 
 #[derive(uniffi::Record, Debug, Clone, PartialEq)]
@@ -226,6 +229,9 @@ pub struct SeerrTvDetail {
     pub can_request: bool,
     pub can_request_4k: bool,
     pub seasons: Vec<SeerrSeasonStatus>,
+    /// Whether the signed-in user has this title on their Seerr watchlist; `None` = watchlist
+    /// unavailable (an API-key connection acts as the key owner, docs/14 Watchlist).
+    pub on_watchlist: Option<bool>,
 }
 
 /// A title's detail after a request mutation (`seerr_submit_request_detail` /

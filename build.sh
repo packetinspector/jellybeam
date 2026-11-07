@@ -20,10 +20,21 @@ build_image() {
 # Apple Silicon, the default; Dockerfile.arm64) or android-build (amd64 under
 # Rosetta; Dockerfile). See docs/06-build-container.md "Two images".
 SERVICE="${JELLYBEAM_BUILD_SERVICE:-android-build-arm64}"
+. tools/build-admission.sh
+# A capped run (admitted beside another build) gets a single-use daemon: its smaller heap
+# would otherwise leave a second idle daemon holding memory beside the warm one.
 run_cmd() {
     docker compose up -d --no-recreate "$SERVICE" >/dev/null 2>&1
-    docker compose exec -T "$SERVICE" "$@"
+    admission_exec_flags
+    if [ "${#ADMIT_EXEC[@]}" -gt 0 ] && [ "$1" = ./gradlew ]; then set -- "$@" --no-daemon; fi
+    docker compose exec -T "${ADMIT_EXEC[@]}" "$SERVICE" "$@"
 }
+
+# Every command that runs Gradle or cargo waits for a build slot first (docs/06 "Build admission").
+case "${1:-shell}" in
+    core|build|release|update-fixture|test-rust|lint-rust|test|check|check-fast)
+        admission_acquire "$1" || exit $? ;;
+esac
 
 case "${1:-shell}" in
     image)

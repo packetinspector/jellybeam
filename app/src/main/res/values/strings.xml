@@ -169,7 +169,15 @@
     <string name="search_field_label">Search</string>
     <string name="search_empty_hint">Search your library</string>
     <string name="search_empty_hint_with_discover">Search your library and Discover</string>
-    <string name="search_no_results">No matches</string>
+    <!-- Search with no matches (docs/29 §9 K3): the query exactly as typed. -->
+    <string name="search_no_results_for">No results for “%1$s”.</string>
+    <!-- Under it, what was searched: the library kinds joined by " │ " (cased up in code). -->
+    <string name="search_searched">Searched %1$s</string>
+    <!-- Search result group headers (docs/29 §9 K1), in their fixed order; music groups reuse the music tab names. -->
+    <string name="search_group_films">Films</string>
+    <string name="search_group_series">Series</string>
+    <string name="search_group_episodes">Episodes</string>
+    <string name="search_group_other">Other</string>
     <string name="search_discover_kicker">FROM DISCOVER · REQUEST WITH SEERR</string>
     <string name="search_discover_searching">Searching Discover…</string>
     <string name="search_discover_unavailable">Discover isn\'t answering right now</string>
@@ -264,6 +272,9 @@
     <string name="settings_desc_playback_autoplay_delay">How long to wait before autoplay starts the next episode.</string>
     <string name="settings_mini_player">Mini player</string>
     <string name="settings_desc_playback_mini_player">Back or Home during playback shrinks the video into a corner window that keeps playing while you browse.</string>
+    <!-- docs/29 §1: shown once the server sent a loudness gain for any song. -->
+    <string name="settings_normalize_volume">Normalize volume</string>
+    <string name="settings_desc_playback_normalize_volume">Plays songs at a similar loudness, using the gain your server measured for each track or album. Music only.</string>
     <string name="settings_desc_playback_mini_player_unsupported">Not available on this device. Picture-in-picture is missing here or turned off for Jellybeam in the system settings.</string>
 
     <!-- Playback section, "Still watching?" group (docs/feature-dev/
@@ -553,7 +564,11 @@
     <string name="discover_action_request">Request</string>
     <string name="discover_action_request_4k">Request 4K</string>
     <string name="discover_action_cancel_request">Cancel request</string>
+    <string name="discover_action_add_to_watchlist">Add to watchlist</string>
+    <string name="discover_action_on_watchlist">On watchlist</string>
+    <string name="discover_watchlist_title">Watchlist</string>
     <string name="discover_action_trailer">Trailer</string>
+    <string name="trailer_unavailable">No app can play this trailer</string>
     <string name="discover_cancel_request_title">Cancel this request?</string>
     <string name="discover_cancel_request_body">This withdraws your request from the server.</string>
     <string name="discover_cancel_request_confirm">Cancel request</string>

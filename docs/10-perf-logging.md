@@ -91,7 +91,9 @@ perf startup phase=home.shelvesMounted atMs=1938
   `MainActivity.onCreate` to the first `ViewTreeObserver.OnPreDrawListener`
   callback (i.e. time to first frame actually drawn).
 - `root.stackReady` -- `JellybeamRoot`'s back stack first resolving (Home or
-  Sign In) after `restoreSession`/`openMirror` settle. Fires again on a
+  Sign In) after `restoreSession`/`openMirror` settle; on a cold start to
+  Home it also waits, at most 1 s, for the warm-up's Home snapshot
+  (docs/brand.md §6.3), so Home seeds without a skeleton. Fires again on a
   later session epoch (a Servers-section switch/add) or an Activity
   recreated in a live process, not just on cold start.
 - `home.contentDrawn` -- one-shot, the first pre-draw that actually carries

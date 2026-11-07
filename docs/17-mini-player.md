@@ -42,6 +42,12 @@ With the mini player on (Settings › Playback › "Mini player"):
 
 With the setting off, nothing changes: Back exits playback, Home stops it.
 
+**Music and the mini player** (docs/29 §3 Q1): starting music while the mini
+player shows a video closes that video first (its final stop lands before the
+music service starts), and starting any video stops the music and removes the
+music bar before the player opens. Music never plays in the mini player; the
+two never sound together.
+
 ## 2. Architecture
 
 The "singleInstance player" shape:

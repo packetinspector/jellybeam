@@ -252,6 +252,9 @@ pub struct MovieDetails {
     pub credits: Option<Credits>,
     #[serde(default)]
     pub media_info: Option<MediaInfo>,
+    /// Per-user: under `API_KEY` this is the key owner's flag (docs/14 Watchlist).
+    #[serde(default)]
+    pub on_user_watchlist: bool,
 }
 
 /// `#/components/schemas/TvDetails` (subset), `GET /tv/{id}`.
@@ -280,6 +283,9 @@ pub struct TvDetails {
     pub credits: Option<Credits>,
     #[serde(default)]
     pub media_info: Option<MediaInfo>,
+    /// Same per-user meaning as [`MovieDetails::on_user_watchlist`].
+    #[serde(default)]
+    pub on_user_watchlist: bool,
 }
 
 /// `#/components/schemas/PersonDetails` (subset), `GET /person/{id}`.
@@ -373,6 +379,26 @@ pub struct ServiceDetail {
 pub struct RequestsPage {
     #[serde(default)]
     pub results: Vec<MediaRequest>,
+}
+
+/// `GET /discover/watchlist` (subset): only the fields the core resolves a card from; the
+/// server's titles are client-supplied and carry no art (docs/14 Watchlist).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchlistPage {
+    #[serde(default)]
+    pub total_pages: i64,
+    #[serde(default)]
+    pub results: Vec<WatchlistItem>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchlistItem {
+    #[serde(default)]
+    pub tmdb_id: Option<i64>,
+    #[serde(default)]
+    pub media_type: Option<String>,
 }
 
 /// `POST /request` request body (subset of the spec's writable fields).

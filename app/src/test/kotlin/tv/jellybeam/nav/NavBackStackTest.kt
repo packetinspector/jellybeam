@@ -386,4 +386,22 @@ class NavBackStackTest {
         assertEquals(listOf(Screen.Home, join), NavBackStack.of(Screen.Home).forDrawerPick(join).entries)
         assertEquals(listOf(Screen.Home, join), NavBackStack.of(Screen.Home).push(Screen.Settings).forDrawerPick(join).entries)
     }
+
+    @Test
+    fun `Now Playing opens once per stack and reopening it pops back to it`() {
+        val artist = Screen.MusicArtist("artist-1")
+        val opened = NavBackStack.of(Screen.Home).push(artist).toNowPlaying()
+        assertEquals(listOf(Screen.Home, artist, Screen.MusicNowPlaying), opened.entries)
+        val again = opened.push(Screen.MusicQueue).push(Screen.MusicAlbum("album-1")).toNowPlaying()
+        assertEquals(listOf(Screen.Home, artist, Screen.MusicNowPlaying), again.entries)
+        assertEquals(opened.ids, again.ids)
+    }
+
+    @Test
+    fun `the music bar is absent only on Now Playing and the Queue`() {
+        assertTrue(Screen.MusicNowPlaying.hidesMusicBar)
+        assertTrue(Screen.MusicQueue.hidesMusicBar)
+        assertFalse(Screen.Home.hidesMusicBar)
+        assertFalse(Screen.MusicAlbum("album-1").hidesMusicBar)
+    }
 }

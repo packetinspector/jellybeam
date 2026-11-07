@@ -67,6 +67,7 @@ import tv.jellybeam.diag.ReportSnapshot
 import tv.jellybeam.diag.SummaryInputs
 import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.requestFocusUntilSuccess
+import tv.jellybeam.ui.music.BlocksAmbient
 import uniffi.jellybeam_core.PlaybackQuality
 
 /** docs/21 §4's server lifetime -- independent of (but numerically equal to) [ReportServer]'s own
@@ -318,6 +319,7 @@ private fun QrCode(url: String, modifier: Modifier = Modifier) {
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun LoggingOffDialog(isTop: Boolean, onTurnOff: () -> Unit, onKeepLogging: () -> Unit) {
+    BlocksAmbient()
     val keepLoggingRequester = remember { FocusRequester() }
     val focusGate = LocalFocusGate.current
     LaunchedEffect(Unit) { requestFocusUntilSuccess(focusGate) { keepLoggingRequester.requestFocus() } }

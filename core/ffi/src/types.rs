@@ -96,6 +96,36 @@ pub struct Card {
     /// `DateCreated` (RFC3339 as stored); when the server added the item, `None` if unknown.
     #[uniffi(default = None)]
     pub date_created: Option<String>,
+    /// docs/feature-dev/music-design-brief.md §1.2: an Audio row's `Album`, `AlbumId` and
+    /// `AlbumArtist` (verbatim), its `ArtistItems` names in server order, `HasLyrics` and the
+    /// album cover tag it falls back to; empty outside music.
+    #[uniffi(default = None)]
+    pub album: Option<String>,
+    #[uniffi(default = None)]
+    pub album_id: Option<String>,
+    #[uniffi(default = None)]
+    pub album_artist: Option<String>,
+    #[uniffi(default = [])]
+    pub artists: Vec<String>,
+    #[uniffi(default = false)]
+    pub has_lyrics: bool,
+    #[uniffi(default = None)]
+    pub album_primary_tag: Option<String>,
+    /// Handoff §9: the song's and its album's served `NormalizationGain` in dB, `None` when
+    /// the server sends none; the player applies them, the server never does.
+    #[uniffi(default = None)]
+    pub normalization_gain: Option<f64>,
+    #[uniffi(default = None)]
+    pub album_normalization_gain: Option<f64>,
+    /// `UserData.PlayCount`; 0 when never played.
+    #[uniffi(default = 0)]
+    pub play_count: u32,
+    /// The first `AlbumArtists` entry's id of an Audio or MusicAlbum card; `None` elsewhere.
+    #[uniffi(default = None)]
+    pub album_artist_id: Option<String>,
+    /// `MediaType` verbatim ("Audio" on a music playlist); `None` when the server sent none.
+    #[uniffi(default = None)]
+    pub media_type: Option<String>,
 }
 
 #[cfg(test)]
@@ -131,6 +161,17 @@ impl Card {
             parent_thumb_item_id: None,
             parent_thumb_tag: None,
             date_created: None,
+            album: None,
+            album_id: None,
+            album_artist: None,
+            artists: Vec::new(),
+            has_lyrics: false,
+            album_primary_tag: None,
+            normalization_gain: None,
+            album_normalization_gain: None,
+            play_count: 0,
+            album_artist_id: None,
+            media_type: None,
         }
     }
 }
@@ -175,6 +216,17 @@ impl From<media_cache::CardRow> for Card {
             parent_thumb_item_id: row.parent_thumb_item_id,
             parent_thumb_tag: row.parent_thumb_tag,
             date_created: row.date_created,
+            album: row.album,
+            album_id: row.album_id,
+            album_artist: row.album_artist,
+            artists: row.artists,
+            has_lyrics: row.has_lyrics,
+            album_primary_tag: row.album_primary_tag,
+            normalization_gain: row.normalization_gain,
+            album_normalization_gain: row.album_normalization_gain,
+            play_count: row.play_count,
+            album_artist_id: row.album_artist_id,
+            media_type: row.media_type,
         }
     }
 }
@@ -241,6 +293,27 @@ impl TryFrom<&jellyfin_api::models::BaseItemDto> for Card {
             parent_thumb_item_id: dto.parent_thumb_item_id.map(|id| id.to_string()),
             parent_thumb_tag: dto.parent_thumb_image_tag.clone(),
             date_created: dto.date_created.map(|d| d.to_rfc3339()),
+            album: dto.album.clone(),
+            album_id: dto.album_id.map(|id| id.to_string()),
+            album_artist: dto.album_artist.clone(),
+            artists: dto
+                .artist_items
+                .iter()
+                .filter_map(|artist| artist.name.clone())
+                .collect(),
+            has_lyrics: dto.has_lyrics.unwrap_or(false),
+            album_primary_tag: dto.album_primary_image_tag.clone(),
+            normalization_gain: dto.normalization_gain.map(f64::from),
+            album_normalization_gain: dto.album_normalization_gain.map(f64::from),
+            play_count: user_data
+                .and_then(|u| u.play_count)
+                .map_or(0, |n| u32::try_from(n).unwrap_or(0)),
+            album_artist_id: dto
+                .album_artists
+                .first()
+                .and_then(|artist| artist.id)
+                .map(|id| id.to_string()),
+            media_type: dto.media_type.map(|m| m.to_string()),
         })
     }
 }
@@ -716,6 +789,61 @@ pub struct ItemDetail {
     pub directors: Vec<String>,
     /// Writer name(s) -- see [`Self::directors`], same before-the-cap reasoning.
     pub writers: Vec<String>,
+    /// docs/19 §2: trailers stored beside the item; `0` when the server omits the count (it does
+    /// unless `LocalTrailerCount` is requested).
+    #[uniffi(default = 0)]
+    pub local_trailer_count: i32,
+    /// docs/19 §2: extras count, `0` when omitted; see [`Self::local_trailer_count`].
+    #[uniffi(default = 0)]
+    pub special_feature_count: i32,
+    /// docs/19 §2: external trailer links (e.g. YouTube), server order, entries without a URL
+    /// dropped.
+    #[uniffi(default = [])]
+    pub remote_trailers: Vec<RemoteTrailer>,
+}
+
+/// One external trailer link from `RemoteTrailers`.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTrailer {
+    pub name: Option<String>,
+    pub url: String,
+}
+
+impl TryFrom<&jellyfin_api::models::MediaUrl> for RemoteTrailer {
+    type Error = ();
+
+    fn try_from(media_url: &jellyfin_api::models::MediaUrl) -> Result<Self, Self::Error> {
+        let url = media_url.url.clone().filter(|url| !url.trim().is_empty());
+        Ok(RemoteTrailer {
+            name: media_url.name.clone(),
+            url: url.ok_or(())?,
+        })
+    }
+}
+
+/// One local trailer or special feature (docs/19 §2), as `/Items/{id}/LocalTrailers` and
+/// `/SpecialFeatures` list them.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct ExtraItem {
+    pub id: String,
+    /// Verbatim from the server; empty when it sent none.
+    pub name: String,
+    /// The server's `ExtraType` string ("Trailer", "BehindTheScenes", ...), `None` when absent.
+    pub extra_type: Option<String>,
+    pub run_time_ticks: Option<i64>,
+}
+
+impl TryFrom<&jellyfin_api::models::BaseItemDto> for ExtraItem {
+    type Error = ();
+
+    fn try_from(dto: &jellyfin_api::models::BaseItemDto) -> Result<Self, Self::Error> {
+        Ok(ExtraItem {
+            id: dto.id.ok_or(())?.to_string(),
+            name: dto.name.clone().unwrap_or_default(),
+            extra_type: dto.extra_type.map(|kind| kind.to_string()),
+            run_time_ticks: dto.run_time_ticks,
+        })
+    }
 }
 
 /// Cap on [`ItemDetail::people`].
@@ -788,6 +916,13 @@ impl From<&jellyfin_api::models::BaseItemDto> for ItemDetail {
             child_count: dto.child_count,
             directors: people_named_by_kind(&dto.people, PersonKind::Director),
             writers: people_named_by_kind(&dto.people, PersonKind::Writer),
+            local_trailer_count: dto.local_trailer_count.unwrap_or(0),
+            special_feature_count: dto.special_feature_count.unwrap_or(0),
+            remote_trailers: dto
+                .remote_trailers
+                .iter()
+                .filter_map(|media_url| RemoteTrailer::try_from(media_url).ok())
+                .collect(),
         }
     }
 }
@@ -1124,6 +1259,113 @@ impl From<media_cache::GridGroup> for GridGroup {
         GridGroup {
             key: group.key,
             count: group.count,
+        }
+    }
+}
+
+/// docs/feature-dev/music-design-brief.md §1, handoff §4 D: which songs a song list shows --
+/// mirrors `media_cache::SongSource` 1:1; each source fixes its own order.
+#[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
+pub enum SongSource {
+    All { view_id: String },
+    Favorites { view_id: String },
+    RecentlyPlayed { view_id: String },
+    Genre { view_id: String, genre: String },
+    Artist { artist_id: String, sort: GridSort },
+}
+
+impl From<SongSource> for media_cache::SongSource {
+    fn from(source: SongSource) -> Self {
+        match source {
+            SongSource::All { view_id } => Self::All { view_id },
+            SongSource::Favorites { view_id } => Self::Favorites { view_id },
+            SongSource::RecentlyPlayed { view_id } => Self::RecentlyPlayed { view_id },
+            SongSource::Genre { view_id, genre } => Self::Genre { view_id, genre },
+            SongSource::Artist { artist_id, sort } => Self::Artist {
+                artist_id,
+                sort: sort.into(),
+            },
+        }
+    }
+}
+
+/// Handoff §4 A: the Artists tab toggle -- mirrors `media_cache::ArtistScope` 1:1.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtistScope {
+    AlbumArtists,
+    All,
+}
+
+impl From<ArtistScope> for media_cache::ArtistScope {
+    fn from(scope: ArtistScope) -> Self {
+        match scope {
+            ArtistScope::AlbumArtists => Self::AlbumArtists,
+            ArtistScope::All => Self::All,
+        }
+    }
+}
+
+/// One artist -- mirrors `media_cache::MusicArtistRow` 1:1; `name` verbatim, `sort_name`
+/// and `primary_tag` `None` for a per-track performer with no mirrored artist row.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct MusicArtistRow {
+    pub id: String,
+    pub name: String,
+    pub sort_name: Option<String>,
+    pub primary_tag: Option<String>,
+    pub album_count: u64,
+    pub appears_on_count: u64,
+    pub song_count: u64,
+    pub runtime_ticks: i64,
+}
+
+impl From<media_cache::MusicArtistRow> for MusicArtistRow {
+    fn from(row: media_cache::MusicArtistRow) -> Self {
+        MusicArtistRow {
+            id: row.id,
+            name: row.name,
+            sort_name: row.sort_name,
+            primary_tag: row.primary_tag,
+            album_count: row.album_count,
+            appears_on_count: row.appears_on_count,
+            song_count: row.song_count,
+            runtime_ticks: row.runtime_ticks,
+        }
+    }
+}
+
+/// One genre of a music view, name verbatim -- mirrors `media_cache::MusicGenreRow` 1:1.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct MusicGenreRow {
+    pub name: String,
+    pub album_count: u64,
+    pub song_count: u64,
+}
+
+impl From<media_cache::MusicGenreRow> for MusicGenreRow {
+    fn from(row: media_cache::MusicGenreRow) -> Self {
+        MusicGenreRow {
+            name: row.name,
+            album_count: row.album_count,
+            song_count: row.song_count,
+        }
+    }
+}
+
+/// An album header's counts -- mirrors `media_cache::AlbumSummary` 1:1.
+#[derive(uniffi::Record, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlbumSummary {
+    pub track_count: u64,
+    pub disc_count: u64,
+    pub runtime_ticks: i64,
+}
+
+impl From<media_cache::AlbumSummary> for AlbumSummary {
+    fn from(summary: media_cache::AlbumSummary) -> Self {
+        AlbumSummary {
+            track_count: summary.track_count,
+            disc_count: summary.disc_count,
+            runtime_ticks: summary.runtime_ticks,
         }
     }
 }
@@ -2966,6 +3208,86 @@ mod tests {
     }
 
     #[test]
+    fn item_detail_carries_extras_counts_and_remote_trailers_dropping_urlless_entries() {
+        let media_url = |name: Option<&str>, url: Option<&str>| jellyfin_api::models::MediaUrl {
+            name: name.map(str::to_string),
+            url: url.map(str::to_string),
+        };
+        let mut dto = jellyfin_api::models::BaseItemDto::default();
+        dto.local_trailer_count = Some(2);
+        dto.special_feature_count = Some(5);
+        dto.remote_trailers = vec![
+            media_url(Some("Teaser"), Some("https://trailers.test/watch?v=one")),
+            media_url(Some("No link"), None),
+            media_url(None, Some("   ")),
+            media_url(None, Some("https://trailers.test/watch?v=two")),
+        ];
+        let detail = ItemDetail::from(&dto);
+        assert_eq!(
+            (detail.local_trailer_count, detail.special_feature_count),
+            (2, 5)
+        );
+        assert_eq!(
+            detail.remote_trailers,
+            vec![
+                RemoteTrailer {
+                    name: Some("Teaser".to_string()),
+                    url: "https://trailers.test/watch?v=one".to_string(),
+                },
+                RemoteTrailer {
+                    name: None,
+                    url: "https://trailers.test/watch?v=two".to_string(),
+                },
+            ]
+        );
+
+        let bare = ItemDetail::from(&jellyfin_api::models::BaseItemDto::default());
+        assert_eq!(
+            (bare.local_trailer_count, bare.special_feature_count),
+            (0, 0)
+        );
+        assert!(bare.remote_trailers.is_empty());
+    }
+
+    #[test]
+    fn extra_item_keeps_the_servers_extra_type_string_and_drops_idless_dtos() {
+        use jellyfin_api::models::{BaseItemDto, ExtraType};
+        let id = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000a01").expect("uuid");
+        let dto = BaseItemDto {
+            id: Some(id),
+            name: Some("Making Of".to_string()),
+            extra_type: Some(ExtraType::BehindTheScenes),
+            run_time_ticks: Some(300_230_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            ExtraItem::try_from(&dto),
+            Ok(ExtraItem {
+                id: id.to_string(),
+                name: "Making Of".to_string(),
+                extra_type: Some("BehindTheScenes".to_string()),
+                run_time_ticks: Some(300_230_000),
+            })
+        );
+
+        let bare = BaseItemDto {
+            id: Some(id),
+            ..Default::default()
+        };
+        assert_eq!(
+            ExtraItem::try_from(&bare),
+            Ok(ExtraItem {
+                id: id.to_string(),
+                name: String::new(),
+                extra_type: None,
+                run_time_ticks: None,
+            }),
+            "a missing name is empty, a missing ExtraType is None"
+        );
+        assert_eq!(ExtraItem::try_from(&BaseItemDto::default()), Err(()));
+    }
+
+    #[test]
     fn item_detail_size_bytes_comes_from_the_first_media_source_only() {
         let mut dto = sample_series_dto();
         dto.media_sources = vec![
@@ -3100,6 +3422,104 @@ mod tests {
         let card = Card::try_from(&dto).expect("has id");
         assert_eq!(card.parent_thumb_item_id, Some(series.to_string()));
         assert_eq!(card.parent_thumb_tag.as_deref(), Some("series-thumb"));
+    }
+
+    /// Handoff §9: a live song carries its served gains in dB, and none when unserved.
+    #[test]
+    fn card_try_from_base_item_dto_carries_normalization_gains() {
+        let id = uuid::Uuid::parse_str("e2f5a5f1-1a0b-4b3a-9c2e-000000000006").expect("uuid");
+        let dto = jellyfin_api::models::BaseItemDto {
+            id: Some(id),
+            type_: Some(jellyfin_api::models::BaseItemKind::Audio),
+            normalization_gain: Some(-6.5),
+            album_normalization_gain: Some(-7.25),
+            ..Default::default()
+        };
+        let card = Card::try_from(&dto).expect("has id");
+        assert_eq!(card.normalization_gain, Some(-6.5));
+        assert_eq!(card.album_normalization_gain, Some(-7.25));
+        let bare = Card::try_from(&jellyfin_api::models::BaseItemDto {
+            id: Some(id),
+            ..Default::default()
+        })
+        .expect("has id");
+        assert_eq!(
+            (bare.normalization_gain, bare.album_normalization_gain),
+            (None, None)
+        );
+    }
+
+    /// A mirrored row's play count and album artist id reach its card unchanged.
+    #[test]
+    fn card_from_a_mirror_row_carries_play_count_and_album_artist_id() {
+        let row = media_cache::CardRow {
+            play_count: 9,
+            album_artist_id: Some("synthetic-artist".to_string()),
+            ..crate::object::tests::grace_row("Audio", None)
+        };
+        let card = Card::from(row);
+        assert_eq!(
+            (card.play_count, card.album_artist_id.as_deref()),
+            (9, Some("synthetic-artist"))
+        );
+    }
+
+    /// A live song carries its play count and its first album artist's id; no count reads 0.
+    #[test]
+    fn card_try_from_base_item_dto_carries_play_count_and_album_artist_id() {
+        let id = uuid::Uuid::parse_str("e2f5a5f1-1a0b-4b3a-9c2e-000000000007").expect("uuid");
+        let artist = uuid::Uuid::parse_str("e2f5a5f1-1a0b-4b3a-9c2e-000000000008").expect("uuid");
+        let other = uuid::Uuid::parse_str("e2f5a5f1-1a0b-4b3a-9c2e-000000000009").expect("uuid");
+        let pair = |id| jellyfin_api::models::NameGuidPair {
+            id: Some(id),
+            name: Some("Synthetic".to_string()),
+        };
+        let dto = jellyfin_api::models::BaseItemDto {
+            id: Some(id),
+            type_: Some(jellyfin_api::models::BaseItemKind::Audio),
+            album_artists: vec![pair(artist), pair(other)],
+            user_data: Some(jellyfin_api::models::UserItemDataDto {
+                play_count: Some(7),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let card = Card::try_from(&dto).expect("has id");
+        assert_eq!(card.play_count, 7);
+        assert_eq!(card.album_artist_id, Some(artist.to_string()));
+        let bare = Card::try_from(&jellyfin_api::models::BaseItemDto {
+            id: Some(id),
+            ..Default::default()
+        })
+        .expect("has id");
+        assert_eq!((bare.play_count, bare.album_artist_id), (0, None));
+    }
+
+    /// A playlist's `MediaType` reaches its card verbatim, live or mirrored; none when unsent.
+    #[test]
+    fn card_carries_media_type_from_a_live_dto_and_a_mirror_row() {
+        let id = uuid::Uuid::parse_str("e2f5a5f1-1a0b-4b3a-9c2e-000000000010").expect("uuid");
+        let dto = jellyfin_api::models::BaseItemDto {
+            id: Some(id),
+            type_: Some(jellyfin_api::models::BaseItemKind::Playlist),
+            media_type: Some(jellyfin_api::models::MediaType::Audio),
+            ..Default::default()
+        };
+        assert_eq!(
+            Card::try_from(&dto).expect("has id").media_type.as_deref(),
+            Some("Audio")
+        );
+        let bare = Card::try_from(&jellyfin_api::models::BaseItemDto {
+            id: Some(id),
+            ..Default::default()
+        })
+        .expect("has id");
+        assert_eq!(bare.media_type, None);
+        let row = media_cache::CardRow {
+            media_type: Some("Audio".to_string()),
+            ..crate::object::tests::grace_row("Playlist", None)
+        };
+        assert_eq!(Card::from(row).media_type.as_deref(), Some("Audio"));
     }
 
     #[test]

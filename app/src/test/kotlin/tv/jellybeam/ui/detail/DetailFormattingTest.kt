@@ -1280,30 +1280,6 @@ class DetailFormattingTest {
         assertEquals(2, DetailFormatting.fittingItemCount(listOf(10f, 20f), separatorWidth = 5f, maxWidth = 35f))
     }
 
-    // -- shelfEntryIndex (docs/15 §2: Down into a shelf lands on its first visible card) ----------
-
-    @Test
-    fun `shelfEntryIndex at rest lands on the first item and is stable across repeated entries`() {
-        assertEquals(0, DetailFormatting.shelfEntryIndex(0, 0, 10))
-        assertEquals(1, DetailFormatting.shelfEntryIndex(1, 0, 10))
-        assertEquals(1, DetailFormatting.shelfEntryIndex(1, 0, 10))
-    }
-
-    @Test
-    fun `shelfEntryIndex skips a partly scrolled-off first item`() {
-        assertEquals(2, DetailFormatting.shelfEntryIndex(1, 50, 10))
-    }
-
-    @Test
-    fun `shelfEntryIndex clamps to the last item`() {
-        assertEquals(9, DetailFormatting.shelfEntryIndex(9, 10, 10))
-    }
-
-    @Test
-    fun `shelfEntryIndex is null for an empty shelf`() {
-        assertNull(DetailFormatting.shelfEntryIndex(0, 0, 0))
-    }
-
     // -- wholeCardCount (docs/19-detail-action-menu.md §1.5 FIX D) ----------
 
     @Test

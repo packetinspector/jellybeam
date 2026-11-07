@@ -59,6 +59,39 @@ Pick the amd64 service only when the arm64 image will not build or run on
 your host (an Intel machine, or a Docker runtime without amd64 emulation
 inside arm64 containers): `JELLYBEAM_BUILD_SERVICE=android-build`.
 
+## Build admission
+
+Every worktree's build container shares one Docker VM, and two full Gradle
+builds can exhaust it (the daemon is OOM-killed, cargo links fail on missing
+`rcgu.o` files). So every `build.sh` command that runs Gradle or cargo, and
+`tools/gate.sh` once per run, first takes a slot in a host directory shared by
+all checkouts (`${XDG_CACHE_HOME:-~/.cache}/jellybeam/build-slots`,
+`tools/build-admission.sh`):
+
+- Every build reads the VM's `MemAvailable` (inside the container; `docker
+  stats` misses swap), even the first, because builds from checkouts without
+  admission hold no slot.
+- A lone build with at least `JELLYBEAM_SOLO_BUDGET_MB` (default 6144) free
+  runs uncapped, keeping `gradle.properties`' heap and its warm daemon.
+- With at least `JELLYBEAM_BUILD_BUDGET_MB` (default 4096) free, and fewer than
+  `JELLYBEAM_MAX_BUILDS` (default 2) running, it runs capped to fit the budget:
+  Gradle `-Xmx3g`, 2 workers, a single-use daemon, and 2 cargo jobs
+  (`JELLYBEAM_CAPPED_GRADLE_OPTS`, `JELLYBEAM_CAPPED_CARGO_JOBS`).
+- Otherwise it waits in FIFO order, printing a `build-queue:` line every
+  minute naming what it waits on. After `JELLYBEAM_BUILD_MAX_WAIT_MIN`
+  (default 90) it fails with exit 75 (`gate.sh`: 3).
+
+A warm daemon holds GBs after its build, so a checkout stops its own idle
+Gradle and Kotlin daemons (never another container's) when it releases a slot
+with builds queued, or once while it waits after the head of the queue found
+memory alone blocking it with no build running; that wait line also names the
+largest container. A slot whose process died is reclaimed
+by the next waiter. Nested `build.sh`
+calls run under their parent's slot. `JELLYBEAM_BUILD_QUEUE=off` bypasses all
+of this. Builds started outside `build.sh` (a bare `docker compose exec`) hold
+no slot and only show up as lower free memory. Tests:
+`tools/test/build-admission-test.sh` (fake `docker` on `PATH`).
+
 ## Local substation checkout
 
 `core/ass-render` pins substation (the styled-subtitle renderer) to a git
@@ -143,8 +176,8 @@ Repeatable session tooling under `tools/`; each takes `--help`. Device serials c
 - `tools/gate.sh [--rust-only|--kotlin-only|--fast <pkg|crate> [test]] [--keep-lock]` — the gates
   (`build.sh test-rust`, `lint-rust`, `check`, and the launcher icon check
   `tools/launcher-icon/check.py`) under timeouts, one summary line, logs in a temp dir.
-  Copies `core/Cargo.lock` aside and back without git, and refuses to start while another
-  Gradle or container build runs.
+  Copies `core/Cargo.lock` aside and back without git, and queues for a build slot first
+  ("Build admission").
 - `tools/scorecard.sh BASE HEAD [--md]` — production/test lines per language (comments and
   blanks stripped, Rust `#[cfg(test)]` mods as tests), coordination counts, and every new type,
   FFI export, settings field and file by name. Works on `git archive` snapshots, read-only.

@@ -3,10 +3,14 @@ package tv.jellybeam.ui.cards
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import tv.jellybeam.ui.focus.FocusMemory
 
 /**
  * The default [BringIntoViewSpec] slides a focused item flush to the viewport edge, ignoring
@@ -90,4 +94,38 @@ internal fun edgeMarginScrollDistance(offset: Float, size: Float, containerSize:
     offset < marginPx -> offset - marginPx
     offset + size > containerSize - marginPx -> offset + size - (containerSize - marginPx)
     else -> 0f
+}
+
+/**
+ * docs/15 §2: a lazy shelf's per-item requesters so entering it lands on its first fully visible
+ * item ([shelfEntryIndex]), not the spatially nearest one; yields while [FocusMemory.frozen] so a
+ * remembered key wins. Indices are in the composed list's space (Detail's sliced window).
+ */
+internal class ShelfEntry {
+    private val requesters = mutableMapOf<Int, FocusRequester>()
+
+    fun target(memory: FocusMemory, listState: LazyListState, itemCount: Int): FocusRequester {
+        if (memory.frozen) return FocusRequester.Default
+        val index = shelfEntryIndex(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, itemCount)
+        return index?.let { requesters[it] } ?: FocusRequester.Default
+    }
+
+    @Composable
+    fun requester(index: Int): FocusRequester {
+        val requester = remember { FocusRequester() }
+        DisposableEffect(index, requester) {
+            requesters[index] = requester
+            onDispose { if (requesters[index] === requester) requesters.remove(index) }
+        }
+        return requester
+    }
+}
+
+/** The first fully visible item of a shelf, or null when it is empty; a partly scrolled-off first
+ * item is skipped (same rule as Detail's card-window latch).
+ */
+internal fun shelfEntryIndex(firstVisibleIndex: Int, firstVisibleOffsetPx: Int, itemCount: Int): Int? {
+    if (itemCount <= 0) return null
+    val firstFullyVisible = firstVisibleIndex + if (firstVisibleOffsetPx > 0) 1 else 0
+    return firstFullyVisible.coerceIn(0, itemCount - 1)
 }

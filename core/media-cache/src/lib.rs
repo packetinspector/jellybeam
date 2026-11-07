@@ -5,6 +5,7 @@ use jellyfin_api::models::{BaseItemDto, UserItemDataDto};
 
 #[cfg(test)]
 mod mock_server;
+mod music;
 mod pool;
 mod query;
 mod rows;
@@ -13,6 +14,8 @@ mod sync;
 mod user_state;
 pub mod watch_grace;
 mod writer;
+
+pub use music::{AlbumSummary, ArtistScope, MusicArtistRow, MusicGenreRow, SongSource};
 
 /// Maps a view's `collection_type` to the root `item_type`(s) whose `date_created` reflects
 /// "recently added" for that library, matching Jellyfin's Latest-Media behavior (a TV
@@ -67,7 +70,10 @@ pub(crate) fn item_types_for_collection(collection_type: &str) -> &'static [&'st
 ///   short prefix like "an" matched nearly every synopsis).
 /// - 16 -> 17: adds `items.parent_thumb_item_id`/`parent_thumb_tag` (series Thumb art for
 ///   Continue Watching / Next Up, docs/07 §1); forces a resync to backfill.
-pub const SCHEMA_VERSION: u32 = 17;
+/// - 17 -> 18 (docs/feature-dev/music-design-brief.md §1): adds the music columns, the
+///   `item_artists` join and the music indexes; forces a resync to backfill.
+/// - 18 -> 19: adds `items.media_type` (an audio playlist opens the music page); forces a resync.
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// docs/16 §2.7: the reserved `view_id` that scopes the library grid queries to every
 /// favorite across libraries. Server ids are 32-hex, so it can never collide with one.
@@ -223,6 +229,8 @@ pub(crate) struct MirrorState {
     /// atomic, since it's a two-field struct touched only on a rare settings change or read
     /// once per `refresh_next_up` call.
     pub(crate) next_up_options: std::sync::Mutex<NextUpOptions>,
+    /// The Artists tab's sorted lists, built on first read; see [`music::ArtistLists`].
+    pub(crate) artist_lists: std::sync::Mutex<music::ArtistLists>,
     /// [`schema::IndexGroup::bit`]s of the deferred index groups that exist; a query needing
     /// an unbuilt group answers empty rather than scan the table (docs/25 §4.8).
     pub(crate) ready_index_groups: std::sync::atomic::AtomicU8,
@@ -267,6 +275,7 @@ impl MirrorState {
             self_weak,
             sync_activity: tokio::sync::watch::channel(SyncActivity::Idle).0,
             next_up_options: std::sync::Mutex::new(NextUpOptions::default()),
+            artist_lists: std::sync::Mutex::default(),
             ready_index_groups: std::sync::atomic::AtomicU8::new(0),
         }
     }
@@ -342,7 +351,7 @@ pub struct Mirror {
 
 /// Rows the UI binds to: extracted columns only — the DTO blob is NOT parsed on
 /// the browse path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CardRow {
     pub id: String,
     pub item_type: String,
@@ -407,6 +416,27 @@ pub struct CardRow {
     pub is_favorite: bool,
     /// `DateCreated` (RFC3339 as stored); when the server added the item, `None` if unknown.
     pub date_created: Option<String>,
+    /// docs/feature-dev/music-design-brief.md §1.2: an Audio row's `Album`, `AlbumId` and
+    /// `AlbumArtist`, verbatim; `None` outside music.
+    pub album: Option<String>,
+    pub album_id: Option<String>,
+    pub album_artist: Option<String>,
+    /// §1.2: `ArtistItems` names in server order, never split or re-cased (no "feat." parsing).
+    pub artists: Vec<String>,
+    /// §1.3: gates the lyrics fetch; `false` when unknown.
+    pub has_lyrics: bool,
+    /// §1.2: the album cover a track without its own `Primary` falls back to.
+    pub album_primary_tag: Option<String>,
+    /// Handoff §9: `NormalizationGain`/`AlbumNormalizationGain` in dB; `None` when unserved.
+    pub normalization_gain: Option<f64>,
+    pub album_normalization_gain: Option<f64>,
+    /// `UserData.PlayCount`; 0 when never played.
+    pub play_count: u32,
+    /// The first `AlbumArtists` entry's id of an Audio or MusicAlbum row; `None` elsewhere or
+    /// when the server sent none.
+    pub album_artist_id: Option<String>,
+    /// `MediaType` verbatim ("Audio" on a music playlist); `None` when the server sent none.
+    pub media_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -821,6 +851,15 @@ impl Mirror {
         self.inner.writer.barrier().await
     }
 
+    /// docs/feature-dev/music-design-brief.md §1.2: records a song's start as the server does
+    /// (played, one more play, last played now), never a resume position. Enqueued, not awaited.
+    pub async fn record_local_audio_play(&self, item_id: &str) {
+        self.inner
+            .writer
+            .record_local_audio_play(item_id.to_string())
+            .await;
+    }
+
     /// docs/19-detail-action-menu.md §2.2: applies a `UserItemDataDto` a server mutation
     /// just returned (FFI's `set_played`/`set_favorite`) as the authoritative result, same
     /// patch semantics as a `UserDataChanged` application (see `writer::apply_user_data`),
@@ -1124,7 +1163,125 @@ mod tests {
 
     #[test]
     fn schema_version_is_stable_constant() {
-        assert_eq!(SCHEMA_VERSION, 17);
+        assert_eq!(SCHEMA_VERSION, 19);
+    }
+
+    /// docs/feature-dev/music-design-brief.md §1: a music view syncs through today's requests
+    /// only (views, resume, the recursive breadth walk), and the mirror then answers the
+    /// album and artist browses from what that walk returned.
+    #[tokio::test]
+    async fn a_music_view_syncs_with_no_extra_request_and_answers_music_browses() {
+        use crate::mock_server::MockServer;
+        use jellyfin_api::{ClientIdentity, JellyfinClient};
+        use serde_json::json;
+
+        let view = "00000000-0000-4000-8000-000000000001";
+        let folder = "00000000-0000-4000-8000-000000000002";
+        let album = "00000000-0000-4000-8000-000000000201";
+        let band = "00000000-0000-4000-8000-000000000301";
+        let solo = "00000000-0000-4000-8000-000000000304";
+        let server = MockServer::start().await;
+        server.route(
+            "/UserViews",
+            &[],
+            json!({ "Items": [{ "Id": view, "Name": "Music", "CollectionType": "music" }] }),
+        );
+        server.route("/UserItems/Resume", &[], json!({ "Items": [] }));
+        let track = |n: u32, name: &str, performer: (&str, &str)| {
+            json!({
+                "Id": format!("00000000-0000-4000-8000-{n:012}"), "Name": name, "Type": "Audio",
+                "ParentId": album, "AlbumId": album, "Album": "Test Album",
+                "AlbumArtist": "Test Band", "AlbumArtists": [{ "Name": "Test Band", "Id": band }],
+                "ArtistItems": [{ "Name": performer.1, "Id": performer.0 }],
+                "ParentIndexNumber": 1, "IndexNumber": n - 100,
+            })
+        };
+        server.route(
+            "/Items",
+            &[("parentId", view), ("startIndex", "0")],
+            json!({
+                "Items": [
+                    { "Id": band, "Name": "Test Band", "Type": "MusicArtist" },
+                    { "Id": album, "Name": "Test Album", "Type": "MusicAlbum", "ParentId": folder,
+                      "AlbumArtist": "Test Band", "AlbumArtists": [{ "Name": "Test Band", "Id": band }] },
+                    track(102, "Second Song", (solo, "Solo Singer")),
+                    track(101, "First Song", (band, "Test Band")),
+                ],
+                "TotalRecordCount": 4
+            }),
+        );
+        let client = JellyfinClient::from_token(
+            &server.base_url,
+            ClientIdentity {
+                client: "Jellybeam Test".to_string(),
+                device: "test".to_string(),
+                device_id: "test-device".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            "tok",
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mirror = test_mirror(client, &dir.path().join("mirror.db"));
+
+        sync::initial_sync(&std::sync::Arc::downgrade(&mirror.inner)).await;
+        assert!(mirror.inner.writer.barrier().await);
+
+        let total = server.request_count("/");
+        let known = server.request_count("/UserViews")
+            + server.request_count("/UserItems/Resume")
+            + server.request_count("/Items?");
+        assert_eq!(total, known, "a request outside views/resume/breadth");
+        assert_eq!(
+            server.request_count("/Items?"),
+            server.request_count_matching(&format!("parentId={view}")),
+            "every /Items request is the view's breadth walk"
+        );
+        assert_eq!(server.request_count_matching("includeItemTypes"), 0);
+
+        let tracks = mirror.album_tracks(album, 0, 100).expect("tracks");
+        let names: Vec<&str> = tracks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["First Song", "Second Song"]);
+        assert_eq!(tracks[1].artists, vec!["Solo Singer"]);
+        let artists = mirror
+            .music_artists(view, ArtistScope::All, 0, 100)
+            .expect("artists");
+        let artist_names: Vec<&str> = artists.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(artist_names, vec!["Solo Singer", "Test Band"]);
+
+        // docs/29 §7: the kept list serves repeat reads and is rebuilt after a write.
+        let kept = mirror.artist_list(view, ArtistScope::All).expect("list");
+        assert!(std::sync::Arc::ptr_eq(
+            &kept,
+            &mirror.artist_list(view, ArtistScope::All).expect("list")
+        ));
+        let guest = "00000000-0000-4000-8000-000000000305";
+        let dto: BaseItemDto =
+            serde_json::from_value(track(103, "Third Song", (guest, "Another Guest")))
+                .expect("dto");
+        mirror
+            .inner
+            .writer
+            .upsert_items_scoped(vec![dto], Some(view.to_string()))
+            .await;
+        assert!(mirror.inner.writer.barrier().await);
+        assert_eq!(
+            mirror
+                .music_artist_count(view, ArtistScope::All)
+                .expect("count"),
+            3
+        );
+        assert_eq!(
+            mirror
+                .music_artist_count(view, ArtistScope::AlbumArtists)
+                .expect("count"),
+            1
+        );
+        let latest: Vec<String> = mirror
+            .latest(view, 10, false)
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(latest, vec!["Test Album".to_string()]);
     }
 
     // `start_paused = true`: `recv_changes` always waits out `CHANGE_DEBOUNCE` before

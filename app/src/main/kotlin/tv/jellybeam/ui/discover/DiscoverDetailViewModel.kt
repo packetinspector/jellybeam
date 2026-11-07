@@ -66,6 +66,10 @@ data class DiscoverDetailUiState(
     val transientEvent: DiscoverDetailTransientEvent? = null,
     /** One mutation (options fetch included) is in flight until its result is applied; every request, cancel and dismiss is a no-op meanwhile (docs/14). */
     val busy: Boolean = false,
+    /** `null`: the watchlist is unavailable (API-key connection) and the pill is absent (docs/14 Watchlist). */
+    val onWatchlist: Boolean? = null,
+    /** A failed watchlist toggle's message, shown beside the card. */
+    val watchlistError: String? = null,
 )
 
 /** What [DiscoverDetailViewModel.mutate] is running. */
@@ -89,6 +93,7 @@ private class LoadedDetail(
     val canRequest: Boolean,
     val canRequest4k: Boolean,
     val seasons: List<SeerrSeasonStatus>,
+    val onWatchlist: Boolean?,
 )
 
 /**
@@ -133,6 +138,7 @@ class DiscoverDetailViewModel(
                         canRequest = it.canRequest,
                         canRequest4k = it.canRequest4k,
                         seasons = emptyList(),
+                        onWatchlist = it.onWatchlist,
                     )
                 }
             } else {
@@ -151,6 +157,7 @@ class DiscoverDetailViewModel(
                         canRequest = it.canRequest,
                         canRequest4k = it.canRequest4k,
                         seasons = it.seasons,
+                        onWatchlist = it.onWatchlist,
                     )
                 }
             }
@@ -171,6 +178,7 @@ class DiscoverDetailViewModel(
                     canRequest = detail.canRequest,
                     canRequest4k = detail.canRequest4k,
                     seasons = detail.seasons,
+                    onWatchlist = detail.onWatchlist,
                     seasonSelection = seasonSelectionFor(it.seasons, detail.seasons, it.seasonSelection),
                 )
             }
@@ -191,7 +199,7 @@ class DiscoverDetailViewModel(
     private fun claim(): Boolean {
         val current = _state.value
         if (current.busy) return false
-        _state.value = current.copy(busy = true, error = null, requestError = null, cancelError = null)
+        _state.value = current.copy(busy = true, error = null, requestError = null, cancelError = null, watchlistError = null)
         return true
     }
 
@@ -228,6 +236,26 @@ class DiscoverDetailViewModel(
         } finally {
             // A cleared view model publishes nothing.
             if (currentCoroutineContext().isActive) _state.update { it.copy(busy = false) }
+        }
+    }
+
+    /** Flips the watchlist under the same busy slot; a failure shows beside the card and re-reads the server state (docs/14 Watchlist). */
+    fun toggleWatchlist() {
+        val target = _state.value.watchlistToggleTarget() ?: return
+        val card = _state.value.card ?: return
+        if (!claim()) return
+        viewModelScope.launch {
+            try {
+                gateway.seerrSetWatchlist(card, target)
+                _state.update { it.copy(onWatchlist = target) }
+            } catch (e: CoreException) {
+                val message = e.displayMessage(strings)
+                _state.update { it.copy(watchlistError = message) }
+                loadDetail()
+            } finally {
+                // A cleared view model publishes nothing.
+                if (currentCoroutineContext().isActive) _state.update { it.copy(busy = false) }
+            }
         }
     }
 
