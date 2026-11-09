@@ -1,5 +1,6 @@
 package tv.jellybeam.ui.music
 
+import android.os.SystemClock
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -40,6 +41,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,6 +62,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
@@ -83,6 +86,7 @@ import tv.jellybeam.ui.focus.placeByKeys
 import tv.jellybeam.ui.focus.rememberFocusMemory
 import tv.jellybeam.ui.focus.withPlacement
 import uniffi.jellybeam_core.SpecLineContext
+import uniffi.jellybeam_core.SyncedLyricLine
 import uniffi.jellybeam_core.musicSpecLine
 import uniffi.jellybeam_core.musicTranscodeLine
 
@@ -94,7 +98,8 @@ private val FACTS_TOP = 78.dp
 private val QUEUE_LINE_TOP = 246.dp
 private val FACTS_GAP = 20.dp
 private val LYRICS_START = 360.dp
-private val LYRICS_WIDTH = 540.dp
+// Ends at the main layout's right edge (40 dp in), so the compact row fits Stop and ···.
+private val LYRICS_WIDTH = 560.dp
 private const val LYRICS_TRANSPORT_SCALE = 0.8f
 private const val LYRIC_SCROLL_MS = 240
 private val PastLyric = JellybeamTheme.Panna.copy(alpha = 0x40 / 255f)
@@ -109,6 +114,8 @@ private const val KEY_STRIP = "np-strip"
 private const val KEY_ARTIST = "np-artist"
 private const val KEY_QUEUE = "np-queue"
 private const val KEY_LYRICS = "np-lyrics"
+private const val KEY_STOP = "np-stop"
+private const val KEY_VISUALIZER = "np-visualizer"
 private const val KEY_FAVORITE = "np-favorite"
 private const val KEY_MORE = "np-more"
 private const val KEY_LYRIC_TEXT = "np-lyric-text"
@@ -124,8 +131,11 @@ internal data class NowPlayingActions(
     val onOpenArtist: (() -> Unit)?,
     val onOpenQueue: () -> Unit,
     val onToggleLyrics: () -> Unit,
+    val onStop: () -> Unit,
     val onFavorite: () -> Unit,
     val onMore: () -> Unit,
+    /** docs/30 §7: opens the visualizer; null when the device has no GLES 3.0. */
+    val onVisualizer: (() -> Unit)? = null,
 )
 
 /**
@@ -182,6 +192,14 @@ private fun NowPlayingFor(
     FocusRestorer(memory, isTop, fallback = { memory.target(KEY_PLAY) }, tag = "music-now-playing")
 
     var lyricsOn by rememberSaveable { mutableStateOf(false) }
+    // docs/30 §7: the full-screen visualizer; closing it returns focus to its button by a gated placement.
+    val context = LocalContext.current
+    val canVisualize = remember { visualizerSupported(context) }
+    // Transient like the other panels: a recreated Activity reopens on Now Playing, not the overlay.
+    var visualizerOpen by remember { mutableStateOf(false) }
+    var visualizerCloses by remember { mutableIntStateOf(0) }
+    // docs/30 §7: a screen pushed over Now Playing closes the overlay, so the return restores focus normally.
+    LaunchedEffect(isTop) { if (!isTop) visualizerOpen = false }
     var lyricsToggles by remember { mutableIntStateOf(0) }
     val lyricsShown = lyricsOn && extras.itemId == model.itemId && extras.lyrics != LyricsState.Absent
     // docs/15 §4: the swap drops the focused pill and focus with it, so the new Lyrics pill takes it by a gated placement.
@@ -189,6 +207,10 @@ private fun NowPlayingFor(
     LaunchedEffect(lyricsToggles) {
         if (lyricsToggles == 0) return@LaunchedEffect
         memory.withPlacement { memory.placeByKeys(listOf(KEY_LYRICS), focusGate) }
+    }
+    LaunchedEffect(visualizerCloses) {
+        if (visualizerCloses == 0) return@LaunchedEffect
+        memory.withPlacement { memory.placeByKeys(listOf(KEY_VISUALIZER), focusGate) }
     }
 
     val position = rememberShownPosition(model.itemId, model.positionMs, model.durationMs, model.isPlaying)
@@ -200,7 +222,7 @@ private fun NowPlayingFor(
     val latestMenuTarget by rememberUpdatedState(menuTarget)
     val latestPosition by rememberUpdatedState(position)
     val artistId = owner.card(model.itemId)?.albumArtistId
-    val actions = remember(owner, viewModel, artistId, isFavorite, skipBackMs, skipForwardMs) {
+    val actions = remember(owner, viewModel, artistId, isFavorite, skipBackMs, skipForwardMs, canVisualize) {
         NowPlayingActions(
             onShuffle = { owner.send(MusicEvent.Transport(TransportOp.Shuffle(!latestModel.shuffle))) },
             onPrevious = { owner.send(MusicEvent.Transport(TransportOp.Previous)) },
@@ -217,8 +239,10 @@ private fun NowPlayingFor(
                 lyricsOn = !lyricsOn
                 lyricsToggles++
             },
+            onStop = { owner.send(MusicEvent.Stop) },
             onFavorite = { viewModel.toggleFavorite(latestModel.itemId, isFavorite) },
             onMore = { latestMenuTarget?.let { menuModel.open(it, KEY_MORE) } },
+            onVisualizer = if (canVisualize) ({ visualizerOpen = true }) else null,
         )
     }
     val panel = NowPlayingPanel(model, extras, isFavorite, position, (skipForwardMs / 1_000L).toInt(), itemActions = menuTarget != null, sessionEpoch)
@@ -234,6 +258,19 @@ private fun NowPlayingFor(
             modifier = Modifier.align(Alignment.TopEnd),
             pageFavorite = PageFavorite(model.itemId, isFavorite, actions.onFavorite),
         )
+        // Only while Now Playing is top: a screen pushed over it ends the surface and the ambient block.
+        if (visualizerOpen && canVisualize && isTop) {
+            VisualizerScreen(
+                owner,
+                playing = model.isPlaying,
+                onPlayPause = actions.onPlayPause,
+                onNextTrack = actions.onNext,
+                onPreviousTrack = actions.onPrevious,
+            ) {
+                visualizerOpen = false
+                visualizerCloses++
+            }
+        }
     }
 }
 
@@ -311,7 +348,7 @@ private fun LyricsLayout(panel: NowPlayingPanel, actions: NowPlayingActions, mem
     }
     Box(Modifier.padding(start = LYRICS_START, top = 70.dp).width(LYRICS_WIDTH).height(300.dp)) {
         when (val lyrics = panel.extras.lyrics) {
-            is LyricsState.Synced -> SyncedLyrics(lyrics, panel.position)
+            is LyricsState.Synced -> SyncedLyrics(lyrics, panel.model)
             is LyricsState.Unsynced -> UnsyncedLyrics(lyrics, memory)
             LyricsState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingDots(color = PannaB3) }
             LyricsState.Absent -> Unit
@@ -426,7 +463,7 @@ private fun TransportRow(model: NowPlayingModel, actions: NowPlayingActions, mem
     }
 }
 
-/** Queue · Lyrics (only with lyrics; a 404 hides it) · ♥ · ··· (both only on the current account). */
+/** Queue · Lyrics (only with lyrics; a 404 hides it) · Stop · ♥ · ··· (both only on the current account). */
 @Composable
 private fun SecondaryRow(panel: NowPlayingPanel, actions: NowPlayingActions, memory: FocusMemory, lyricsOn: Boolean, modifier: Modifier = Modifier) {
     val accent = LocalAccent.current
@@ -444,6 +481,16 @@ private fun SecondaryRow(panel: NowPlayingPanel, actions: NowPlayingActions, mem
                 compact = lyricsOn,
             )
         }
+        // docs/30 §7: the compact lyrics row has no room for it; the main layout carries it.
+        if (!lyricsOn) {
+            actions.onVisualizer?.let { open ->
+                MusicPill(stringResource(R.string.music_visualizer), glyph = null, primary = false, onClick = open, modifier = Modifier.focusKey(memory, KEY_VISUALIZER))
+            }
+        }
+        // docs/29 §9 F: Stop ends the queue, so the music bar goes and this screen leaves on its own.
+        MusicRoundButton(actions.onStop, accentFill = false, modifier = Modifier.focusKey(memory, KEY_STOP), compact = lyricsOn) { ink ->
+            androidx.compose.foundation.Canvas(Modifier.size(15.dp)) { StopGlyph(ink) }
+        }
         if (!panel.itemActions) return@Row
         MusicRoundButton(actions.onFavorite, accentFill = false, modifier = Modifier.focusKey(memory, KEY_FAVORITE), compact = lyricsOn) { ink ->
             val heart = if (panel.isFavorite && ink == JellybeamTheme.Panna) accent.accentInk else ink
@@ -456,13 +503,33 @@ private fun SecondaryRow(panel: NowPlayingPanel, actions: NowPlayingActions, mem
 }
 
 /**
+ * docs/29 §9 F2: the current line, run on from the player's last snapshot and woken at the next line's
+ * start; a new snapshot restarts it, so it never reads a ticker that has stopped.
+ */
+@Composable
+private fun rememberLyricLine(lines: List<SyncedLyricLine>, model: NowPlayingModel): State<Int> {
+    val line = remember(lines) { mutableIntStateOf(lyricCue(lines, model.positionMs).line) }
+    LaunchedEffect(lines, model.itemId, model.positionMs, model.durationMs, model.isPlaying) {
+        val anchor = SystemClock.elapsedRealtime()
+        while (true) {
+            val cue = lyricCue(lines, musicPositionMs(model.positionMs, model.durationMs, model.isPlaying, SystemClock.elapsedRealtime() - anchor))
+            line.intValue = cue.line
+            if (!model.isPlaying) return@LaunchedEffect
+            delay(cue.untilNextMs ?: return@LaunchedEffect)
+            withFrameMillis { }
+        }
+    }
+    return line
+}
+
+/**
  * docs/29 §9 F2: synced lines with the current one centred; each line change scrolls 240 ms on the
  * focus curve. Before the first line nothing is current and every line reads as next.
  */
 @Composable
-private fun SyncedLyrics(lyrics: LyricsState.Synced, position: State<Long>) {
+private fun SyncedLyrics(lyrics: LyricsState.Synced, model: NowPlayingModel) {
     val listState = rememberLazyListState()
-    val current by remember(lyrics) { androidx.compose.runtime.derivedStateOf { currentLyricLine(lyrics.lines, position.value) } }
+    val current by rememberLyricLine(lyrics.lines, model)
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val half = maxHeight / 2
         LaunchedEffect(current) {

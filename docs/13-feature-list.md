@@ -196,8 +196,8 @@ Now playing entry while music plays; a Current dot marks the playing song
 wherever it is listed. Now Playing shows the art, title, artist link, the queue strip
 (focus it to seek), shuffle and repeat, the next song, when the song ends, the
 Direct Play or transcode line, favorite (it stays set when the song comes
-back), and lyrics beside the art when the song has them (synced lyrics follow
-the song). Music left playing on a kept account keeps its art, line and source
+back), lyrics beside the art when the song has them (synced lyrics follow
+the song), and Stop, which ends the music and clears the music bar (the bar has Stop too). Music left playing on a kept account keeps its art, line and source
 name, but Now Playing hides favorite and ··· and a queue row offers no Go to
 album, since those would act on the account now in use. The Queue screen shows the
 playing song, what you queued and the rest of the source in the order that
@@ -210,8 +210,24 @@ lets the system screensaver take over. It starts on any screen while music is
 playing or paused, never while a video plays, the app is in the background, a
 dialog or menu is open or the keyboard shows; any key closes it and leaves you
 on the same screen with the same focus.
-Settings › Playback shows Normalize volume (off by default) once any song
+Page or Channel Up/Down skip to the next or previous song on music screens,
+Now Playing, the visualizer and the music bar. A ··· menu opened by holding
+OK never acts on that same press.
+Settings › Playback › Music shows Normalize volume (off by default) once any song
 carried a loudness gain, and plays songs at the server's measured level.
+**Visualizer** (docs/30): a Visualizer button on Now Playing opens a
+full-screen visualizer in colours drawn from the chosen accent: ten
+patterns (Bars, Radial, Waterfall, Kaleidoscope, Swirl, Fire, Phosphor,
+Superscope, Ridgeline, Ripples) with trails and flowing colour
+that follow the kick, snare, hi-hat, tempo and phrases. Patterns change by
+themselves on a beat about every 30 seconds with a crossfade (Settings ›
+Playback › Music › Change patterns automatically); Left/Right switch at once (the name
+shows briefly and the choice is remembered), Up/Down go to the next or
+previous song, OK plays or pauses, Back returns to the button; a short key
+hint shows each time it opens. Flashes are limited to three a second, always. It follows the
+song in time, freezes when paused, and shows "Visualizer needs decoded audio"
+for passthrough audio. Settings › Playback › Music › Ambient screen picks Cover art or
+Visualizer for the ambient screen. Hidden on devices without OpenGL ES 3.0; a user who never opens it pays nothing for it.
 On Home, a music library's Latest is a shelf of square album cards, and the
 remote's Play key plays the focused album; search groups Artists, Albums, Songs
 and Playlists under their own headers.
@@ -223,7 +239,7 @@ confirms queue and playlist adds for three seconds; Instant Mix (artist, album, 
 shows loading dots after 400 ms, Back cancels it with the queue untouched, a mix opens Now Playing, and an
 empty or failed one says there is no mix yet; Most played shows each song's play count, and an
 album's facts its play count.
-<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/music/MusicLibraryScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicLibraryViewModel.kt createPlaylist; app/src/main/kotlin/tv/jellybeam/ui/home/classic/ShelfAssembly.kt albumPlayKey; app/src/main/kotlin/tv/jellybeam/ui/nav/NavDrawerHost.kt Now playing row; app/src/main/kotlin/tv/jellybeam/ui/music/MusicMenuModel.kt buildMusicMenu InQueue; app/src/main/kotlin/tv/jellybeam/ui/music/MusicAlbumScreen.kt MusicPlaylistScreen/ReorderBanner; app/src/main/kotlin/tv/jellybeam/ui/music/PlaylistReorder.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicArtistScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicSongsScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicBar.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicNowPlayingScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicQueueScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/AmbientLogic.kt; app/src/main/kotlin/tv/jellybeam/ui/music/AmbientHost.kt; app/src/main/kotlin/tv/jellybeam/ui/music/AmbientScreen.kt; app/src/main/kotlin/tv/jellybeam/player/music/MusicService.kt normalizationVolume; app/src/main/kotlin/tv/jellybeam/ui/settings/SettingsSections.kt playback/normalize_volume; app/src/main/kotlin/tv/jellybeam/JellybeamApp.kt beforePlayback -->
+<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/music/MusicLibraryScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicLibraryViewModel.kt createPlaylist; app/src/main/kotlin/tv/jellybeam/ui/home/classic/ShelfAssembly.kt albumPlayKey; app/src/main/kotlin/tv/jellybeam/ui/nav/NavDrawerHost.kt Now playing row; app/src/main/kotlin/tv/jellybeam/ui/music/MusicMenuModel.kt buildMusicMenu InQueue; app/src/main/kotlin/tv/jellybeam/ui/music/MusicAlbumScreen.kt MusicPlaylistScreen/ReorderBanner; app/src/main/kotlin/tv/jellybeam/ui/music/PlaylistReorder.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicArtistScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicSongsScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicBar.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicNowPlayingScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/MusicQueueScreen.kt; app/src/main/kotlin/tv/jellybeam/ui/music/AmbientLogic.kt; app/src/main/kotlin/tv/jellybeam/ui/music/AmbientHost.kt; app/src/main/kotlin/tv/jellybeam/ui/music/AmbientScreen.kt; app/src/main/kotlin/tv/jellybeam/player/music/MusicService.kt normalizationVolume; app/src/main/kotlin/tv/jellybeam/ui/settings/SettingsSections.kt playback/normalize_volume playback/ambient_screen; app/src/main/kotlin/tv/jellybeam/ui/music/VisualizerScreen.kt; visualizer/src/main/kotlin/tv/jellybeam/visualizer/gl/VisualizerEngine.kt; app/src/main/kotlin/tv/jellybeam/JellybeamApp.kt beforePlayback -->
 
 **Navigation** — a left-edge nav drawer (Home, every library, Discover when
 connected, Search, Settings, plus a Servers section) opens with D-pad Left

@@ -236,4 +236,31 @@
         <item quantity="one">%1$s time</item>
         <item quantity="other">%1$s times</item>
     </plurals>
+
+    <!-- docs/30 §7: Now Playing's button that opens the full-screen music visualizer. -->
+    <string name="music_visualizer">Visualizer</string>
+    <!-- docs/30 §7: shown under the still visualizer when the audio is passthrough and can't be analysed. -->
+    <string name="music_visualizer_needs_decoded">Visualizer needs decoded audio</string>
+    <!-- docs/30 §7: shown briefly each time the full-screen visualizer opens; arrows are the remote's D-pad. -->
+    <string name="music_visualizer_hint">◀ ▶ Pattern   ▲ ▼ Track</string>
+    <!-- docs/30 §5: pattern names, shown for 1.5 s on a Left/Right switch (cased up in code). -->
+    <string name="visualizer_pattern_bars">Bars</string>
+    <string name="visualizer_pattern_radial">Radial</string>
+    <string name="visualizer_pattern_waterfall">Waterfall</string>
+    <string name="visualizer_pattern_kaleido">Kaleidoscope</string>
+    <string name="visualizer_pattern_swirl">Swirl</string>
+    <string name="visualizer_pattern_fire">Fire</string>
+    <string name="visualizer_pattern_phosphor">Phosphor</string>
+    <string name="visualizer_pattern_superscope">Superscope</string>
+    <string name="visualizer_pattern_ridgeline">Ridgeline</string>
+    <string name="visualizer_pattern_ripples">Ripples</string>
+    <!-- docs/30 §7: Settings › Playback row choosing what the music ambient screen draws. -->
+    <string name="settings_music_group">Music</string>
+    <string name="settings_ambient_screen">Ambient screen</string>
+    <string name="settings_desc_ambient_screen">What the screen shows after two idle minutes while music plays: the cover art, or the visualizer.</string>
+    <string name="settings_ambient_cover">Cover art</string>
+    <string name="settings_ambient_visualizer">Visualizer</string>
+    <!-- docs/30 §8 (E6): Settings › Playback toggle next to Ambient screen. -->
+    <string name="settings_visualizer_auto_change">Change patterns automatically</string>
+    <string name="settings_desc_visualizer_auto_change">The visualizer moves to the next pattern on a beat every half minute or so. Left and Right still switch at once.</string>
 </resources>

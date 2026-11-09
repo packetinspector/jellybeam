@@ -49,6 +49,9 @@ import tv.jellybeam.diag.DiagStatus
 import tv.jellybeam.player.pipController
 import tv.jellybeam.player.subtitleColorArgb
 import tv.jellybeam.ui.focus.focusKey
+import tv.jellybeam.ui.music.AmbientStyle
+import tv.jellybeam.ui.music.ambientStyleFor
+import tv.jellybeam.ui.music.visualizerSupported
 import uniffi.jellybeam_core.OsdDetailSetting
 import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.SeekPreviewSize
@@ -341,17 +344,6 @@ internal fun PlaybackSectionContent(state: SettingsUiState, viewModel: SettingsV
             key = "playback/mini_player",
             enabled = miniPlayerSupported,
         )
-        if (normalizationRowShown(state)) {
-            // docs/29 §1: per-track gain from the server, applied by the music player; off by default.
-            ToggleRow(
-                label = stringResource(R.string.settings_normalize_volume),
-                description = stringResource(R.string.settings_desc_playback_normalize_volume),
-                value = settings.normalizationEnabled,
-                onToggle = viewModel::toggleNormalization,
-                key = "playback/normalize_volume",
-            )
-        }
-
         SectionHeader(stringResource(R.string.settings_still_watching_group))
         StillWatchingGroup(state = state, viewModel = viewModel)
 
@@ -431,6 +423,47 @@ internal fun PlaybackSectionContent(state: SettingsUiState, viewModel: SettingsV
             key = "playback/ffmpeg_dts_hd",
         )
         SettingsNoteRow(stringResource(R.string.settings_ffmpeg_dts_note))
+
+        // docs/29 §1, docs/30 §7: music-only rows sit last, under their own header, so they never read as video settings.
+        val music = musicSettingsRows(normalizationRowShown(state), remember { visualizerSupported(context) })
+        if (music.header) {
+            SectionHeader(stringResource(R.string.settings_music_group))
+            if (music.normalize) {
+                // docs/29 §1: per-track gain from the server, applied by the music player; off by default.
+                ToggleRow(
+                    label = stringResource(R.string.settings_normalize_volume),
+                    description = stringResource(R.string.settings_desc_playback_normalize_volume),
+                    value = settings.normalizationEnabled,
+                    onToggle = viewModel::toggleNormalization,
+                    key = "playback/normalize_volume",
+                )
+            }
+            // docs/30 §7 (D10): no option where the visualizer can't draw.
+            if (music.visualizer) {
+                PresetChipRow(
+                    label = stringResource(R.string.settings_ambient_screen),
+                    description = stringResource(R.string.settings_desc_ambient_screen),
+                    key = "playback/ambient_screen",
+                    options = AmbientStyle.entries,
+                    selected = ambientStyleFor(settings.ambientStyle),
+                    onSelect = viewModel::selectAmbientStyle,
+                    chipLabel = {
+                        when (it) {
+                            AmbientStyle.COVER -> stringResource(R.string.settings_ambient_cover)
+                            AmbientStyle.VISUALIZER -> stringResource(R.string.settings_ambient_visualizer)
+                        }
+                    },
+                    chipKey = { it.key },
+                )
+                ToggleRow(
+                    label = stringResource(R.string.settings_visualizer_auto_change),
+                    description = stringResource(R.string.settings_desc_visualizer_auto_change),
+                    value = settings.visualizerAutoChange,
+                    onToggle = viewModel::toggleVisualizerAutoChange,
+                    key = "playback/visualizer_auto_change",
+                )
+            }
+        }
     }
 }
 

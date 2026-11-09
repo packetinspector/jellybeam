@@ -25,6 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import tv.jellybeam.ui.music.AmbientStyle
 import uniffi.jellybeam_core.HomeLayout
 import uniffi.jellybeam_core.LanguageSettings
 import uniffi.jellybeam_core.OsdDetailSetting
@@ -228,6 +229,14 @@ data class SettingsUiState(
 internal fun normalizationRowShown(state: SettingsUiState): Boolean =
     state.musicHasNormalizationGain || state.settings.normalizationEnabled
 
+/** docs/29 §1, docs/30 §7: which Playback › Music rows show; the header shows only above at least one row. */
+internal data class MusicSettingsRows(val normalize: Boolean, val visualizer: Boolean) {
+    val header: Boolean get() = normalize || visualizer
+}
+
+internal fun musicSettingsRows(normalizationShown: Boolean, visualizerSupported: Boolean) =
+    MusicSettingsRows(normalize = normalizationShown, visualizer = visualizerSupported)
+
 /**
  * docs/21 §6: the Troubleshooting row actions that reach [tv.jellybeam.AppGraph.diag]/
  * [tv.jellybeam.AppGraph.crash], factored out of [SettingsViewModel] so
@@ -425,6 +434,12 @@ class SettingsViewModel(
     fun toggleMiniPlayer() = updateSettings { it.copy(miniPlayerEnabled = !it.miniPlayerEnabled) }
 
     fun toggleNormalization() = updateSettings { it.copy(normalizationEnabled = !it.normalizationEnabled) }
+
+    /** docs/30 §8: stored as the style's key. */
+    internal fun selectAmbientStyle(style: AmbientStyle) = updateSettings { it.copy(ambientStyle = style.key) }
+
+    /** docs/30 §8: patterns change by themselves while this is on. */
+    fun toggleVisualizerAutoChange() = updateSettings { it.copy(visualizerAutoChange = !it.visualizerAutoChange) }
 
     /** docs/29 §1: re-reads the mirror's gain flag each time Playback opens; no request leaves the device. */
     fun playbackSectionOpened() {

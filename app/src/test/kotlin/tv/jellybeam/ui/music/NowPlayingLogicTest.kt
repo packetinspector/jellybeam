@@ -177,12 +177,19 @@ class NowPlayingLogicTest {
 
     @Test
     fun `the current lyric line follows the position`() {
-        assertEquals("before the first line", -1, currentLyricLine(lines, 999L))
-        assertEquals(0, currentLyricLine(lines, 1_000L))
-        assertEquals(0, currentLyricLine(lines, 4_999L))
-        assertEquals(1, currentLyricLine(lines, 5_000L))
-        assertEquals("after the last line", 2, currentLyricLine(lines, 600_000L))
-        assertEquals(-1, currentLyricLine(emptyList(), 5_000L))
+        assertEquals("before the first line", LyricCue(-1, 1L), lyricCue(lines, 999L))
+        assertEquals(LyricCue(0, 4_000L), lyricCue(lines, 1_000L))
+        assertEquals(LyricCue(0, 1L), lyricCue(lines, 4_999L))
+        assertEquals(LyricCue(1, 4_000L), lyricCue(lines, 5_000L))
+        assertEquals("after the last line nothing is due", LyricCue(2, null), lyricCue(lines, 600_000L))
+        assertEquals(LyricCue(-1, null), lyricCue(emptyList(), 5_000L))
+        assertEquals("a negative position reads as zero", LyricCue(-1, 1_000L), lyricCue(lines, -50L))
+    }
+
+    @Test
+    fun `lines sharing a start time wake once, on the last of them`() {
+        val doubled = listOf(1_000uL, 1_000uL, 3_000uL).mapIndexed { i, ms -> SyncedLyricLine(ms, "Line $i") }
+        assertEquals(LyricCue(1, 2_000L), lyricCue(doubled, 1_000L))
     }
 
     @Test

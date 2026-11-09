@@ -141,10 +141,15 @@ internal fun stripSeekTarget(positionMs: Long, durationMs: Long, forward: Boolea
     return if (durationMs > 0L) target.coerceIn(0L, durationMs) else target.coerceAtLeast(0L)
 }
 
-/** docs/29 §9 F2: the synced line sung at [positionMs]; -1 before the first line, the last one after it. */
-internal fun currentLyricLine(lines: List<SyncedLyricLine>, positionMs: Long): Int {
+/** The synced line sung now ([line], -1 before the first) and the wait until a later one starts (null after the last). */
+internal data class LyricCue(val line: Int, val untilNextMs: Long?)
+
+/** docs/29 §9 F2: the cue at [positionMs]; the screen sleeps [LyricCue.untilNextMs], so lines change on time, not on a 1 s tick. */
+internal fun lyricCue(lines: List<SyncedLyricLine>, positionMs: Long): LyricCue {
     val ms = positionMs.coerceAtLeast(0L).toULong()
-    return lines.indexOfLast { it.startMs <= ms }
+    val line = lines.indexOfLast { it.startMs <= ms }
+    val next = lines.firstOrNull { it.startMs > ms }
+    return LyricCue(line, next?.let { (it.startMs - ms).toLong() })
 }
 
 /** What a queue plays from, as Now Playing and the Queue screen name it. */

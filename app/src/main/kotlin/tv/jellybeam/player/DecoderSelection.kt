@@ -25,6 +25,7 @@ import androidx.media3.exoplayer.text.TextOutput
 import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 import tv.jellybeam.perf.PerfLog
+import tv.jellybeam.visualizer.tap.PcmTap
 
 /** Per-session local audio-decoder overrides; none of these affect server negotiation. */
 data class AudioDecoderPreferences(
@@ -213,6 +214,8 @@ class JellybeamRenderersFactory(
     private val ssaRenderers: ((TextOutput, Looper) -> List<Renderer>)? = null,
     /** docs/12 §16: read on the playback thread each render, so a change lands on the next one. */
     private val subtitleDelayMs: () -> Long = { 0L },
+    /** docs/30 §2: the music player's PCM tap; null (the video player) leaves the audio path as it was. */
+    private val musicTap: PcmTap? = null,
 ) : DefaultRenderersFactory(context) {
 
     /** Media3's TextRenderer also claims raw SSA (then fails without legacy decoding); first wins. */
@@ -271,8 +274,12 @@ class JellybeamRenderersFactory(
         DefaultAudioSink.Builder(context)
             .setEnableFloatOutput(enableFloatOutput)
             .setEnableAudioOutputPlaybackParameters(enableAudioOutputPlaybackParams)
-            .setAudioOutputProvider(PlausibleClockAudioOutputProvider(AudioTrackAudioOutputProvider.Builder(context).build()))
+            .setAudioOutputProvider(audioOutputProvider(context))
             .build()
+
+    /** The guarded output provider, with the visualizer tap only on the music player (docs/30 §2). */
+    internal fun audioOutputProvider(context: Context): PlausibleClockAudioOutputProvider =
+        PlausibleClockAudioOutputProvider(AudioTrackAudioOutputProvider.Builder(context).build(), musicTap)
 
     @OptIn(UnstableApi::class)
     override fun buildVideoRenderers(

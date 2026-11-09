@@ -62,7 +62,9 @@ import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.i18n.uppercaseUi
 import tv.jellybeam.nav.Screen
 import tv.jellybeam.nav.hidesMusicBar
+import tv.jellybeam.player.PageKeys
 import tv.jellybeam.player.music.MusicEvent
+import tv.jellybeam.player.music.MusicFlow
 import tv.jellybeam.player.music.MusicSource
 import tv.jellybeam.player.music.MusicPlaybackOwner
 import tv.jellybeam.player.music.TransportOp
@@ -146,7 +148,8 @@ internal fun MusicBarHost(
                 onNoticeShown = { latestNotice?.let(owner::noticeShown) },
             )
         },
-        modifier = modifier,
+        // The bar is music's control wherever it shows, so its page keys change track too.
+        modifier = modifier.musicTrackKeys(),
     )
 }
 
@@ -179,12 +182,13 @@ internal data class MusicBarActions(
     val onPlayPause: () -> Unit,
     val onPrevious: () -> Unit,
     val onNext: () -> Unit,
+    val onStop: () -> Unit,
     val onOpenNowPlaying: () -> Unit,
     val onExitUp: () -> Unit,
     val onNoticeShown: () -> Unit,
 )
 
-/** Play/Pause, Previous and Next through the owner's reducer; Play after a lost connection retries (MusicEvent.UserPlay). */
+/** Play/Pause, Previous, Next and Stop through the owner's reducer; Play after a lost connection retries (MusicEvent.UserPlay). */
 internal fun musicBarActions(
     owner: MusicPlaybackOwner,
     isPlaying: () -> Boolean,
@@ -195,10 +199,47 @@ internal fun musicBarActions(
     onPlayPause = { owner.send(if (isPlaying()) MusicEvent.Transport(TransportOp.Pause) else MusicEvent.UserPlay) },
     onPrevious = { owner.send(MusicEvent.Transport(TransportOp.Previous)) },
     onNext = { owner.send(MusicEvent.Transport(TransportOp.Next)) },
+    // The bar leaves with the queue, so focus goes back to the page first rather than to nothing.
+    onStop = {
+        onExitUp()
+        owner.send(MusicEvent.Stop)
+    },
     onOpenNowPlaying = onOpenNowPlaying,
     onExitUp = onExitUp,
     onNoticeShown = onNoticeShown,
 )
+
+/** What a page key does on a music screen (docs/29 §9 Keys). */
+internal enum class TrackKey { NEXT, PREVIOUS, CONSUME, PASS }
+
+/**
+ * docs/29 §9 Keys: Page/Channel Up is the next track and Down the previous (as for video chapters, docs/12 §9),
+ * once per press; the repeats and release are consumed so a held key skips one track. Without a session
+ * ([hasSession] false, e.g. after Stop) they pass, so a list can page with them again.
+ */
+internal fun musicTrackKey(key: Key, down: Boolean, repeatCount: Int, hasSession: Boolean): TrackKey = when {
+    !hasSession || !PageKeys.isPageKey(key) -> TrackKey.PASS
+    !down || repeatCount != 0 -> TrackKey.CONSUME
+    key in PageKeys.NEXT_KEYS -> TrackKey.NEXT
+    else -> TrackKey.PREVIOUS
+}
+
+/**
+ * docs/29 §9 Keys: the music layers' page keys change track through the playing owner, ahead of their children:
+ * a scroll container would otherwise take Page Up/Down whenever it can scroll. No session: they pass.
+ */
+internal fun Modifier.musicTrackKeys(): Modifier = onPreviewKeyEvent { event ->
+    val owner = AppGraph.musicStarted.value ?: return@onPreviewKeyEvent false
+    // Transport acts only on an Active session (MusicFlow), so Idle and Starting let the keys page.
+    val hasSession = owner.state.value.phase is MusicFlow.Phase.Active
+    when (musicTrackKey(event.key, event.type == KeyEventType.KeyDown, event.nativeKeyEvent.repeatCount, hasSession)) {
+        TrackKey.NEXT -> owner.send(MusicEvent.Transport(TransportOp.Next))
+        TrackKey.PREVIOUS -> owner.send(MusicEvent.Transport(TransportOp.Previous))
+        TrackKey.CONSUME -> Unit
+        TrackKey.PASS -> return@onPreviewKeyEvent false
+    }
+    true
+}
 
 private val BUTTON = 32.dp
 private val BUTTON_GLYPH = 15.dp
@@ -274,6 +315,8 @@ internal fun MusicBar(
             loading = model.loading,
         )
         TransportButton(NextGlyph, actions.onNext, size = BUTTON, glyphSize = BUTTON_GLYPH)
+        // docs/29 §8.4: Stop ends the queue, so the bar itself goes.
+        TransportButton(StopGlyph, actions.onStop, size = BUTTON, glyphSize = BUTTON_GLYPH)
     }
 }
 

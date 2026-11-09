@@ -75,6 +75,18 @@ class MusicPlaybackOwnerTest {
     }
 
     @Test
+    fun `the bar's Stop hands focus back while the session still holds playback, then ends it`() = runTest {
+        val owner = owner()
+        owner.playing()
+        val seen = mutableListOf<Phase>()
+        val actions = tv.jellybeam.ui.music.musicBarActions(owner, isPlaying = { true }, onOpenNowPlaying = {}, onExitUp = { seen += owner.state.value.phase }, onNoticeShown = {})
+        actions.onStop()
+        assertTrue("focus left before the bar did", seen.single() is Phase.Active)
+        assertEquals(Phase.Idle, owner.state.value.phase)
+        assertNull(owner.now.value)
+    }
+
+    @Test
     fun `reports reach the core in order even while an earlier one is slow`() = runTest {
         val owner = owner()
         val held = CompletableDeferred<Unit>().also { gateway.startAudioTrackGate = it }

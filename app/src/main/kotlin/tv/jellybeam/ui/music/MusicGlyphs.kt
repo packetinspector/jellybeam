@@ -20,6 +20,17 @@ internal val PauseGlyph: MusicGlyph = { drawPauseGlyph(it) }
 internal val PreviousGlyph: MusicGlyph = { drawSkipGlyph(forward = false, tint = it) }
 internal val NextGlyph: MusicGlyph = { drawSkipGlyph(forward = true, tint = it) }
 
+/** Stop: a centred square with softened corners. */
+internal val StopGlyph: MusicGlyph = { tint ->
+    val side = size.minDimension * 0.72f
+    drawRoundRect(
+        tint,
+        topLeft = Offset((size.width - side) / 2f, (size.height - side) / 2f),
+        size = Size(side, side),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(side * 0.14f),
+    )
+}
+
 /** A single eighth note: the no-art tile's mark and the drawer's Now playing entry. */
 internal val NoteGlyph: MusicGlyph = { tint ->
     val w = size.width

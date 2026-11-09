@@ -65,7 +65,10 @@ in `JellybeamTheme.kt`; the base mascot, wordmark and launch dot follow it, whil
 launcher art and the other poses stay Pistacchio;
 fills use `accent`, text on them `onAccent`, rings on fills `accentSheen`, text
 and thin bars on dark `accentInk`), warm neutrals, no gradients, glows, or translucency **in the
-UI**. The single exception is inside the mascot art itself (§5).
+UI**. The single exception is inside the mascot art itself (§5). The music visualizer's surface is
+content, like video: it may draw trails and anti-aliased edges, and its palettes may be multi-hue as
+long as every hue derives from the accent; no glow; its background is true black, not NOTTE, so
+idle pixels stay dark on OLED and projector panels (docs/30 §4). The chrome around it stays flat.
 
 ## 4. Wordmark
 

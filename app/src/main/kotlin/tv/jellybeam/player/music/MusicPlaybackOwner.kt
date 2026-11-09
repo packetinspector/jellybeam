@@ -23,6 +23,7 @@ import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.player.ProgressReportGate
 import tv.jellybeam.player.music.MusicFlow.Phase
+import tv.jellybeam.visualizer.tap.PcmTap
 import uniffi.jellybeam_core.AudioEnd
 import uniffi.jellybeam_core.AudioStream
 import uniffi.jellybeam_core.AudioTrackPlan
@@ -104,6 +105,9 @@ internal class MusicPlaybackOwner(
 ) {
     private val scope = CoroutineScope(SupervisorJob(parent.coroutineContext.job) + main)
     private val mainDispatcher = main
+
+    /** docs/30 §2: the music output's PCM tap; idle (one volatile read per buffer) until a visualizer attaches. */
+    val tap = PcmTap()
 
     private val _state = MutableStateFlow(MusicFlow())
     val state: StateFlow<MusicFlow> = _state.asStateFlow()

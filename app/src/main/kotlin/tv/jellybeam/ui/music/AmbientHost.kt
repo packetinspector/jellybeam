@@ -15,7 +15,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.platform.LocalContext
 import tv.jellybeam.AppForeground
+import tv.jellybeam.AppGraph
 import tv.jellybeam.MainActivity
 import tv.jellybeam.i18n.rememberUiStrings
 import tv.jellybeam.player.music.MusicPlaybackOwner
@@ -78,5 +80,13 @@ private fun AmbientDrawing(owner: MusicPlaybackOwner, drawing: Ambient.Drawing) 
     val view = remember(flow, now) { musicQueueView(flow, now) } ?: return
     val strings = rememberUiStrings()
     val model = remember(view, strings) { nowPlayingModel(view, owner::card, strings) }
-    AmbientScreen(drawing, model, pausedAtMs = model.positionMs, accountEpoch = flow.session?.epoch)
+    // docs/30 §7: the style only changes what draws; the controller still decides when.
+    val settings by AppGraph.settingsStore.settings.collectAsState()
+    val context = LocalContext.current
+    val supported = remember { visualizerSupported(context) }
+    if (ambientDrawsVisualizer(ambientStyleFor(settings?.ambientStyle), supported)) {
+        AmbientVisualizer(owner, paused = drawing.pausedSince != null, pausedAtMs = model.positionMs)
+    } else {
+        AmbientScreen(drawing, model, pausedAtMs = model.positionMs, accountEpoch = flow.session?.epoch)
+    }
 }

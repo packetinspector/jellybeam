@@ -176,6 +176,8 @@ dependencies {
     implementation(libs.androidx.profileinstaller)
     // docs/21 §4: QR encoding for the report screen.
     implementation(libs.zxing.core)
+    // docs/30: the music visualizer engine (GLES 3.0, no native code).
+    implementation(project(":visualizer"))
 
     coreLibraryDesugaring(libs.desugar.jdk.libs)
 

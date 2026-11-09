@@ -1,5 +1,6 @@
 package tv.jellybeam.ui.detail
 
+import androidx.compose.ui.input.key.Key
 import kotlin.random.Random
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -526,5 +527,25 @@ class DetailMenuModelTest {
         val boxSet = testCard(id = "set-1", itemType = "BoxSet")
         val playable = DetailFormatting.PrimaryAction.Playable("Play", "member-1", hasProgress = false)
         assertNull(buildMenu(strings, movieInput(card = boxSet, primaryAction = playable)).watchTogether())
+    }
+
+    @Test
+    fun `the hold that opened the panel selects nothing, a fresh press does`() {
+        val gate = ConfirmGate()
+        // The row's hold: its first repeat opened the panel, so the panel sees only the rest of it.
+        assertTrue("repeat", gate.swallow(Key.DirectionCenter, down = true, repeatCount = 2))
+        assertTrue("release", gate.swallow(Key.DirectionCenter, down = false, repeatCount = 0))
+        assertFalse("fresh press", gate.swallow(Key.DirectionCenter, down = true, repeatCount = 0))
+        assertFalse("its release", gate.swallow(Key.DirectionCenter, down = false, repeatCount = 0))
+        assertFalse("Enter after arming", gate.swallow(Key.Enter, down = true, repeatCount = 1))
+        assertFalse("other keys pass", ConfirmGate().swallow(Key.DirectionDown, down = true, repeatCount = 3))
+    }
+
+    @Test
+    fun `leaving the panel disarms it`() {
+        val gate = ConfirmGate()
+        gate.swallow(Key.Enter, down = true, repeatCount = 0)
+        gate.reset()
+        assertTrue(gate.swallow(Key.NumPadEnter, down = false, repeatCount = 0))
     }
 }

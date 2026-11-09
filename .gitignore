@@ -8,6 +8,8 @@
 
 # Android / Gradle
 /app/build/
+/visualizer/build/
+/visualizer-lab/build/
 /build/
 # cargo-ndk's output -- rebuilt by the `cargoNdkBuild` Gradle task from
 # core/, never hand-authored or committed.

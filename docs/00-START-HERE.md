@@ -49,6 +49,8 @@ why, not how a change came to be.
   rules, group lifecycle, playback sync and stall recovery (in progress)
 - `29-music.md` — music libraries: idle cost, the playback owner and service,
   video and account rules, queue semantics, surfaces and the ambient screen
+- `30-music-visualizer.md` — the music visualizer: the PCM tap and its idle
+  cost, analysis, palette, patterns, renderer and pacing, controls, tests
 - `jellybeam-osd-handoff/` — the OSD specification files that `12-osd-ux-spec.md`
   summarizes; code cites them by section, so they stay as they are
 - `brand.md` — name, colour tokens, wordmark, mascot usage, and the acceptance bar

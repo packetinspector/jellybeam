@@ -140,6 +140,7 @@ import tv.jellybeam.ui.music.AmbientHost
 import tv.jellybeam.ui.music.BlocksAmbient
 import tv.jellybeam.ui.music.LocalAmbientBlock
 import tv.jellybeam.ui.music.MusicBarHost
+import tv.jellybeam.ui.music.musicTrackKeys
 import tv.jellybeam.ui.music.musicBarInset
 import tv.jellybeam.ui.music.session
 import tv.jellybeam.ui.music.OpenNowPlayingOnMix
@@ -1603,27 +1604,30 @@ private fun JellybeamRoot(
                                     CompositionLocalProvider(
                                         LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                     ) {
-                                        NavDrawerHost(
-                                            currentScreen = entry,
-                                            libraries = drawerViews,
-                                            onNavigate = navigateFromDrawer,
-                                            isTop = isTop,
-                                            accounts = accounts,
-                                            activeAccountIndex = activeAccountIndex,
-                                            onSwitchServer = ::switchServer,
-                                            onAddServer = { addServerActive = true },
-                                            onManageServers = ::openServerManagement,
-                                            discoverConfigured = discoverConfigured,
-                                            onOpenDiscover = { navigateFromDrawer(Screen.Discover) },
-                                            onOpenNowPlaying = openNowPlaying,
-                                        ) {
-                                            when (entry) {
-                                                is Screen.MusicLibrary -> MusicLibraryScreen(entry.view, isTop, musicNav)
-                                                is Screen.MusicAlbum -> MusicAlbumScreen(entry.albumId, isTop, musicNav)
-                                                is Screen.MusicArtist -> MusicArtistScreen(entry.artistId, isTop, musicNav)
-                                                is Screen.MusicSongs -> MusicSongsScreen(entry.source, entry.title, isTop, musicNav)
-                                                is Screen.MusicPlaylist -> MusicPlaylistScreen(entry.playlist, isTop, musicNav)
-                                                else -> Unit
+                                        // docs/29 §9 Keys: page and channel keys change track on every music page.
+                                        Box(Modifier.musicTrackKeys()) {
+                                            NavDrawerHost(
+                                                currentScreen = entry,
+                                                libraries = drawerViews,
+                                                onNavigate = navigateFromDrawer,
+                                                isTop = isTop,
+                                                accounts = accounts,
+                                                activeAccountIndex = activeAccountIndex,
+                                                onSwitchServer = ::switchServer,
+                                                onAddServer = { addServerActive = true },
+                                                onManageServers = ::openServerManagement,
+                                                discoverConfigured = discoverConfigured,
+                                                onOpenDiscover = { navigateFromDrawer(Screen.Discover) },
+                                                onOpenNowPlaying = openNowPlaying,
+                                            ) {
+                                                when (entry) {
+                                                    is Screen.MusicLibrary -> MusicLibraryScreen(entry.view, isTop, musicNav)
+                                                    is Screen.MusicAlbum -> MusicAlbumScreen(entry.albumId, isTop, musicNav)
+                                                    is Screen.MusicArtist -> MusicArtistScreen(entry.artistId, isTop, musicNav)
+                                                    is Screen.MusicSongs -> MusicSongsScreen(entry.source, entry.title, isTop, musicNav)
+                                                    is Screen.MusicPlaylist -> MusicPlaylistScreen(entry.playlist, isTop, musicNav)
+                                                    else -> Unit
+                                                }
                                             }
                                         }
                                     }
@@ -1633,10 +1637,12 @@ private fun JellybeamRoot(
                                     LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                 ) {
                                     val leave = { go { it.popIfTop(stack.ids[index]) } }
-                                    if (entry == Screen.MusicNowPlaying) {
-                                        MusicNowPlayingScreen(isTop, musicNav, onOpenQueue = { go { it.push(Screen.MusicQueue) } }, onExit = leave)
-                                    } else {
-                                        MusicQueueScreen(isTop, musicNav, onExit = leave)
+                                    Box(Modifier.musicTrackKeys()) {
+                                        if (entry == Screen.MusicNowPlaying) {
+                                            MusicNowPlayingScreen(isTop, musicNav, onOpenQueue = { go { it.push(Screen.MusicQueue) } }, onExit = leave)
+                                        } else {
+                                            MusicQueueScreen(isTop, musicNav, onExit = leave)
+                                        }
                                     }
                                 }
 

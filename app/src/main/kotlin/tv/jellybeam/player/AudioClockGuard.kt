@@ -9,9 +9,11 @@ import androidx.media3.exoplayer.audio.AudioOutput
 import androidx.media3.exoplayer.audio.AudioOutputProvider
 import androidx.media3.exoplayer.audio.ForwardingAudioOutput
 import androidx.media3.exoplayer.audio.ForwardingAudioOutputProvider
+import java.nio.ByteBuffer
 import kotlin.math.max
 import tv.jellybeam.AppGraph
 import tv.jellybeam.diag.DiagLog
+import tv.jellybeam.visualizer.tap.PcmTap
 
 /** Which rule found a position to be a lie; see [AudioClockGuard]. */
 internal enum class ClockRule { START, JUMP, CEILING }
@@ -329,6 +331,8 @@ internal class PlausibleClockAudioOutput(
         enabled = { AppGraph.diag.enabled },
         emit = { AppGraph.diag.clockEvent(it) },
     ),
+    /** docs/30 §2: sees every consumed buffer, flush and position; null on the video player. */
+    private val tap: PcmTap? = null,
 ) : ForwardingAudioOutput(delegate) {
 
     private val nowUs: Long get() = clock.nanoTime() / 1000
@@ -343,11 +347,21 @@ internal class PlausibleClockAudioOutput(
     override fun pause() {
         guard.onPause(nowUs, speed)
         super.pause()
+        tap?.pause(clock.nanoTime())
     }
 
     override fun flush() {
         super.flush()
         guard.onFlush()
+        tap?.flush()
+    }
+
+    override fun write(buffer: ByteBuffer, encodedAccessUnitCount: Int, presentationTimeUs: Long): Boolean {
+        val start = buffer.position()
+        val written = super.write(buffer, encodedAccessUnitCount, presentationTimeUs)
+        // Only the bytes the output consumed; a partial write re-offers the rest next call.
+        tap?.offer(buffer, start, buffer.position())
+        return written
     }
 
     override fun stop() {
@@ -359,8 +373,10 @@ internal class PlausibleClockAudioOutput(
         val reportedUs = super.getPositionUs()
         if (reportedUs < 0) return reportedUs
         val faultsBefore = guard.ruleCounts.sum()
-        val positionUs = guard.filter(reportedUs, nowUs, speed)
-        reporter.onRead(guard, reportedUs, positionUs, faultsBefore, nowUs)
+        val now = nowUs
+        val positionUs = guard.filter(reportedUs, now, speed)
+        reporter.onRead(guard, reportedUs, positionUs, faultsBefore, now)
+        tap?.onPosition(positionUs, now * 1000, guard.isPlaying, speed)
         return positionUs
     }
 
@@ -380,9 +396,12 @@ internal class PlausibleClockAudioOutput(
     }
 }
 
-/** Wraps every output the delegate creates in a [PlausibleClockAudioOutput]. */
+/** Wraps every output the delegate creates in a [PlausibleClockAudioOutput]; [tap] (music only, docs/30 §2) learns each output's format. */
 @UnstableApi
-internal class PlausibleClockAudioOutputProvider(delegate: AudioOutputProvider) : ForwardingAudioOutputProvider(delegate) {
+internal class PlausibleClockAudioOutputProvider(
+    delegate: AudioOutputProvider,
+    private val tap: PcmTap? = null,
+) : ForwardingAudioOutputProvider(delegate) {
 
     private var clock: Clock = Clock.DEFAULT
 
@@ -395,13 +414,20 @@ internal class PlausibleClockAudioOutputProvider(delegate: AudioOutputProvider) 
         super.setClock(clock)
     }
 
-    override fun getAudioOutput(config: AudioOutputProvider.OutputConfig): AudioOutput =
-        PlausibleClockAudioOutput(
+    override fun getAudioOutput(config: AudioOutputProvider.OutputConfig): AudioOutput {
+        val output = PlausibleClockAudioOutput(
             delegate = super.getAudioOutput(config),
             clock = clock,
             guard = AudioClockGuard(lagUs = healthyLagUs),
             onLagLearned = { healthyLagUs = it },
+            tap = tap,
         )
+        tap?.configure(config.encoding, config.sampleRate, Integer.bitCount(config.channelMask), config.isOffload)
+        return output
+    }
+
+    /** Test hook (docs/30 §9 T28): whether this provider feeds a tap. */
+    internal val hasTap: Boolean get() = tap != null
 }
 
 private const val SEEK_LOG_TAG = "JellybeamSeek"

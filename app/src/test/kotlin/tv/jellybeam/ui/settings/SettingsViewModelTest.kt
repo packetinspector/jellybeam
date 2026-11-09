@@ -645,6 +645,15 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `music rows sit under a Music header that shows only when a music row does`() {
+        assertEquals(MusicSettingsRows(normalize = false, visualizer = false), musicSettingsRows(false, false))
+        assertFalse("no rows, no header", musicSettingsRows(false, false).header)
+        assertTrue(musicSettingsRows(true, false).header)
+        assertTrue(musicSettingsRows(false, true).header)
+        assertEquals(MusicSettingsRows(normalize = true, visualizer = true), musicSettingsRows(true, true))
+    }
+
+    @Test
     fun `toggleNormalization flips the flag, default off, and persists`() = runTest {
         val seeded = defaultTestSettings()
         assertFalse(seeded.normalizationEnabled)

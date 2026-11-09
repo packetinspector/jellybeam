@@ -368,7 +368,7 @@ class MusicService : MediaSessionService() {
         return spec.withUri(Uri.parse(url))
     }
 
-    /** The video player's renderers, audio clock guard, OkHttp client and retry policy; music attributes, gapless (no pause between items). */
+    /** The video player's renderers, audio clock guard, OkHttp client and retry policy; music attributes, gapless (no pause between items), the visualizer tap (docs/30 §2). */
     private fun buildMusicPlayer(): ExoPlayer {
         val settings = AppGraph.settingsStore.settings.value
         val preferences = AudioDecoderPreferences(
@@ -376,7 +376,7 @@ class MusicService : MediaSessionService() {
             preferFfmpegDts = settings?.preferFfmpegDts ?: false,
             preferFfmpegDtsHd = settings?.preferFfmpegDtsHd ?: false,
         )
-        val renderers = JellybeamRenderersFactory(this, audioDecoderPreferences = { preferences }).apply {
+        val renderers = JellybeamRenderersFactory(this, audioDecoderPreferences = { preferences }, musicTap = owner?.tap).apply {
             setEnableDecoderFallback(true)
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         }

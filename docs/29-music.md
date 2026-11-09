@@ -141,6 +141,9 @@ service, no collector and no first-frame work.
   `PAUSED │ m:ss`.
 - After 10 min paused while drawing it stops drawing and lets the screen go,
   so the system screensaver takes over.
+- Settings › Playback › Music › Ambient screen chooses what it draws: the cover art
+  (default) or the visualizer (docs/30 §7). The style changes only the
+  picture; this owner still decides when it shows, pauses and releases.
 - The screen is kept on only while ambient draws (`AmbientScreen`'s
   `keepScreenOn`); no other music screen keeps it on.
 - One owner, `AmbientController`, composed by the root's `AmbientHost` only
@@ -179,7 +182,7 @@ transcode's spec line.
 - **8.4 Music bar.** Bottom-anchored, exists only while music plays or is
   paused, absent on Now Playing, the Queue, ambient and the video player.
   Progress line at its top; art, title, artist, `m:ss / m:ss`, Prev,
-  Play/Pause, Next. Focus: Down from the lowest element lands on Play/Pause;
+  Play/Pause, Next, Stop (ends the queue, so the bar goes). Focus: Down from the lowest element lands on Play/Pause;
   Left reaches Prev, then the art block (OK opens Now Playing); Up or Back
   returns. A confirmation (`ADDED TO QUEUE`, `PLAYING NEXT`, `ADDED TO …`,
   `ALREADY IN · ADDED AGAIN`) shows for 3 s; `CONNECTION LOST │ PAUSED`
@@ -230,11 +233,21 @@ transcode's spec line.
   (§11), `QUEUE │ n OF m`, the queue strip (segments by duration in play
   order, a 40-track window with `… +n` at the ends when they would be too
   thin; Left/Right seeks while focused), elapsed and `ENDS h:mm`, transport,
-  then Queue · Lyrics · ♥ · ··· and Up next. Opens on Play/Pause; media keys
+  then Queue · Lyrics · Stop · ♥ · ··· and Up next. Stop ends the queue:
+  the bar goes and Now Playing leaves. Opens on Play/Pause; media keys
   work anywhere. F2 Lyrics: the art shrinks left, synced lines keep the
-  current line centred, unsynced lyrics scroll with the D-pad; requested
-  only for songs that have lyrics. F3 Paused: `PAUSED` after elapsed, no
+  current line centred and change at each line's start time; unsynced
+  lyrics scroll with the D-pad; requested only for songs that have lyrics. F3 Paused: `PAUSED` after elapsed, no
   `ENDS`, the Current dot holds still. No art-derived colour or backdrop.
+- **Keys.** Media Next/Previous/Play-Pause reach the music session
+  anywhere. Page or Channel Up is the next track and Down the previous
+  (Previous restarts the song first, as the transport does), once per press,
+  on every music page, Now Playing, the Queue, the visualizer and the bar,
+  ahead of the page itself: no music page pages with them, and a scrolling
+  page would otherwise take Page Up/Down to scroll.
+  A ··· menu opened by holding OK ignores the rest of that hold and its
+  release: OK acts in a menu only after a fresh press there (the detail
+  menu shares this).
 - **G · Bar and drawer (G1–G3).** The bar is 8.4; G2 is its focus. G3:
   while music plays or is paused the drawer shows a Now playing entry under
   Home that opens Now Playing.

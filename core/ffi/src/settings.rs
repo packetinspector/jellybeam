@@ -177,6 +177,21 @@ fn default_accent_color() -> String {
     "pistacchio".to_owned()
 }
 
+/// [`Settings::visualizer_pattern`]'s default: swirl, what a new user sees first (docs/30 §5).
+fn default_visualizer_pattern() -> String {
+    "swirl".to_owned()
+}
+
+/// [`Settings::visualizer_auto_change`]'s default: patterns change by themselves (docs/30 §5).
+fn default_visualizer_auto_change() -> bool {
+    true
+}
+
+/// [`Settings::ambient_style`]'s default: the cover-art ambient screen (docs/30 §7).
+fn default_ambient_style() -> String {
+    "cover".to_owned()
+}
+
 /// [`Settings::show_clock`]'s real default -- `true`, not `bool`'s zero
 /// value, so an explicit `#[serde(default = "...")]` is required.
 fn default_show_clock() -> bool {
@@ -508,6 +523,18 @@ pub struct Settings {
     #[serde(default)]
     #[uniffi(default = false)]
     pub normalization_enabled: bool,
+    /// docs/30 §8: the last visualizer pattern as a key; Kotlin resolves it and an unknown key opens the first.
+    #[serde(default = "default_visualizer_pattern")]
+    #[uniffi(default = "swirl")]
+    pub visualizer_pattern: String,
+    /// docs/30 §8: "Change patterns automatically" on the visualizer (on by default).
+    #[serde(default = "default_visualizer_auto_change")]
+    #[uniffi(default = true)]
+    pub visualizer_auto_change: bool,
+    /// docs/30 §8: what the ambient screen draws, `cover` or `visualizer`; Kotlin resolves it, unknown is `cover`.
+    #[serde(default = "default_ambient_style")]
+    #[uniffi(default = "cover")]
+    pub ambient_style: String,
 }
 
 impl Default for Settings {
@@ -560,6 +587,9 @@ impl Default for Settings {
             home_layout: HomeLayout::default(),
             accent_color: default_accent_color(),
             normalization_enabled: false,
+            visualizer_pattern: default_visualizer_pattern(),
+            visualizer_auto_change: default_visualizer_auto_change(),
+            ambient_style: default_ambient_style(),
         }
     }
 }
@@ -720,6 +750,9 @@ mod tests {
             home_layout: HomeLayout::Classic,
             accent_color: "oceano".to_owned(),
             normalization_enabled: true,
+            visualizer_pattern: "fire".to_owned(),
+            visualizer_auto_change: false,
+            ambient_style: "visualizer".to_owned(),
         }
     }
 
@@ -1146,6 +1179,38 @@ mod tests {
         raw.as_object_mut().expect("object").remove("accent_color");
         let loaded = load_from_json(raw);
         assert_eq!(loaded.accent_color, "pistacchio");
+    }
+
+    /// Pins the visualizer keys' JSON shape at non-default values (docs/30 §8).
+    #[test]
+    fn visualizer_keys_round_trip_through_json() {
+        let original = Settings {
+            visualizer_pattern: "ripples".to_owned(),
+            visualizer_auto_change: false,
+            ambient_style: "visualizer".to_owned(),
+            ..Settings::default()
+        };
+        let json = serde_json::to_value(&original).expect("serialize");
+        assert_eq!(json["visualizer_pattern"], "ripples");
+        assert_eq!(json["visualizer_auto_change"], false);
+        assert_eq!(json["ambient_style"], "visualizer");
+
+        let loaded: Settings = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(loaded, original);
+    }
+
+    /// A settings file written before the visualizer existed loads its defaults.
+    #[test]
+    fn load_tolerates_a_settings_json_written_before_the_visualizer_existed() {
+        let mut raw = serde_json::to_value(Settings::default()).expect("serialize");
+        let obj = raw.as_object_mut().expect("object");
+        obj.remove("visualizer_pattern");
+        obj.remove("visualizer_auto_change");
+        obj.remove("ambient_style");
+        let loaded = load_from_json(raw);
+        assert_eq!(loaded.visualizer_pattern, "swirl");
+        assert!(loaded.visualizer_auto_change);
+        assert_eq!(loaded.ambient_style, "cover");
     }
 
     /// Pins [`Settings::osd_detail`]'s exact JSON shape at a non-default

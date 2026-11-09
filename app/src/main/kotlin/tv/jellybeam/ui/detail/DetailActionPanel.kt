@@ -352,8 +352,28 @@ internal fun DetailActionPanel(
 }
 
 /**
+ * docs/19 §1.5: OK/Enter reaches a panel only after a fresh press of its own. A panel opened by holding OK
+ * (docs/29 §9 Keys) still receives that hold's repeats and release, which would select its newly focused row.
+ */
+internal class ConfirmGate {
+    private var armed = false
+
+    /** True when the event must be swallowed. */
+    fun swallow(key: Key, down: Boolean, repeatCount: Int): Boolean {
+        if (key != Key.DirectionCenter && key != Key.Enter && key != Key.NumPadEnter) return false
+        if (down && repeatCount == 0) armed = true
+        return !armed
+    }
+
+    /** Focus left the panel: the next OK must be fresh again. */
+    fun reset() {
+        armed = false
+    }
+}
+
+/**
  * §1.5's panel chrome, shared with the music menu (docs/29 §8.7): the leftward shadow, the ground with
- * its hairline, the focus trap and [onPreviewKey], sliding on [offsetX]; [content] is the padded column.
+ * its hairline, the focus trap, [ConfirmGate] and [onPreviewKey], sliding on [offsetX]; [content] is the padded column.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -363,6 +383,7 @@ internal fun ActionPanelFrame(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val gate = remember { ConfirmGate() }
     Row(modifier = modifier.fillMaxHeight().offset(x = offsetX)) {
         // §1.5's leftward shadow: a horizontal gradient band in the same Row, tracking the panel's
         // slide.
@@ -381,8 +402,11 @@ internal fun ActionPanelFrame(
                     drawLine(JellybeamTheme.Hairline, Offset(0f, 0f), Offset(0f, size.height), strokeWidth = 0.5.dp.toPx())
                 }
                 .focusProperties { exit = { FocusRequester.Cancel } }
+                .onFocusChanged { if (!it.hasFocus) gate.reset() }
                 .focusGroup()
-                .onPreviewKeyEvent(onPreviewKey),
+                .onPreviewKeyEvent { event ->
+                    gate.swallow(event.key, event.type == KeyEventType.KeyDown, event.nativeKeyEvent.repeatCount) || onPreviewKey(event)
+                },
         ) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(top = PANEL_PADDING_TOP, bottom = PANEL_PADDING_BOTTOM),
