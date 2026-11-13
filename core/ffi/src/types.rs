@@ -1771,20 +1771,78 @@ pub(crate) fn embedded_subtitles_of(
         .collect()
 }
 
+/// docs/18 §3.1: one audio stream of the source, named by its server index when a transcode is
+/// renegotiated with it.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct AudioStreamFfi {
+    pub index: i32,
+    /// The server's label, shown verbatim (docs/05: server names are never prettified).
+    pub display_title: Option<String>,
+    /// The stream's own title, which the player reports too, so a choice matches across Direct Play and transcode.
+    #[uniffi(default = None)]
+    pub title: Option<String>,
+    pub language: Option<String>,
+    pub codec: Option<String>,
+    pub channels: Option<i32>,
+    pub is_default: bool,
+}
+
+/// docs/18 §3.1: the source's audio streams that carry a server index, in server order.
+pub(crate) fn audio_streams_of(
+    source: &jellyfin_api::models::MediaSourceInfo,
+) -> Vec<AudioStreamFfi> {
+    source
+        .media_streams
+        .iter()
+        .filter(|s| s.type_ == Some(jellyfin_api::models::MediaStreamType::Audio))
+        .filter_map(|s| {
+            Some(AudioStreamFfi {
+                index: s.index?,
+                display_title: s.display_title.clone().filter(|t| !t.is_empty()),
+                title: s.title.clone().filter(|t| !t.is_empty()),
+                language: s.language.clone().filter(|l| !l.is_empty()),
+                codec: s.codec.clone(),
+                channels: s.channels,
+                is_default: s.is_default == Some(true),
+            })
+        })
+        .collect()
+}
+
+/// docs/18 §3.1: the audio stream a transcode carries -- the URL's own `AudioStreamIndex`, else the
+/// one the negotiation named, else the source's default; `None` for Direct Play, whose file holds
+/// every stream for the player to pick.
+pub(crate) fn delivered_audio_index(
+    play_method: PlayMethodFfi,
+    url: &str,
+    requested: Option<i32>,
+    source: &jellyfin_api::models::MediaSourceInfo,
+) -> Option<i32> {
+    match play_method {
+        PlayMethodFfi::Transcode => url_param(url, "AudioStreamIndex")
+            .and_then(|v| v.parse().ok())
+            .filter(|index: &i32| *index >= 0)
+            .or(requested)
+            .or(source.default_audio_stream_index),
+        PlayMethodFfi::DirectPlay => None,
+    }
+}
+
+/// One query parameter of `url`, matched case-insensitively.
+fn url_param<'a>(url: &'a str, name: &str) -> Option<&'a str> {
+    url.split_once('?')?.1.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        key.eq_ignore_ascii_case(name).then_some(value)
+    })
+}
+
 /// docs/18 §3.1: the subtitle index a transcode URL burns in. Both parameters are needed: a
 /// `SubtitleStreamIndex=-1` negotiation still says `SubtitleMethod=Encode` with no index.
 pub(crate) fn burned_subtitle_index(url: &str) -> Option<i32> {
-    let query = url.split_once('?')?.1;
-    let param = |name: &str| {
-        query.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            key.eq_ignore_ascii_case(name).then_some(value)
-        })
-    };
-    if !param("SubtitleMethod")?.eq_ignore_ascii_case("Encode") {
+    if !url_param(url, "SubtitleMethod")?.eq_ignore_ascii_case("Encode") {
         return None;
     }
-    param("SubtitleStreamIndex")?
+    url_param(url, "SubtitleStreamIndex")?
         .parse()
         .ok()
         .filter(|index: &i32| *index >= 0)
@@ -1837,6 +1895,13 @@ pub struct PlaybackPlan {
     /// docs/18 §3.1: the stream a Transcode plan burns into the video, if any; no Media3 track
     /// selection can remove it, only a renegotiation.
     pub burned_subtitle_index: Option<i32>,
+    /// docs/18 §3.1: the source's audio streams, so Kotlin can name the viewer's choice when it
+    /// renegotiates a transcode, whose HLS holds only the one delivered.
+    #[uniffi(default = [])]
+    pub audio_streams: Vec<AudioStreamFfi>,
+    /// docs/18 §3.1: the audio stream a Transcode plan delivers; `None` on Direct Play.
+    #[uniffi(default = None)]
+    pub delivered_audio_index: Option<i32>,
     // `outro_start_secs`/`trickplay` don't live here: neither is needed to
     // start a frame, and Kotlin fetches both separately (fire-and-forget).
 }
@@ -2037,6 +2102,72 @@ impl From<playback_policy::tracks::TrackDecision> for TrackDecisionFfi {
 
 #[cfg(test)]
 mod tests {
+
+    /// docs/18 §3.1: every indexed audio stream is offered with the server's own label.
+    #[test]
+    fn audio_streams_are_the_sources_indexed_audio_streams_in_server_order() {
+        use jellyfin_api::models::{MediaSourceInfo, MediaStream, MediaStreamType};
+        let stream = |index: Option<i32>, kind, title: &str, default| MediaStream {
+            index,
+            type_: Some(kind),
+            display_title: Some(title.to_string()),
+            title: Some(format!("{title} raw")).filter(|_| !title.is_empty()),
+            language: Some("eng".to_string()),
+            codec: Some("ac3".to_string()),
+            channels: Some(6),
+            is_default: default,
+            ..Default::default()
+        };
+        let source = MediaSourceInfo {
+            media_streams: vec![
+                stream(Some(0), MediaStreamType::Video, "Video 0", None),
+                stream(Some(1), MediaStreamType::Audio, "audio ONE - x", Some(true)),
+                stream(Some(2), MediaStreamType::Subtitle, "Sub 2", None),
+                stream(Some(3), MediaStreamType::Audio, "", Some(false)),
+                stream(None, MediaStreamType::Audio, "No index", None),
+            ],
+            ..Default::default()
+        };
+        let audio = |index, title: Option<&str>, is_default| AudioStreamFfi {
+            index,
+            display_title: title.map(str::to_string),
+            title: title.map(|t| format!("{t} raw")),
+            language: Some("eng".to_string()),
+            codec: Some("ac3".to_string()),
+            channels: Some(6),
+            is_default,
+        };
+        assert_eq!(
+            audio_streams_of(&source),
+            vec![audio(1, Some("audio ONE - x"), true), audio(3, None, false)]
+        );
+    }
+
+    /// docs/18 §3.1: a transcode carries the named stream, else the default; Direct Play names none.
+    #[test]
+    fn delivered_audio_is_the_urls_stream_else_requested_else_default_and_none_on_direct_play() {
+        let source = |default| jellyfin_api::models::MediaSourceInfo {
+            default_audio_stream_index: default,
+            ..Default::default()
+        };
+        let with = "http://server.test/videos/x/master.m3u8?audioStreamIndex=4&x=1";
+        let without = "http://server.test/videos/x/master.m3u8?x=1";
+        let cases = [
+            (PlayMethodFfi::Transcode, with, Some(3), Some(1), Some(4)),
+            (PlayMethodFfi::Transcode, without, Some(3), Some(1), Some(3)),
+            (PlayMethodFfi::Transcode, without, None, Some(1), Some(1)),
+            (PlayMethodFfi::Transcode, without, None, None, None),
+            (PlayMethodFfi::DirectPlay, with, Some(3), Some(1), None),
+            (PlayMethodFfi::DirectPlay, without, None, Some(1), None),
+        ];
+        for (method, url, requested, default, expected) in cases {
+            assert_eq!(
+                delivered_audio_index(method, url, requested, &source(default)),
+                expected,
+                "{method:?} {url} requested {requested:?} default {default:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_burned_subtitle_needs_both_encode_and_an_index() {

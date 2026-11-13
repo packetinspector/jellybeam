@@ -645,11 +645,9 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun `music rows sit under a Music header that shows only when a music row does`() {
+    fun `music rows show normalize when seen and the visualizer rows only where it can draw`() {
         assertEquals(MusicSettingsRows(normalize = false, visualizer = false), musicSettingsRows(false, false))
-        assertFalse("no rows, no header", musicSettingsRows(false, false).header)
-        assertTrue(musicSettingsRows(true, false).header)
-        assertTrue(musicSettingsRows(false, true).header)
+        assertEquals(MusicSettingsRows(normalize = true, visualizer = false), musicSettingsRows(true, false))
         assertEquals(MusicSettingsRows(normalize = true, visualizer = true), musicSettingsRows(true, true))
     }
 

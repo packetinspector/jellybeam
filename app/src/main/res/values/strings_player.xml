@@ -194,5 +194,5 @@
     <string name="wt_osd_waiting">Waiting for everyone…</string>
     <string name="wt_osd_prompt">Still waiting for someone — press Play to start without them</string>
     <string name="wt_osd_helper">Play, pause, and seek apply to everyone in the group.</string>
-    <string name="wt_subtitle_refused">Can\'t change this subtitle in a group</string>
+    <string name="wt_track_refused">Can\'t change this track in a group</string>
 </resources>

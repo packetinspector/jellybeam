@@ -229,10 +229,8 @@ data class SettingsUiState(
 internal fun normalizationRowShown(state: SettingsUiState): Boolean =
     state.musicHasNormalizationGain || state.settings.normalizationEnabled
 
-/** docs/29 §1, docs/30 §7: which Playback › Music rows show; the header shows only above at least one row. */
-internal data class MusicSettingsRows(val normalize: Boolean, val visualizer: Boolean) {
-    val header: Boolean get() = normalize || visualizer
-}
+/** docs/29 §1, docs/30 §7: which Playback › Music rows show; without GLES 3.0 one dimmed row replaces the visualizer rows, so the header always has a row. */
+internal data class MusicSettingsRows(val normalize: Boolean, val visualizer: Boolean)
 
 internal fun musicSettingsRows(normalizationShown: Boolean, visualizerSupported: Boolean) =
     MusicSettingsRows(normalize = normalizationShown, visualizer = visualizerSupported)

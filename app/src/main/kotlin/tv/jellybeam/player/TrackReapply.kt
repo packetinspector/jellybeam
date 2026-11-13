@@ -1,6 +1,7 @@
 package tv.jellybeam.player
 
 import java.util.Locale
+import uniffi.jellybeam_core.AudioStreamFfi
 import uniffi.jellybeam_core.EmbeddedSubtitleFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
@@ -47,8 +48,13 @@ internal sealed interface TextChoice {
     data class Embedded(val identity: TrackIdentity, val streamIndex: Int? = null) : TextChoice
 }
 
-/** What a reload restores: the subtitle choice, and the selected audio track once one was decided. */
-internal data class ReloadChoice(val text: TextChoice, val audio: TrackIdentity?)
+/** docs/18 §3.1: the audio choice a reload restores; [streamIndex] is the server stream a transcode
+ * row named, which identity alone may not single out.
+ */
+internal data class AudioChoice(val identity: TrackIdentity, val streamIndex: Int? = null)
+
+/** What a reload restores: the subtitle choice, and the audio choice once one was decided. */
+internal data class ReloadChoice(val text: TextChoice, val audio: AudioChoice?)
 
 /** The choice to restore after a reload: undecided resolves afresh, a showing or loading sidecar
  * wins over what was [recorded] before it.
@@ -92,3 +98,57 @@ internal fun subtitleStreamIndexFor(choice: TextChoice, embedded: List<EmbeddedS
 
 /** Jellyfin's "no subtitle stream" index. */
 internal const val NO_SUBTITLE_STREAM = -1
+
+
+/** docs/18 §3.1: a transcode's audio rows are every source stream, since its HLS carries only the
+ * [shown] one; the server's label is the title, shown verbatim.
+ */
+internal fun transcodeAudioRows(streams: List<AudioStreamFfi>, shown: Int?): List<TrackInfo> = streams.map { it.row(shown) }
+
+private fun AudioStreamFfi.row(shown: Int?) = TrackInfo(
+    id = streamRowId(index),
+    kind = TrackKindFfi.AUDIO,
+    title = displayTitle,
+    lang = language,
+    codec = codec,
+    isDefault = isDefault,
+    isSelected = index == shown,
+    isForced = false,
+)
+
+/**
+ * docs/18 §3.1: the audio stream a transcode negotiation names for [choice]: the stream a row named
+ * while it still carries the picked identity, else the unique match; none (the server's default)
+ * when undecided, ambiguous or missing, since there is no "no audio" to fall back to.
+ */
+internal fun audioStreamIndexFor(choice: AudioChoice?, streams: List<AudioStreamFfi>): Int? {
+    choice ?: return null
+    val named = streams.firstOrNull { it.index == choice.streamIndex && it.identity() == choice.identity }
+    if (named != null) return named.index
+    val match = matchTrack(choice.identity, TrackKindFfi.AUDIO, streams.map { it.row(null).copy(title = it.title) }) ?: return null
+    return streams.first { streamRowId(it.index) == match.id }.index
+}
+
+/** docs/18 §3.1: what a player audio [track] records; a transcode's one track is its [delivered]
+ * stream, recorded as that stream so a renegotiation names it again.
+ */
+internal fun audioChoiceOf(track: TrackInfo, delivered: AudioStreamFfi?): AudioChoice =
+    delivered?.let(::streamAudioChoice) ?: AudioChoice(track.identity())
+
+/** docs/18 §3.1: what picking source [stream] records, keyed the way [audioStreamIndexFor] matches it. */
+internal fun streamAudioChoice(stream: AudioStreamFfi): AudioChoice = AudioChoice(stream.identity(), stream.index)
+
+/** docs/18 §3.1: a stream's identity uses its own title, as the player reports it, not the server's display label. */
+private fun AudioStreamFfi.identity() = row(null).copy(title = title).identity()
+
+/** docs/18 §3.1, docs/28 §1: what picking a transcode's audio stream does. */
+internal enum class AudioStreamPick { UNCHANGED, REFUSED, RENEGOTIATE }
+
+/** docs/18 §3.1, docs/28 §1: the [delivered] stream changes nothing unless a negotiation is in flight
+ * (its landing re-checks the choice); any other pick renegotiates, which a group never does.
+ */
+internal fun audioStreamPick(picked: Int, delivered: Int?, negotiating: Boolean, inGroup: Boolean): AudioStreamPick = when {
+    picked == delivered && !negotiating -> AudioStreamPick.UNCHANGED
+    inGroup -> AudioStreamPick.REFUSED
+    else -> AudioStreamPick.RENEGOTIATE
+}

@@ -52,11 +52,16 @@ import tv.jellybeam.visualizer.gl.VisualizerView
 import tv.jellybeam.visualizer.pattern.Pattern
 import tv.jellybeam.visualizer.pattern.PatternCycle
 
+/** docs/30 §7 (D10): the device's `reqGlEsVersion`, 0 when unknown. */
+internal fun deviceGlEsVersion(context: Context): Int =
+    (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.deviceConfigurationInfo?.reqGlEsVersion ?: 0
+
 /** docs/30 §7 (D10): whether this device can draw the visualizer (GLES 3.0). */
-internal fun visualizerSupported(context: Context): Boolean {
-    val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return false
-    return visualizerSupported(am.deviceConfigurationInfo.reqGlEsVersion)
-}
+internal fun visualizerSupported(context: Context): Boolean = visualizerSupported(deviceGlEsVersion(context))
+
+/** docs/30 §7 (D10): the line that says why the visualizer is off on this device. */
+internal fun visualizerUnsupportedText(context: Context): String =
+    context.getString(R.string.music_visualizer_unsupported, glEsVersionLabel(deviceGlEsVersion(context)))
 
 /**
  * docs/30 §7: the full-screen visualizer over Now Playing. Holds focus and ambient off while open;

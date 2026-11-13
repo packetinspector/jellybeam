@@ -90,8 +90,21 @@ fn in_view<'a>(view_id: &'a dyn ToSql, filter: &str, sort: GridSort) -> SongQuer
     SongQuery {
         scope: format!("{SONGS_IN_VIEW}{filter}"),
         params: vec![view_id],
-        order: grid_sort_order(sort),
-        key: Cow::Borrowed(grid_group_key_expr(sort.field)),
+        order: song_sort_order(sort),
+        key: song_group_key(sort.field),
+    }
+}
+
+/// docs/29 §9 A: songs order by `name`, never `sort_name`, which the server prefixes with "disc - track - ".
+fn song_sort_order(sort: GridSort) -> String {
+    grid_sort_order(sort).replace("sort_name", "name")
+}
+
+/// docs/29 §9 A: the rail key follows [`song_sort_order`], so a song files under its title's letter, not "#".
+fn song_group_key(field: GridSortField) -> Cow<'static, str> {
+    match field {
+        GridSortField::Name => Cow::Owned(grid_group_key_expr(field).replace("sort_name", "name")),
+        _ => Cow::Borrowed(grid_group_key_expr(field)),
     }
 }
 
@@ -127,8 +140,8 @@ fn song_query(source: &SongSource) -> SongQuery<'_> {
         SongSource::Artist { artist_id, sort } => SongQuery {
             scope: format!("FROM items WHERE {ARTIST_SONGS_WHERE}"),
             params: vec![artist_id as &dyn ToSql],
-            order: grid_sort_order(*sort),
-            key: Cow::Borrowed(grid_group_key_expr(sort.field)),
+            order: song_sort_order(*sort),
+            key: song_group_key(sort.field),
         },
     }
 }
@@ -691,9 +704,15 @@ mod tests {
         performers: &'static [u32],
     }
 
+    /// The server's own song SortName: "disc - track - name", each number when present.
+    fn server_song_sort_name(t: &Track) -> String {
+        let n = |v: Option<i32>| v.map(|v| format!("{v:04} - ")).unwrap_or_default();
+        format!("{}{}{}", n(t.disc), n(t.track), t.name)
+    }
+
     fn track(t: &Track, album_name: &str, by: u32, added: &str, genre: Option<&str>) -> Value {
         json!({
-            "Id": id(t.n), "Name": t.name, "SortName": t.name, "Type": "Audio",
+            "Id": id(t.n), "Name": t.name, "SortName": server_song_sort_name(t), "Type": "Audio",
             "ParentId": id(t.album), "AlbumId": id(t.album), "Album": album_name,
             "AlbumArtist": artist_name(by), "AlbumArtists": [pair(by, artist_name(by))],
             "ArtistItems": t.performers.iter().map(|p| pair(*p, artist_name(*p))).collect::<Vec<_>>(),

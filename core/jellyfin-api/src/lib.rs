@@ -958,6 +958,7 @@ impl JellyfinClient {
             allow_video_stream_copy: options.allow_video_stream_copy,
             allow_audio_stream_copy: options.allow_audio_stream_copy,
             subtitle_stream_index: options.subtitle_stream_index,
+            audio_stream_index: options.audio_stream_index,
             ..Default::default()
         };
         let resp = self
@@ -1462,6 +1463,9 @@ pub struct PlaybackInfoOptions {
     /// docs/18 §3.1: the subtitle stream the viewer chose (`-1` for none), honoured only with
     /// `media_source_id`; `None` leaves the server's default, which may burn it in.
     pub subtitle_stream_index: Option<i32>,
+    /// docs/18 §3.1: the audio stream the viewer chose, honoured only with `media_source_id`;
+    /// `None` leaves the server's default.
+    pub audio_stream_index: Option<i32>,
 }
 
 /// Start/progress/stopped payloads unified, mapped to the three endpoints
@@ -2726,6 +2730,29 @@ mod tests {
                 "{kind:?}: {body}"
             );
         }
+    }
+
+    /// docs/18 §3.1: a renegotiation names the viewer's audio stream beside its source, the only
+    /// way the server applies it.
+    #[tokio::test]
+    async fn playback_info_body_carries_the_chosen_audio_stream_with_its_source() {
+        let (base_url, rx) = test_server::capturing_server("200 OK", "{}".to_string()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        let options = PlaybackInfoOptions {
+            force_transcode: true,
+            media_source_id: Some("ms-1".to_string()),
+            audio_stream_index: Some(3),
+            ..Default::default()
+        };
+        client
+            .get_playback_info("item", &DeviceProfile::default(), Some(0), options)
+            .await
+            .expect("get_playback_info against mock server");
+        let request = rx.await.expect("mock server captured a request");
+        let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+        let body: serde_json::Value = serde_json::from_str(body).expect("a JSON body");
+        assert_eq!(body["MediaSourceId"], "ms-1", "{body}");
+        assert_eq!(body["AudioStreamIndex"], 3, "{body}");
     }
 
     // --- ItemQuery.sort_order -> `sortOrder` query param ----------------

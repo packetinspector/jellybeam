@@ -45,6 +45,7 @@ import uniffi.jellybeam_core.ChapterInfoFfi
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.EpisodeNeighbors
 import uniffi.jellybeam_core.ItemDetail
+import uniffi.jellybeam_core.AudioStreamFfi
 import uniffi.jellybeam_core.EmbeddedSubtitleFfi
 import uniffi.jellybeam_core.ExternalSubtitleFfi
 import uniffi.jellybeam_core.FailedTrackFfi
@@ -98,6 +99,8 @@ private fun samplePlan(
     playSessionId: String = "session-1",
     embeddedSubtitles: List<EmbeddedSubtitleFfi> = emptyList(),
     burnedSubtitleIndex: Int? = null,
+    audioStreams: List<AudioStreamFfi> = emptyList(),
+    deliveredAudioIndex: Int? = null,
 ) = PlaybackPlan(
     itemId = itemId,
     itemName = itemName,
@@ -115,6 +118,8 @@ private fun samplePlan(
     externalSubtitles = externalSubtitles,
     embeddedSubtitles = embeddedSubtitles,
     burnedSubtitleIndex = burnedSubtitleIndex,
+    audioStreams = audioStreams,
+    deliveredAudioIndex = deliveredAudioIndex,
     playMethod = playMethod,
     transcodeReason = transcodeReason,
     serverVerdict = serverVerdict,
@@ -6148,6 +6153,178 @@ class PlaybackViewModelTest {
         }
     }
 
+    // -- docs/18 §3.1: the negotiation carries the audio choice ---------------------------------
+
+    private val mainAudioStream = AudioStreamFfi(index = 1, displayTitle = "English - AAC - Stereo - Default", language = "eng", codec = "aac", channels = 2, isDefault = true)
+    private val commentaryStream = AudioStreamFfi(index = 3, displayTitle = "Commentary - English - AAC - Stereo", title = "Commentary", language = "eng", codec = "aac", channels = 2, isDefault = false)
+    private val japaneseStream = AudioStreamFfi(index = 4, displayTitle = null, language = "jpn", codec = "ac3", channels = 6, isDefault = false)
+
+    private fun audioTranscode(id: String, delivered: Int?, burned: Int? = null, itemId: String = "item-1") = samplePlan(
+        itemId = itemId,
+        playMethod = PlayMethodFfi.TRANSCODE,
+        playSessionId = id,
+        embeddedSubtitles = listOf(assStream),
+        burnedSubtitleIndex = burned,
+        audioStreams = listOf(mainAudioStream, commentaryStream, japaneseStream),
+        deliveredAudioIndex = delivered,
+    )
+
+    @Test
+    fun `while transcoding the audio picker lists the source's streams with the delivered one selected`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = audioTranscode("session-1", delivered = 1)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            viewModel.openTrackPicker()
+
+            val rows = viewModel.state.value.trackPicker!!.audioTracks
+            assertEquals(listOf(streamRowId(1), streamRowId(3), streamRowId(4)), rows.map { it.id })
+            assertEquals(listOf(true, false, false), rows.map { it.selected })
+            assertEquals(listOf("English - AAC - Stereo - Default", "Commentary - English - AAC - Stereo", "Japanese"), rows.map { it.label })
+            assertNull("the server's label already says language and format", rows[0].meta)
+            assertNotNull("an unlabelled stream keeps the usual format line", rows[2].meta)
+            assertTrue(gateway.prepareTranscodeFallbackCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `on Direct Play the audio picker and a pick stay with the player's own tracks`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(audioStreams = listOf(mainAudioStream, japaneseStream))
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true, jaAudio to false))
+            runCurrent()
+            viewModel.openTrackPicker()
+            assertEquals(listOf(TrackMapping.toId(0, 0), TrackMapping.toId(1, 0)), viewModel.state.value.trackPicker!!.audioTracks.map { it.id })
+
+            viewModel.chooseAudio(TrackMapping.toId(1, 0))
+            runCurrent()
+
+            assertEquals(TrackMapping.toId(1, 0), player.applyTrackDecisionCalls.last().first.audioTrackId)
+            assertTrue(gateway.prepareTranscodeFallbackCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `picking another audio stream while transcoding renegotiates with it and stays paused, the delivered one changes nothing`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            val plan = audioTranscode("session-1", delivered = 1)
+            val landed = audioTranscode("landed", delivered = 3)
+            val gateway = FakeCoreGateway(
+                preparePlaybackResult = Result.success(plan),
+                prepareTranscodeFallbackResult = Result.success(landed),
+            )
+            val player = FakePlaybackPlayer()
+            val viewModel = buildViewModel(gateway, player, plan.itemId)
+            withSession(viewModel) {
+                player.fireTracksChanged(tracksOf(enAudio to true))
+                runCurrent()
+                viewModel.openTrackPicker()
+
+                viewModel.chooseAudio(streamRowId(1))
+                runCurrent()
+                assertTrue("the delivered stream needs nothing", gateway.prepareTranscodeFallbackCalls.isEmpty())
+
+                player.pause()
+                viewModel.chooseAudio(streamRowId(3))
+                assertEquals(listOf(false, true, false), viewModel.state.value.trackPicker!!.audioTracks.map { it.selected })
+                runCurrent()
+
+                val call = gateway.prepareTranscodeFallbackCalls.single()
+                assertEquals(3, call.audioStreamIndex)
+                assertNull("an undecided subtitle leaves the server's default", call.subtitleStreamIndex)
+                assertEquals("session-1", call.playSessionId)
+                assertEquals(listOf(plan, landed), player.loadedPlans)
+                assertFalse("a paused viewer stays paused", player.playWhenReady)
+            }
+        }
+
+    /** The landed HLS announces one audio track; recording it must not lose which stream it is. */
+    @Test
+    fun `an audio pick survives its landing and a later subtitle burn-in renegotiation`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = audioTranscode("session-1", delivered = 1)
+        val landed = audioTranscode("audio", delivered = 3)
+        val burned = audioTranscode("burned", delivered = 3, burned = 2)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan)).apply {
+            prepareTranscodeFallbackResultsByCall[0] = Result.success(landed)
+            prepareTranscodeFallbackResultsByCall[1] = Result.success(burned)
+        }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            viewModel.chooseAudio(streamRowId(3))
+            runCurrent()
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            viewModel.openTrackPicker()
+            assertEquals(listOf(false, true, false), viewModel.state.value.trackPicker!!.audioTracks.map { it.selected })
+
+            viewModel.chooseSubtitle(streamRowId(2))
+            runCurrent()
+
+            val calls = gateway.prepareTranscodeFallbackCalls
+            assertEquals(listOf(null to 3, 2 to 3), calls.map { it.subtitleStreamIndex to it.audioStreamIndex })
+            assertEquals(listOf(plan, landed, burned), player.loadedPlans)
+        }
+    }
+
+    @Test
+    fun `an audio pick changed while its renegotiation runs renegotiates again before anything loads`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = audioTranscode("session-1", delivered = 1)
+        val commentary = audioTranscode("commentary", delivered = 3)
+        val japanese = audioTranscode("japanese", delivered = 4)
+        val gate = CompletableDeferred<Unit>()
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan)).apply {
+            prepareTranscodeFallbackResultsByCall[0] = Result.success(commentary)
+            prepareTranscodeFallbackResultsByCall[1] = Result.success(japanese)
+            prepareTranscodeFallbackGatesByCall[0] = gate
+        }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            viewModel.chooseAudio(streamRowId(3))
+            runCurrent()
+            viewModel.chooseAudio(streamRowId(4))
+            gate.complete(Unit)
+            runCurrent()
+
+            val calls = gateway.prepareTranscodeFallbackCalls
+            assertEquals(listOf(3, 4), calls.map { it.audioStreamIndex })
+            assertEquals("renegotiated from the landed session", "commentary", calls[1].playSessionId)
+            assertEquals("the first landing never loaded", listOf(plan, japanese), player.loadedPlans)
+        }
+    }
+
+    @Test
+    fun `a fallback from Direct Play carries the audio track the viewer chose`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(transcodeFallbackAllowed = true, audioStreams = listOf(mainAudioStream, japaneseStream))
+        val landed = audioTranscode("landed", delivered = 4)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(landed),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true, jaAudio to false))
+            runCurrent()
+            viewModel.chooseAudio(TrackMapping.toId(1, 0))
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            runCurrent()
+
+            assertEquals(4, gateway.prepareTranscodeFallbackCalls.single().audioStreamIndex)
+        }
+    }
+
     // -- review fixes: a renegotiation in flight owns the session until it lands -------------
 
     @Test
@@ -7863,6 +8040,21 @@ class PlaybackViewModelTest {
         }
 
     @Test
+    fun `in a group picking another audio stream of a transcode is refused and nothing reloads`() =
+        groupTest(groupGateway(audioTranscode("session-1", delivered = 1, itemId = "item-g"), audioTranscode("landed", delivered = 3, itemId = "item-g"))) { rig ->
+            landWithPicker(rig, tracksOf(enAudio to true))
+            val before = rig.viewModel.state.value.trackPicker!!.audioTracks
+            assertEquals(listOf(streamRowId(1), streamRowId(3), streamRowId(4)), before.map { it.id })
+            val decisions = rig.player.applyTrackDecisionCalls.size
+
+            rig.viewModel.chooseAudio(streamRowId(3))
+
+            assertTrue(rig.viewModel.state.value.trackPickRefused)
+            assertRefused(rig, rig.viewModel.state.value.trackPicker!!.subtitleTracks, decisions)
+            assertEquals("the audio selection is unchanged", before, rig.viewModel.state.value.trackPicker!!.audioTracks)
+        }
+
+    @Test
     fun `in a group switching delivered text tracks still works`() {
         val en = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "English", forced = false, default = false, codec = "srt", displayTitle = "English", delivery = SubtitleDeliveryFfi.HLS)
         val fr = EmbeddedSubtitleFfi(index = 4, language = "fre", title = "French", forced = false, default = false, codec = "srt", displayTitle = "French", delivery = SubtitleDeliveryFfi.HLS)
@@ -7930,9 +8122,9 @@ class PlaybackViewModelTest {
         runCurrent()
 
         rig.viewModel.chooseSubtitle(streamRowId(3))
-        assertTrue(rig.viewModel.state.value.subtitlePickRefused)
-        rig.viewModel.subtitlePickRefusedShown()
-        assertFalse(rig.viewModel.state.value.subtitlePickRefused)
+        assertTrue(rig.viewModel.state.value.trackPickRefused)
+        rig.viewModel.trackPickRefusedShown()
+        assertFalse(rig.viewModel.state.value.trackPickRefused)
         assertTrue(rig.gateway.prepareTranscodeFallbackCalls.isEmpty())
     }
 

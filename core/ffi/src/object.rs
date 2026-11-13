@@ -2280,6 +2280,7 @@ impl JellybeamCore {
         play_session_id: String,
         failed: Option<FailedTrackFfi>,
         subtitle_stream_index: Option<i32>,
+        audio_stream_index: Option<i32>,
         request: PlaybackRequest,
     ) -> Result<PlaybackPlan, CoreError> {
         let (client, mirror, caps, tolerate_mislabeled_levels, quality, media_source_id, claim) = {
@@ -2351,7 +2352,12 @@ impl JellybeamCore {
                 &item_id,
                 &profile,
                 Some(position_ticks),
-                fallback_options(media_source_id, failed, subtitle_stream_index),
+                fallback_options(
+                    media_source_id,
+                    failed,
+                    subtitle_stream_index,
+                    audio_stream_index,
+                ),
             )?;
             // See [`transcode_url_from_decision`]'s own doc comment for exactly
             // which two decision shapes this accepts (a codec-blind source's
@@ -2372,6 +2378,12 @@ impl JellybeamCore {
             self.install_claimed_session(&claim, &client, ctx, sidecars)?;
 
             let burned_subtitle_index = crate::types::burned_subtitle_index(&url);
+            let delivered_audio_index = crate::types::delivered_audio_index(
+                PlayMethodFfi::Transcode,
+                &url,
+                audio_stream_index,
+                &source,
+            );
             let plan = PlaybackPlan {
                 item_id: item_id.clone(),
                 item_name,
@@ -2395,6 +2407,8 @@ impl JellybeamCore {
                 external_subtitles: sidecar_tracks,
                 embedded_subtitles: crate::types::embedded_subtitles_of(&source),
                 burned_subtitle_index,
+                audio_streams: crate::types::audio_streams_of(&source),
+                delivered_audio_index,
             };
 
             Ok(plan)
@@ -3314,6 +3328,9 @@ impl JellybeamCore {
         let (sidecars, sidecar_tracks) = Self::session_sidecars(&client, &source, &play_session_id);
         self.install_claimed_session(claim, &client, ctx, sidecars)?;
         let burned_subtitle_index = crate::types::burned_subtitle_index(&url);
+        // The first negotiation names no audio stream.
+        let delivered_audio_index =
+            crate::types::delivered_audio_index(play_method, &url, None, &source);
         let plan = PlaybackPlan {
             item_id: item_id.clone(),
             item_name,
@@ -3335,6 +3352,8 @@ impl JellybeamCore {
             external_subtitles: sidecar_tracks,
             embedded_subtitles: crate::types::embedded_subtitles_of(&source),
             burned_subtitle_index,
+            audio_streams: crate::types::audio_streams_of(&source),
+            delivered_audio_index,
         };
 
         Ok(plan)
@@ -5317,11 +5336,13 @@ fn resolve_plan(
 
 /// docs/18 §2: the fallback's negotiation -- a forced transcode of the same source that never copies
 /// the stream type that `failed` (an unattributed failure is treated as video, the usual culprit;
-/// `None` is a renegotiation with no failure) and carries the viewer's subtitle stream (§3.1).
+/// `None` is a renegotiation with no failure) and carries the viewer's subtitle and audio
+/// streams (§3.1).
 fn fallback_options(
     media_source_id: String,
     failed: Option<FailedTrackFfi>,
     subtitle_stream_index: Option<i32>,
+    audio_stream_index: Option<i32>,
 ) -> jellyfin_api::PlaybackInfoOptions {
     let (video_copy, audio_copy) = match failed {
         Some(FailedTrackFfi::Video | FailedTrackFfi::Unknown) => (Some(false), None),
@@ -5334,6 +5355,7 @@ fn fallback_options(
         allow_video_stream_copy: video_copy,
         allow_audio_stream_copy: audio_copy,
         subtitle_stream_index,
+        audio_stream_index,
     }
 }
 
@@ -5441,6 +5463,7 @@ pub(crate) mod tests {
                 reason,
                 play_session_id,
                 Some(FailedTrackFfi::Video),
+                None,
                 None,
                 request,
             )
@@ -9878,33 +9901,54 @@ pub(crate) mod tests {
         assert!(core.lock_state().preload_cache.is_none());
     }
 
-    /// docs/18 §2: the fallback renegotiates the same source and never asks for a copy of the
-    /// stream type that failed, so the server re-encodes it.
+    /// docs/18 §2, §3.1: the fallback renegotiates the same source with the viewer's subtitle and
+    /// audio streams, never asks for a copy of the stream type that failed, and its plan names
+    /// the audio stream it delivers.
     #[test]
     fn a_fallback_names_its_source_and_forbids_copying_the_failed_stream() {
         let cases = [
-            (Some(FailedTrackFfi::Video), Some(false), None, Some(-1)),
-            (Some(FailedTrackFfi::Unknown), Some(false), None, Some(2)),
-            (Some(FailedTrackFfi::Audio), None, Some(false), None),
-            (None, None, None, Some(-1)),
+            (
+                Some(FailedTrackFfi::Video),
+                Some(false),
+                None,
+                Some(-1),
+                Some(1),
+            ),
+            (
+                Some(FailedTrackFfi::Unknown),
+                Some(false),
+                None,
+                Some(2),
+                None,
+            ),
+            (
+                Some(FailedTrackFfi::Audio),
+                None,
+                Some(false),
+                None,
+                Some(3),
+            ),
+            (None, None, None, Some(-1), Some(2)),
         ];
-        for (failed, video_copy, audio_copy, subtitle) in cases {
+        for (failed, video_copy, audio_copy, subtitle, audio) in cases {
             let (_dir, core, mock) =
                 auto_core(vec![direct_play_fixture().1, transcode_fixture().1]);
             let a = core
                 .prepare_playback_now("item-1".to_string(), false)
                 .expect("A plays");
             let request = core.next_request();
-            core.prepare_transcode_fallback(
-                "item-1".to_string(),
-                0,
-                "decoder error".to_string(),
-                a.play_session_id,
-                failed,
-                subtitle,
-                request,
-            )
-            .expect("the fallback negotiates");
+            let plan = core
+                .prepare_transcode_fallback(
+                    "item-1".to_string(),
+                    0,
+                    "decoder error".to_string(),
+                    a.play_session_id,
+                    failed,
+                    subtitle,
+                    audio,
+                    request,
+                )
+                .expect("the fallback negotiates");
 
             let body = &mock.playback_info_bodies()[1];
             let flag = |value: Option<bool>| {
@@ -9915,6 +9959,9 @@ pub(crate) mod tests {
             assert_eq!(body["AllowAudioStreamCopy"], flag(audio_copy), "{failed:?}");
             let index = subtitle.map_or(serde_json::Value::Null, serde_json::Value::from);
             assert_eq!(body["SubtitleStreamIndex"], index, "{failed:?}");
+            let audio_index = audio.map_or(serde_json::Value::Null, serde_json::Value::from);
+            assert_eq!(body["AudioStreamIndex"], audio_index, "{failed:?}");
+            assert_eq!(plan.delivered_audio_index, audio, "{failed:?}");
         }
     }
 
@@ -10990,6 +11037,7 @@ pub(crate) mod tests {
                         1_000_000,
                         "decoder error".to_string(),
                         plan.play_session_id,
+                        None,
                         None,
                         None,
                         a_request(core, a_epoch),

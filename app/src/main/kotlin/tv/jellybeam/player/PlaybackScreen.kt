@@ -1067,12 +1067,12 @@ fun PlaybackScreen(
         false
     }
 
-    // docs/28 §1: a subtitle pick the group refused shows as a notice.
-    LaunchedEffect(state.subtitlePickRefused) {
-        if (state.subtitlePickRefused) {
-            noticeText = R.string.wt_subtitle_refused
+    // docs/28 §1: a track pick the group refused shows as a notice.
+    LaunchedEffect(state.trackPickRefused) {
+        if (state.trackPickRefused) {
+            noticeText = R.string.wt_track_refused
             noticeToken++
-            viewModel.subtitlePickRefusedShown()
+            viewModel.trackPickRefusedShown()
         }
     }
 

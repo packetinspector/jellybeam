@@ -145,6 +145,10 @@ fields. Presets are a Kotlin concern (the chip row), the core accepts any
   the codecs this device decodes: a listed codec is copied, so an
   undecodable HEVC listed there came straight back (dev-server evidence:
   `-codec:v:0 copy` before, `libx264` after).
+  Full signature: `prepare_transcode_fallback(item_id, position_ticks,
+  reason, play_session_id, failed, subtitle_stream_index,
+  audio_stream_index, request)`; both stream indexes are sent beside the
+  `MediaSourceId` (`None` leaves the server's default, §3.1).
 - `preload_playback` caches DirectPlay plans only (an attempt-anyway plan
   included — its URL is position-independent); a Transcode plan is never
   cached (its HLS URL embeds the start position), and preload is a no-op
@@ -436,6 +440,15 @@ Session threading rules shared by every path above:
   loads: burned-in pixels can't be turned off), and every renegotiation
   resends the session's copy policy
   (§2), so a subtitle change never lets a failed stream be copied back.
+- **The negotiation carries the audio choice.** A transcode's HLS holds one
+  audio stream, so Media3 can list only that one; picking another
+  renegotiates naming it (`AudioStreamIndex`, honoured only with
+  `MediaSourceId`, like the subtitle index). `PlaybackPlan.audio_streams`
+  lists the source's indexed audio streams (`DisplayTitle` verbatim), and
+  `delivered_audio_index` is the one a Transcode plan carries: the
+  negotiation's `AudioStreamIndex`, else the source's
+  `DefaultAudioStreamIndex`; `None` on Direct Play, whose file holds every
+  stream for the player to pick.
 - **Text subtitles in a transcode are drawn by the player, never burned in.**
   The profile lists `Hls` ahead of `External` for SRT and WebVTT, since the
   server takes the first matching profile and reads `Hls` only in a

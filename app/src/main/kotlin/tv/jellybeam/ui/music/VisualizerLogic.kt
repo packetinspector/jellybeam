@@ -20,6 +20,9 @@ internal fun ambientStyleFor(key: String?): AmbientStyle = AmbientStyle.entries.
 /** docs/30 §7 (D10): GLES 3.0 (`ConfigurationInfo.reqGlEsVersion`) or no Visualizer button and no ambient option. */
 internal fun visualizerSupported(reqGlEsVersion: Int): Boolean = reqGlEsVersion >= GLES_3_0
 
+/** docs/30 §7 (D10): `reqGlEsVersion` as "major.minor" for the unsupported note, so the user sees what the device reports. */
+internal fun glEsVersionLabel(reqGlEsVersion: Int): String = "${reqGlEsVersion ushr 16}.${reqGlEsVersion and 0xffff}"
+
 /** docs/30 §7: ambient draws the visualizer only when chosen and the device can draw it; otherwise the cover art. */
 internal fun ambientDrawsVisualizer(style: AmbientStyle, supported: Boolean): Boolean = supported && style == AmbientStyle.VISUALIZER
 

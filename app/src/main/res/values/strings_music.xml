@@ -241,6 +241,8 @@
     <string name="music_visualizer">Visualizer</string>
     <!-- docs/30 §7: shown under the still visualizer when the audio is passthrough and can't be analysed. -->
     <string name="music_visualizer_needs_decoded">Visualizer needs decoded audio</string>
+    <!-- docs/30 §7 (D10): Settings note and Now Playing message on a device without OpenGL ES 3.0; %1$s is the version it reports, e.g. 2.0. -->
+    <string name="music_visualizer_unsupported">The visualizer needs OpenGL ES 3.0; this device\'s graphics report %1$s.</string>
     <!-- docs/30 §7: shown briefly each time the full-screen visualizer opens; arrows are the remote's D-pad. -->
     <string name="music_visualizer_hint">◀ ▶ Pattern   ▲ ▼ Track</string>
     <!-- docs/30 §5: pattern names, shown for 1.5 s on a Left/Right switch (cased up in code). -->

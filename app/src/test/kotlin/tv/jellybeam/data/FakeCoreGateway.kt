@@ -386,6 +386,7 @@ class FakeCoreGateway(
         val playSessionId: String,
         val failed: FailedTrackFfi?,
         val subtitleStreamIndex: Int? = null,
+        val audioStreamIndex: Int? = null,
     )
 
     private val _prepareTranscodeFallbackCalls = mutableListOf<PrepareTranscodeFallbackCall>()
@@ -952,10 +953,11 @@ class FakeCoreGateway(
         playSessionId: String,
         failed: FailedTrackFfi?,
         subtitleStreamIndex: Int?,
+        audioStreamIndex: Int?,
         request: PlaybackRequest,
     ): PlaybackPlan {
         playbackRequests.add(request)
-        _prepareTranscodeFallbackCalls.add(PrepareTranscodeFallbackCall(itemId, positionTicks, reason, playSessionId, failed, subtitleStreamIndex))
+        _prepareTranscodeFallbackCalls.add(PrepareTranscodeFallbackCall(itemId, positionTicks, reason, playSessionId, failed, subtitleStreamIndex, audioStreamIndex))
         val result = prepareTranscodeFallbackResultsByCall[_prepareTranscodeFallbackCalls.size - 1]
             ?: prepareTranscodeFallbackResult
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.prepareTranscodeFallback($itemId): no result configured")

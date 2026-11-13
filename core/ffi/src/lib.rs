@@ -67,16 +67,16 @@ pub use syncplay::{
     SyncPlayRole, SyncPlaySeverity, SyncPlaySnapshot, SyncPlayUpdate,
 };
 pub use types::{
-    AccountIdentity, AccountInfo, AlbumSummary, ArtistScope, AudioSpatialKind, BrowseRead, Card,
-    ChangeEvent, ChapterInfoFfi, Decade, DeviceCaps, EmbeddedSubtitleFfi, EpisodeNeighbors,
-    ExternalSubtitleFfi, FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort,
-    GridSortField, ImageKind, ImageUrlPrefix, ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment,
-    MediaSegmentKind, MediaStreamInfo, MediaStreamKind, MirrorItemCounts, MirrorLibrary,
-    MirrorStats, MusicArtistRow, MusicGenreRow, PersonInfo, PlayMethodFfi, PlaybackOsdDetail,
-    PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails, ServerInfoSnapshot,
-    SongSource, SortOrder, StatusFilter, SubtitleActionFfi, SubtitleDeliveryFfi, TrackDecisionFfi,
-    TrackInfo, TrackKindFfi, TrackMemoryFfi, TrickplayMetaFfi, TrickplayTileFfi, VideoCaps,
-    VideoCodecId, ViewSnapshot, WatchedFilter,
+    AccountIdentity, AccountInfo, AlbumSummary, ArtistScope, AudioSpatialKind, AudioStreamFfi,
+    BrowseRead, Card, ChangeEvent, ChapterInfoFfi, Decade, DeviceCaps, EmbeddedSubtitleFfi,
+    EpisodeNeighbors, ExternalSubtitleFfi, FailedTrackFfi, GridCounts, GridFilters, GridGroup,
+    GridSort, GridSortField, ImageKind, ImageUrlPrefix, ItemDetail, LibraryGridPrefs, LiveSort,
+    MediaSegment, MediaSegmentKind, MediaStreamInfo, MediaStreamKind, MirrorItemCounts,
+    MirrorLibrary, MirrorStats, MusicArtistRow, MusicGenreRow, PersonInfo, PlayMethodFfi,
+    PlaybackOsdDetail, PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails,
+    ServerInfoSnapshot, SongSource, SortOrder, StatusFilter, SubtitleActionFfi,
+    SubtitleDeliveryFfi, TrackDecisionFfi, TrackInfo, TrackKindFfi, TrackMemoryFfi,
+    TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId, ViewSnapshot, WatchedFilter,
 };
 
 /// docs/16 §2.7: the drawer's Favorites page as a library view; Kotlin recognises it by

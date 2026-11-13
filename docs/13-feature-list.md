@@ -227,7 +227,7 @@ previous song, OK plays or pauses, Back returns to the button; a short key
 hint shows each time it opens. Flashes are limited to three a second, always. It follows the
 song in time, freezes when paused, and shows "Visualizer needs decoded audio"
 for passthrough audio. Settings › Playback › Music › Ambient screen picks Cover art or
-Visualizer for the ambient screen. Hidden on devices without OpenGL ES 3.0; a user who never opens it pays nothing for it.
+Visualizer for the ambient screen. On devices without OpenGL ES 3.0 the button and Settings say it needs 3.0 and name the version the device reports; a user who never opens it pays nothing for it.
 On Home, a music library's Latest is a shelf of square album cards, and the
 remote's Play key plays the focused album; search groups Artists, Albums, Songs
 and Playlists under their own headers.
@@ -338,6 +338,7 @@ title (episode/season identity, plot, air/premiere and library-added dates,
 watch count and last-watch date, content/community/critic ratings when
 available, genres, director/writer, studio, and runtime); one unified track-selector control for the shared
 audio/subtitle picker (a row's label is the server's title or the language's name; its meta adds the format, Forced and SDH, e.g. `SRT · SDH`);
+while a server transcode plays, the audio list is the source's audio streams under the server's own labels with the delivered one selected, and picking another renegotiates the transcode with it at the same position and play/pause state (refused in a watch-together group; docs/18 §3.1);
 external playback orchestration through an exported PLAY intent or
 `jellybeam://play/&lt;item-id&gt;` deep link (active server/account, resume semantics,
 any UUID spelling treated as the same item the UI plays,

@@ -164,7 +164,9 @@ Ten, in Left/Right order (Bars first, Ripples last, wrapping); each picks a pale
 ## 7. Screens and controls
 
 - **Entry:** a Visualizer button on Now Playing opens it full screen. GLES 3.0
-  missing: no button and no ambient option.
+  missing: the button stays and says why ("needs OpenGL ES 3.0", with the
+  version the device reports), and Settings › Playback › Music shows one dimmed
+  Visualizer row with that note in place of the Ambient screen and pattern rows.
 - **Keys:** Left/Right = previous/next pattern (wraps; remembered); Up/Down
   = next/previous track (the transport's own rule: Previous restarts first);
   Centre = play/pause; each acts on the first key down. Page/Channel keys

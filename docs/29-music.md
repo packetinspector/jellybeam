@@ -201,7 +201,9 @@ transcode's spec line.
   (Albums the first time). Tabs Albums · Artists · Songs · Playlists · Genres
   switch on OK, not focus. A sort strip `{n} {TYPE} │ {ORDER}` names the
   tab's fixed order. The focused item's facts sit top right; the A–Z rail
-  shows only when the list is longer than a screen. Artists has a Show:
+  shows only when the list is longer than a screen. Song lists sort and file
+  under the song's Name, not its SortName (the server prefixes that with
+  "disc - track - "). Artists has a Show:
   Album artists | All artists toggle (A2). Playlists starts with New playlist
   and sorts by most recently changed (A4). Genres are verbatim tiles that
   open that genre's song list (A5).

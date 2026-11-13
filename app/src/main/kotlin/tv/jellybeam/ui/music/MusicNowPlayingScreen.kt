@@ -1,6 +1,7 @@
 package tv.jellybeam.ui.music
 
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -242,7 +243,8 @@ private fun NowPlayingFor(
             onStop = { owner.send(MusicEvent.Stop) },
             onFavorite = { viewModel.toggleFavorite(latestModel.itemId, isFavorite) },
             onMore = { latestMenuTarget?.let { menuModel.open(it, KEY_MORE) } },
-            onVisualizer = if (canVisualize) ({ visualizerOpen = true }) else null,
+            // docs/30 §7 (D10): the button stays where the visualizer can't draw and says why, so the feature never just goes missing.
+            onVisualizer = if (canVisualize) ({ visualizerOpen = true }) else ({ Toast.makeText(context, visualizerUnsupportedText(context), Toast.LENGTH_LONG).show() }),
         )
     }
     val panel = NowPlayingPanel(model, extras, isFavorite, position, (skipForwardMs / 1_000L).toInt(), itemActions = menuTarget != null, sessionEpoch)

@@ -389,7 +389,8 @@ interface CoreGateway {
      * is free text surfaced via [tv.jellybeam.player.PlaybackUiState.transcodeReason]. Refuses with
      * [CoreException.WouldTranscode] when `Settings.playbackQuality` is `DirectPlay`.
      * Also renegotiates a playing transcode for a new subtitle choice (§3.1): [failed] is the
-     * session's fallback cause, if any, and [subtitleStreamIndex] the stream to name (`-1` none).
+     * session's fallback cause, if any, and [subtitleStreamIndex] the stream to name (`-1` none);
+     * [audioStreamIndex] is the audio stream to carry (`null` leaves the server's default).
      * [playSessionId] and [request] guard staleness (§2.1): throws
      * [CoreException.StalePlaybackSession] if superseded.
      */
@@ -401,6 +402,7 @@ interface CoreGateway {
         playSessionId: String,
         failed: FailedTrackFfi?,
         subtitleStreamIndex: Int?,
+        audioStreamIndex: Int?,
         request: PlaybackRequest,
     ): PlaybackPlan
 
@@ -1215,10 +1217,11 @@ internal class RealCoreGateway(
         playSessionId: String,
         failed: FailedTrackFfi?,
         subtitleStreamIndex: Int?,
+        audioStreamIndex: Int?,
         request: PlaybackRequest,
     ): PlaybackPlan =
         ffi("ffi.prepareTranscodeFallback", reauthorize = false) {
-            prepareTranscodeFallback(itemId, positionTicks, reason, playSessionId, failed, subtitleStreamIndex, request)
+            prepareTranscodeFallback(itemId, positionTicks, reason, playSessionId, failed, subtitleStreamIndex, audioStreamIndex, request)
         }
 
     override suspend fun preloadPlayback(itemId: String, accountEpoch: ULong?) =

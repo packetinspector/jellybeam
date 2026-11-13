@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.jellybeam_core.AudioStreamFfi
 import uniffi.jellybeam_core.EmbeddedSubtitleFfi
 import uniffi.jellybeam_core.SubtitleActionFfi
 import uniffi.jellybeam_core.SubtitleDeliveryFfi
@@ -163,5 +164,65 @@ class TrackReapplyTest {
         assertEquals("subrip", got[1].codec)
         assertTrue("the file's default flag, not the manifest's", got[1].isDefault)
         assertEquals("no manifest stream, no manifest text to map", infos, manifestTrackInfos(infos, listOf(ass)))
+    }
+
+    // -- docs/18 §3.1: the negotiation carries the audio choice ----------------------------------
+
+    private val mainAudio = AudioStreamFfi(index = 1, displayTitle = "English - AAC - Stereo - Default", language = "eng", codec = "aac", channels = 2, isDefault = true)
+    private val commentary = AudioStreamFfi(index = 3, displayTitle = "Commentary - English - AAC - Stereo", title = "Commentary", language = "eng", codec = "aac", channels = 2, isDefault = false)
+    private val japanese = AudioStreamFfi(index = 4, displayTitle = null, language = "jpn", codec = "ac3", channels = 6, isDefault = false)
+    private val audioStreams = listOf(mainAudio, commentary, japanese)
+
+    @Test
+    fun `a transcode's audio rows are every source stream, the server's label verbatim, the delivered one selected`() {
+        val rows = transcodeAudioRows(audioStreams, shown = 3)
+        assertEquals(listOf(streamRowId(1), streamRowId(3), streamRowId(4)), rows.map { it.id })
+        assertTrue(rows.all { it.kind == TrackKindFfi.AUDIO })
+        assertEquals(listOf("English - AAC - Stereo - Default", "Commentary - English - AAC - Stereo", null), rows.map { it.title })
+        assertEquals(listOf(false, true, false), rows.map { it.isSelected })
+        assertEquals(listOf(true, false, false), rows.map { it.isDefault })
+        assertEquals(listOf("eng", "eng", "jpn"), rows.map { it.lang })
+        assertTrue("nothing delivered reads unselected", transcodeAudioRows(audioStreams, shown = null).none { it.isSelected })
+    }
+
+    @Test
+    fun `an audio negotiation names the picked stream while it keeps its identity, else the unique match, else the server's default`() {
+        val picked = streamAudioChoice(commentary)
+        assertEquals("a row's stream, where language alone is ambiguous", 3, audioStreamIndexFor(picked, audioStreams))
+        assertNull("undecided leaves the server's default", audioStreamIndexFor(null, audioStreams))
+        assertEquals("a player track's language when it is unique", 4, audioStreamIndexFor(AudioChoice(audio(0, "ja").identity()), audioStreams))
+        assertEquals("an untitled player track names its language's untitled stream", 1, audioStreamIndexFor(AudioChoice(audio(0, "en").identity()), audioStreams))
+        assertNull("a missing language names none", audioStreamIndexFor(AudioChoice(audio(0, "de").identity()), audioStreams))
+        val twins = listOf(5, 6).map { AudioStreamFfi(index = it, displayTitle = null, language = "eng", codec = "aac", channels = 2, isDefault = false) }
+        assertNull("an ambiguous language names none", audioStreamIndexFor(AudioChoice(audio(0, "en").identity()), twins))
+        val second = streamAudioChoice(twins[1])
+        assertEquals("only the row's own index tells unlabelled twins apart", 6, audioStreamIndexFor(second, twins))
+        val moved = AudioChoice(TrackIdentity("fra", null, forced = false), streamIndex = 3)
+        assertNull("a stream that no longer carries the identity is not named", audioStreamIndexFor(moved, audioStreams))
+    }
+
+    @Test
+    fun `a Direct Play pick of a titled twin names that stream when a fallback transcodes`() {
+        val playerCommentary = audio(0, "eng").copy(title = "Commentary")
+        assertEquals(3, audioStreamIndexFor(AudioChoice(playerCommentary.identity()), audioStreams))
+    }
+
+    @Test
+    fun `a transcode's player audio records the stream it delivers, Direct Play's the track itself`() {
+        val track = audio(0, "eng")
+        assertEquals(AudioChoice(track.identity()), audioChoiceOf(track, delivered = null))
+        val delivered = audioChoiceOf(track, delivered = commentary)
+        assertEquals(3, delivered.streamIndex)
+        assertEquals("it names the delivered stream again", 3, audioStreamIndexFor(delivered, audioStreams))
+    }
+
+    @Test
+    fun `picking the delivered audio stream changes nothing, a group refuses, any other pick renegotiates`() {
+        assertEquals(AudioStreamPick.UNCHANGED, audioStreamPick(picked = 1, delivered = 1, negotiating = false, inGroup = false))
+        assertEquals(AudioStreamPick.UNCHANGED, audioStreamPick(picked = 1, delivered = 1, negotiating = false, inGroup = true))
+        assertEquals(AudioStreamPick.RENEGOTIATE, audioStreamPick(picked = 3, delivered = 1, negotiating = false, inGroup = false))
+        assertEquals(AudioStreamPick.RENEGOTIATE, audioStreamPick(picked = 3, delivered = null, negotiating = false, inGroup = false))
+        assertEquals("the landing in flight re-checks it", AudioStreamPick.RENEGOTIATE, audioStreamPick(picked = 1, delivered = 1, negotiating = true, inGroup = false))
+        assertEquals(AudioStreamPick.REFUSED, audioStreamPick(picked = 3, delivered = 1, negotiating = false, inGroup = true))
     }
 }

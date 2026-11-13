@@ -50,8 +50,9 @@ SyncPlay. It needs no server change, no new port, and no plugin.
   decides and members never race each other's seeks.
 - **In a group,** a subtitle that needs the server to re-encode the stream
   (burning one in, removing the one burned in, or adding text the stream
-  lacks) can't be chosen, since that reload can't land on the group's exact
-  position (§5); delivered text switches as usual.
+  lacks), or another audio stream while the server transcodes, can't be
+  chosen, since that reload can't land on the group's exact position (§5);
+  delivered text switches as usual.
 
 ## 2. Server protocol and compatibility
 
