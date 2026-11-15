@@ -119,7 +119,7 @@ Fixed event names, `key=value` fields, no free text from the server.
 | Session | `auth.restore`, `auth.reauth`, `auth.signin`, `auth.signout` | server alias, ms, result, reason (fixed enum, e.g. `401`) |
 | Sync | `sync.pass` | server alias, kind (home/library/nextup/…), items, ms, result |
 | Websocket | `ws.connect`, `ws.drop`, `ws.reconnect` | server alias, ms, attempt |
-| Playback | `playback.prepare`, `playback.plan`, `playback.stop` | item alias, item type, mode (DirectPlay/Transcode), container, video/audio codec, subtitle source, reasons enum, posMs |
+| Playback | `playback.prepare`, `playback.plan`, `playback.renegotiate`, `playback.stop` | item alias, item type, mode (DirectPlay/Transcode), container, video/audio codec, subtitle source, reasons enum, renegotiation cause (fallback/auto/pick/audio_pick/changed) with the subtitle and audio stream it names, posMs |
 | Player | `player.state`, `player.decoder`, `player.track`, `player.error` | state, decoder name, track index and codec, error code, posMs, ms since previous state |
 | Segments | `segment.skip` | kind, action |
 | UI | `focus.restore.miss`, `nav.screen` | screen name, reason |

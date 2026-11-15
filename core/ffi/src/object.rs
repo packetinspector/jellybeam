@@ -3310,6 +3310,7 @@ impl JellybeamCore {
                 &profile,
                 start_ticks,
                 cached,
+                series_id.as_deref(),
             )?;
 
         let media_source_id = source.id.clone().unwrap_or_default();
@@ -3943,6 +3944,7 @@ impl JellybeamCore {
         profile: &jellyfin_api::models::DeviceProfile,
         start_ticks: Option<i64>,
         cached: Option<PreloadCache>,
+        series_id: Option<&str>,
     ) -> Result<NegotiatedSource, CoreError> {
         if let Some(cache) = cached {
             return Ok((
@@ -3959,18 +3961,26 @@ impl JellybeamCore {
         // itself, nothing for `resolve_plan` to resolve.
         match quality {
             PlaybackQuality::Cap { max_bps } => {
-                let (play_session_id, decision) = self.negotiate_playback_info(
-                    client,
-                    item_id,
-                    profile,
-                    start_ticks,
-                    jellyfin_api::PlaybackInfoOptions {
-                        force_transcode: true,
-                        ..Default::default()
-                    },
-                )?;
-                let (source, url) = transcode_url_from_decision(client, item_id, decision)
-                    .ok_or(jellyfin_core::CoreError::NoPlayableSource)?;
+                let negotiate = |subtitle: Option<NamedSubtitle>| -> Result<_, CoreError> {
+                    let (play_session_id, decision) = self.negotiate_playback_info(
+                        client,
+                        item_id,
+                        profile,
+                        start_ticks,
+                        jellyfin_api::PlaybackInfoOptions {
+                            force_transcode: true,
+                            ..subtitle_options(subtitle)
+                        },
+                    )?;
+                    let (source, url) = transcode_url_from_decision(client, item_id, decision)
+                        .ok_or(jellyfin_core::CoreError::NoPlayableSource)?;
+                    Ok((play_session_id, source, url))
+                };
+                let (mut play_session_id, mut source, mut url) = negotiate(None)?;
+                // docs/18 §3.1: a second PlaybackInfo is far cheaper than the server restarting ffmpeg.
+                if let Some(subtitle) = self.policy_subtitle(series_id, &source, &url) {
+                    (play_session_id, source, url) = negotiate(Some(subtitle))?;
+                }
                 Ok((
                     source,
                     url,
@@ -3982,13 +3992,13 @@ impl JellybeamCore {
             }
             PlaybackQuality::DirectPlay | PlaybackQuality::Auto => {
                 let supported_codecs = jellyfin_core::android_direct_play_video_codecs(caps);
-                let negotiate = |profile| -> Result<_, CoreError> {
+                let negotiate = |profile, subtitle| -> Result<_, CoreError> {
                     let (play_session_id, decision) = self.negotiate_playback_info(
                         client,
                         item_id,
                         profile,
                         start_ticks,
-                        jellyfin_api::PlaybackInfoOptions::default(),
+                        subtitle_options(subtitle),
                     )?;
                     let video_codec = video_stream_codec(decision_source(&decision));
                     let plan = resolve_plan(
@@ -4000,16 +4010,21 @@ impl JellybeamCore {
                     );
                     Ok((play_session_id, plan))
                 };
-                let (mut play_session_id, mut plan) = negotiate(profile)?;
+                let (mut play_session_id, mut plan) = negotiate(profile, None)?;
                 // docs/18 §3.2: offered ASS sidecars, the transcode Auto takes anyway would hand
-                // out embedded ASS instead of burning it in, so it is asked for without them.
-                if matches!(plan, Ok(ResolvedPlan::Transcode { .. })) {
-                    (play_session_id, plan) = negotiate(&build_android_profile_for_quality(
-                        caps,
-                        tolerate_mislabeled_levels,
-                        &quality,
-                        false,
-                    ))?;
+                // out embedded ASS instead of burning it in, so it is asked for without them, and
+                // with the policy's subtitle (§3.1) so it never restarts to add it.
+                if let Ok(ResolvedPlan::Transcode { source, url, .. }) = &plan {
+                    let subtitle = self.policy_subtitle(series_id, source, url);
+                    (play_session_id, plan) = negotiate(
+                        &build_android_profile_for_quality(
+                            caps,
+                            tolerate_mislabeled_levels,
+                            &quality,
+                            false,
+                        ),
+                        subtitle,
+                    )?;
                 }
                 match plan {
                     Ok(ResolvedPlan::DirectPlay {
@@ -4040,6 +4055,35 @@ impl JellybeamCore {
                 }
             }
         }
+    }
+
+    /// docs/18 §3.1: the subtitle stream [`crate::types::policy_subtitle_for_transcode`] names
+    /// for this transcode under the viewer's current language settings and series memory.
+    fn policy_subtitle(
+        &self,
+        series_id: Option<&str>,
+        source: &jellyfin_api::models::MediaSourceInfo,
+        url: &str,
+    ) -> Option<NamedSubtitle> {
+        let (global, series_pref) = {
+            let state = self.lock_state();
+            let global =
+                playback_policy::prefs::LanguagePrefs::from(state.settings.language.clone());
+            (
+                global,
+                series_id.and_then(|id| state.track_prefs.get(id).cloned()),
+            )
+        };
+        let index = crate::types::policy_subtitle_for_transcode(
+            source,
+            url,
+            series_pref.as_ref(),
+            &global,
+        )?;
+        Some(NamedSubtitle {
+            media_source_id: source.id.clone(),
+            index,
+        })
     }
 
     /// Shared by [`Self::prepare_playback`] (preload-cache miss),
@@ -5331,6 +5375,28 @@ fn resolve_plan(
                 })
             }
         }
+    }
+}
+
+/// A subtitle stream named in a first negotiation, with the source JF12 needs beside it (§3.1).
+struct NamedSubtitle {
+    media_source_id: Option<String>,
+    index: i32,
+}
+
+/// docs/18 §3.1: JF12 honours `SubtitleStreamIndex` only beside `MediaSourceId`.
+fn subtitle_options(subtitle: Option<NamedSubtitle>) -> jellyfin_api::PlaybackInfoOptions {
+    let Some(NamedSubtitle {
+        media_source_id,
+        index,
+    }) = subtitle
+    else {
+        return jellyfin_api::PlaybackInfoOptions::default();
+    };
+    jellyfin_api::PlaybackInfoOptions {
+        media_source_id: media_source_id.filter(|id| !id.is_empty()),
+        subtitle_stream_index: Some(index),
+        ..Default::default()
     }
 }
 

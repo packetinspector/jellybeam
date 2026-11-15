@@ -795,18 +795,65 @@ object DetailFormatting {
         return if (extra > 0) strings.plural(R.plurals.detail_studio_more, extra, clean.first(), extra) else clean.first()
     }
 
-    /** The credits line's three segments, each `null` when the item has nothing for it. */
-    data class CreditsLines(val directors: String?, val writers: String?, val studio: String?) {
-        val isEmpty: Boolean get() = directors == null && writers == null && studio == null
+    /** The credits line's three segments: names verbatim (empty when none) and the studio summary. */
+    data class CreditsLines(val directors: List<String>, val writers: List<String>, val studio: String?) {
+        val isEmpty: Boolean get() = directors.isEmpty() && writers.isEmpty() && studio == null
     }
 
     /** docs/23 Rule 3's director / writer / studio segments; empty means the line is absent. */
     fun creditsLines(strings: UiStrings, directors: List<String>?, writers: List<String>?, studios: List<String>?): CreditsLines =
         CreditsLines(
-            directors = peopleLine(directors.orEmpty()),
-            writers = peopleLine(writers.orEmpty()),
+            directors = directors.orEmpty().filter { it.isNotBlank() },
+            writers = writers.orEmpty().filter { it.isNotBlank() },
             studio = studioSummary(strings, studios.orEmpty())?.uppercaseUi(),
         )
+
+    /** One people segment's measured widths: its label (with the gap after it) and each name. */
+    data class CreditsGroupWidths(val label: Float, val names: List<Float>)
+
+    /** How many names each people segment shows, whether the studio shows, and whether the result
+     * [fits] (false only when one name per segment already overflows).
+     */
+    data class CreditsFit(val directors: Int, val writers: Int, val studio: Boolean, val fits: Boolean = true)
+
+    /**
+     * docs/23 Rule 3: whole names only, the rest as a "+N" count. Each people segment keeps its first
+     * name; directors then writers take more while the line fits, and the studio shows only in what
+     * is left, because the line never grows a second row. [more] is the width of the suffix for N
+     * hidden names; an oversized minimum still returns one name each (the row ellipsizes it).
+     */
+    fun creditsFit(
+        directors: CreditsGroupWidths,
+        writers: CreditsGroupWidths,
+        studio: Float?,
+        comma: Float,
+        separator: Float,
+        more: (Int) -> Float,
+        maxWidth: Float,
+    ): CreditsFit {
+        fun groupWidth(group: CreditsGroupWidths, shown: Int): Float? {
+            if (shown == 0) return null
+            val hidden = group.names.size - shown
+            return group.label + group.names.take(shown).sum() + comma * (shown - 1) + (if (hidden > 0) more(hidden) else 0f)
+        }
+        fun total(d: Int, w: Int, s: Boolean): Float {
+            val parts = listOfNotNull(groupWidth(directors, d), groupWidth(writers, w), studio?.takeIf { s })
+            return parts.sum() + separator * (parts.size - 1).coerceAtLeast(0)
+        }
+        var d = minOf(1, directors.names.size)
+        var w = minOf(1, writers.names.size)
+        while (d < directors.names.size && total(d + 1, w, false) <= maxWidth) d++
+        while (w < writers.names.size && total(d, w + 1, false) <= maxWidth) w++
+        val showStudio = studio != null && (d + w == 0 || total(d, w, true) <= maxWidth)
+        return CreditsFit(d, w, showStudio, fits = total(d, w, showStudio) <= maxWidth)
+    }
+
+    /** A people segment's text: the first [shown] names verbatim, comma-joined, then [more] for the rest. */
+    fun creditsNames(names: List<String>, shown: Int, more: (Int) -> String): String {
+        val hidden = names.size - shown
+        val joined = names.take(shown).joinToString(", ")
+        return if (hidden > 0) joined + more(hidden) else joined
+    }
 
     /**
      * The spec capsule's cells: [specStripFields] plus [extraFields] (the Movie page's file size).

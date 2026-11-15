@@ -6183,9 +6183,8 @@ class PlaybackViewModelTest {
             val rows = viewModel.state.value.trackPicker!!.audioTracks
             assertEquals(listOf(streamRowId(1), streamRowId(3), streamRowId(4)), rows.map { it.id })
             assertEquals(listOf(true, false, false), rows.map { it.selected })
-            assertEquals(listOf("English - AAC - Stereo - Default", "Commentary - English - AAC - Stereo", "Japanese"), rows.map { it.label })
-            assertNull("the server's label already says language and format", rows[0].meta)
-            assertNotNull("an unlabelled stream keeps the usual format line", rows[2].meta)
+            assertEquals("labelled as Direct Play labels them", listOf("English", "Commentary", "Japanese"), rows.map { it.label })
+            assertEquals(listOf("AAC", "English · AAC", "Dolby Digital"), rows.map { it.meta })
             assertTrue(gateway.prepareTranscodeFallbackCalls.isEmpty())
         }
     }
@@ -6272,6 +6271,38 @@ class PlaybackViewModelTest {
             val calls = gateway.prepareTranscodeFallbackCalls
             assertEquals(listOf(null to 3, 2 to 3), calls.map { it.subtitleStreamIndex to it.audioStreamIndex })
             assertEquals(listOf(plan, landed, burned), player.loadedPlans)
+        }
+    }
+
+    /** The picker stays open across the audio reload, as on the TV; text the manifest lacks still renegotiates. */
+    @Test
+    fun `after an audio pick lands a text subtitle the manifest lacks still renegotiates`() = runTest(timeout = TEST_TIMEOUT) {
+        val english = EmbeddedSubtitleFfi(index = 5, language = "eng", title = "English", forced = false, default = false, codec = "subrip", displayTitle = "English - SUBRIP", delivery = SubtitleDeliveryFfi.HLS)
+        fun text(id: String, delivered: Int) = audioTranscode(id, delivered).copy(embeddedSubtitles = listOf(english))
+        val plan = text("session-1", delivered = 1)
+        val landed = text("audio", delivered = 3)
+        val withText = text("text", delivered = 3)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan)).apply {
+            prepareTranscodeFallbackResultsByCall[0] = Result.success(landed)
+            prepareTranscodeFallbackResultsByCall[1] = Result.success(withText)
+        }
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            viewModel.openTrackPicker()
+            viewModel.chooseAudio(streamRowId(3))
+            runCurrent()
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+
+            viewModel.chooseSubtitle(streamRowId(5))
+            runCurrent()
+
+            val calls = gateway.prepareTranscodeFallbackCalls
+            assertEquals(listOf(null to 3, 5 to 3), calls.map { it.subtitleStreamIndex to it.audioStreamIndex })
+            assertEquals(listOf(plan, landed, withText), player.loadedPlans)
         }
     }
 

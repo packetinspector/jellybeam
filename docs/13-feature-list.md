@@ -75,7 +75,9 @@ genre chips, credits, spec capsule, cast, Up Next, season chips, episode shelf -
 holds its final size as a quiet pulsing skeleton and fades its content in; a
 region that turns out empty collapses once, docs/11 §Loading state; a movie's
 spec capsule sits just under its synopsis and credits whether or not it has a
-cast; art downloads run up to eight at a time per server on their own queue,
+cast; the credits line shows directors and writers as whole names with the
+rest counted as "+N", dropping the studio first, so it stays one line however
+many there are; art downloads run up to eight at a time per server on their own queue,
 so cast portraits and the backdrop land together instead of in waves);
 selecting a cast member opens a person page (portrait, name, birth and death
 details, biography, "In your library" with their movies and series, and --
@@ -338,7 +340,7 @@ title (episode/season identity, plot, air/premiere and library-added dates,
 watch count and last-watch date, content/community/critic ratings when
 available, genres, director/writer, studio, and runtime); one unified track-selector control for the shared
 audio/subtitle picker (a row's label is the server's title or the language's name; its meta adds the format, Forced and SDH, e.g. `SRT · SDH`);
-while a server transcode plays, the audio list is the source's audio streams under the server's own labels with the delivered one selected, and picking another renegotiates the transcode with it at the same position and play/pause state (refused in a watch-together group; docs/18 §3.1);
+while a server transcode plays, the audio list is the source's audio streams, labelled as in Direct Play, with the delivered one selected, and picking another renegotiates the transcode with it at the same position and play/pause state (refused in a watch-together group; docs/18 §3.1);
 external playback orchestration through an exported PLAY intent or
 `jellybeam://play/&lt;item-id&gt;` deep link (active server/account, resume semantics,
 any UUID spelling treated as the same item the UI plays,
@@ -615,7 +617,9 @@ public display.)*
   embedded or as a file next to the media) are never burned in either: in
   a transcode the player draws them, in your subtitle style and delay, and
   switching between them is instant. The first one chosen after Off
-  re-requests the stream once. Subtitles that can only be burned in (such
+  re-requests the stream once; the one your language settings or series
+  memory pick is in the first request, so a transcode never restarts at
+  start-up to add it. Subtitles that can only be burned in (such
   as ASS) are still listed in the picker while transcoding; the one burned
   in shows selected, the tracks dot lights when it isn't the file's
   default, and choosing Off or another track re-requests the stream with

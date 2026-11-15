@@ -174,11 +174,12 @@ class TrackReapplyTest {
     private val audioStreams = listOf(mainAudio, commentary, japanese)
 
     @Test
-    fun `a transcode's audio rows are every source stream, the server's label verbatim, the delivered one selected`() {
+    fun `a transcode's audio rows are every source stream, titled as Direct Play titles them, the delivered one selected`() {
         val rows = transcodeAudioRows(audioStreams, shown = 3)
         assertEquals(listOf(streamRowId(1), streamRowId(3), streamRowId(4)), rows.map { it.id })
         assertTrue(rows.all { it.kind == TrackKindFfi.AUDIO })
-        assertEquals(listOf("English - AAC - Stereo - Default", "Commentary - English - AAC - Stereo", null), rows.map { it.title })
+        assertEquals("the stream's own title, never the server's joined label", listOf(null, "Commentary", null), rows.map { it.title })
+        assertEquals(listOf("aac", "aac", "ac3"), rows.map { it.codec })
         assertEquals(listOf(false, true, false), rows.map { it.isSelected })
         assertEquals(listOf(true, false, false), rows.map { it.isDefault })
         assertEquals(listOf("eng", "eng", "jpn"), rows.map { it.lang })

@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import tv.jellybeam.i18n.ResourceUiStrings
+import uniffi.jellybeam_core.AudioStreamFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
 
@@ -172,5 +173,19 @@ class TrackChoiceTextTest {
         assertEquals("Signs · ASS", TrackChoiceText.delayTrack(strings, info("Signs", "en", "ass"), 0, locale = us))
         val ssa = SubtitleFacts(hearingImpaired = false, forced = false, codec = "ssa")
         assertEquals("Signs · SSA", TrackChoiceText.delayTrack(strings, info("Signs", "en", "text/x-ssa"), 0, ssa, us))
+    }
+
+    /** docs/12 §16: a transcode's audio rows read like Direct Play's, not as the server's joined label. */
+    @Test
+    fun `a transcode audio row has the Direct Play label and meta`() {
+        val (main, commentary) = transcodeAudioRows(
+            listOf(
+                AudioStreamFfi(index = 1, displayTitle = "English - Dolby Digital+ - 5.1 - Default", language = "eng", codec = "eac3", channels = 6, isDefault = true),
+                AudioStreamFfi(index = 2, displayTitle = "Commentary - English - AAC - Stereo", title = "Commentary", language = "eng", codec = "aac", channels = 2, isDefault = false),
+            ),
+            shown = 1,
+        )
+        assertEquals("English" to "Dolby Digital Plus", label(main) to meta(main))
+        assertEquals("Commentary" to "English · AAC", label(commentary, 1) to meta(commentary))
     }
 }

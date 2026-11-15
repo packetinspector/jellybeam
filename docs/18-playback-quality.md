@@ -440,6 +440,15 @@ Session threading rules shared by every path above:
   loads: burned-in pixels can't be turned off), and every renegotiation
   resends the session's copy policy
   (§2), so a subtitle change never lets a failed stream be copied back.
+- **A transcode starts with the policy's subtitle.** Before the transcode
+  negotiation `prepare_playback` sends (Auto's second, sidecar-free one;
+  Cap's repeat), `policy_subtitle_for_transcode` runs the track policy over
+  what the player will list: sidecars, then the streams only a negotiation
+  shows. A stream pick is named with its `MediaSourceId`, so the server
+  never starts a transcode only to restart it with the subtitle (each
+  restart re-reads the file to extract the text). A sidecar, Off, Leave or
+  a URL already naming a stream sends nothing, and a pick the player still
+  disagrees with renegotiates as before.
 - **The negotiation carries the audio choice.** A transcode's HLS holds one
   audio stream, so Media3 can list only that one; picking another
   renegotiates naming it (`AudioStreamIndex`, honoured only with

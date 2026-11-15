@@ -1848,6 +1848,79 @@ pub(crate) fn burned_subtitle_index(url: &str) -> Option<i32> {
         .filter(|index: &i32| *index >= 0)
 }
 
+/// docs/18 §3.1: the subtitle stream a transcode names up front, so the player's own policy pick
+/// lands without a restart: the policy runs over what the player lists (sidecars, then streams
+/// only a negotiation shows) and only a stream pick is named; a URL already naming one keeps it.
+pub(crate) fn policy_subtitle_for_transcode(
+    source: &jellyfin_api::models::MediaSourceInfo,
+    url: &str,
+    series_pref: Option<&playback_policy::prefs::SeriesTrackPref>,
+    global: &playback_policy::prefs::LanguagePrefs,
+) -> Option<i32> {
+    use playback_policy::tracks::{resolve_track_selection, SubtitleDecision, Track, TrackKind};
+    if url_param(url, "SubtitleStreamIndex").is_some_and(|v| v.parse::<i32>().is_ok_and(|i| i >= 0))
+    {
+        return None;
+    }
+    let subtitle = |id: i64,
+                    title: Option<String>,
+                    lang: Option<String>,
+                    codec: Option<String>,
+                    default: bool,
+                    forced: bool| Track {
+        id,
+        kind: TrackKind::Subtitle,
+        title,
+        lang,
+        codec,
+        default,
+        selected: false,
+        forced,
+    };
+    // Sidecar ids are negative so they never collide with a stream index.
+    let sidecars = external_subtitles_of(source, |u| Some(u.to_string()))
+        .into_iter()
+        .map(|s| {
+            let t = s.track;
+            subtitle(
+                -1 - i64::from(t.index),
+                t.display_title,
+                t.language,
+                Some(t.codec),
+                t.is_default,
+                t.is_forced,
+            )
+        });
+    // A stream offered as External here is embedded; the transcode profile shows it as a row too.
+    let rows = embedded_subtitles_of(source)
+        .into_iter()
+        .filter(|s| {
+            matches!(
+                s.delivery,
+                Some(
+                    SubtitleDeliveryFfi::Hls
+                        | SubtitleDeliveryFfi::Encode
+                        | SubtitleDeliveryFfi::External
+                )
+            )
+        })
+        .map(|s| {
+            subtitle(
+                i64::from(s.index),
+                s.title,
+                s.language,
+                s.codec,
+                s.default,
+                s.forced,
+            )
+        });
+    let tracks: Vec<Track> = sidecars.chain(rows).collect();
+    match resolve_track_selection(&tracks, series_pref, global).subtitle {
+        SubtitleDecision::Track(id) if id >= 0 => i32::try_from(id).ok(),
+        _ => None,
+    }
+}
+
 /// The plan Kotlin's Media3 player executes, returned by
 /// `prepare_playback`/`prepare_transcode_fallback`. docs/18-playback-quality.md
 /// §2: the `play_method`/`transcode_reason`/`server_verdict` fields let
@@ -2216,6 +2289,119 @@ mod tests {
         assert!(!embedded[1].hearing_impaired);
         let external = external_subtitles_of(&source, |url| Some(url.to_string()));
         assert!(external[0].track.hearing_impaired);
+    }
+
+    fn policy_source() -> jellyfin_api::models::MediaSourceInfo {
+        use jellyfin_api::models::{
+            MediaSourceInfo, MediaStream, MediaStreamType, SubtitleDeliveryMethod,
+        };
+        let sub = |index: i32, lang: &str, codec: &str, external: bool, method| MediaStream {
+            index: Some(index),
+            type_: Some(MediaStreamType::Subtitle),
+            is_external: Some(external),
+            language: Some(lang.to_string()),
+            codec: Some(codec.to_string()),
+            delivery_method: Some(method),
+            delivery_url: external.then(|| format!("/Videos/x/Subtitles/{index}/Stream.srt")),
+            ..Default::default()
+        };
+        MediaSourceInfo {
+            media_streams: vec![
+                sub(2, "fre", "subrip", false, SubtitleDeliveryMethod::Hls),
+                sub(3, "eng", "subrip", false, SubtitleDeliveryMethod::Hls),
+                sub(4, "eng", "pgssub", false, SubtitleDeliveryMethod::Encode),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn always(lang: &str) -> playback_policy::prefs::LanguagePrefs {
+        playback_policy::prefs::LanguagePrefs {
+            audio: None,
+            subtitle: Some(lang.to_string()),
+            subtitle_mode: playback_policy::prefs::SubtitleMode::Always,
+        }
+    }
+
+    const PLAIN_URL: &str = "/videos/x/master.m3u8?VideoCodec=h264&AudioStreamIndex=1";
+
+    #[test]
+    fn a_transcode_names_the_stream_the_policy_would_pick() {
+        let source = policy_source();
+        assert_eq!(
+            policy_subtitle_for_transcode(&source, PLAIN_URL, None, &always("eng")),
+            Some(3)
+        );
+        assert_eq!(
+            policy_subtitle_for_transcode(&source, PLAIN_URL, None, &always("fre")),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_transcode_names_nothing_the_player_decides_alone() {
+        use playback_policy::prefs::{LanguagePrefs, SeriesTrackPref, SubtitleMode, TrackMemory};
+        let source = policy_source();
+        let mode = |subtitle_mode| LanguagePrefs {
+            audio: None,
+            subtitle: Some("eng".into()),
+            subtitle_mode,
+        };
+        for m in [
+            SubtitleMode::Default,
+            SubtitleMode::None,
+            SubtitleMode::OnlyForced,
+        ] {
+            assert_eq!(
+                policy_subtitle_for_transcode(&source, PLAIN_URL, None, &mode(m)),
+                None,
+                "{m:?}"
+            );
+        }
+        let off = SeriesTrackPref {
+            audio: TrackMemory::Unset,
+            subtitle: TrackMemory::Off,
+        };
+        assert_eq!(
+            policy_subtitle_for_transcode(&source, PLAIN_URL, Some(&off), &always("eng")),
+            None
+        );
+        // A URL that already names a stream keeps it.
+        let named = format!("{PLAIN_URL}&SubtitleStreamIndex=4&SubtitleMethod=Encode");
+        assert_eq!(
+            policy_subtitle_for_transcode(&source, &named, None, &always("eng")),
+            None
+        );
+    }
+
+    #[test]
+    fn series_memory_names_its_stream_and_a_matching_sidecar_names_none() {
+        use jellyfin_api::models::{MediaStream, MediaStreamType, SubtitleDeliveryMethod};
+        use playback_policy::prefs::{SeriesTrackPref, TrackMemory};
+        let mut source = policy_source();
+        let french = SeriesTrackPref {
+            audio: TrackMemory::Unset,
+            subtitle: TrackMemory::Key("fre".into()),
+        };
+        assert_eq!(
+            policy_subtitle_for_transcode(&source, PLAIN_URL, Some(&french), &always("eng")),
+            Some(2)
+        );
+        // The player lists sidecars before streams, so an English sidecar wins and needs no stream.
+        source.media_streams.push(MediaStream {
+            index: Some(9),
+            type_: Some(MediaStreamType::Subtitle),
+            is_external: Some(true),
+            language: Some("eng".into()),
+            codec: Some("srt".into()),
+            delivery_method: Some(SubtitleDeliveryMethod::External),
+            delivery_url: Some("/Videos/x/Subtitles/9/Stream.srt".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            policy_subtitle_for_transcode(&source, PLAIN_URL, None, &always("eng")),
+            None
+        );
     }
 
     #[test]

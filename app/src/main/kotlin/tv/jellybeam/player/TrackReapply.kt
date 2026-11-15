@@ -101,14 +101,14 @@ internal const val NO_SUBTITLE_STREAM = -1
 
 
 /** docs/18 §3.1: a transcode's audio rows are every source stream, since its HLS carries only the
- * [shown] one; the server's label is the title, shown verbatim.
+ * [shown] one; each is labelled as Direct Play labels it (docs/12 §16: the stream's own title, then language and format).
  */
 internal fun transcodeAudioRows(streams: List<AudioStreamFfi>, shown: Int?): List<TrackInfo> = streams.map { it.row(shown) }
 
 private fun AudioStreamFfi.row(shown: Int?) = TrackInfo(
     id = streamRowId(index),
     kind = TrackKindFfi.AUDIO,
-    title = displayTitle,
+    title = title,
     lang = language,
     codec = codec,
     isDefault = isDefault,
@@ -125,7 +125,7 @@ internal fun audioStreamIndexFor(choice: AudioChoice?, streams: List<AudioStream
     choice ?: return null
     val named = streams.firstOrNull { it.index == choice.streamIndex && it.identity() == choice.identity }
     if (named != null) return named.index
-    val match = matchTrack(choice.identity, TrackKindFfi.AUDIO, streams.map { it.row(null).copy(title = it.title) }) ?: return null
+    val match = matchTrack(choice.identity, TrackKindFfi.AUDIO, streams.map { it.row(null) }) ?: return null
     return streams.first { streamRowId(it.index) == match.id }.index
 }
 

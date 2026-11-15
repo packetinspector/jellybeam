@@ -51,6 +51,9 @@
         <item quantity="other">%1$s +%2$d more</item>
     </plurals>
 
+    <!-- Credits line: the count of directors or writers that did not fit, after the shown names. -->
+    <string name="detail_people_more">" +%1$d"</string>
+
     <!-- Action menu rows (docs/19 §1.1). -->
     <string name="detail_menu_mark_season_watched">Mark season as watched</string>
     <string name="detail_menu_mark_series_watched">Mark series as watched</string>

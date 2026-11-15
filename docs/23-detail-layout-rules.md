@@ -54,7 +54,9 @@ A TV detail page is a **decision surface, not a reading surface.** Four lines is
 
 ## Rule 3 — Credits read as prose
 
-Director, writer, and studio sit as one wrapped line directly under the overview, in the same column — `DIRECTED BY` / `WRITTEN BY` in Martian Mono 17px at `#8C8478`, names in Archivo 22px at `#F7E9CE`, `│` at `#322A22` between. No panel, no box, no label gutter.
+Director, writer, and studio sit as one line directly under the overview, in the same column — `DIRECTED BY` / `WRITTEN BY` in Martian Mono 17px at `#8C8478`, names in Archivo 22px at `#F7E9CE`, `│` at `#322A22` between. No panel, no box, no label gutter.
+
+The line never wraps and never cuts a name: each segment shows whole names and counts the rest as `+N`. Directors keep their names first, then writers; the studio shows only in the room left over.
 
 This keeps the right half of the frame as backdrop, which is what makes the page read as a poster rather than a form.
 

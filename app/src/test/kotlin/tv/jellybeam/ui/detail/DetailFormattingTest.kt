@@ -1128,8 +1128,8 @@ class DetailFormattingTest {
     @Test
     fun `creditsLines keeps names verbatim and uppercases only the studio`() {
         val lines = DetailFormatting.creditsLines(strings, listOf("Dana Director"), listOf("Wes Writer", "Pat Producer"), listOf("Acme Pictures"))
-        assertEquals("Dana Director", lines.directors)
-        assertEquals("Wes Writer, Pat Producer", lines.writers)
+        assertEquals(listOf("Dana Director"), lines.directors)
+        assertEquals(listOf("Wes Writer", "Pat Producer"), lines.writers)
         assertEquals("ACME PICTURES", lines.studio)
         assertEquals(false, lines.isEmpty)
     }
@@ -1137,6 +1137,53 @@ class DetailFormattingTest {
     @Test
     fun `creditsLines is not empty when only the studio is set`() {
         assertEquals(false, DetailFormatting.creditsLines(strings, null, null, listOf("Acme Pictures")).isEmpty)
+    }
+
+    // -- creditsFit / creditsNames (docs/23 Rule 3) ----------------------------
+
+    // Label 10, each name 20, comma 2, separator 6, "+N" 8: a 1-of-2 group is 10+20+8 = 38.
+    private fun group(names: Int) = DetailFormatting.CreditsGroupWidths(label = 10f, names = List(names) { 20f })
+    private fun fit(directors: Int, writers: Int, studio: Float?, maxWidth: Float) =
+        DetailFormatting.creditsFit(group(directors), group(writers), studio, comma = 2f, separator = 6f, more = { 8f }, maxWidth = maxWidth)
+
+    @Test
+    fun `creditsFit shows everything when the line has room`() {
+        assertEquals(DetailFormatting.CreditsFit(2, 4, true), fit(2, 4, studio = 30f, maxWidth = 1000f))
+    }
+
+    @Test
+    fun `creditsFit drops the studio before any name`() {
+        // 2 directors 52 + sep 6 + 2 writers 52 = 110; the studio needs 6+30 more.
+        assertEquals(DetailFormatting.CreditsFit(2, 2, false), fit(2, 2, studio = 30f, maxWidth = 120f))
+    }
+
+    @Test
+    fun `creditsFit gives directors their room before writers`() {
+        // Directors 2 (52) + sep + writers 1 of 4 (38) = 96; a second writer would need 22 more.
+        assertEquals(DetailFormatting.CreditsFit(2, 1, false), fit(2, 4, studio = null, maxWidth = 100f))
+    }
+
+    @Test
+    fun `creditsFit keeps one name per segment even when that overflows`() {
+        assertEquals(DetailFormatting.CreditsFit(1, 1, false, fits = false), fit(3, 3, studio = 30f, maxWidth = 10f))
+    }
+
+    @Test
+    fun `creditsFit shows a lone studio however narrow the line`() {
+        assertEquals(DetailFormatting.CreditsFit(0, 0, true, fits = false), fit(0, 0, studio = 30f, maxWidth = 10f))
+    }
+
+    @Test
+    fun `creditsFit boundary is inclusive`() {
+        assertEquals(DetailFormatting.CreditsFit(2, 0, false), fit(2, 0, studio = null, maxWidth = 52f))
+        assertEquals(DetailFormatting.CreditsFit(1, 0, false), fit(2, 0, studio = null, maxWidth = 51f))
+    }
+
+    @Test
+    fun `creditsNames joins the shown names and counts the rest`() {
+        val names = listOf("Ann Lee", "Bo Park", "Cy Moss", "Di Hart")
+        assertEquals("Ann Lee, Bo Park +2", DetailFormatting.creditsNames(names, 2) { " +$it" })
+        assertEquals("Ann Lee, Bo Park, Cy Moss, Di Hart", DetailFormatting.creditsNames(names, 4) { " +$it" })
     }
 
     @Test

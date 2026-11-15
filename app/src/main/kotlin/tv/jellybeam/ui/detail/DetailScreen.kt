@@ -94,9 +94,11 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -2229,67 +2231,77 @@ private fun CreditsRegion(
 }
 
 /**
- * docs/23-detail-layout-rules.md Rule 3: director/writer/studio as one non-wrapping prose line.
- * Each segment gets its own `weight(1f, fill = false)` so a long name list shrinks and ellipsizes
- * instead of reflowing a sibling or overflowing the row.
+ * docs/23-detail-layout-rules.md Rule 3: director/writer/studio as one non-wrapping prose line of
+ * whole names, the rest counted as "+N"; the pick is [DetailFormatting.creditsFit] over measured
+ * widths. Segments take their natural width; only when one name each overflows do they share the
+ * row by [creditsWeight] and ellipsize.
  */
 @Composable
 private fun CreditsLine(lines: DetailFormatting.CreditsLines) {
-    val directorsLine = lines.directors
-    val writersLine = lines.writers
-    val studioLine = lines.studio
     if (lines.isEmpty) return
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        var needsSeparator = false
-        directorsLine?.let { names ->
-            if (needsSeparator) CreditsSeparator()
-            needsSeparator = true
-            Row(modifier = Modifier.weight(creditsWeight(names), fill = false), verticalAlignment = Alignment.CenterVertically) {
-                BasicText(
-                    text = stringResource(R.string.detail_directed_by),
-                    style = CREDITS_LABEL_STYLE,
-                )
-                Box(modifier = Modifier.width(6.dp))
-                BasicText(
-                    text = names,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                    style = CREDITS_NAMES_STYLE,
-                )
-            }
-        }
-        writersLine?.let { names ->
-            if (needsSeparator) CreditsSeparator()
-            needsSeparator = true
-            Row(modifier = Modifier.weight(creditsWeight(names), fill = false), verticalAlignment = Alignment.CenterVertically) {
-                BasicText(
-                    text = stringResource(R.string.detail_written_by),
-                    style = CREDITS_LABEL_STYLE,
-                )
-                Box(modifier = Modifier.width(6.dp))
-                BasicText(
-                    text = names,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                    style = CREDITS_NAMES_STYLE,
+    val directedBy = stringResource(R.string.detail_directed_by)
+    val writtenBy = stringResource(R.string.detail_written_by)
+    val resources = LocalContext.current.resources
+    val moreText: (Int) -> String = { hidden -> resources.getString(R.string.detail_people_more, hidden) }
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    BoxWithConstraints {
+        val maxWidthPx = constraints.maxWidth
+        val fit = remember(lines, maxWidthPx, measurer, density) {
+            if (maxWidthPx == Constraints.Infinity) {
+                DetailFormatting.CreditsFit(lines.directors.size, lines.writers.size, lines.studio != null)
+            } else {
+                fun width(text: String, style: TextStyle) = measurer.measure(text = text, style = style).size.width.toFloat()
+                val gap = with(density) { CREDITS_LABEL_GAP.toPx() }
+                fun group(label: String, names: List<String>) =
+                    DetailFormatting.CreditsGroupWidths(width(label, CREDITS_LABEL_STYLE) + gap, names.map { width(it, CREDITS_NAMES_STYLE) })
+                DetailFormatting.creditsFit(
+                    directors = group(directedBy, lines.directors),
+                    writers = group(writtenBy, lines.writers),
+                    studio = lines.studio?.let { width(it, CREDITS_STUDIO_STYLE) },
+                    comma = width(", ", CREDITS_NAMES_STYLE),
+                    separator = width(BOX_SEPARATOR, CREDITS_SEPARATOR_STYLE),
+                    more = { width(moreText(it), CREDITS_NAMES_STYLE) },
+                    maxWidth = maxWidthPx.toFloat(),
                 )
             }
         }
-        studioLine?.let { studio ->
-            if (needsSeparator) CreditsSeparator()
-            BasicText(
-                text = studio,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(creditsWeight(studio), fill = false),
-                style = CREDITS_STUDIO_STYLE,
-            )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            var needsSeparator = false
+            listOf(directedBy to (lines.directors to fit.directors), writtenBy to (lines.writers to fit.writers)).forEach { (label, group) ->
+                val (names, shown) = group
+                if (shown == 0) return@forEach
+                if (needsSeparator) CreditsSeparator()
+                needsSeparator = true
+                val text = DetailFormatting.creditsNames(names, shown, moreText)
+                Row(modifier = if (fit.fits) Modifier else Modifier.weight(creditsWeight(text), fill = false), verticalAlignment = Alignment.CenterVertically) {
+                    BasicText(text = label, style = CREDITS_LABEL_STYLE)
+                    Box(modifier = Modifier.width(CREDITS_LABEL_GAP))
+                    BasicText(
+                        text = text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                        style = CREDITS_NAMES_STYLE,
+                    )
+                }
+            }
+            val studio = lines.studio
+            if (studio != null && fit.studio) {
+                if (needsSeparator) CreditsSeparator()
+                BasicText(
+                    text = studio,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = if (fit.fits) Modifier else Modifier.weight(creditsWeight(studio), fill = false),
+                    style = CREDITS_STUDIO_STYLE,
+                )
+            }
         }
     }
 }
+
+private val CREDITS_LABEL_GAP = 6.dp
 
 /** A segment's row share is proportional to its text length: equal weights would hand a short name
  * a third of the row it can't use, and Compose never redistributes a weighted child's unused share.
