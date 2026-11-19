@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Home loading / sync status. -->
+    <string name="home_loading">Chargement…</string>
+    <string name="home_still_loading">Chargement toujours en cours…</string>
+    <string name="home_syncing">Synchronisation…</string>
+    <string name="home_sync_library_fallback">médiathèque</string>
+    <string name="home_syncing_progress">Synchronisation de %1$s — %2$d sur %3$d…</string>
+    <plurals name="home_syncing_items">
+        <item quantity="one">Synchronisation de %1$s — %2$d élément…</item>
+        <item quantity="many">Synchronisation de %1$s — %2$d éléments…</item>
+        <item quantity="other">Synchronisation de %1$s — %2$d éléments…</item>
+    </plurals>
+    <string name="home_continue_eyebrow">REPRENDRE</string>
+
+    <!-- Card text. -->
+    <string name="card_runtime_hours_minutes">%1$d h %2$d min</string>
+    <string name="card_runtime_minutes">%1$d min</string>
+    <string name="card_episode_short">E%1$d</string>
+    <string name="card_season_short">S%1$d</string>
+    <string name="card_season_episode">S%1$d E%2$d</string>
+    <string name="card_time_left">Reste %1$s</string>
+    <string name="card_airs">Diffusion\u00A0: %1$s</string>
+    <string name="card_missing">Manquant</string>
+
+    <!-- Library grid summary, sort and filter labels. -->
+    <plurals name="library_summary_movies">
+        <item quantity="one">%1$d FILM</item>
+        <item quantity="many">%1$d FILMS</item>
+        <item quantity="other">%1$d FILMS</item>
+    </plurals>
+    <plurals name="library_summary_shows">
+        <item quantity="one">%1$d SÉRIE</item>
+        <item quantity="many">%1$d SÉRIES</item>
+        <item quantity="other">%1$d SÉRIES</item>
+    </plurals>
+    <plurals name="library_summary_favorites">
+        <item quantity="one">%1$d FAVORI</item>
+        <item quantity="many">%1$d FAVORIS</item>
+        <item quantity="other">%1$d FAVORIS</item>
+    </plurals>
+    <string name="library_summary_filtered">%1$d SUR %2$d</string>
+
+    <string name="library_readout_ends_at">FIN À</string>
+    <string name="library_readout_last_played">DERNIÈRE LECTURE</string>
+    <string name="library_readout_added">AJOUTÉ</string>
+    <string name="library_readout_if_started_now">si lancé maintenant</string>
+    <string name="library_readout_never">Jamais</string>
+    <string name="library_readout_no_date">—</string>
+    <string name="library_readout_watched_state">vu</string>
+    <string name="library_readout_in_progress">en cours</string>
+    <string name="library_readout_today">Aujourd\'hui</string>
+    <string name="library_readout_yesterday">Hier</string>
+    <plurals name="library_readout_days_ago">
+        <item quantity="one">Il y a %d jour</item>
+        <item quantity="many">Il y a %d jours</item>
+        <item quantity="other">Il y a %d jours</item>
+    </plurals>
+    <plurals name="library_readout_weeks_ago">
+        <item quantity="one">Il y a %d semaine</item>
+        <item quantity="many">Il y a %d semaines</item>
+        <item quantity="other">Il y a %d semaines</item>
+    </plurals>
+    <plurals name="library_readout_months_ago">
+        <item quantity="one">Il y a %d mois</item>
+        <item quantity="many">Il y a %d mois</item>
+        <item quantity="other">Il y a %d mois</item>
+    </plurals>
+    <plurals name="library_readout_years_ago">
+        <item quantity="one">Il y a %d an</item>
+        <item quantity="many">Il y a %d ans</item>
+        <item quantity="other">Il y a %d ans</item>
+    </plurals>
+    <string name="library_sort_name">Nom</string>
+    <string name="library_sort_date_added">Date d\'ajout</string>
+    <string name="library_sort_year">Année</string>
+    <string name="library_sort_runtime">Durée</string>
+    <string name="library_type_movies">Films</string>
+    <string name="library_type_shows">Séries</string>
+    <string name="library_type_seasons">Saisons</string>
+    <string name="library_type_episodes">Épisodes</string>
+    <string name="library_type_collections">Collections</string>
+    <!-- Decades and jump labels also sit on the 48 dp index rail, so they stay five characters or fewer. -->
+    <string name="library_decade_2020s">2020s</string>
+    <string name="library_decade_2010s">2010s</string>
+    <string name="library_decade_2000s">2000s</string>
+    <string name="library_decade_1990s">1990s</string>
+    <string name="library_decade_1980s">1980s</string>
+    <string name="library_decade_older">Plus ancien</string>
+
+    <string name="library_rail_now">AUJ.</string>
+    <string name="library_rail_old">AVANT</string>
+    <string name="library_rail_runtime_under_30">&lt;30m</string>
+    <string name="library_rail_runtime_30">30m</string>
+    <string name="library_rail_runtime_60">1h</string>
+    <string name="library_rail_runtime_90">1h30</string>
+    <string name="library_rail_runtime_120">2h</string>
+    <string name="library_rail_runtime_150">2h30</string>
+    <string name="library_rail_runtime_180">3h+</string>
+
+    <!-- Live TV channel folder rows. -->
+    <string name="library_folder_tag">DOSSIER</string>
+    <string name="library_resume_tag">REPRENDRE</string>
+
+    <!-- Launch screen and empty-library strip. -->
+    <string name="launch_connecting">CONNEXION</string>
+    <string name="launch_server_unreachable">SERVEUR INJOIGNABLE</string>
+    <plurals name="common_library_count">
+        <item quantity="one">%1$d MÉDIATHÈQUE</item>
+        <item quantity="many">%1$d MÉDIATHÈQUES</item>
+        <item quantity="other">%1$d MÉDIATHÈQUES</item>
+    </plurals>
+    <plurals name="common_item_count">
+        <item quantity="one">%1$d ÉLÉMENT</item>
+        <item quantity="many">%1$d ÉLÉMENTS</item>
+        <item quantity="other">%1$d ÉLÉMENTS</item>
+    </plurals>
+</resources>

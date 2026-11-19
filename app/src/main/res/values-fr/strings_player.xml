@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Live player state. -->
+    <string name="player_live_state_idle">Inactif</string>
+    <string name="player_live_state_preparing">Préparation</string>
+    <string name="player_live_state_playing">Lecture</string>
+    <string name="player_live_state_paused">En pause</string>
+    <string name="player_live_state_buffering">Mise en tampon</string>
+    <string name="player_live_state_ended">Terminé</string>
+
+    <!-- Stats sheet. -->
+    <string name="player_stats_transcoding">Transcodage</string>
+    <string name="player_stats_direct_play">Lecture directe</string>
+    <string name="player_stats_no_transcode">sans transcodage</string>
+    <string name="player_stats_label_video">Vidéo</string>
+    <string name="player_stats_label_audio">Audio</string>
+    <string name="player_stats_label_subtitles">Sous-titres</string>
+    <string name="player_stats_label_container">Conteneur</string>
+    <string name="player_stats_label_source">Source</string>
+    <string name="player_stats_label_buffer">Tampon</string>
+    <string name="player_stats_label_network">Réseau</string>
+    <string name="player_stats_label_health">État</string>
+    <string name="player_track_off">Désactivés</string>
+    <plurals name="player_stats_subtitles_value">
+        <item quantity="one">%1$s · %2$d disponible</item>
+        <item quantity="many">%1$s · %2$d disponibles</item>
+        <item quantity="other">%1$s · %2$d disponibles</item>
+    </plurals>
+    <string name="player_stats_buffer_value">%1$.1f s d\'avance · %2$.1f Mio</string>
+    <string name="player_stats_network_value">%1$.2f Mbit/s</string>
+    <plurals name="player_stats_health_value">
+        <item quantity="one">%1$s · %2$d image perdue</item>
+        <item quantity="many">%1$s · %2$d images perdues</item>
+        <item quantity="other">%1$s · %2$d images perdues</item>
+    </plurals>
+    <string name="player_stats_fps">%1$sfps</string>
+    <string name="player_stats_video_bitrate">%1$.1fMb/s</string>
+    <string name="player_stats_audio_bitrate">%1$dkb/s</string>
+    <string name="player_stats_sample_rate">%1$skHz</string>
+    <string name="player_channels_mono">Mono</string>
+    <string name="player_channels_stereo">Stéréo</string>
+    <string name="player_channels_count">%1$d can.</string>
+
+    <!-- Sheets and OSD chrome. -->
+    <string name="player_sheet_stats_kicker">Statistiques de lecture</string>
+    <string name="player_sheet_library_kicker">Dans votre médiathèque</string>
+    <string name="player_sheet_back_to_close">Retour pour fermer</string>
+    <string name="player_stats_subtitles_with_delay">%1$s · décalage %2$s</string>
+    <string name="player_stats_file">FICHIER %1$s</string>
+    <string name="player_library_loading">Chargement…</string>
+    <string name="player_library_unavailable">Infos de la médiathèque indisponibles</string>
+    <string name="player_osd_direct_play">Lecture directe</string>
+    <string name="player_osd_transcode">Transcodage</string>
+    <string name="player_osd_ends">Fin à %1$s</string>
+    <string name="player_seek_flash_seconds">%1$d s</string>
+    <string name="player_seek_unavailable">Ce fichier ne permet pas l\'avance ni le retour rapide</string>
+    <string name="player_skip_toast">%1$s · OK pour annuler</string>
+
+    <!-- Library info sheet. -->
+    <string name="player_library_rating_max">/10</string>
+    <string name="player_library_field_director">Réalisation</string>
+    <string name="player_library_field_writers">Scénario</string>
+    <string name="player_library_field_play_count">Nombre de lectures</string>
+    <string name="player_library_field_added">Ajouté</string>
+    <string name="player_library_writers_more">%1$s + %2$d</string>
+    <string name="player_library_play_count_last">%1$s · dernière lecture %2$s</string>
+
+    <!-- Skip pill and its Undo toast. -->
+    <string name="player_skip_intro">Passer l\'intro</string>
+    <string name="player_skip_credits">Passer le générique</string>
+    <string name="player_skip_recap">Passer le résumé</string>
+    <string name="player_skip_preview">Passer l\'aperçu</string>
+    <string name="player_skip_commercial">Passer la publicité</string>
+    <string name="player_skip_unknown">Passer</string>
+    <string name="player_skipped_intro">Intro passée</string>
+    <string name="player_skipped_credits">Générique passé</string>
+    <string name="player_skipped_recap">Résumé passé</string>
+    <string name="player_skipped_preview">Aperçu passé</string>
+    <string name="player_skipped_commercial">Publicité passée</string>
+    <string name="player_skipped_unknown">Segment passé</string>
+
+    <!-- Glide chip, countdown numeral and buffering pill. -->
+    <string name="player_glide_start">Début</string>
+    <string name="player_glide_end">Fin</string>
+    <string name="player_countdown_seconds">%1$dS</string>
+    <string name="player_throughput_mbps">%1$.1f Mo/s</string>
+    <string name="player_buffering_pill_percent">%1$s · %2$d\u00A0%%</string>
+    <string name="player_buffering_pill_throughput">%1$s · %2$d\u00A0%% · %3$s</string>
+
+    <!-- Track picker. -->
+    <string name="player_picker_audio">Audio</string>
+    <string name="player_picker_subtitles">Sous-titres</string>
+    <string name="player_subtitle_delay_row">Décalage des sous-titres</string>
+    <string name="player_subtitle_delay_value">%1$s ms</string>
+    <string name="player_subtitle_delay_later">Les sous-titres apparaissent plus tard</string>
+    <string name="player_subtitle_delay_earlier">Les sous-titres apparaissent plus tôt</string>
+    <string name="player_subtitle_delay_in_sync">Synchronisés avec le fichier</string>
+    <string name="player_subtitle_delay_reset_hint">OK pour réinitialiser</string>
+    <string name="player_subtitle_delay_close_hint">Retour pour fermer</string>
+    <string name="player_subtitle_delay_track">%1$s · %2$s</string>
+    <string name="player_track_default_name">Piste %1$d</string>
+    <string name="player_track_external">Externe</string>
+    <string name="player_track_forced">Forcé</string>
+    <string name="player_track_sdh">SDH</string>
+    <string name="player_track_meta_join">%1$s · %2$s</string>
+    <string name="player_track_loading">Chargement…</string>
+    <string name="player_track_unavailable">Indisponible</string>
+    <string name="player_subtitle_unavailable">Impossible de charger ces sous-titres</string>
+
+    <!-- Fatal playback errors. -->
+    <string name="player_error_generic">Erreur de lecture\u00A0: %1$s</string>
+    <string name="player_error_lost_connection">Erreur de lecture\u00A0: connexion au serveur perdue</string>
+    <string name="player_error_direct_play_blocked">Ce fichier ne peut pas être lu en lecture directe sur ce téléviseur (%1$s). Serveur\u00A0: %2$s. Réglez Qualité sur Auto dans Paramètres › Lecture pour laisser le serveur le transcoder.</string>
+
+    <!-- Watch together. -->
+    <string name="wt_eyebrow">REGARDER ENSEMBLE</string>
+    <string name="wt_role_hosting">VOUS ÊTES L\'HÔTE</string>
+    <string name="wt_role_joined">VOUS PARTICIPEZ</string>
+    <string name="wt_host_title">Votre salon est ouvert</string>
+    <string name="wt_finished_title">Terminé. Regarder autre chose\u00A0?</string>
+    <string name="wt_waiting_title">En attente du lancement par %1$s</string>
+    <string name="wt_waiting_host_title">En attente du lancement par l\'hôte</string>
+    <string name="wt_cancel">Annuler</string>
+    <string name="wt_end_group">Terminer le groupe</string>
+    <string name="wt_leave">Quitter</string>
+    <string name="wt_stop">Arrêter</string>
+    <string name="wt_starting">Démarrage…</string>
+    <string name="wt_joining">Connexion…</string>
+    <string name="wt_leaving">Départ…</string>
+    <string name="wt_members">DANS LE GROUPE · %1$d</string>
+    <string name="wt_tag_host">HÔTE</string>
+    <string name="wt_tag_you">VOUS</string>
+    <string name="wt_tag_host_you">HÔTE · VOUS</string>
+    <string name="wt_tag_joined">A REJOINT</string>
+    <string name="wt_tag_in_group">DANS LE GROUPE</string>
+    <!-- Worded so a user name needs no gender agreement. -->
+    <string name="wt_log_you_joined">VOUS AVEZ REJOINT LE GROUPE</string>
+    <string name="wt_log_user_joined">%1$s A REJOINT LE GROUPE</string>
+    <string name="wt_log_user_left">%1$s A QUITTÉ LE GROUPE</string>
+    <string name="wt_log_reconnecting">RECONNEXION…</string>
+    <string name="wt_log_waiting">EN ATTENTE D\'AUTRES PARTICIPANTS…</string>
+    <string name="wt_card_now_showing">EN CE MOMENT</string>
+    <string name="wt_card_up_next">À SUIVRE</string>
+    <string name="wt_card_just_watched">VU À L\'INSTANT</string>
+    <string name="wt_start">Démarrer</string>
+    <string name="wt_play_again">Revoir</string>
+    <string name="wt_start_beginning">Depuis le début</string>
+    <string name="wt_start_resume">Reprendre à %1$s</string>
+    <string name="wt_choose_title">Choisir un autre titre</string>
+    <string name="wt_role_rooms">SALONS</string>
+    <string name="wt_role_rooms_count">SALONS · %1$d</string>
+    <string name="wt_role_no_access">PAS D\'ACCÈS</string>
+    <string name="wt_rooms_title">Rejoindre un salon</string>
+    <string name="wt_rooms_loading">RECHERCHE DE SALONS…</string>
+    <string name="wt_rooms_empty">Personne ne regarde ensemble pour le moment.</string>
+    <string name="wt_rooms_empty_hint">Ouvrez un salon depuis le menu ⋯ de n\'importe quel titre.</string>
+    <string name="wt_rooms_failed">Impossible de charger les salons. Nouvel essai toutes les 5 s.</string>
+    <string name="wt_rooms_footnote">Toutes les personnes de ce serveur ayant accès à Regarder ensemble voient cette liste. Elle s\'actualise toutes les 5 s.</string>
+    <string name="wt_rooms_no_access_title">Regarder ensemble n\'est pas activé pour vous</string>
+    <string name="wt_rooms_no_access">Votre compte ne peut pas utiliser Regarder ensemble.</string>
+    <string name="wt_rooms_no_access_hint">Un administrateur du serveur peut l\'activer dans vos paramètres utilisateur.</string>
+    <string name="wt_rooms_keys_list">OK POUR REJOINDRE · RETOUR POUR FERMER</string>
+    <string name="wt_rooms_keys_joining">RETOUR POUR ANNULER</string>
+    <string name="wt_rooms_keys_close">RETOUR POUR FERMER</string>
+    <plurals name="wt_room_people">
+        <item quantity="one">%1$d PERSONNE</item>
+        <item quantity="many">%1$d PERSONNES</item>
+        <item quantity="other">%1$d PERSONNES</item>
+    </plurals>
+    <string name="wt_room_more">+%1$d</string>
+    <string name="wt_room_in_lobby">SALLE D\'ATTENTE</string>
+    <string name="wt_room_playing">EN LECTURE</string>
+    <string name="wt_room_paused">EN PAUSE</string>
+    <string name="wt_room_waiting">EN ATTENTE</string>
+    <string name="wt_room_joining">CONNEXION…</string>
+    <string name="wt_room_gone">Ce salon s\'est terminé avant votre arrivée.</string>
+    <string name="wt_room_no_library">Ce salon regarde un titre absent de vos médiathèques.</string>
+    <string name="wt_room_unreachable">Impossible de joindre le serveur. Réessayez.</string>
+    <string name="wt_room_unavailable">Ce groupe n\'est pas disponible</string>
+    <string name="wt_notice_create_refused">Arrêtez la lecture en cours pour regarder ensemble</string>
+    <string name="wt_notice_start_failed">Impossible de lancer Regarder ensemble</string>
+    <string name="wt_notice_no_such_group">Ce salon est terminé</string>
+    <string name="wt_notice_no_access">Votre compte ne peut pas utiliser Regarder ensemble</string>
+    <string name="wt_notice_joined">Vous avez rejoint le groupe</string>
+    <string name="wt_notice_user_joined">%1$s a rejoint le groupe</string>
+    <string name="wt_notice_user_left">%1$s a quitté le groupe</string>
+    <string name="wt_notice_reconnecting">Reconnexion…</string>
+    <string name="wt_notice_ended_removed">Vous avez été retiré du groupe</string>
+    <string name="wt_notice_ended_gone">Le groupe est terminé</string>
+    <string name="wt_notice_ended_auth">Votre session a été fermée, vous avez donc quitté le groupe</string>
+    <string name="wt_notice_ended_lost">Connexion au groupe perdue</string>
+    <string name="wt_notice_host_left">L\'hôte a quitté le groupe</string>
+    <string name="wt_osd_host">(hôte)</string>
+    <string name="wt_osd_waiting">En attente de tout le monde…</string>
+    <string name="wt_osd_prompt">Toujours en attente de quelqu\'un — appuyez sur Lecture pour démarrer sans attendre</string>
+    <string name="wt_osd_helper">Lecture, pause et déplacements dans la vidéo s\'appliquent à tout le groupe.</string>
+    <string name="wt_track_refused">Impossible de changer cette piste dans un groupe</string>
+</resources>

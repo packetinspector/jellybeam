@@ -1,0 +1,629 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- docs/27 §4: French. \u00A0 is the no-break space French puts before : ; ? ! and inside « ». -->
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <string name="press_back_again_to_exit">Appuyez de nouveau sur Retour pour quitter Jellybeam</string>
+    <string name="app_name">Jellybeam</string>
+    <string name="external_playback_invalid">Lecture impossible\u00A0: la demande externe n\'est pas valide</string>
+    <string name="external_playback_sign_in_required">Connectez-vous à Jellybeam avant de lancer une lecture externe</string>
+
+    <!-- Home shelves. -->
+    <string name="shelf_continue_watching">Reprendre la lecture</string>
+    <string name="shelf_next_up">À suivre</string>
+    <string name="shelf_favorites">Favoris</string>
+    <string name="drawer_favorites">Favoris</string>
+    <string name="shelf_latest_in">Derniers ajouts dans %1$s</string>
+    <string name="home_empty_title">Vos médiathèques ne contiennent encore aucun élément.</string>
+    <string name="home_empty_body">Ajoutez des médias à une médiathèque de votre serveur Jellyfin et ils apparaîtront ici.</string>
+
+    <!-- Sign in. -->
+    <string name="sign_in_server_url_label">Serveur</string>
+    <string name="sign_in_username_label">Nom d\'utilisateur</string>
+    <string name="sign_in_password_label">Mot de passe</string>
+    <string name="sign_in_button">Se connecter</string>
+    <string name="sign_in_signing_in">Connexion…</string>
+    <string name="reauthorize_title">Réautoriser</string>
+    <string name="reauthorize_explanation">Renouvelle l\'accès de ce compte enregistré sans supprimer sa médiathèque locale.</string>
+    <string name="reauthorize_button">Réautoriser</string>
+    <string name="reauthorizing">Réautorisation…</string>
+    <string name="quick_connect_button">Utiliser Connexion rapide</string>
+    <string name="quick_connect_use_password">Utiliser plutôt le mot de passe</string>
+    <string name="quick_connect_code_label">Saisissez ce code dans Jellyfin</string>
+    <string name="quick_connect_instructions">Ouvrez Connexion rapide dans une application Jellyfin déjà connectée.</string>
+    <string name="quick_connect_starting">Demande d\'un code…</string>
+    <string name="quick_connect_waiting">En attente d\'approbation…</string>
+    <string name="quick_connect_retry">Réessayer</string>
+
+    <string name="sign_in_discovery_header">Serveurs sur votre réseau</string>
+    <string name="sign_in_discovery_searching">Recherche de serveurs sur votre réseau…</string>
+    <string name="sign_in_discovery_saved">Enregistré</string>
+    <string name="sign_in_discovery_retry">Relancer la recherche</string>
+
+    <!-- Detail page. -->
+    <string name="detail_cast">Distribution</string>
+    <string name="detail_similar_titles">Titres similaires</string>
+    <string name="detail_collection_eyebrow">COLLECTION</string>
+    <string name="detail_up_next">À SUIVRE</string>
+    <string name="detail_seasons">SAISONS</string>
+    <string name="detail_lists_error">Impossible de charger les saisons et les épisodes.</string>
+    <string name="detail_season_specials_chip">SP</string>
+    <string name="detail_directed_by">RÉALISÉ PAR</string>
+    <string name="detail_written_by">ÉCRIT PAR</string>
+    <string name="detail_more">SUITE ↓</string>
+
+    <!-- Detail action panel. -->
+    <string name="detail_menu_group_this_title">Ce titre</string>
+    <string name="detail_menu_group_playback">Lecture</string>
+    <string name="detail_menu_group_library">Médiathèque</string>
+    <string name="detail_menu_kicker_actions">Actions</string>
+    <string name="detail_menu_kicker_season">Saison %d</string>
+    <string name="detail_menu_collections_header">Ajouter à une collection</string>
+    <plurals name="detail_menu_collections_count">
+        <item quantity="one">%d collection</item>
+        <item quantity="many">%d collections</item>
+        <item quantity="other">%d collections</item>
+    </plurals>
+    <string name="detail_menu_already_in">Déjà ajouté</string>
+    <string name="detail_menu_footer_close">Retour pour fermer</string>
+    <plurals name="detail_menu_footer_actions_count">
+        <item quantity="one">%d action</item>
+        <item quantity="many">%d actions</item>
+        <item quantity="other">%d actions</item>
+    </plurals>
+    <string name="detail_menu_footer_back_for_actions">Retour aux actions</string>
+    <string name="detail_menu_footer_back_to_cancel">Retour pour annuler</string>
+    <plurals name="detail_menu_confirm_watched_title">
+        <item quantity="one">Marquer %d épisode comme vu\u00A0?</item>
+        <item quantity="many">Marquer %d épisodes comme vus\u00A0?</item>
+        <item quantity="other">Marquer %d épisodes comme vus\u00A0?</item>
+    </plurals>
+    <plurals name="detail_menu_confirm_unwatched_title">
+        <item quantity="one">Marquer %d épisode comme non vu\u00A0?</item>
+        <item quantity="many">Marquer %d épisodes comme non vus\u00A0?</item>
+        <item quantity="other">Marquer %d épisodes comme non vus\u00A0?</item>
+    </plurals>
+    <string name="detail_menu_confirm_watched_body">Tous les épisodes non vus de %s.</string>
+    <string name="detail_menu_confirm_unwatched_body">Tous les épisodes vus de %s.</string>
+    <string name="detail_menu_confirm_watched_button">Marquer comme vu</string>
+    <string name="detail_menu_confirm_unwatched_button">Marquer comme non vu</string>
+    <string name="detail_menu_confirm_cancel">Annuler</string>
+
+    <!-- Home hero banner. -->
+    <string name="hero_resume">Reprendre</string>
+    <string name="hero_play">Lire</string>
+    <string name="hero_more_info">Plus d\'infos</string>
+
+    <!-- Side drawer. -->
+    <string name="drawer_home">Accueil</string>
+    <string name="drawer_watch_together">Regarder ensemble</string>
+    <string name="settings_chip">Paramètres</string>
+
+    <!-- Servers. -->
+    <string name="drawer_servers_section">Serveurs</string>
+    <string name="drawer_add_server">Ajouter un serveur</string>
+    <string name="drawer_manage_servers">Gérer les serveurs</string>
+    <string name="server_management_title">Serveurs</string>
+    <string name="server_management_hint">Sélectionnez un compte enregistré pour renouveler son accès ou le supprimer de cet appareil.</string>
+    <string name="server_management_active">Actif</string>
+    <string name="server_management_done">Terminé</string>
+    <string name="server_account_actions_title">Gérer le compte</string>
+    <string name="server_reauthorize">Réautoriser</string>
+    <string name="server_reauthorize_detail">Mot de passe ou Connexion rapide</string>
+    <string name="server_remove_title">Supprimer le serveur\u00A0?</string>
+    <string name="server_remove_warning">La connexion enregistrée et le cache local de sa médiathèque seront supprimés.</string>
+    <string name="server_remove_active_warning">Ce serveur est le serveur actif. Jellybeam basculera vers un autre serveur enregistré ou reviendra à l\'écran de connexion.</string>
+    <string name="server_remove_cancel">Annuler</string>
+    <string name="server_remove_confirm">Supprimer</string>
+    <string name="server_removing">Suppression…</string>
+
+    <!-- Search. -->
+    <string name="search_chip">Recherche</string>
+    <string name="search_field_label">Rechercher</string>
+    <string name="search_empty_hint">Recherchez dans votre médiathèque</string>
+    <string name="search_empty_hint_with_discover">Recherchez dans votre médiathèque et dans Découvrir</string>
+    <string name="search_no_results_for">Aucun résultat pour «\u00A0%1$s\u00A0».</string>
+    <string name="search_searched">Recherche dans %1$s</string>
+    <string name="search_group_films">Films</string>
+    <string name="search_group_series">Séries</string>
+    <string name="search_group_episodes">Épisodes</string>
+    <string name="search_group_other">Autres</string>
+    <string name="search_discover_kicker">DANS DÉCOUVRIR · DEMANDER AVEC SEERR</string>
+    <string name="search_discover_searching">Recherche dans Découvrir…</string>
+    <string name="search_discover_unavailable">Découvrir ne répond pas pour le moment</string>
+    <plurals name="search_discover_below">
+        <item quantity="one">↓ %d DANS DÉCOUVRIR CI-DESSOUS</item>
+        <item quantity="many">↓ %d DANS DÉCOUVRIR CI-DESSOUS</item>
+        <item quantity="other">↓ %d DANS DÉCOUVRIR CI-DESSOUS</item>
+    </plurals>
+
+    <!-- Settings. -->
+    <string name="settings_title">Paramètres</string>
+    <string name="settings_section_home">Accueil</string>
+    <string name="settings_section_appearance">Apparence</string>
+    <string name="settings_section_library">Médiathèque</string>
+    <string name="settings_section_playback">Lecture</string>
+    <string name="settings_section_osd">OSD</string>
+    <string name="settings_section_subtitles">Sous-titres</string>
+    <string name="settings_section_about">À propos</string>
+
+    <!-- Appearance. -->
+    <string name="settings_appearance_accent_label">Couleur d\'accent</string>
+    <string name="settings_appearance_light">Clair</string>
+    <string name="settings_appearance_deep">Foncé</string>
+    <string name="settings_appearance_preview">Aperçu</string>
+    <string name="settings_appearance_sample_title">Le Long Week-end</string>
+    <string name="settings_appearance_sample_count">3 spectateurs</string>
+    <string name="settings_appearance_sample_start">Démarrer</string>
+    <string name="settings_appearance_hint_ok">OK</string>
+    <string name="settings_appearance_hint_use">Utiliser %1$s</string>
+    <string name="settings_appearance_hint_back">Retour</string>
+    <string name="settings_appearance_hint_keep">Garder %1$s</string>
+
+    <!-- Home section. -->
+    <string name="settings_next_up_group">À suivre</string>
+    <string name="settings_cutoff">Délai d\'inactivité</string>
+    <string name="settings_next_up_cutoff_off">Désactivé</string>
+    <string name="settings_next_up_cutoff_1_week">1 semaine</string>
+    <string name="settings_next_up_cutoff_2_weeks">2 semaines</string>
+    <string name="settings_next_up_cutoff_1_month">1 mois</string>
+    <string name="settings_next_up_cutoff_3_months">3 mois</string>
+    <string name="settings_next_up_cutoff_1_year">1 an</string>
+    <string name="settings_desc_home_cutoff">Masque les séries de la rangée À suivre après cette période d\'inactivité.</string>
+    <string name="settings_next_up_rewatching">Inclure les séries revues dans À suivre</string>
+    <string name="settings_desc_home_next_up_rewatching">Inclut dans À suivre les séries déjà vues que vous êtes en train de revoir.</string>
+    <string name="settings_home_show_favorites">Rangée Favoris</string>
+    <string name="settings_desc_home_show_favorites">Affiche vos favoris dans une rangée de l\'accueil. Favoris reste dans le menu latéral dans tous les cas.</string>
+    <string name="settings_hide_watched_in_latest">Masquer les éléments vus dans Derniers ajouts</string>
+    <string name="settings_desc_home_hide_watched_in_latest">Masque les éléments entièrement vus dans la rangée Derniers ajouts.</string>
+    <string name="settings_libraries_on_home">Médiathèques sur l\'accueil</string>
+    <string name="settings_desc_home_library_visibility">Affiche cette médiathèque sur l\'écran d\'accueil.</string>
+    <string name="settings_home_shelf_size">Taille des rangées</string>
+    <string name="settings_desc_home_shelf_size">Nombre de titres affichés par rangée de l\'accueil\u00A0: Reprendre la lecture, À suivre et chaque rangée Derniers ajouts.</string>
+    <string name="settings_home_resume_art">Visuel de reprise</string>
+    <string name="settings_desc_home_resume_art">Visuel utilisé pour Reprendre la lecture et À suivre. Vignette de la série et Affiche montrent un visuel de la série\u00A0: aucune image ne dévoile l\'épisode.</string>
+    <string name="settings_home_resume_art_episode">Épisode</string>
+    <string name="settings_home_resume_art_series_thumb">Vignette de la série</string>
+    <string name="settings_home_resume_art_poster">Affiche</string>
+    <string name="settings_startup_screen">Écran de démarrage</string>
+    <string name="settings_startup_screen_home">Accueil</string>
+    <string name="settings_desc_home_startup_screen">Choisissez l\'écran qui s\'ouvre au lancement de l\'application.</string>
+    <string name="settings_show_clock">Horloge</string>
+    <string name="settings_desc_home_show_clock">Affiche une horloge dans la barre supérieure de l\'écran d\'accueil.</string>
+
+    <!-- Playback section. -->
+    <string name="settings_playback_quality">Qualité</string>
+    <string name="settings_desc_playback_quality">Lecture directe ne transcode jamais et refuse les fichiers que ce téléviseur ne peut pas lire. Auto lit les fichiers directement et ne transcode que ceux que les décodeurs de ce téléviseur ne prennent pas en charge. Un préréglage de débit transcode tout à ce débit.</string>
+    <string name="settings_quality_direct_play">Lecture directe</string>
+    <string name="settings_quality_auto">Auto</string>
+    <string name="settings_quality_mbps">%1$d Mbit/s</string>
+    <string name="settings_skip_back">Saut arrière</string>
+    <string name="settings_desc_playback_skip_back">Durée du saut en arrière du bouton Retour rapide pendant la lecture.</string>
+    <string name="settings_skip_forward">Saut avant</string>
+    <string name="settings_desc_playback_skip_forward">Durée du saut en avant du bouton Avance rapide pendant la lecture.</string>
+    <string name="settings_skip_seconds">%1$d s</string>
+    <string name="settings_autoplay_enabled">Lecture auto de l\'épisode suivant</string>
+    <string name="settings_desc_playback_autoplay_enabled">Lance automatiquement l\'épisode suivant à la fin d\'un épisode.</string>
+    <string name="settings_autoplay_delay">Délai de lecture auto</string>
+    <string name="settings_desc_playback_autoplay_delay">Temps d\'attente avant que la lecture automatique lance l\'épisode suivant.</string>
+    <string name="settings_mini_player">Mini-lecteur</string>
+    <string name="settings_desc_playback_mini_player">Pendant la lecture, Retour ou Accueil réduit la vidéo dans une fenêtre en coin d\'écran, qui continue de jouer pendant que vous naviguez.</string>
+    <string name="settings_normalize_volume">Normaliser le volume</string>
+    <string name="settings_desc_playback_normalize_volume">Lit les morceaux à un volume sonore comparable, grâce au gain mesuré par votre serveur pour chaque piste ou album. Musique uniquement.</string>
+    <string name="settings_desc_playback_mini_player_unsupported">Indisponible sur cet appareil. L\'incrustation d\'image (PiP) est absente ou désactivée pour Jellybeam dans les paramètres système.</string>
+
+    <!-- Playback section, "Still watching?" group. -->
+    <string name="settings_still_watching_group">Toujours là\u00A0?</string>
+    <string name="settings_still_watching_mode">Demander après</string>
+    <string name="settings_still_watching_mode_off">Désactivé</string>
+    <string name="settings_still_watching_mode_episodes">Épisodes</string>
+    <string name="settings_still_watching_mode_hours">Heures</string>
+    <string name="settings_desc_playback_still_watching_mode">Demande si vous regardez toujours après un certain nombre d\'épisodes ou d\'heures.</string>
+    <string name="settings_still_watching_episodes">Épisodes</string>
+    <string name="settings_desc_playback_still_watching_episodes">Nombre d\'épisodes lus automatiquement avant de demander si vous regardez toujours.</string>
+    <string name="settings_still_watching_hours">Heures</string>
+    <string name="settings_still_watching_hours_value">%1$d h</string>
+    <string name="settings_desc_playback_still_watching_hours">Nombre d\'heures de lecture continue avant de demander si vous regardez toujours.</string>
+    <string name="settings_still_watching_timeout">Délai de réponse</string>
+    <string name="settings_still_watching_timeout_minutes">%1$d min</string>
+    <string name="settings_desc_playback_still_watching_timeout">Temps pendant lequel la question reste affichée avant l\'arrêt de la lecture.</string>
+    <string name="settings_still_watching_reset_on_input">Un appui remet le compteur à zéro</string>
+    <string name="settings_desc_playback_still_watching_reset_on_input">Remet le compteur à zéro à chaque appui sur un bouton de la télécommande.</string>
+    <string name="settings_still_watching_note">S\'applique lorsque la lecture automatique est activée.</string>
+
+    <!-- Library section. -->
+    <string name="settings_show_virtual_episodes">Afficher les épisodes manquants</string>
+    <string name="settings_desc_library_show_virtual_episodes">Affiche un emplacement pour les épisodes manquants ou non diffusés dans les listes d\'épisodes.</string>
+
+    <!-- Playback section, "Skip segments" group. -->
+    <string name="settings_skip_segments_group">Passer les segments</string>
+    <string name="settings_skip_segment_intro">Intro</string>
+    <string name="settings_desc_playback_skip_segment_intro">Demander, passer automatiquement ou ne rien faire pour les intros des épisodes.</string>
+    <string name="settings_skip_segment_outro">Générique</string>
+    <string name="settings_desc_playback_skip_segment_outro">Demander, passer automatiquement ou ne rien faire pour les génériques de fin.</string>
+    <string name="settings_skip_segment_recap">Résumé</string>
+    <string name="settings_desc_playback_skip_segment_recap">Demander, passer automatiquement ou ne rien faire pour les résumés des épisodes précédents.</string>
+    <string name="settings_skip_segment_preview">Aperçu</string>
+    <string name="settings_desc_playback_skip_segment_preview">Demander, passer automatiquement ou ne rien faire pour les aperçus de l\'épisode suivant.</string>
+    <string name="settings_skip_segment_commercial">Publicités</string>
+    <string name="settings_desc_playback_skip_segment_commercial">Demander, passer automatiquement ou ne rien faire pour les coupures publicitaires.</string>
+    <string name="settings_skip_segment_ask">Demander</string>
+    <string name="settings_skip_segment_auto">Auto</string>
+    <string name="settings_skip_segment_off">Désactivé</string>
+
+    <!-- Playback section, "Advanced" group. -->
+    <string name="settings_advanced_group">Avancé</string>
+    <string name="settings_tolerate_levels">Tolérer les niveaux de codec mal étiquetés</string>
+    <string name="settings_desc_playback_tolerate_levels">Autorise la lecture des pistes dont le niveau de codec déclaré semble incorrect.</string>
+    <string name="settings_preload_on_focus">Précharger à la sélection</string>
+    <string name="settings_desc_playback_preload_on_focus">Commence à charger un titre dès que sa carte est sélectionnée.</string>
+    <string name="settings_ffmpeg_true_hd">Décoder le TrueHD avec FFmpeg</string>
+    <string name="settings_desc_playback_ffmpeg_true_hd">Décode le Dolby TrueHD de façon logicielle plutôt qu\'avec le décodeur de l\'appareil.</string>
+    <string name="settings_ffmpeg_dts">Décoder le DTS avec FFmpeg</string>
+    <string name="settings_desc_playback_ffmpeg_dts">Décode l\'audio DTS de façon logicielle plutôt qu\'avec le décodeur de l\'appareil.</string>
+    <string name="settings_ffmpeg_dts_hd">Décoder le DTS-HD / DTS:X avec FFmpeg</string>
+    <string name="settings_desc_playback_ffmpeg_dts_hd">Décode l\'audio DTS-HD et DTS:X de façon logicielle plutôt qu\'avec le décodeur de l\'appareil.</string>
+    <string name="settings_ffmpeg_dts_note">Android signale certaines pistes DTS-HD comme du DTS\u00A0; activer l\'une ou l\'autre option DTS couvre ces pistes. Les changements s\'appliquent à la prochaine lecture.</string>
+
+    <!-- OSD section. -->
+    <string name="settings_osd_detail">Détail de l\'OSD</string>
+    <string name="settings_osd_detail_minimal">Minimal</string>
+    <string name="settings_osd_detail_full">Complet</string>
+    <string name="settings_desc_osd_osd_detail">Choisissez la quantité d\'informations affichées par les commandes du lecteur à l\'écran.</string>
+    <string name="settings_seek_preview_size">Aperçu de navigation</string>
+    <string name="settings_desc_osd_seek_preview_size">Taille de la vignette affichée pendant l\'avance ou le retour dans la vidéo.</string>
+    <string name="settings_seek_preview_size_small">Petit</string>
+    <string name="settings_seek_preview_size_medium">Moyen</string>
+    <string name="settings_seek_preview_size_large">Grand</string>
+    <string name="settings_osd_detail_note">Complet ajoute une bande de codecs, l\'heure de fin, une barre de progression du tampon, ainsi que les commandes de vitesse de lecture et de statistiques.</string>
+
+    <!-- Subtitles section. -->
+    <string name="settings_subtitle_size">Taille</string>
+    <string name="settings_desc_subtitles_subtitle_size">Taille du texte des sous-titres pendant la lecture.</string>
+    <string name="settings_subtitle_position">Position verticale</string>
+    <string name="settings_desc_subtitles_subtitle_position">Hauteur des sous-titres par rapport au bord inférieur.</string>
+    <string name="settings_subtitle_bold">Texte en gras</string>
+    <string name="settings_desc_subtitles_subtitle_bold">Affiche le texte des sous-titres en gras.</string>
+    <string name="settings_subtitle_background">Opacité du fond</string>
+    <string name="settings_desc_subtitles_subtitle_background">Opacité du fond affiché derrière les sous-titres.</string>
+    <string name="settings_subtitle_percent">%1$d\u00A0%%</string>
+    <string name="settings_subtitle_position_default">Par défaut</string>
+    <string name="settings_subtitle_position_raised">Relevée</string>
+    <string name="settings_subtitle_position_higher">Plus haute</string>
+    <string name="settings_subtitle_position_highest">La plus haute</string>
+    <string name="settings_subtitle_system_style">Utiliser le style de sous-titres du système</string>
+    <string name="settings_desc_subtitles_subtitle_system_style">Utilise les couleurs et la police des paramètres de sous-titres d\'Android.</string>
+    <string name="settings_subtitle_color">Couleur du texte</string>
+    <string name="settings_desc_subtitles_subtitle_color">Sous-titres simples uniquement\u00A0; les sous-titres stylisés et les sous-titres image gardent leur apparence.</string>
+    <string name="settings_subtitle_color_white">Blanc</string>
+    <string name="settings_subtitle_color_soft_white">Blanc doux</string>
+    <string name="settings_subtitle_color_yellow">Jaune</string>
+    <string name="settings_subtitle_color_light_green">Vert clair</string>
+    <string name="settings_subtitle_full_styling">Style complet pour les sous-titres stylisés</string>
+    <string name="settings_desc_subtitles_subtitle_full_styling">Affiche les sous-titres stylisés avec leurs polices, leurs panneaux et leur karaoké. Désactivé, ils sont simplifiés.</string>
+
+    <!-- About section. -->
+    <string name="settings_about_version_build">Version %1$s · Build %2$s</string>
+    <string name="settings_about_descriptor">Un client Jellyfin pour Android TV.</string>
+    <string name="settings_about_not_signed_in">Connectez-vous pour voir les détails du serveur.</string>
+    <string name="settings_about_unknown">Inconnu</string>
+    <string name="settings_about_needs_admin">Nécessite un compte administrateur</string>
+
+    <string name="settings_about_server_group">Serveur</string>
+    <string name="settings_about_row_name">Nom</string>
+    <string name="settings_about_row_version">Version</string>
+    <string name="settings_about_row_product">Produit</string>
+    <string name="settings_about_row_address">Adresse</string>
+    <string name="settings_about_row_account">Compte</string>
+    <string name="settings_about_status_restart_pending">Redémarrage en attente</string>
+    <string name="settings_about_status_update_available">Mise à jour disponible</string>
+    <string name="settings_about_status_running">En service</string>
+    <string name="settings_about_status_unavailable">Détails indisponibles</string>
+    <string name="settings_about_library_group">Médiathèque</string>
+    <string name="settings_about_media_none">Aucun élément</string>
+    <!-- Unit words shown beside a count: French "one" covers 0 and 1, and the word carries no number. -->
+    <plurals name="settings_about_unit_movies" tools:ignore="ImpliedQuantity">
+        <item quantity="one">film</item>
+        <item quantity="many">films</item>
+        <item quantity="other">films</item>
+    </plurals>
+    <plurals name="settings_about_unit_series" tools:ignore="ImpliedQuantity">
+        <item quantity="one">série</item>
+        <item quantity="many">séries</item>
+        <item quantity="other">séries</item>
+    </plurals>
+    <plurals name="settings_about_unit_episodes" tools:ignore="ImpliedQuantity">
+        <item quantity="one">épisode</item>
+        <item quantity="many">épisodes</item>
+        <item quantity="other">épisodes</item>
+    </plurals>
+    <plurals name="settings_about_unit_collections" tools:ignore="ImpliedQuantity">
+        <item quantity="one">collection</item>
+        <item quantity="many">collections</item>
+        <item quantity="other">collections</item>
+    </plurals>
+    <plurals name="settings_about_unit_albums" tools:ignore="ImpliedQuantity">
+        <item quantity="one">album</item>
+        <item quantity="many">albums</item>
+        <item quantity="other">albums</item>
+    </plurals>
+    <plurals name="settings_about_unit_songs" tools:ignore="ImpliedQuantity">
+        <item quantity="one">morceau</item>
+        <item quantity="many">morceaux</item>
+        <item quantity="other">morceaux</item>
+    </plurals>
+    <plurals name="settings_about_unit_artists" tools:ignore="ImpliedQuantity">
+        <item quantity="one">artiste</item>
+        <item quantity="many">artistes</item>
+        <item quantity="other">artistes</item>
+    </plurals>
+    <plurals name="settings_about_unit_music_videos" tools:ignore="ImpliedQuantity">
+        <item quantity="one">clip vidéo</item>
+        <item quantity="many">clips vidéo</item>
+        <item quantity="other">clips vidéo</item>
+    </plurals>
+    <plurals name="settings_about_unit_books" tools:ignore="ImpliedQuantity">
+        <item quantity="one">livre</item>
+        <item quantity="many">livres</item>
+        <item quantity="other">livres</item>
+    </plurals>
+    <plurals name="settings_about_unit_trailers" tools:ignore="ImpliedQuantity">
+        <item quantity="one">bande-annonce</item>
+        <item quantity="many">bandes-annonces</item>
+        <item quantity="other">bandes-annonces</item>
+    </plurals>
+    <plurals name="settings_about_unit_programs" tools:ignore="ImpliedQuantity">
+        <item quantity="one">programme</item>
+        <item quantity="many">programmes</item>
+        <item quantity="other">programmes</item>
+    </plurals>
+    <plurals name="settings_about_unit_short_episodes" tools:ignore="ImpliedQuantity">
+        <item quantity="one">ép.</item>
+        <item quantity="many">ép.</item>
+        <item quantity="other">ép.</item>
+    </plurals>
+    <plurals name="settings_about_unit_short_collections" tools:ignore="ImpliedQuantity">
+        <item quantity="one">coll.</item>
+        <item quantity="many">coll.</item>
+        <item quantity="other">coll.</item>
+    </plurals>
+    <plurals name="settings_about_unit_short_music_videos" tools:ignore="ImpliedQuantity">
+        <item quantity="one">clip</item>
+        <item quantity="many">clips</item>
+        <item quantity="other">clips</item>
+    </plurals>
+
+    <string name="settings_about_mirror_group">Miroir local</string>
+    <string name="settings_about_row_items_mirrored">Éléments copiés</string>
+    <string name="settings_about_row_database">Base de données</string>
+    <string name="settings_about_row_last_full_sync">Dernière synchro complète</string>
+    <string name="settings_about_row_last_change_check">Dernière vérification</string>
+    <string name="settings_about_never">Jamais</string>
+    <string name="settings_about_row_sync">Synchronisation</string>
+    <string name="settings_about_sync_idle">Inactive</string>
+    <string name="settings_about_sync_library">Médiathèque</string>
+    <string name="settings_about_sync_progress">%1$s · %2$s/%3$s</string>
+    <string name="settings_about_sync_progress_unbounded">%1$s · %2$s</string>
+    <string name="settings_about_live_events_connected">Événements en direct connectés</string>
+    <string name="settings_about_live_events_disconnected">Événements en direct déconnectés</string>
+
+    <string name="settings_about_device_group">Cet appareil</string>
+    <string name="settings_about_row_android">Android</string>
+    <string name="settings_about_row_media3">Media3</string>
+    <string name="settings_about_row_device_id">ID de l\'appareil</string>
+
+    <!-- Player pills and cards. -->
+    <string name="player_buffering_label">Mise en tampon</string>
+    <string name="player_reconnecting_label">Reconnexion… (tentative %1$d)</string>
+    <string name="next_up_eyebrow">À SUIVRE</string>
+    <string name="next_up_back_to_dismiss">RETOUR POUR IGNORER</string>
+    <string name="next_up_play_next">Lire le suivant</string>
+    <string name="card_select">OK</string>
+    <string name="card_countdown_in">DANS %1$s</string>
+    <string name="still_watching_eyebrow">TOUJOURS LÀ\u00A0?</string>
+    <string name="still_watching_title">Êtes-vous toujours là\u00A0?</string>
+    <string name="still_watching_keep_watching">Continuer</string>
+    <string name="still_watching_back_to_stop">RETOUR POUR ARRÊTER</string>
+
+    <!-- Seerr Discover. -->
+    <string name="drawer_discover">Découvrir</string>
+    <string name="discover_chip_search">Rechercher</string>
+    <string name="discover_chip_my_requests">Mes demandes</string>
+    <string name="discover_chip_movies">Films</string>
+    <string name="discover_chip_tv">Séries</string>
+    <string name="discover_not_configured">Découvrir n\'est pas encore configuré. Connectez-le depuis les Paramètres.</string>
+    <string name="discover_error_retry">Réessayer</string>
+    <string name="discover_empty">Rien à afficher pour le moment.</string>
+
+    <string name="discover_sort_popularity">Popularité</string>
+    <string name="discover_sort_release_date">Date de sortie</string>
+    <string name="discover_sort_rating">Note</string>
+    <string name="discover_sort_az">A–Z</string>
+    <string name="discover_sort_za">Z–A</string>
+    <string name="discover_genre_all">Tous les genres</string>
+
+    <string name="discover_search_field_label">Rechercher dans Découvrir</string>
+    <string name="discover_search_empty_hint">Recherchez des films et des séries à demander</string>
+    <string name="discover_search_no_results">Aucun résultat</string>
+    <string name="discover_search_unavailable">La recherche n\'est pas disponible pour le moment</string>
+
+    <string name="discover_availability_not_requested">Non demandé</string>
+    <string name="discover_availability_pending">Demandé — en attente</string>
+    <string name="discover_availability_processing">Demandé — en cours de traitement</string>
+    <string name="discover_availability_partially_available">Partiellement disponible</string>
+    <string name="discover_availability_available">Disponible dans votre médiathèque</string>
+    <string name="discover_score_critics">Critiques %1$d\u00A0%%</string>
+    <string name="discover_score_audience">Public %1$d\u00A0%%</string>
+    <string name="discover_runtime_minutes">%1$d min</string>
+    <string name="discover_action_go_to_library">Voir dans la médiathèque</string>
+    <string name="discover_action_request">Demander</string>
+    <string name="discover_action_request_4k">Demander en 4K</string>
+    <string name="discover_action_cancel_request">Annuler la demande</string>
+    <string name="discover_action_add_to_watchlist">Ajouter à ma liste</string>
+    <string name="discover_action_on_watchlist">Dans ma liste</string>
+    <string name="discover_watchlist_title">Ma liste</string>
+    <string name="discover_action_trailer">Bande-annonce</string>
+    <string name="trailer_unavailable">Aucune application ne peut lire cette bande-annonce</string>
+    <string name="discover_cancel_request_title">Annuler cette demande\u00A0?</string>
+    <string name="discover_cancel_request_body">Votre demande sera retirée du serveur.</string>
+    <string name="discover_cancel_request_confirm">Annuler la demande</string>
+    <string name="discover_cancel_request_dismiss">Conserver la demande</string>
+    <string name="discover_cancelling">Annulation…</string>
+    <string name="discover_request_submitted">Demande envoyée</string>
+    <string name="discover_request_cancelled">Demande annulée</string>
+    <string name="discover_request_dialog_title">Demande</string>
+    <string name="discover_request_dialog_seasons">Saisons</string>
+    <string name="discover_request_dialog_select_all">Tout sélectionner</string>
+    <string name="discover_request_dialog_server">Serveur</string>
+    <string name="discover_request_dialog_profile">Profil de qualité</string>
+    <string name="discover_request_dialog_folder">Dossier racine</string>
+    <string name="discover_request_dialog_submit">Envoyer la demande</string>
+    <string name="discover_request_dialog_cancel">Annuler</string>
+    <string name="discover_cast_row_title">Distribution</string>
+    <string name="discover_similar_row_title">Similaires</string>
+    <string name="discover_recommended_row_title">Recommandés</string>
+
+    <string name="discover_requests_title">Mes demandes</string>
+    <string name="discover_requests_empty">Aucune demande pour l\'instant</string>
+    <string name="discover_status_pending">EN ATTENTE</string>
+    <string name="discover_status_approved">APPROUVÉE</string>
+    <string name="discover_status_declined">REFUSÉE</string>
+
+    <!-- Settings > Discover. -->
+    <string name="settings_section_discover">Découvrir</string>
+    <string name="settings_discover_status_connected">Connecté à %1$s en tant que %2$s</string>
+    <string name="settings_discover_status_not_configured">Non configuré</string>
+    <string name="settings_discover_method_label">Méthode</string>
+    <string name="settings_desc_discover_method">Méthode utilisée par Jellybeam pour se connecter à votre serveur Jellyseerr ou Overseerr.</string>
+    <string name="settings_discover_method_jellyfin">Compte Jellyfin</string>
+    <string name="settings_discover_method_local">Compte Seerr</string>
+    <string name="settings_discover_method_api_key">Clé API</string>
+    <string name="settings_discover_url_label">Adresse du serveur</string>
+    <string name="settings_discover_identity_label">Nom d\'utilisateur</string>
+    <string name="settings_discover_identity_label_local">Adresse e-mail</string>
+    <string name="settings_discover_identity_label_api_key">Libellé (facultatif)</string>
+    <string name="settings_discover_secret_label">Mot de passe</string>
+    <string name="settings_discover_secret_label_api_key">Clé API</string>
+    <string name="settings_discover_connect">Connecter</string>
+    <string name="settings_discover_connecting">Connexion…</string>
+    <string name="settings_discover_disconnect">Déconnecter</string>
+    <string name="settings_discover_disconnect_body">La connexion Seerr enregistrée pour ce compte sera supprimée.</string>
+    <string name="settings_discover_disconnect_confirm">Déconnecter</string>
+    <string name="settings_discover_disconnect_cancel">Annuler</string>
+
+    <!-- Settings > Troubleshooting. -->
+    <string name="settings_section_troubleshooting">Dépannage</string>
+    <string name="settings_troubleshooting_diagnostic_logging">Journalisation de diagnostic</string>
+    <string name="settings_troubleshooting_logging_off">Désactivée</string>
+    <string name="settings_troubleshooting_logging_on">Activée depuis %1$s · %2$s</string>
+    <plurals name="settings_troubleshooting_logging_lines">
+        <item quantity="one">%d ligne</item>
+        <item quantity="many">%d lignes</item>
+        <item quantity="other">%d lignes</item>
+    </plurals>
+    <string name="settings_troubleshooting_crash_reports">Rapports de plantage</string>
+    <string name="settings_desc_troubleshooting_crash_reports">Propose d\'envoyer un rapport après une fermeture inattendue de Jellybeam</string>
+    <string name="settings_troubleshooting_report_problem">Signaler un problème</string>
+    <string name="settings_desc_troubleshooting_report_problem">Partagez un journal expurgé avec votre téléphone, sans compte sur le téléviseur</string>
+    <string name="settings_troubleshooting_clear_log">Effacer le journal</string>
+    <string name="settings_desc_troubleshooting_clear_log">Supprime le journal et tout rapport de plantage en attente</string>
+
+    <!-- Report screen and post-crash dialog. -->
+    <string name="report_title">Signaler un problème</string>
+    <string name="report_no_network">Le téléviseur doit être sur le même réseau que votre téléphone. Aucune adresse réseau n\'a été trouvée.</string>
+    <string name="report_status_waiting">En attente d\'un scan</string>
+    <string name="report_status_opened">Ouvert sur un téléphone</string>
+    <string name="report_status_downloaded">Journal téléchargé</string>
+    <string name="report_status_expired">Expiré. Appuyez sur Retour et rouvrez Signaler un problème.</string>
+    <string name="report_nothing_sent">Rien n\'est envoyé tant que vous ne le décidez pas sur votre téléphone.</string>
+    <string name="report_back_hint">Retour ferme cet écran et arrête le partage.</string>
+    <string name="report_turn_off_logging_title">Désactiver la journalisation de diagnostic maintenant\u00A0?</string>
+    <string name="report_turn_off_logging_confirm">Désactiver</string>
+    <string name="report_turn_off_logging_keep">Continuer la journalisation</string>
+    <string name="crash_prompt_title">Jellybeam s\'est fermé de façon inattendue la dernière fois.</string>
+    <string name="crash_prompt_report_now">Signaler maintenant</string>
+    <string name="crash_prompt_later">Plus tard</string>
+    <string name="crash_prompt_discard">Ignorer</string>
+
+    <!-- Library sort/filter strip. -->
+    <string name="library_sort_label">TRI</string>
+    <string name="library_filter_label">FILTRE</string>
+    <string name="library_watched_any">Vu\u00A0: tous</string>
+    <string name="library_watched_unwatched">Non vus</string>
+    <string name="library_watched_watched">Vus</string>
+    <string name="library_has_unwatched">Avec non vus</string>
+    <string name="library_genre">Genre</string>
+    <string name="library_years">Années</string>
+    <string name="library_type">Type</string>
+    <string name="library_status_any">Statut\u00A0: tous</string>
+    <string name="library_status_continuing">En cours</string>
+    <string name="library_status_ended">Terminée</string>
+    <string name="library_reset">Réinitialiser</string>
+    <string name="library_any">Tous</string>
+    <string name="library_no_titles_match">Aucun titre ne correspond</string>
+
+    <!-- Settings > Updates. -->
+    <string name="settings_section_updates">Mises à jour</string>
+    <string name="updates_unavailable">Les mises à jour sont indisponibles. Redémarrez l\'application pour réessayer.</string>
+    <string name="settings_chip_with_update">%1$s · Mise à jour disponible</string>
+    <string name="updates_status_failed_update">MISE À JOUR IMPOSSIBLE</string>
+    <string name="updates_status_failed_check">VÉRIFICATION IMPOSSIBLE</string>
+    <string name="updates_status_checking">RECHERCHE</string>
+    <string name="updates_status_downloading">TÉLÉCHARGEMENT</string>
+    <string name="updates_status_verifying">VÉRIFICATION</string>
+    <string name="updates_status_preparing">PRÉPARATION DE L\'INSTALLATION</string>
+    <string name="updates_status_confirmation">CONFIRMATION ANDROID</string>
+    <string name="updates_status_current">À JOUR</string>
+    <string name="updates_status_ready">MISE À JOUR PRÊTE</string>
+    <string name="updates_status_idle">MISES À JOUR</string>
+    <string name="updates_headline_server_down">Le serveur de mises à jour ne répond pas.</string>
+    <string name="updates_headline_failed">Retentons cette mise à jour.</string>
+    <string name="updates_headline_checking">Recherche de nouveautés…</string>
+    <string name="updates_headline_downloading">Récupération de %1$s…</string>
+    <string name="updates_headline_verifying">Vérification de chaque détail…</string>
+    <string name="updates_headline_preparing">Préparation de l\'installation…</string>
+    <string name="updates_headline_confirmation">Android prend le relais.</string>
+    <string name="updates_headline_current">Vous avez la dernière version.</string>
+    <string name="updates_headline_available">Un Jellybeam tout frais est arrivé.</string>
+    <string name="updates_headline_idle">Un Jellybeam tout frais commence ici.</string>
+    <string name="updates_detail_try_again">Réessayez.</string>
+    <string name="updates_detail_checking">Consultation de GitHub Releases</string>
+    <string name="updates_detail_downloading">Votre mise à jour arrive</string>
+    <string name="updates_detail_verifying">Vérification de la signature et de la version</string>
+    <string name="updates_detail_preparing">Comptes et paramètres sont conservés</string>
+    <string name="updates_detail_confirmation">Android demandera d\'abord confirmation</string>
+    <string name="updates_detail_permission">Autorisez Jellybeam à installer des applications, puis revenez</string>
+    <string name="updates_detail_checked">Vérification\u00A0: %1$s</string>
+    <string name="updates_detail_available">%1$d Mio · comptes et paramètres conservés</string>
+    <string name="updates_detail_idle">Vous choisissez quand mettre à jour</string>
+    <string name="updates_action_open_settings">Ouvrir les paramètres</string>
+    <string name="updates_action_cancel">Annuler</string>
+    <string name="updates_action_continue">Continuer l\'installation</string>
+    <string name="updates_action_try_again">Réessayer</string>
+    <string name="updates_action_install">Installer la mise à jour</string>
+    <string name="updates_action_check_again">Vérifier à nouveau</string>
+    <string name="updates_action_check">Rechercher des mises à jour</string>
+    <string name="updates_action_install_hint">Android demandera d\'abord confirmation</string>
+    <string name="updates_action_later">Plus tard</string>
+    <string name="updates_action_later_hint">Me le rappeler demain</string>
+    <string name="updates_version_checking">%1$s → ?</string>
+    <string name="updates_version_latest">%1$s ✓ À JOUR</string>
+    <string name="updates_version_target">%1$s → %2$s</string>
+    <string name="updates_progress">%1$.1f / %2$d Mio</string>
+    <string name="updates_install_heading">CETTE INSTALLATION</string>
+    <string name="updates_stat_installed">Version installée</string>
+    <string name="updates_stat_installed_value">%1$s · %2$d</string>
+    <string name="updates_stat_channel">Canal</string>
+    <string name="updates_stat_channel_value">Stable</string>
+    <string name="updates_stat_source">Source</string>
+    <string name="updates_stat_source_value">GitHub Releases</string>
+    <string name="updates_stat_last_checked">Dernière vérification</string>
+    <string name="updates_stat_now">Maintenant</string>
+    <string name="updates_checked_never">Pas encore</string>
+    <string name="updates_checked_just_now">À l\'instant</string>
+    <string name="updates_automatic_title">Vérifier automatiquement</string>
+    <string name="updates_automatic_hint">Une fois par jour, quand le téléviseur est inactif.</string>
+    <string name="updates_notes_heading_new">NOUVEAUTÉS DE LA VERSION %1$s</string>
+    <string name="updates_notes_heading_yours">VOTRE VERSION · %1$s</string>
+    <string name="updates_notes_empty">Les notes de version apparaîtront ici après une vérification réussie.</string>
+    <string name="updates_notes_end">Fin des notes de version</string>
+    <string name="updates_notes_scroll_hint">↑↓ DÉFILER</string>
+</resources>

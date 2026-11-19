@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_not_signed_in">Non connecté.</string>
+    <string name="error_library_not_ready">La médiathèque n\'est pas encore prête.</string>
+    <string name="error_authorization_expired">L\'autorisation a expiré.</string>
+    <string name="error_would_transcode">La lecture directe de ce fichier est impossible sur ce téléviseur\u00A0: %1$s. Réglez Qualité sur Auto dans Paramètres › Lecture pour laisser le serveur le transcoder.</string>
+    <string name="error_server_removed">Ce serveur n\'est plus disponible.</string>
+    <string name="error_discover_not_set_up">Découvrir n\'est pas encore configuré. Connectez-le depuis les Paramètres.</string>
+    <string name="error_playback_session_stale">La session de lecture n\'est plus à jour.</string>
+    <string name="error_playback_account_changed">Le compte a changé avant le démarrage de la lecture.</string>
+    <string name="error_invalid_server_address">Cela ne ressemble pas à une adresse de serveur. Saisissez-la telle que votre navigateur l\'affiche, par exemple http://192.0.2.10:8096.</string>
+    <string name="error_server_unreachable">Impossible de joindre %1$s (%2$s). Vérifiez l\'adresse et le port, et que le serveur est démarré.</string>
+    <string name="error_unreachable_name_not_resolved">le nom n\'a pas pu être résolu</string>
+    <string name="error_unreachable_connection_refused">connexion refusée</string>
+    <string name="error_unreachable_timed_out">délai dépassé</string>
+    <string name="error_unreachable_network_unreachable">réseau inaccessible</string>
+    <string name="error_https_not_offered">%1$s ne répond pas en HTTPS. Essayez la même adresse avec http:// à la place.</string>
+    <string name="error_certificate_rejected">Le certificat de sécurité de %1$s n\'a pas été accepté (expiré, auto-signé ou émis pour un autre nom). Corrigez le certificat sur le serveur ou utilisez son adresse de confiance.</string>
+    <string name="error_not_jellyfin_server">%1$s a répondu, mais ce n\'est pas un serveur Jellyfin (HTTP %2$d). Vérifiez le port\u00A0; celui de Jellyfin est 8096 par défaut.</string>
+    <string name="error_invalid_credentials">Nom d\'utilisateur ou mot de passe incorrect.</string>
+    <string name="error_seerr_wrong_email_or_password">Adresse e-mail ou mot de passe incorrect. Un compte Seerr se connecte avec son adresse e-mail.</string>
+    <string name="error_seerr_session_expired">Seerr a déconnecté ce téléviseur. Reconnectez Seerr dans les Paramètres.</string>
+    <string name="error_seerr_change_unconfirmed">Le changement est bien arrivé à Seerr, mais ce téléviseur n\'a pas pu relire le titre. Réessayez.</string>
+    <string name="error_seerr_api_key_rejected">Le serveur a rejeté cette clé API.</string>
+    <string name="error_seerr_media_server_sign_in">Seerr n\'a pas pu se connecter à son propre serveur Jellyfin et ne peut donc pas vérifier ce compte. Jellyfin 12 nécessite Seerr 3.0 ou plus récent\u00A0; sinon, vérifiez les paramètres Jellyfin de Seerr.</string>
+    <string name="error_seerr_new_users_blocked">Seerr ne connaît pas encore cet utilisateur Jellyfin et les nouvelles connexions y sont désactivées. Connectez-vous une fois à Seerr dans un navigateur, ou autorisez les nouvelles connexions Jellyfin dans Seerr.</string>
+    <string name="error_seerr_method_disabled">Cette méthode de connexion est désactivée dans Seerr. Essayez-en une autre.</string>
+    <string name="error_seerr_unreachable">Impossible de joindre Seerr. Vérifiez qu\'il est démarré, ou son adresse dans les Paramètres.</string>
+    <string name="error_seerr_unreachable_reason">Impossible de joindre Seerr (%1$s). Vérifiez qu\'il est démarré, ou son adresse dans les Paramètres.</string>
+    <string name="error_seerr_refused">Seerr a refusé la connexion.</string>
+    <string name="error_seerr_refused_detail">Seerr a refusé la connexion\u00A0: %1$s</string>
+    <string name="error_update_storage_unavailable">Le stockage des mises à jour est indisponible</string>
+
+    <string name="signin_error_server_address_empty">Saisissez d\'abord une adresse de serveur.</string>
+    <string name="signin_error_quick_connect_disabled">Connexion rapide est désactivée sur ce serveur.</string>
+    <string name="signin_error_quick_connect_expired">Ce code Connexion rapide a expiré. Réessayez pour en obtenir un nouveau.</string>
+
+    <string name="settings_about_size_bytes">%1$d o</string>
+    <string name="settings_about_size_kb">%1$.1f Ko</string>
+    <string name="settings_about_size_mb">%1$.1f Mo</string>
+    <string name="settings_about_size_gb">%1$.1f Go</string>
+    <string name="settings_about_size_tb">%1$.1f To</string>
+    <string name="settings_about_android_value">%1$s · API %2$d</string>
+
+    <plurals name="updates_checked_minutes_ago">
+        <item quantity="one">Il y a %1$d min</item>
+        <item quantity="many">Il y a %1$d min</item>
+        <item quantity="other">Il y a %1$d min</item>
+    </plurals>
+    <plurals name="updates_checked_hours_ago">
+        <item quantity="one">Il y a %1$d h</item>
+        <item quantity="many">Il y a %1$d h</item>
+        <item quantity="other">Il y a %1$d h</item>
+    </plurals>
+    <plurals name="updates_checked_days_ago">
+        <item quantity="one">Il y a %1$d j</item>
+        <item quantity="many">Il y a %1$d j</item>
+        <item quantity="other">Il y a %1$d j</item>
+    </plurals>
+
+    <string name="updates_failure_network">Échec de la connexion. Réessayez.</string>
+    <string name="updates_failure_rate_limited">GitHub est surchargé. Réessayez plus tard.</string>
+    <string name="updates_failure_unsupported_release">Cette version ne prend pas en charge les mises à jour sécurisées dans l\'application.</string>
+    <string name="updates_failure_incompatible">Cette mise à jour n\'est pas compatible avec cet appareil.</string>
+    <string name="updates_failure_verification">La mise à jour n\'a pas pu être vérifiée. Téléchargez-la à nouveau.</string>
+    <string name="updates_failure_storage">Espace de stockage insuffisant pour cette mise à jour.</string>
+    <string name="updates_failure_installation">Android n\'a pas pu installer la mise à jour. Réessayez.</string>
+    <string name="updates_failure_withdrawn">Cette version n\'est plus disponible à l\'installation.</string>
+</resources>

@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="music_now_playing">Lecture en cours</string>
+    <string name="music_now_playing_line">%1$s · %2$s</string>
+
+    <string name="music_bar_connection_lost">Connexion perdue │ En pause</string>
+
+    <!-- Library landing. -->
+    <string name="music_title">Musique</string>
+    <string name="music_tab_albums">Albums</string>
+    <string name="music_tab_artists">Artistes</string>
+    <string name="music_tab_songs">Morceaux</string>
+    <string name="music_tab_playlists">Playlists</string>
+    <string name="music_tab_genres">Genres</string>
+    <string name="music_show">Afficher</string>
+    <string name="music_album_artists">Artistes d\'album</string>
+    <string name="music_all_artists">Tous les artistes</string>
+    <string name="music_new_playlist">Nouvelle playlist</string>
+    <string name="music_new_playlist_hint">Nommez-la, puis ajoutez des morceaux</string>
+
+    <string name="music_sort_name">Nom</string>
+    <string name="music_sort_recently_changed">Dernière modification</string>
+    <string name="music_sort_last_played">Dernière lecture</string>
+    <string name="music_sort_date_added">Date d\'ajout</string>
+    <plurals name="music_count_albums">
+        <item quantity="one">%1$s album</item>
+        <item quantity="many">%1$s albums</item>
+        <item quantity="other">%1$s albums</item>
+    </plurals>
+    <plurals name="music_count_artists">
+        <item quantity="one">%1$s artiste</item>
+        <item quantity="many">%1$s artistes</item>
+        <item quantity="other">%1$s artistes</item>
+    </plurals>
+    <plurals name="music_count_songs">
+        <item quantity="one">%1$s morceau</item>
+        <item quantity="many">%1$s morceaux</item>
+        <item quantity="other">%1$s morceaux</item>
+    </plurals>
+    <plurals name="music_count_playlists">
+        <item quantity="one">%1$s playlist</item>
+        <item quantity="many">%1$s playlists</item>
+        <item quantity="other">%1$s playlists</item>
+    </plurals>
+    <plurals name="music_count_genres">
+        <item quantity="one">%1$s genre</item>
+        <item quantity="many">%1$s genres</item>
+        <item quantity="other">%1$s genres</item>
+    </plurals>
+    <plurals name="music_count_tracks">
+        <item quantity="one">%1$s piste</item>
+        <item quantity="many">%1$s pistes</item>
+        <item quantity="other">%1$s pistes</item>
+    </plurals>
+    <plurals name="music_appears_on_albums">
+        <item quantity="one">Apparaît sur %1$s album</item>
+        <item quantity="many">Apparaît sur %1$s albums</item>
+        <item quantity="other">Apparaît sur %1$s albums</item>
+    </plurals>
+    <string name="music_appears_on_n">Apparaît sur %1$s</string>
+    <string name="music_minutes">%1$d min</string>
+    <string name="music_hours_minutes">%1$d h %2$02d min</string>
+
+    <!-- Focused-item facts. -->
+    <string name="music_fact_tracks">Pistes</string>
+    <string name="music_fact_length">Durée</string>
+    <string name="music_fact_added">Ajouté</string>
+    <string name="music_fact_albums">Albums</string>
+    <string name="music_fact_songs">Morceaux</string>
+    <string name="music_fact_appears_on">Apparaît sur</string>
+
+    <!-- Page eyebrows. -->
+    <string name="music_eyebrow_artist">Artiste</string>
+    <string name="music_eyebrow_album">Album</string>
+    <string name="music_eyebrow_playlist">Playlist</string>
+    <string name="music_eyebrow_added">%1$s │ Ajouté le %2$s</string>
+    <string name="music_eyebrow_changed">%1$s │ Modifiée le %2$s</string>
+
+    <!-- Page actions. -->
+    <string name="music_play_all">Tout lire</string>
+    <string name="music_play">Lire</string>
+    <string name="music_shuffle">Aléatoire</string>
+    <string name="music_instant_mix">Mix instantané</string>
+    <string name="music_favorite_add">Ajouter aux favoris</string>
+    <string name="music_favorite_remove">Retirer des favoris</string>
+    <string name="music_more_actions">Plus d\'actions</string>
+    <string name="music_most_played">Les plus écoutés</string>
+    <string name="music_appears_on">Apparaît sur</string>
+    <string name="music_disc">Disque %1$d</string>
+
+    <!-- Song list. -->
+    <string name="music_col_title">Titre</string>
+    <string name="music_col_artist">Artiste</string>
+    <string name="music_col_album">Album</string>
+    <string name="music_col_title_artist_album">Titre · Artiste · Album</string>
+    <string name="music_col_title_album">Titre · Album</string>
+    <string name="music_col_played">Écouté</string>
+    <string name="music_col_added">Ajouté</string>
+    <string name="music_col_year">Année</string>
+    <string name="music_col_time">Durée</string>
+    <string name="music_songs_favorites">Morceaux favoris</string>
+    <string name="music_songs_recent">Écoutés récemment</string>
+    <string name="music_ago_minutes">Il y a %1$d min</string>
+    <string name="music_ago_hours">Il y a %1$d h</string>
+    <string name="music_ago_yesterday">Hier</string>
+    <plurals name="music_ago_days">
+        <item quantity="one">Il y a %1$d jour</item>
+        <item quantity="many">Il y a %1$d jours</item>
+        <item quantity="other">Il y a %1$d jours</item>
+    </plurals>
+    <string name="music_added_on">Ajouté le %1$s</string>
+
+    <!-- Empty and unreachable states. -->
+    <string name="music_empty_library">Cette médiathèque ne contient pas encore de musique.</string>
+    <string name="music_empty_playlists">Aucune playlist pour l\'instant.</string>
+    <string name="music_empty_favorites">Aucun morceau favori pour l\'instant.</string>
+    <string name="music_empty_played">Rien d\'écouté pour l\'instant.</string>
+    <string name="music_unreachable">Impossible de joindre %1$s.</string>
+    <string name="music_unreachable_server">Impossible de joindre le serveur.</string>
+    <string name="music_last_tried">Dernier essai\u00A0: %1$s</string>
+    <string name="music_retry">Réessayer</string>
+
+    <!-- Now Playing. -->
+    <string name="music_playing_from">Lecture depuis</string>
+    <string name="music_disc_track">Disque %1$d, piste %2$d</string>
+    <string name="music_track_n">Piste %1$d</string>
+    <string name="music_queue_position">File d\'attente │ %1$d sur %2$d</string>
+    <string name="music_shuffled">Aléatoire</string>
+    <string name="music_ends_at">Fin à %1$s</string>
+    <string name="music_paused">En pause</string>
+    <string name="music_paused_at">En pause │ %1$s</string>
+    <string name="music_seek_step">◂ %1$d s ▸</string>
+    <string name="music_up_next">À suivre</string>
+    <string name="music_queue">File d\'attente</string>
+    <string name="music_lyrics">Paroles</string>
+
+    <!-- Queue screen. -->
+    <string name="music_left">Reste %1$s</string>
+    <!-- %2$s is one of the music_source_* words, which carry their own article in French. -->
+    <string name="music_next_in_queue">À suivre dans la file · %1$d · Lus avant le reste %2$s</string>
+    <string name="music_next_from">À suivre depuis</string>
+    <string name="music_shuffled_order">Ordre aléatoire</string>
+    <string name="music_source_album">de l\'album</string>
+    <string name="music_source_artist">de l\'artiste</string>
+    <string name="music_source_playlist">de la playlist</string>
+    <string name="music_source_mix">du mix</string>
+    <string name="music_source_list">de la liste</string>
+    <string name="music_shuffle_state">Aléatoire │ %1$s</string>
+    <string name="music_repeat_state">Répéter │ %1$s</string>
+    <string name="music_on">Activé</string>
+    <string name="music_off">Désactivé</string>
+    <string name="music_repeat_all">Tout</string>
+    <string name="music_repeat_one">Un seul</string>
+    <string name="music_clear_queue">Vider la file d\'attente</string>
+    <string name="music_play_next">Lire ensuite</string>
+    <string name="music_tag_added">Ajouté</string>
+    <string name="music_move">Déplacer</string>
+    <string name="music_remove">Retirer</string>
+    <string name="music_go_to_album">Aller à l\'album</string>
+
+    <!-- Action menu. -->
+    <string name="music_menu_this_song">Ce morceau</string>
+    <string name="music_menu_this_album">Cet album</string>
+    <string name="music_menu_this_artist">Cet artiste</string>
+    <string name="music_menu_this_playlist">Cette playlist</string>
+    <string name="music_go_to_artist">Aller à l\'artiste</string>
+    <string name="music_reorder_songs">Réorganiser les morceaux</string>
+    <string name="music_reordering">Réorganisation</string>
+    <string name="music_reorder_keys">▲▼ Déplacer │ OK déposer │ Retour annuler</string>
+    <string name="music_reorder_failed">Impossible de déplacer</string>
+    <string name="music_add_to_queue">Ajouter à la file d\'attente</string>
+    <string name="music_add_to_playlist">Ajouter à une playlist</string>
+    <string name="music_remove_from_playlist">Retirer de la playlist</string>
+    <string name="music_all_playlists">Toutes les playlists…</string>
+    <string name="music_in_playlist">Dans la playlist</string>
+    <string name="music_new_playlist_name_it">Nommez-la</string>
+    <string name="music_new_playlist_adds">%1$s y sera ajouté dès sa création.</string>
+    <string name="music_create_and_add">Créer et ajouter</string>
+    <string name="music_create">Créer</string>
+    <string name="music_couldnt_create">Impossible de créer la playlist. Réessayez.</string>
+    <string name="music_cancel">Annuler</string>
+
+    <!-- Music bar confirmations. -->
+    <string name="music_notice_added_to_queue">Ajouté à la file d\'attente</string>
+    <string name="music_notice_playing_next">Sera lu ensuite</string>
+    <string name="music_notice_added_to">Ajouté à</string>
+    <string name="music_notice_added_again">Déjà présent · ajouté de nouveau</string>
+    <string name="music_notice_couldnt_add_to">Impossible d\'ajouter à</string>
+    <string name="music_notice_enqueue_failed">Impossible d\'ajouter à la file d\'attente</string>
+    <string name="music_notice_start_failed">Impossible de lancer la musique</string>
+
+    <!-- Instant Mix. -->
+    <string name="music_building_mix">Création du mix instantané</string>
+    <string name="music_no_mix_song">Pas encore de mix pour ce morceau</string>
+    <string name="music_no_mix_album">Pas encore de mix pour cet album</string>
+    <string name="music_no_mix_artist">Pas encore de mix pour cet artiste</string>
+    <string name="music_no_mix_playlist">Pas encore de mix pour cette playlist</string>
+    <string name="music_no_mix_genre">Pas encore de mix pour ce genre</string>
+
+    <!-- Play counts. -->
+    <string name="music_col_plays">Écoutes</string>
+    <string name="music_fact_played">Écouté</string>
+    <plurals name="music_count_plays">
+        <item quantity="one">%1$s écoute</item>
+        <item quantity="many">%1$s écoutes</item>
+        <item quantity="other">%1$s écoutes</item>
+    </plurals>
+    <plurals name="music_played_times">
+        <item quantity="one">%1$s fois</item>
+        <item quantity="many">%1$s fois</item>
+        <item quantity="other">%1$s fois</item>
+    </plurals>
+
+    <!-- Visualizer. -->
+    <string name="music_visualizer">Visualiseur</string>
+    <string name="music_visualizer_needs_decoded">Le visualiseur a besoin d\'audio décodé</string>
+    <string name="music_visualizer_unsupported">Le visualiseur nécessite OpenGL ES 3.0\u00A0; la puce graphique de cet appareil indique %1$s.</string>
+    <string name="music_visualizer_hint">◀ ▶ Motif   ▲ ▼ Piste</string>
+    <string name="visualizer_pattern_bars">Barres</string>
+    <string name="visualizer_pattern_radial">Radial</string>
+    <string name="visualizer_pattern_waterfall">Cascade</string>
+    <string name="visualizer_pattern_kaleido">Kaléidoscope</string>
+    <string name="visualizer_pattern_swirl">Tourbillon</string>
+    <string name="visualizer_pattern_fire">Feu</string>
+    <string name="visualizer_pattern_phosphor">Phosphore</string>
+    <string name="visualizer_pattern_superscope">Superscope</string>
+    <string name="visualizer_pattern_ridgeline">Lignes de crête</string>
+    <string name="visualizer_pattern_ripples">Ondulations</string>
+
+    <!-- Settings › Playback, Music group. -->
+    <string name="settings_music_group">Musique</string>
+    <string name="settings_ambient_screen">Écran d\'ambiance</string>
+    <string name="settings_desc_ambient_screen">Ce que l\'écran affiche après deux minutes d\'inactivité pendant la lecture de musique\u00A0: la pochette ou le visualiseur.</string>
+    <string name="settings_ambient_cover">Pochette</string>
+    <string name="settings_ambient_visualizer">Visualiseur</string>
+    <string name="settings_visualizer_auto_change">Changer de motif automatiquement</string>
+    <string name="settings_desc_visualizer_auto_change">Le visualiseur passe au motif suivant sur un temps fort, toutes les trente secondes environ. Gauche et Droite changent toujours de motif immédiatement.</string>
+</resources>

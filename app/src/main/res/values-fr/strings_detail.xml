@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Primary action pill. -->
+    <string name="detail_play">Lire</string>
+    <string name="detail_resume">Reprendre</string>
+    <string name="detail_play_again">Revoir</string>
+    <string name="detail_resume_episode">Reprendre %1$s</string>
+    <string name="detail_season_episode">S%1$d E%2$d</string>
+    <string name="detail_episode_number">E%d</string>
+
+    <!-- Header meta lines. -->
+    <plurals name="detail_season_count">
+        <item quantity="one">%d saison</item>
+        <item quantity="many">%d saisons</item>
+        <item quantity="other">%d saisons</item>
+    </plurals>
+    <plurals name="detail_episode_count">
+        <item quantity="one">%d épisode</item>
+        <item quantity="many">%d épisodes</item>
+        <item quantity="other">%d épisodes</item>
+    </plurals>
+    <plurals name="detail_episode_count_caps">
+        <item quantity="one">%d ÉPISODE</item>
+        <item quantity="many">%d ÉPISODES</item>
+        <item quantity="other">%d ÉPISODES</item>
+    </plurals>
+    <plurals name="detail_item_count_caps">
+        <item quantity="one">%d ÉLÉMENT</item>
+        <item quantity="many">%d ÉLÉMENTS</item>
+        <item quantity="other">%d ÉLÉMENTS</item>
+    </plurals>
+    <string name="detail_watched_count">%d VUS</string>
+
+    <!-- Spec strip audio channel words. -->
+    <string name="detail_channels_mono">MONO</string>
+    <string name="detail_channels_stereo">STÉRÉO</string>
+    <string name="detail_channels_count">%d CAN.</string>
+
+    <!-- Movie eyebrow's ADDED and ENDS clauses. -->
+    <string name="detail_added_today">Aujourd\'hui</string>
+    <string name="detail_added_yesterday">Hier</string>
+    <plurals name="detail_added_days_ago">
+        <item quantity="one">Il y a %d jour</item>
+        <item quantity="many">Il y a %d jours</item>
+        <item quantity="other">Il y a %d jours</item>
+    </plurals>
+    <string name="detail_ends_clause">FIN À %1$s</string>
+    <string name="detail_added_clause">AJOUTÉ %1$s</string>
+
+    <plurals name="detail_studio_more">
+        <item quantity="one">%1$s +%2$d autre</item>
+        <item quantity="many">%1$s +%2$d autres</item>
+        <item quantity="other">%1$s +%2$d autres</item>
+    </plurals>
+
+    <string name="detail_people_more">" +%1$d"</string>
+
+    <!-- Action menu rows. -->
+    <string name="detail_menu_mark_season_watched">Marquer la saison comme vue</string>
+    <string name="detail_menu_mark_series_watched">Marquer la série comme vue</string>
+    <string name="detail_menu_mark_season_unwatched">Marquer la saison comme non vue</string>
+    <string name="detail_menu_mark_series_unwatched">Marquer la série comme non vue</string>
+    <string name="detail_menu_mark_watched">Marquer comme vu</string>
+    <string name="detail_menu_mark_unwatched">Marquer comme non vu</string>
+    <string name="detail_menu_never_played">JAMAIS LU</string>
+    <string name="detail_menu_add_favorite">Ajouter aux favoris</string>
+    <string name="detail_menu_remove_favorite">Retirer des favoris</string>
+    <string name="detail_menu_state_series">SÉRIE</string>
+    <string name="detail_menu_play_next_unwatched">Lire le prochain non vu</string>
+    <string name="detail_menu_play_from_beginning">Lire depuis le début</string>
+    <string name="detail_menu_play_random">Lire au hasard</string>
+    <string name="detail_menu_play_random_from">PARMI %d</string>
+    <string name="detail_menu_go_to_series">Aller à la série</string>
+    <string name="detail_menu_watch_together">Regarder ensemble</string>
+    <string name="detail_menu_add_to_collection">Ajouter à une collection</string>
+    <string name="detail_menu_refresh_metadata">Actualiser les métadonnées</string>
+
+    <!-- Collection page and stacked card. -->
+    <string name="detail_collection_series">Série</string>
+    <string name="detail_collection_series_with_seasons">Série · %1$s</string>
+    <string name="detail_collection_unplayed">%d NON LUS</string>
+    <string name="detail_collection_all_watched">TOUT VU</string>
+
+    <!-- Detail toasts. -->
+    <string name="detail_toast_marked_watched">Marqué comme vu</string>
+    <string name="detail_toast_marked_unwatched">Marqué comme non vu</string>
+    <string name="detail_toast_added_favorite">Ajouté aux favoris</string>
+    <string name="detail_toast_removed_favorite">Retiré des favoris</string>
+    <string name="detail_toast_refreshing_metadata">Actualisation des métadonnées</string>
+    <string name="detail_toast_server_unreachable">Impossible de joindre le serveur</string>
+    <string name="detail_toast_added_to_collection">Ajouté à %1$s</string>
+
+    <!-- Library person page: noun forms, so the line needs no gender agreement. -->
+    <string name="person_in_library">Dans votre médiathèque</string>
+    <string name="person_not_in_library">Absent de votre médiathèque</string>
+    <string name="person_nothing_in_library">Rien de cette personne dans votre médiathèque.</string>
+    <string name="person_born">Naissance\u00A0: %1$s</string>
+    <string name="person_born_in">Naissance\u00A0: %1$s, %2$s</string>
+    <string name="person_born_place">Lieu de naissance\u00A0: %1$s</string>
+    <string name="person_died">Décès\u00A0: %1$s</string>
+
+    <!-- Trailers and extras. -->
+    <string name="detail_menu_extras">Bandes-annonces et bonus</string>
+    <plurals name="detail_menu_extras_count">
+        <item quantity="one">%d bonus</item>
+        <item quantity="many">%d bonus</item>
+        <item quantity="other">%d bonus</item>
+    </plurals>
+    <string name="detail_menu_extras_loading">Chargement</string>
+    <string name="detail_menu_extras_failed">Impossible de charger les bonus</string>
+    <string name="detail_extra_trailer_fallback">Bande-annonce</string>
+    <string name="detail_extra_fallback">Bonus</string>
+
+    <string name="detail_extra_type_trailer">BANDE-ANNONCE</string>
+    <string name="detail_extra_type_youtube">YOUTUBE</string>
+    <string name="detail_extra_type_behind_the_scenes">COULISSES</string>
+    <string name="detail_extra_type_featurette">FEATURETTE</string>
+    <string name="detail_extra_type_interview">INTERVIEW</string>
+    <string name="detail_extra_type_scene">SCÈNE</string>
+    <string name="detail_extra_type_deleted_scene">SCÈNE COUPÉE</string>
+    <string name="detail_extra_type_short">COURT-MÉTRAGE</string>
+    <string name="detail_extra_type_clip">EXTRAIT</string>
+    <string name="detail_extra_type_sample">ÉCHANTILLON</string>
+    <string name="detail_extra_type_other">BONUS</string>
+</resources>
