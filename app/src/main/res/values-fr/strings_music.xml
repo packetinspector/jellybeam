@@ -73,8 +73,8 @@
     <string name="music_eyebrow_artist">Artiste</string>
     <string name="music_eyebrow_album">Album</string>
     <string name="music_eyebrow_playlist">Playlist</string>
-    <string name="music_eyebrow_added">%1$s │ Ajouté le %2$s</string>
-    <string name="music_eyebrow_changed">%1$s │ Modifiée le %2$s</string>
+    <string name="music_eyebrow_added">%1$s │ Ajout le %2$s</string>
+    <string name="music_eyebrow_changed">%1$s │ Modification le %2$s</string>
 
     <!-- Page actions. -->
     <string name="music_play_all">Tout lire</string>
@@ -124,14 +124,14 @@
     <string name="music_playing_from">Lecture depuis</string>
     <string name="music_disc_track">Disque %1$d, piste %2$d</string>
     <string name="music_track_n">Piste %1$d</string>
-    <string name="music_queue_position">File d\'attente │ %1$d sur %2$d</string>
+    <string name="music_queue_position">File │ %1$d sur %2$d</string>
     <string name="music_shuffled">Aléatoire</string>
     <string name="music_ends_at">Fin à %1$s</string>
     <string name="music_paused">En pause</string>
     <string name="music_paused_at">En pause │ %1$s</string>
     <string name="music_seek_step">◂ %1$d s ▸</string>
     <string name="music_up_next">À suivre</string>
-    <string name="music_queue">File d\'attente</string>
+    <string name="music_queue">File</string>
     <string name="music_lyrics">Paroles</string>
 
     <!-- Queue screen. -->

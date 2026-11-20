@@ -25,10 +25,10 @@
     <string name="reauthorize_explanation">Renouvelle l\'accès de ce compte enregistré sans supprimer sa médiathèque locale.</string>
     <string name="reauthorize_button">Réautoriser</string>
     <string name="reauthorizing">Réautorisation…</string>
-    <string name="quick_connect_button">Utiliser Connexion rapide</string>
+    <string name="quick_connect_button">Utiliser la Connexion rapide</string>
     <string name="quick_connect_use_password">Utiliser plutôt le mot de passe</string>
     <string name="quick_connect_code_label">Saisissez ce code dans Jellyfin</string>
-    <string name="quick_connect_instructions">Ouvrez Connexion rapide dans une application Jellyfin déjà connectée.</string>
+    <string name="quick_connect_instructions">Ouvrez la Connexion rapide dans une application Jellyfin déjà connectée.</string>
     <string name="quick_connect_starting">Demande d\'un code…</string>
     <string name="quick_connect_waiting">En attente d\'approbation…</string>
     <string name="quick_connect_retry">Réessayer</string>
@@ -160,7 +160,7 @@
 
     <!-- Home section. -->
     <string name="settings_next_up_group">À suivre</string>
-    <string name="settings_cutoff">Délai d\'inactivité</string>
+    <string name="settings_cutoff">Délai</string>
     <string name="settings_next_up_cutoff_off">Désactivé</string>
     <string name="settings_next_up_cutoff_1_week">1 semaine</string>
     <string name="settings_next_up_cutoff_2_weeks">2 semaines</string>
@@ -196,7 +196,7 @@
     <string name="settings_quality_auto">Auto</string>
     <string name="settings_quality_mbps">%1$d Mbit/s</string>
     <string name="settings_skip_back">Saut arrière</string>
-    <string name="settings_desc_playback_skip_back">Durée du saut en arrière du bouton Retour rapide pendant la lecture.</string>
+    <string name="settings_desc_playback_skip_back">Durée du saut en arrière du bouton Rembobiner pendant la lecture.</string>
     <string name="settings_skip_forward">Saut avant</string>
     <string name="settings_desc_playback_skip_forward">Durée du saut en avant du bouton Avance rapide pendant la lecture.</string>
     <string name="settings_skip_seconds">%1$d s</string>
@@ -397,7 +397,7 @@
     <string name="settings_about_row_last_full_sync">Dernière synchro complète</string>
     <string name="settings_about_row_last_change_check">Dernière vérification</string>
     <string name="settings_about_never">Jamais</string>
-    <string name="settings_about_row_sync">Synchronisation</string>
+    <string name="settings_about_row_sync">Synchro</string>
     <string name="settings_about_sync_idle">Inactive</string>
     <string name="settings_about_sync_library">Médiathèque</string>
     <string name="settings_about_sync_progress">%1$s · %2$s/%3$s</string>
@@ -425,7 +425,7 @@
 
     <!-- Seerr Discover. -->
     <string name="drawer_discover">Découvrir</string>
-    <string name="discover_chip_search">Rechercher</string>
+    <string name="discover_chip_search">Recherche</string>
     <string name="discover_chip_my_requests">Mes demandes</string>
     <string name="discover_chip_movies">Films</string>
     <string name="discover_chip_tv">Séries</string>
@@ -556,7 +556,7 @@
     <string name="library_status_any">Statut\u00A0: tous</string>
     <string name="library_status_continuing">En cours</string>
     <string name="library_status_ended">Terminée</string>
-    <string name="library_reset">Réinitialiser</string>
+    <string name="library_reset">Effacer</string>
     <string name="library_any">Tous</string>
     <string name="library_no_titles_match">Aucun titre ne correspond</string>
 
@@ -566,9 +566,9 @@
     <string name="settings_chip_with_update">%1$s · Mise à jour disponible</string>
     <string name="updates_status_failed_update">MISE À JOUR IMPOSSIBLE</string>
     <string name="updates_status_failed_check">VÉRIFICATION IMPOSSIBLE</string>
-    <string name="updates_status_checking">RECHERCHE</string>
+    <string name="updates_status_checking">VÉRIFICATION</string>
     <string name="updates_status_downloading">TÉLÉCHARGEMENT</string>
-    <string name="updates_status_verifying">VÉRIFICATION</string>
+    <string name="updates_status_verifying">VALIDATION</string>
     <string name="updates_status_preparing">PRÉPARATION DE L\'INSTALLATION</string>
     <string name="updates_status_confirmation">CONFIRMATION ANDROID</string>
     <string name="updates_status_current">À JOUR</string>
@@ -578,7 +578,7 @@
     <string name="updates_headline_failed">Retentons cette mise à jour.</string>
     <string name="updates_headline_checking">Recherche de nouveautés…</string>
     <string name="updates_headline_downloading">Récupération de %1$s…</string>
-    <string name="updates_headline_verifying">Vérification de chaque détail…</string>
+    <string name="updates_headline_verifying">Validation de chaque détail…</string>
     <string name="updates_headline_preparing">Préparation de l\'installation…</string>
     <string name="updates_headline_confirmation">Android prend le relais.</string>
     <string name="updates_headline_current">Vous avez la dernière version.</string>
@@ -587,7 +587,7 @@
     <string name="updates_detail_try_again">Réessayez.</string>
     <string name="updates_detail_checking">Consultation de GitHub Releases</string>
     <string name="updates_detail_downloading">Votre mise à jour arrive</string>
-    <string name="updates_detail_verifying">Vérification de la signature et de la version</string>
+    <string name="updates_detail_verifying">Validation de la signature et de la version</string>
     <string name="updates_detail_preparing">Comptes et paramètres sont conservés</string>
     <string name="updates_detail_confirmation">Android demandera d\'abord confirmation</string>
     <string name="updates_detail_permission">Autorisez Jellybeam à installer des applications, puis revenez</string>
@@ -600,7 +600,7 @@
     <string name="updates_action_try_again">Réessayer</string>
     <string name="updates_action_install">Installer la mise à jour</string>
     <string name="updates_action_check_again">Vérifier à nouveau</string>
-    <string name="updates_action_check">Rechercher des mises à jour</string>
+    <string name="updates_action_check">Vérifier les mises à jour</string>
     <string name="updates_action_install_hint">Android demandera d\'abord confirmation</string>
     <string name="updates_action_later">Plus tard</string>
     <string name="updates_action_later_hint">Me le rappeler demain</string>

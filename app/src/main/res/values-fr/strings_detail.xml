@@ -118,7 +118,7 @@
     <string name="detail_extra_type_interview">INTERVIEW</string>
     <string name="detail_extra_type_scene">SCÈNE</string>
     <string name="detail_extra_type_deleted_scene">SCÈNE COUPÉE</string>
-    <string name="detail_extra_type_short">COURT-MÉTRAGE</string>
+    <string name="detail_extra_type_short">COURT</string>
     <string name="detail_extra_type_clip">EXTRAIT</string>
     <string name="detail_extra_type_sample">ÉCHANTILLON</string>
     <string name="detail_extra_type_other">BONUS</string>

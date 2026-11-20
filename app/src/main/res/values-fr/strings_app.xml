@@ -32,8 +32,8 @@
     <string name="error_update_storage_unavailable">Le stockage des mises à jour est indisponible</string>
 
     <string name="signin_error_server_address_empty">Saisissez d\'abord une adresse de serveur.</string>
-    <string name="signin_error_quick_connect_disabled">Connexion rapide est désactivée sur ce serveur.</string>
-    <string name="signin_error_quick_connect_expired">Ce code Connexion rapide a expiré. Réessayez pour en obtenir un nouveau.</string>
+    <string name="signin_error_quick_connect_disabled">La Connexion rapide est désactivée sur ce serveur.</string>
+    <string name="signin_error_quick_connect_expired">Ce code de Connexion rapide a expiré. Réessayez pour en obtenir un nouveau.</string>
 
     <string name="settings_about_size_bytes">%1$d o</string>
     <string name="settings_about_size_kb">%1$.1f Ko</string>
@@ -62,7 +62,7 @@
     <string name="updates_failure_rate_limited">GitHub est surchargé. Réessayez plus tard.</string>
     <string name="updates_failure_unsupported_release">Cette version ne prend pas en charge les mises à jour sécurisées dans l\'application.</string>
     <string name="updates_failure_incompatible">Cette mise à jour n\'est pas compatible avec cet appareil.</string>
-    <string name="updates_failure_verification">La mise à jour n\'a pas pu être vérifiée. Téléchargez-la à nouveau.</string>
+    <string name="updates_failure_verification">La mise à jour n\'a pas pu être validée. Téléchargez-la à nouveau.</string>
     <string name="updates_failure_storage">Espace de stockage insuffisant pour cette mise à jour.</string>
     <string name="updates_failure_installation">Android n\'a pas pu installer la mise à jour. Réessayez.</string>
     <string name="updates_failure_withdrawn">Cette version n\'est plus disponible à l\'installation.</string>

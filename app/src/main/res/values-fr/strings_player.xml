@@ -53,7 +53,7 @@
     <string name="player_osd_transcode">Transcodage</string>
     <string name="player_osd_ends">Fin à %1$s</string>
     <string name="player_seek_flash_seconds">%1$d s</string>
-    <string name="player_seek_unavailable">Ce fichier ne permet pas l\'avance ni le retour rapide</string>
+    <string name="player_seek_unavailable">Ce fichier ne permet pas de se déplacer dans la vidéo</string>
     <string name="player_skip_toast">%1$s · OK pour annuler</string>
 
     <!-- Library info sheet. -->
@@ -114,8 +114,8 @@
 
     <!-- Watch together. -->
     <string name="wt_eyebrow">REGARDER ENSEMBLE</string>
-    <string name="wt_role_hosting">VOUS ÊTES L\'HÔTE</string>
-    <string name="wt_role_joined">VOUS PARTICIPEZ</string>
+    <string name="wt_role_hosting">HÔTE</string>
+    <string name="wt_role_joined">REJOINT</string>
     <string name="wt_host_title">Votre salon est ouvert</string>
     <string name="wt_finished_title">Terminé. Regarder autre chose\u00A0?</string>
     <string name="wt_waiting_title">En attente du lancement par %1$s</string>
@@ -134,9 +134,9 @@
     <string name="wt_tag_joined">A REJOINT</string>
     <string name="wt_tag_in_group">DANS LE GROUPE</string>
     <!-- Worded so a user name needs no gender agreement. -->
-    <string name="wt_log_you_joined">VOUS AVEZ REJOINT LE GROUPE</string>
-    <string name="wt_log_user_joined">%1$s A REJOINT LE GROUPE</string>
-    <string name="wt_log_user_left">%1$s A QUITTÉ LE GROUPE</string>
+    <string name="wt_log_you_joined">VOUS AVEZ REJOINT</string>
+    <string name="wt_log_user_joined">%1$s A REJOINT</string>
+    <string name="wt_log_user_left">%1$s A QUITTÉ</string>
     <string name="wt_log_reconnecting">RECONNEXION…</string>
     <string name="wt_log_waiting">EN ATTENTE D\'AUTRES PARTICIPANTS…</string>
     <string name="wt_card_now_showing">EN CE MOMENT</string>
@@ -168,7 +168,7 @@
         <item quantity="other">%1$d PERSONNES</item>
     </plurals>
     <string name="wt_room_more">+%1$d</string>
-    <string name="wt_room_in_lobby">SALLE D\'ATTENTE</string>
+    <string name="wt_room_in_lobby">AU LOBBY</string>
     <string name="wt_room_playing">EN LECTURE</string>
     <string name="wt_room_paused">EN PAUSE</string>
     <string name="wt_room_waiting">EN ATTENTE</string>
