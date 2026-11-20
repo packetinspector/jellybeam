@@ -10,7 +10,7 @@ plugins {
 
 // docs/27 §2: the languages that ship. A translation in res/values-xx/ stays out of the APK
 // (and out of the system's per-app language list) until its code is added here.
-val shippedLanguages = listOf("en")
+val shippedLanguages = listOf("en", "fr")
 
 // One flag drives the BuildConfig field, signing and the cargo feature (docs/26 §7).
 val updateFixtureBuild = providers.gradleProperty("jellybeam.updateFixture").orNull == "true"

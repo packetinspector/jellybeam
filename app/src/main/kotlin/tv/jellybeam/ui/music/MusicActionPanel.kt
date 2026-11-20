@@ -1,20 +1,13 @@
 package tv.jellybeam.ui.music
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -30,22 +23,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.withStyle
@@ -74,6 +62,7 @@ import tv.jellybeam.ui.focus.requestFocusWithRetry
 import tv.jellybeam.ui.focus.withPlacement
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.MixSeedFfi
+import tv.jellybeam.ui.common.JellybeamTextField
 
 /** The page item's own heart, owned by its page: the menu reads and flips it there, so the two never differ. */
 internal data class PageFavorite(val itemId: String, val isFavorite: Boolean, val onToggle: () -> Unit)
@@ -430,10 +419,6 @@ private fun ColumnScope.NewPlaylistFields(
 ) {
     var name by rememberSaveable(nameKey) { mutableStateOf("") }
     val keyboard = LocalSoftwareKeyboardController.current
-    val focusManager = LocalFocusManager.current
-    val accent = LocalAccent.current
-    val fieldInteraction = remember { MutableInteractionSource() }
-    val fieldFocused by fieldInteraction.collectIsFocusedAsState()
     PanelTitle(kicker(stringResource(R.string.music_new_playlist), back = true), stringResource(R.string.music_new_playlist_name_it))
     Box(Modifier.height(6.dp))
     if (adds != null) {
@@ -445,31 +430,15 @@ private fun ColumnScope.NewPlaylistFields(
         )
     }
     Box(Modifier.height(12.dp))
-    Box(
-        Modifier
-            .padding(horizontal = 18.dp)
-            .fillMaxWidth()
-            .background(JellybeamTheme.Surface, RoundedCornerShape(8.dp))
-            // The house field: Hairline at rest, accent only while the field itself holds focus.
-            .border(2.dp, if (fieldFocused) accent.accentInk else JellybeamTheme.Hairline, RoundedCornerShape(8.dp))
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-    ) {
-        BasicTextField(
-            value = name,
-            onValueChange = { name = it },
-            modifier = Modifier
-                .fillMaxWidth()
-                .focusRequester(field)
-                // The field moves focus on Down itself only for a hardware D-pad; injected and CEC keys stop in the text input.
-                .onPreviewKeyEvent { it.type == KeyEventType.KeyDown && it.key == Key.DirectionDown && focusManager.moveFocus(FocusDirection.Down) },
-            textStyle = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 15.sp),
-            singleLine = true,
-            interactionSource = fieldInteraction,
-            cursorBrush = SolidColor(accent.accentInk),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { if (canCreatePlaylist(name)) onCreate(name) else keyboard?.hide() }),
-        )
-    }
+    JellybeamTextField(
+        value = name,
+        onValueChange = { name = it },
+        modifier = Modifier.padding(horizontal = 18.dp),
+        fieldModifier = Modifier.focusRequester(field),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { if (canCreatePlaylist(name)) onCreate(name) else keyboard?.hide() }),
+        compact = true,
+    )
     Box(Modifier.height(12.dp))
     Column(Modifier.weight(1f)) {
         if (canCreatePlaylist(name)) PanelActionRow(createLabel, subtext = null, busy = busy, onSelect = { onCreate(name) })

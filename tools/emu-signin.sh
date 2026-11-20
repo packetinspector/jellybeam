@@ -34,6 +34,9 @@ key() { for k in "$@"; do adb -s "$S" shell input keyevent "KEYCODE_$k"; sleep 0
 type_text() { adb -s "$S" shell input text "$(printf '%s' "$1" | sed 's/ /%s/g')"; }
 fail() { echo "emu-signin: $1" >&2; adb -s "$S" exec-out screencap -p > "${TMPDIR:-/tmp}/emu-signin-fail.png"; echo "screenshot: ${TMPDIR:-/tmp}/emu-signin-fail.png" >&2; exit 1; }
 
+# docs/15 §4.1: focusing a field raises the IME; keys typed before its input connection is up are lost.
+ime_up() { local end=$((SECONDS + 8)); while [ $SECONDS -lt $end ]; do adb -s "$S" shell dumpsys input_method | grep -q 'mInputShown=true' && break; sleep 0.5; done; sleep 1; }
+
 # One line per text/edit/focused node: "<class> <text> <F?>". A blinking cursor keeps the UI
 # from going idle, so dumps only happen once focus has left the text fields.
 ui() {
@@ -67,7 +70,9 @@ wait_for 20 '^TextView Username' || fail "sign-in screen did not show"
 echo "sign-in screen up"
 
 # docs/15 §4: focus opens on the Quick Connect button; Up enters the server field in edit mode.
-key DPAD_UP MOVE_END
+key DPAD_UP
+ime_up
+key MOVE_END
 adb -s "$S" shell input keyevent $(printf 'KEYCODE_DEL %.0s' $(seq 80))
 type_text "$server"
 key TAB
@@ -76,8 +81,10 @@ echo "server set"
 
 # Down from Quick Connect enters Username; TAB (ImeAction.Next) moves to Password, then Sign in.
 key DPAD_DOWN
+ime_up
 type_text "$user"
 key TAB
+ime_up
 type_text "$pass"
 key TAB
 ui | grep -qxF "EditText $user " || fail "username field does not read $user"

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -164,11 +165,13 @@ internal val ROW_HEIGHT = 52.dp
 internal val ROW_GAP = 4.dp
 private val ROW_CORNER = 8.dp
 
-// docs/15-focus-and-selection.md §6: ToggleRow/ChipFieldRow reserve a fixed second line for
-// subtext via [SETTINGS_ROW_HEIGHT]/[SETTINGS_CHIP_ROW_HEIGHT] (`Modifier.height`), so row
-// height is a property of kind, not content.
+// docs/15-focus-and-selection.md §6: ToggleRow/ChipFieldRow reserve a second line for subtext;
+// these are minimum heights per kind, grown only by a two-line description, never by focus.
 internal val SETTINGS_ROW_HEIGHT = 64.dp
 internal val SETTINGS_CHIP_ROW_HEIGHT = 76.dp
+
+/** docs/27 §4: a description wraps (the row grows) rather than cutting a translation short; French Quality needs three. */
+internal const val SETTINGS_DESCRIPTION_MAX_LINES = 3
 
 /** docs/15-focus-and-selection.md §6: the description line's alpha fade, alpha only, no layout
  * change.
@@ -188,7 +191,7 @@ internal fun settingsDescriptionStyle() = TextStyle(
 )
 
 /** Whole-row focus/click target: a plain label row, or the shell every other row builds on.
- * [height] defaults to [ROW_HEIGHT] except [ToggleRow], which uses [SETTINGS_ROW_HEIGHT].
+ * [height] is a minimum, [ROW_HEIGHT] by default; [ToggleRow] uses [SETTINGS_ROW_HEIGHT].
  */
 @Composable
 internal fun RowCard(
@@ -201,7 +204,7 @@ internal fun RowCard(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .height(height)
+            .heightIn(min = height)
             .background(JellybeamTheme.SurfaceRaised, RoundedCornerShape(ROW_CORNER))
             .focusRing(isFocused, cornerRadius = ROW_CORNER, color = accent.accentInk)
             .padding(horizontal = 16.dp),
@@ -323,7 +326,7 @@ internal fun ToggleRow(
             )
             BasicText(
                 text = description,
-                maxLines = 1,
+                maxLines = SETTINGS_DESCRIPTION_MAX_LINES,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.graphicsLayer { alpha = descriptionAlpha },
                 style = settingsDescriptionStyle(),
@@ -375,7 +378,7 @@ internal fun ActionRow(
             )
             BasicText(
                 text = description,
-                maxLines = 1,
+                maxLines = SETTINGS_DESCRIPTION_MAX_LINES,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.graphicsLayer { alpha = descriptionAlpha },
                 style = settingsDescriptionStyle(),
@@ -493,11 +496,11 @@ internal fun ChipFieldRow(label: String, description: String, key: String, modif
     )
 
     // Label + chips on one line, description on a full-width line beneath (a 12sp sentence never
-    // fits the 170dp label column). Row height is fixed; only description alpha moves with focus.
+    // fits the 170dp label column). The row grows only for a two-line description; focus moves alpha only.
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .height(SETTINGS_CHIP_ROW_HEIGHT)
+            .heightIn(min = SETTINGS_CHIP_ROW_HEIGHT)
             // A focused chip would scroll only its own bounds, leaving the last row's ring and
             // description below the pane edge; one request widened to the row avoids a second scroll.
             .then(WholeRowBringIntoView)
@@ -539,7 +542,7 @@ internal fun ChipFieldRow(label: String, description: String, key: String, modif
         }
         BasicText(
             text = description,
-            maxLines = 1,
+            maxLines = SETTINGS_DESCRIPTION_MAX_LINES,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .fillMaxWidth()

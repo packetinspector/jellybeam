@@ -34,6 +34,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -91,6 +92,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -597,7 +599,10 @@ private fun SpeedButtonLabel(rate: Float, focusedTint: Color, modifier: Modifier
     BasicText(
         text = formatSpeedLabel(rate),
         modifier = modifier,
-        style = TextStyle(fontFamily = JellybeamTheme.MartianMono, fontWeight = FontWeight.Bold, color = tint, fontSize = 14.sp),
+        style = TextStyle(fontFamily = JellybeamTheme.MartianMono, fontWeight = FontWeight.Bold, color = tint),
+        maxLines = 1,
+        // "1.25×" overflows the 44dp button at 14sp; it steps down to fit instead of breaking before ×.
+        autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = 14.sp, stepSize = 0.5.sp),
     )
 }
 
@@ -1727,12 +1732,14 @@ fun PlaybackScreen(
                             accentColor = JellybeamTheme.Panna,
                         )
                         Spacer(modifier = Modifier.height(16.dp))
+                        val liveRows = StatsSheetFormat.liveRows(strings, live)
+                        val labelWidth = statsLabelWidth(content.rows.map { it.label } + liveRows.map { it.label })
                         content.rows.forEach { row ->
-                            StatsGridRow(label = row.label, value = row.value)
+                            StatsGridRow(label = row.label, value = row.value, labelWidth = labelWidth)
                             Spacer(modifier = Modifier.height(6.dp))
                         }
-                        StatsSheetFormat.liveRows(strings, live).forEach { row ->
-                            StatsGridRow(label = row.label, value = row.value)
+                        liveRows.forEach { row ->
+                            StatsGridRow(label = row.label, value = row.value, labelWidth = labelWidth)
                             Spacer(modifier = Modifier.height(6.dp))
                         }
                         content.fileName?.let { fileName ->
@@ -2401,23 +2408,38 @@ private fun StatsSpansText(
 
 /** docs/12 §17's grid row: label col 75dp, gap 11dp, mono 11sp muted / mono 12sp cream. */
 @Composable
-private fun StatsGridRow(label: String, value: String, modifier: Modifier = Modifier) {
+private fun StatsGridRow(label: String, value: String, labelWidth: Dp, modifier: Modifier = Modifier) {
     Row(modifier = modifier.fillMaxWidth()) {
         BasicText(
             text = label,
-            modifier = Modifier.width(75.dp),
-            style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 11.sp),
+            modifier = Modifier.width(labelWidth),
+            maxLines = 1,
+            style = STATS_LABEL_STYLE,
         )
         Spacer(modifier = Modifier.width(11.dp))
+        // A long codec or audio line wraps under itself rather than losing its tail; the sheet scrolls.
         BasicText(
             text = value,
             modifier = Modifier.weight(1f),
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             style = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Panna, fontSize = 12.sp),
         )
     }
 }
+
+private val STATS_LABEL_STYLE = TextStyle(fontFamily = JellybeamTheme.MartianMono, color = JellybeamTheme.Grigio, fontSize = 11.sp)
+
+/** The stats label column fits its widest label so a translated label never wraps (docs/27 §4). */
+@Composable
+private fun statsLabelWidth(labels: List<String>): Dp {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val widest = remember(labels, measurer) { labels.map { measurer.measure(it, STATS_LABEL_STYLE, maxLines = 1).size.width } }
+    return with(density) { StatsSheetFormat.labelColumnPx(widest, STATS_LABEL_MIN.roundToPx()).toDp() }
+}
+
+private val STATS_LABEL_MIN = 75.dp
 
 /** docs/12 §17's library sheet body: meta line, synopsis (max 4 lines), fields grid. */
 @Composable

@@ -1,9 +1,6 @@
 package tv.jellybeam.ui.discover
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -16,9 +13,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
@@ -33,7 +28,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -43,7 +37,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
-import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.ui.focus.FocusMemory
 import tv.jellybeam.ui.focus.FocusRestorer
@@ -51,6 +44,7 @@ import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
 import tv.jellybeam.ui.focus.rememberFocusMemory
 import uniffi.jellybeam_core.SeerrMediaType
+import tv.jellybeam.ui.common.JellybeamTextField
 
 private val PAGE_MARGIN = 32.dp
 private val CELL_GAP = 12.dp
@@ -64,8 +58,7 @@ private const val CONTENT_TYPE_POSTER = "poster"
  * debounce,
  * generation-guarded, Down-from-field routed to the first result), querying `seerr_search` instead
  * of
- * the local mirror (docs/14). `SearchField` below is a private copy of that file's field, same
- * convention.
+ * the local mirror (docs/14). Both use the house [tv.jellybeam.ui.common.JellybeamTextField].
  *
  * docs/15-focus-and-selection.md §2-§5, same shape as [tv.jellybeam.ui.search.SearchScreen]: [memory]
  * keys
@@ -171,9 +164,7 @@ fun DiscoverSearchScreen(
     }
 }
 
-/** [tv.jellybeam.ui.search.SearchScreen]'s private `SearchField`, copied verbatim (Grigio label,
- * Surface box, Hairline/accent-on-focus border, Archivo text).
- */
+/** The house [JellybeamTextField] for Seerr search; Done just dismisses the keyboard, results are live. */
 @Composable
 private fun DiscoverSearchField(
     value: String,
@@ -184,43 +175,21 @@ private fun DiscoverSearchField(
     memory: FocusMemory,
     modifier: Modifier = Modifier,
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isFocused by interactionSource.collectIsFocusedAsState()
-    val accent = LocalAccent.current
-    val borderColor = if (isFocused) accent.accentInk else JellybeamTheme.Hairline
     val keyboardController = LocalSoftwareKeyboardController.current
-
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        BasicText(
-            text = stringResource(R.string.discover_search_field_label),
-            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 12.sp),
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(JellybeamTheme.Surface, RoundedCornerShape(8.dp))
-                .border(2.dp, borderColor, RoundedCornerShape(8.dp))
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusKey(memory, "field")
-                    .focusRequester(focusRequester)
-                    .focusProperties {
-                        down = if (hasResults) firstResultRequester else FocusRequester.Default
-                    },
-                textStyle = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 16.sp),
-                singleLine = true,
-                cursorBrush = SolidColor(accent.accentInk),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { keyboardController?.hide() }),
-                interactionSource = interactionSource,
-            )
-        }
-    }
+    JellybeamTextField(
+        label = stringResource(R.string.discover_search_field_label),
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier,
+        fieldModifier = Modifier
+            .focusKey(memory, "field")
+            .focusRequester(focusRequester)
+            .focusProperties {
+                down = if (hasResults) firstResultRequester else FocusRequester.Default
+            },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { keyboardController?.hide() }),
+    )
 }
 
 @Composable

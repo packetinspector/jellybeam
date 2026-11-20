@@ -121,6 +121,9 @@ object StatsSheetFormat {
         return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
     }
 
+    /** The label column is as wide as its widest label, never narrower than [minPx], so no label wraps. */
+    internal fun labelColumnPx(labelWidthsPx: List<Int>, minPx: Int): Int = maxOf(minPx, labelWidthsPx.maxOrNull() ?: 0)
+
     /** Split so buffer allocation and network estimate don't collapse into one HEALTH summary. */
     internal fun liveRows(strings: UiStrings, live: PlaybackLiveStats): List<StatsRow> = listOf(
         StatsRow(label(strings, R.string.player_stats_label_buffer), bufferValue(strings, live)),

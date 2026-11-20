@@ -20,7 +20,12 @@ internal fun rootKeyAction(action: Int, keyCode: Int, hasFocus: Boolean, hasSeat
 }
 
 internal fun isDpadKey(keyCode: Int): Boolean = when (keyCode) {
-    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> true
+    else -> isSelectKey(keyCode)
+}
+
+/** A remote's OK: remotes send any of these for the same button. */
+internal fun isSelectKey(keyCode: Int): Boolean = when (keyCode) {
     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> true
     else -> false
 }

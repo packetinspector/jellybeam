@@ -1,6 +1,6 @@
 # 27 — Translations
 
-Status: **Ready for translations; US English is the only shipped language.**
+Status: **Shipped languages: US English and French.**
 There is no in-app language setting: Jellybeam follows the TV's system
 language whenever that language ships.
 

@@ -4,7 +4,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -25,9 +24,7 @@ import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
@@ -41,21 +38,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import tv.jellybeam.ui.music.BlocksAmbient
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
@@ -94,7 +85,6 @@ import tv.jellybeam.ui.music.trackArtSource
 import tv.jellybeam.ui.music.trackDurationLabel
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
-import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.cards.PosterCard
@@ -108,6 +98,7 @@ import tv.jellybeam.ui.focus.rememberFocusMemory
 import tv.jellybeam.ui.focus.ringClearBringIntoViewSpec
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.SeerrMediaType
+import tv.jellybeam.ui.common.JellybeamTextField
 
 private val PAGE_MARGIN = 32.dp
 
@@ -531,10 +522,8 @@ private fun DiscoverSectionHeader(status: String?, topGap: Boolean) {
 }
 
 /**
- * The house text-field style ([tv.jellybeam.ui.signin.SignInScreen]'s `JellybeamTextField` recipe): a
- * Grigio label, a Surface box with a Hairline border that turns accent on focus, Archivo
- * text. `imeAction = Done` just dismisses the keyboard -- results are already live via
- * [SearchViewModel]'s debounce.
+ * The house [JellybeamTextField] for library search. `imeAction = Done` just dismisses the keyboard --
+ * results are already live via [SearchViewModel]'s debounce.
  */
 @Composable
 private fun SearchField(
@@ -551,49 +540,23 @@ private fun SearchField(
     val isFocused by interactionSource.collectIsFocusedAsState()
     // docs/29 §6: a focused text field holds ambient off, since the keyboard's insets don't reach Compose before API 30.
     if (isFocused) BlocksAmbient()
-    val accent = LocalAccent.current
-    val borderColor = if (isFocused) accent.accentInk else JellybeamTheme.Hairline
     val keyboardController = LocalSoftwareKeyboardController.current
-    val focusManager = LocalFocusManager.current
-
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        BasicText(
-            text = stringResource(R.string.search_field_label),
-            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 12.sp),
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(JellybeamTheme.Surface, RoundedCornerShape(8.dp))
-                .border(2.dp, borderColor, RoundedCornerShape(8.dp))
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusKey(memory, "field")
-                    .focusRequester(focusRequester)
-                    // The field moves focus on Down itself only for a hardware D-pad; injected and CEC keys stop in the text input.
-                    .onPreviewKeyEvent { it.type == KeyEventType.KeyDown && it.key == Key.DirectionDown && focusManager.moveFocus(FocusDirection.Down) }
-                    .focusProperties {
-                        // Only points `down` at the first-result requester once it's attached.
-                        down = if (hasResults) firstResultRequester else FocusRequester.Default
-                    },
-                textStyle = TextStyle(
-                    fontFamily = JellybeamTheme.Archivo,
-                    color = JellybeamTheme.Panna,
-                    fontSize = 16.sp,
-                ),
-                singleLine = true,
-                cursorBrush = SolidColor(accent.accentInk),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { keyboardController?.hide() }),
-                interactionSource = interactionSource,
-            )
-        }
-    }
+    JellybeamTextField(
+        label = stringResource(R.string.search_field_label),
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier,
+        fieldModifier = Modifier
+            .focusKey(memory, "field")
+            .focusRequester(focusRequester)
+            .focusProperties {
+                // Only points `down` at the first-result requester once it's attached.
+                down = if (hasResults) firstResultRequester else FocusRequester.Default
+            },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { keyboardController?.hide() }),
+        interactionSource = interactionSource,
+    )
 }
 
 /** docs/29 §9 K3: the searching mascot over `No results for "{q}".` and a mono line naming what was searched. */

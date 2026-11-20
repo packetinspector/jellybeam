@@ -254,6 +254,10 @@ hidden competes with them for focus or Back.
 - **Seeds.** Sign-in surfaces open on Quick Connect, never a text field (it would raise the IME);
   a discovered server that lands later takes focus while the address is untouched. Server
   management opens on its sub-page's first action; the crash prompt on Report now.
+- **Text fields.** Every text field is the house `JellybeamTextField` (`ui/common`), whose keys are
+  decided by `fieldKeyAction`: OK (DPAD_CENTER, ENTER or NUMPAD_ENTER) opens the keyboard and Up/Down
+  leave the field, whatever the input device. Compose does both only for a non-virtual D-pad
+  device, which some remotes, injected keys and HDMI-CEC are not.
 - **Back.** In-page `BackHandler`s (drawer, panels, dialogs) are enabled only while their layer is
   top, so a hidden layer's handler never beats the top page's or the crash prompt's Back.
 - **Dialogs inside a page.** A dialog that is part of a retained page (Discover's request options
@@ -318,13 +322,16 @@ at the screen edge.
 Descriptive text is shown for the **focused** row (the option under the
 cursor), not the selected value: the viewer is browsing; the text explains
 what the thing they are pointing at does. Each `ToggleRow` and
-`ChipFieldRow` reserves a fixed second line (`Archivo`, `Grigio`, 12sp)
-at all times. Row heights are fixed per row kind (`Modifier.height`, never
-a minimum): `ToggleRow` goes from 52dp to 64dp (label and description
-stacked beside the switch); `ChipFieldRow` is 76dp (its 32dp chip line
-sits above a full-width description line, with 8dp between them so a
-focused chip's outset ring clears the text -- at 64dp the ring would touch
-the card edge). The text fades in over 120ms (alpha only). No layout
+`ChipFieldRow` reserves a second line (`Archivo`, `Grigio`, 12sp)
+at all times. Row heights are set per row kind as a minimum: `ToggleRow`
+goes from 52dp to 64dp (label and description stacked beside the switch);
+`ChipFieldRow` is 76dp (its 32dp chip line sits above a full-width
+description line, with 8dp between them so a focused chip's outset ring
+clears the text -- at 64dp the ring would touch the card edge). A
+description too long for one line wraps, up to three lines (never cut short,
+so a translation reads in full), and its row grows to fit; the description is laid
+out whether or not it shows, so that height never depends on focus. The text
+fades in over 120ms (alpha only). No layout
 property changes with focus, so neighbouring rows never move and the ring
 geometry never re-triggers §0.3.
 

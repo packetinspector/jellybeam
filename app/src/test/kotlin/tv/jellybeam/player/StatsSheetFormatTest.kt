@@ -317,4 +317,11 @@ class StatsSheetFormatTest {
         val content = StatsSheetFormat.build(strings, detail(), null, 0, null, live = liveStats(0L, 0L))
         assertEquals("—", content.rows.first { it.label == "NETWORK" }.value)
     }
+
+    @Test
+    fun `label column grows to the widest label and keeps its minimum`() {
+        assertEquals(120, StatsSheetFormat.labelColumnPx(listOf(60, 120, 90), minPx = 75))
+        assertEquals(75, StatsSheetFormat.labelColumnPx(listOf(40, 70), minPx = 75))
+        assertEquals(75, StatsSheetFormat.labelColumnPx(emptyList(), minPx = 75))
+    }
 }

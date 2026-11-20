@@ -35,7 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -44,7 +43,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -61,6 +59,7 @@ import tv.jellybeam.ui.settings.SectionHeader
 import tv.jellybeam.ui.settings.SettingsChip
 import tv.jellybeam.ui.theme.JellybeamWordmark
 import uniffi.jellybeam_core.DiscoveredServer
+import tv.jellybeam.ui.common.JellybeamTextField
 
 /**
  * The sign-in screen: Notte background, Archivo type, fields in a Column (D-pad focus traversal
@@ -301,53 +300,6 @@ private fun JellybeamReadOnlyField(label: String, value: String) {
             BasicText(
                 text = value,
                 style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 16.sp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun JellybeamTextField(
-    label: String,
-    value: String,
-    onValueChange: (String) -> Unit,
-    modifier: Modifier = Modifier,
-    visualTransformation: VisualTransformation = VisualTransformation.None,
-    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
-    keyboardActions: KeyboardActions = KeyboardActions.Default,
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isFocused by interactionSource.collectIsFocusedAsState()
-    val accent = LocalAccent.current
-    val borderColor = if (isFocused) accent.accentInk else JellybeamTheme.Hairline
-
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        BasicText(
-            text = label,
-            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 12.sp),
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(JellybeamTheme.Surface, RoundedCornerShape(8.dp))
-                .border(2.dp, borderColor, RoundedCornerShape(8.dp))
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                modifier = Modifier.fillMaxWidth(),
-                textStyle = TextStyle(
-                    fontFamily = JellybeamTheme.Archivo,
-                    color = JellybeamTheme.Panna,
-                    fontSize = 16.sp,
-                ),
-                singleLine = true,
-                cursorBrush = SolidColor(accent.accentInk),
-                visualTransformation = visualTransformation,
-                keyboardOptions = keyboardOptions,
-                keyboardActions = keyboardActions,
-                interactionSource = interactionSource,
             )
         }
     }

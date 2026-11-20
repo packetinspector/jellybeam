@@ -543,9 +543,10 @@ download; Later hides the indicator until tomorrow. Installation always
 needs Android's confirmation, and playback defers checks and installs.
 <!-- verified: app/src/main/kotlin/tv/jellybeam/ui/settings/UpdatesSection.kt; app/src/main/kotlin/tv/jellybeam/updates/UpdateCoordinator.kt; app/src/main/kotlin/tv/jellybeam/updates/AndroidUpdateInstaller.kt; app/src/main/kotlin/tv/jellybeam/updates/ReleaseNotes.kt; core/app-updates/src/policy.rs; core/ffi/src/updates.rs -->
 
-**Language** — docs/27: US English text with no language setting; every
+**Language** — docs/27: US English and French, following the TV's system
+language (no in-app setting); any other language shows US English. Every
 user-visible string is a resource, so a contributed translation ships by
-adding its code to one list, after which the TV's system language picks it.
+adding its code to one list.
 Dates, times and numbers already follow the TV's locale.
 <!-- verified: app/build.gradle.kts shippedLanguages; app/src/main/kotlin/tv/jellybeam/i18n/AppLocale.kt; app/src/main/kotlin/tv/jellybeam/i18n/UiStrings.kt; app/src/test/kotlin/tv/jellybeam/i18n/I18nTest.kt -->
 
@@ -578,8 +579,10 @@ a page lands on its first action. Leaving Add server, server management or
 reauthorization with Back returns to the page underneath with its focus and
 scroll restored. Sign-in surfaces start on Quick Connect (or a discovered
 server), never in a text field, and Sign in and Remove stay focused while
-they run.
-<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/focus/FocusOwner.kt, FocusMemory.kt, LayerReentry.kt, RingClearance.kt; MainActivity.kt RetainedScreenLayer/rememberSaveableStateHolder; ui/cards/CardArt.kt focusRing zIndex; ui/detail/DetailScreen.kt, ui/settings/SettingsScreen.kt, ui/search/SearchScreen.kt FocusRestorer call sites; player/PlaybackScreen.kt restoreInvokerFocus/OsdRowLeading -->
+they run. On every text field (sign-in, Search, Discover search, Discover
+settings, New playlist) OK opens the on-screen keyboard and Up/Down move on,
+from every remote, including ones whose OK sends Enter.
+<!-- verified: app/src/main/kotlin/tv/jellybeam/ui/focus/FocusOwner.kt, ui/common/JellybeamTextField.kt, FocusMemory.kt, LayerReentry.kt, RingClearance.kt; MainActivity.kt RetainedScreenLayer/rememberSaveableStateHolder; ui/cards/CardArt.kt focusRing zIndex; ui/detail/DetailScreen.kt, ui/settings/SettingsScreen.kt, ui/search/SearchScreen.kt FocusRestorer call sites; player/PlaybackScreen.kt restoreInvokerFocus/OsdRowLeading -->
 
 **Watch Together** (docs/28) -- watch with other accounts on the same server
 through its own SyncPlay, no plugin. The menu's Watch together opens a live room

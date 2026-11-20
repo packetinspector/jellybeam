@@ -1,19 +1,11 @@
 package tv.jellybeam.ui.settings
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -28,7 +20,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -43,7 +34,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import tv.jellybeam.AppGraph
 import tv.jellybeam.JellybeamTheme
-import tv.jellybeam.LocalAccent
 import tv.jellybeam.R
 import tv.jellybeam.diag.DiagStatus
 import tv.jellybeam.player.pipController
@@ -62,6 +52,7 @@ import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingMode
 import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
+import tv.jellybeam.ui.common.JellybeamTextField
 
 /**
  * The settings sheet's rail sections (docs/09), trimmed to what this app can
@@ -788,7 +779,7 @@ internal fun TroubleshootingSectionContent(state: SettingsUiState, viewModel: Se
 
 /**
  * Discover section (docs/14-seerr-discover.md): status row, method chips, URL/identity/secret
- * fields (the `JellybeamTextField` recipe from [tv.jellybeam.ui.signin.SignInScreen]), a Connect button
+ * fields ([tv.jellybeam.ui.common.JellybeamTextField]), a Connect button
  * (spinner while connecting, inline error), and a confirmation-gated Disconnect. Values write
  * through only on Connect (see [DiscoverSettingsViewModel]). The gateway's `seerrRevision`
  * moves on connect/disconnect, so the drawer's Discover entry appears/disappears without a restart.
@@ -930,53 +921,26 @@ internal fun DiscoverSectionContent(
     }
 }
 
-/** [tv.jellybeam.ui.signin.SignInScreen]'s `JellybeamTextField`, copied into this section. [key] is
- * this field's docs/15-focus-and-selection.md §5 stable key ("discover/<id>"), registered the
- * same way [ToggleRow]/[SettingsChip] register theirs.
- */
+/** The house [JellybeamTextField] with [key], its docs/15 §5 stable key ("discover/<id>"), registered like [ToggleRow]/[SettingsChip]'s. */
 @Composable
 private fun DiscoverTextField(
     label: String,
     value: String,
     onValueChange: (String) -> Unit,
     key: String,
-    modifier: Modifier = Modifier,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isFocused by interactionSource.collectIsFocusedAsState()
-    val accent = LocalAccent.current
-    val borderColor = if (isFocused) accent.accentInk else JellybeamTheme.Hairline
     val memory = LocalSettingsFocusMemory.current
     val entryTarget = LocalSettingsPaneEntryKey.current
-
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        BasicText(
-            text = label,
-            style = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Grigio, fontSize = 12.sp),
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(JellybeamTheme.Surface, RoundedCornerShape(8.dp))
-                .border(2.dp, borderColor, RoundedCornerShape(8.dp))
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .let { if (memory != null) it.focusKey(memory, key) else it }
-                    .let { it.paneEntry(entryTarget, key) },
-                textStyle = TextStyle(fontFamily = JellybeamTheme.Archivo, color = JellybeamTheme.Panna, fontSize = 16.sp),
-                singleLine = true,
-                cursorBrush = SolidColor(accent.accentInk),
-                visualTransformation = visualTransformation,
-                keyboardOptions = keyboardOptions,
-                interactionSource = interactionSource,
-            )
-        }
-    }
+    JellybeamTextField(
+        label = label,
+        value = value,
+        onValueChange = onValueChange,
+        fieldModifier = Modifier
+            .let { if (memory != null) it.focusKey(memory, key) else it }
+            .paneEntry(entryTarget, key),
+        visualTransformation = visualTransformation,
+        keyboardOptions = keyboardOptions,
+    )
 }
