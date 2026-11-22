@@ -64,6 +64,14 @@ object ReconnectPolicy {
         return false
     }
 
+    /**
+     * docs/18 §5.4: a load that failed on a stored seek index ([seekIndexMiss], the index already dropped)
+     * retries cold once per play session, with no reconnect episode; a second failure, or any other error,
+     * takes today's path.
+     */
+    fun retriesCold(seekIndexMiss: Boolean, session: String?, retriedSession: String?): Boolean =
+        seekIndexMiss && session != null && session != retriedSession
+
     /** [decide]'s fixed opening backoff (1-based); past this falls back to
      * [STEADY_STATE_RETRY_INTERVAL_MS].
      */

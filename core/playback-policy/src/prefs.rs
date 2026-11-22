@@ -10,43 +10,63 @@ use jellyfin_api::models::MediaSegmentType;
 /// the shape for [`crate::tracks::resolve_track_selection`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SeriesTrackPref {
-    /// Preferred audio track language/title key ([`crate::tracks::track_pref_key`]): matches
-    /// `Track::lang` first, falling back to `Track::title`, since track ids aren't stable across
-    /// items.
+    /// Remembered audio track; track ids aren't stable across items, so it names the track by
+    /// identity ([`crate::tracks::track_identity`]) rather than by id.
     #[serde(default)]
     pub audio: TrackMemory,
     #[serde(default)]
     pub subtitle: TrackMemory,
 }
 
-/// One half of a series' remembered choice. On disk: `Unset` is `null`/absent and `Key` a bare
-/// string (the legacy shapes); `Off` is the tagged object `{"off":true}`, which no key string can
-/// collide with. Audio has no Off: its memory is `Unset` or `Key`.
+/// What distinguishes one remembered track from its siblings (docs/12 "Choices are remembered per
+/// series"): language first (normalized), the kind flags and title/codec to tell "English" from
+/// "English Forced" or "English SDH".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrackIdentity {
+    /// Normalized language code; `None` when the track carried none.
+    pub lang: Option<String>,
+    pub title: Option<String>,
+    pub forced: bool,
+    pub sdh: bool,
+    pub codec: Option<String>,
+}
+
+/// One half of a series' remembered choice. On disk: `Unset` is `null`/absent, `Key` a bare string
+/// (the legacy shape, still read), `Off` the tagged object `{"off":true}` and `Track` the tagged
+/// object `{"track":{...}}`; the tags keep either from colliding with a key string or each other.
+/// Audio has no Off: its memory is `Unset`, `Key` or `Track`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum TrackMemory {
     #[default]
     Unset,
     Off,
     Key(String),
+    Track(TrackIdentity),
 }
 
 impl TrackMemory {
-    /// The remembered track key, if the choice names one.
-    pub fn key(&self) -> Option<&str> {
-        match self {
-            TrackMemory::Key(key) => Some(key),
-            TrackMemory::Unset | TrackMemory::Off => None,
-        }
+    /// `Key` and `Track` name a track to find; `Unset` and `Off` do not.
+    pub fn names_track(&self) -> bool {
+        matches!(self, Self::Key(_) | Self::Track(_))
     }
 }
 
-/// The on-disk shape of a non-null [`TrackMemory`]: a bare key string or the `{"off":true}` tag;
-/// `Other` swallows any shape this build does not know so one odd entry cannot fail the whole map.
+/// The id a viewer's track memory is kept under (docs/12): the series for an episode, the item
+/// itself otherwise (a movie keeps its own choice).
+pub fn track_memory_subject(series_id: Option<&str>, item_id: &str) -> String {
+    series_id.unwrap_or(item_id).to_string()
+}
+
+/// The on-disk shape of a non-null [`TrackMemory`]: a bare key string or one of the tagged objects;
+/// `Other` swallows any shape this build does not know (including a malformed `track` body) so one
+/// odd entry cannot fail the whole map.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum TrackMemoryRepr {
     Key(String),
     Off { off: bool },
+    Track { track: TrackIdentity },
     Other(serde::de::IgnoredAny),
 }
 
@@ -56,12 +76,19 @@ struct OffTag {
     off: bool,
 }
 
+/// The write side of [`TrackMemoryRepr::Track`].
+#[derive(Serialize)]
+struct TrackTag<'a> {
+    track: &'a TrackIdentity,
+}
+
 impl Serialize for TrackMemory {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             TrackMemory::Unset => serializer.serialize_none(),
             TrackMemory::Off => OffTag { off: true }.serialize(serializer),
             TrackMemory::Key(key) => serializer.serialize_str(key),
+            TrackMemory::Track(identity) => TrackTag { track: identity }.serialize(serializer),
         }
     }
 }
@@ -72,9 +99,14 @@ impl<'de> Deserialize<'de> for TrackMemory {
             match Option::<TrackMemoryRepr>::deserialize(deserializer)? {
                 Some(TrackMemoryRepr::Off { off: true }) => TrackMemory::Off,
                 Some(TrackMemoryRepr::Key(key)) => TrackMemory::Key(key),
-                None | Some(TrackMemoryRepr::Off { off: false } | TrackMemoryRepr::Other(_)) => {
-                    TrackMemory::Unset
+                Some(TrackMemoryRepr::Track { track })
+                    if track.lang.is_some() || track.title.is_some() =>
+                {
+                    TrackMemory::Track(track)
                 }
+                // An identity with neither language nor title matches no track
+                // ([`crate::tracks::track_identity`]'s rule) and would block the global fallback.
+                _ => TrackMemory::Unset,
             },
         )
     }
@@ -261,5 +293,108 @@ mod tests {
         let prefs = SkipLengthPrefs::default();
         assert_eq!(prefs.back_secs, 10);
         assert_eq!(prefs.forward_secs, 10);
+    }
+
+    fn english_identity() -> TrackIdentity {
+        TrackIdentity {
+            lang: Some("eng".into()),
+            title: Some("English".into()),
+            forced: false,
+            sdh: true,
+            codec: Some("subrip".into()),
+        }
+    }
+
+    #[test]
+    fn only_key_and_track_memories_name_a_track() {
+        assert!(!TrackMemory::Unset.names_track());
+        assert!(!TrackMemory::Off.names_track());
+        assert!(TrackMemory::Key("eng".into()).names_track());
+        assert!(TrackMemory::Track(english_identity()).names_track());
+    }
+
+    /// docs/12: an episode is remembered under its series, anything else (a movie) under itself.
+    #[test]
+    fn the_memory_subject_is_the_series_for_an_episode_and_the_item_for_a_movie() {
+        assert_eq!(
+            track_memory_subject(Some("series-1"), "episode-1"),
+            "series-1"
+        );
+        assert_eq!(track_memory_subject(None, "movie-1"), "movie-1");
+    }
+
+    #[test]
+    fn a_track_memory_round_trips_as_a_tagged_object() {
+        let memory = TrackMemory::Track(english_identity());
+        let json = serde_json::to_string(&memory).expect("serialize");
+        assert!(json.starts_with(r#"{"track":{"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<TrackMemory>(&json).expect("parse"),
+            memory
+        );
+    }
+
+    #[test]
+    fn a_track_memory_with_missing_fields_defaults_them() {
+        let memory: TrackMemory =
+            serde_json::from_str(r#"{"track":{"lang":"eng"}}"#).expect("parse");
+        assert_eq!(
+            memory,
+            TrackMemory::Track(TrackIdentity {
+                lang: Some("eng".into()),
+                ..TrackIdentity::default()
+            })
+        );
+    }
+
+    /// An identity with neither language nor title matches no track, so it must not block the
+    /// global fallback.
+    #[test]
+    fn a_track_memory_with_neither_language_nor_title_loads_as_unset() {
+        for json in [
+            r#"{"track":{}}"#,
+            r#"{"track":{"forced":true,"codec":"srt"}}"#,
+        ] {
+            let memory: TrackMemory = serde_json::from_str(json).expect("parse");
+            assert_eq!(memory, TrackMemory::Unset, "{json}");
+        }
+    }
+
+    /// docs/18 §3.1: the tagged shapes never collide with each other or with a key string.
+    #[test]
+    fn off_and_legacy_key_still_read_beside_the_track_shape() {
+        let off: TrackMemory = serde_json::from_str(r#"{"off":true}"#).expect("off");
+        let key: TrackMemory = serde_json::from_str(r#""eng""#).expect("key");
+        assert_eq!(off, TrackMemory::Off);
+        assert_eq!(key, TrackMemory::Key("eng".into()));
+    }
+
+    #[test]
+    fn a_file_mixing_every_shape_loads_and_an_unknown_track_body_only_forgets_itself() {
+        let json = format!(
+            r#"{{
+                "a": {{"audio": "eng", "subtitle": {{"off": true}}}},
+                "b": {{"audio": null, "subtitle": {}}},
+                "c": {{"audio": {{"track": 5}}, "subtitle": "spa"}},
+                "d": {{"audio": {{"track": {{"forced": "yes"}}}}, "subtitle": {{"track": {{"lang": "fre"}}}}}}
+            }}"#,
+            serde_json::to_string(&TrackMemory::Track(english_identity())).expect("serialize"),
+        );
+        let loaded: std::collections::HashMap<String, SeriesTrackPref> =
+            serde_json::from_str(&json).expect("one odd entry must not fail the map");
+        assert_eq!(loaded["a"].audio, TrackMemory::Key("eng".into()));
+        assert_eq!(loaded["a"].subtitle, TrackMemory::Off);
+        assert_eq!(loaded["b"].audio, TrackMemory::Unset);
+        assert_eq!(loaded["b"].subtitle, TrackMemory::Track(english_identity()));
+        assert_eq!(loaded["c"].audio, TrackMemory::Unset);
+        assert_eq!(loaded["c"].subtitle, TrackMemory::Key("spa".into()));
+        assert_eq!(loaded["d"].audio, TrackMemory::Unset);
+        assert_eq!(
+            loaded["d"].subtitle,
+            TrackMemory::Track(TrackIdentity {
+                lang: Some("fre".into()),
+                ..TrackIdentity::default()
+            })
+        );
     }
 }

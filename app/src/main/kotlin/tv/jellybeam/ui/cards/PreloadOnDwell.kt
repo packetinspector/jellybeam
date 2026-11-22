@@ -21,6 +21,11 @@ const val PRELOAD_DWELL_MILLIS: Long = 400L
  */
 const val PRELOAD_REARM_MILLIS: Long = 30_000L
 
+/** Fires per focus, first included: ~2.5 min covers reading a synopsis, and an idle screen then stops
+ * asking the server (zero idle cost); a later Play just negotiates as usual.
+ */
+const val PRELOAD_MAX_FIRES: Int = 6
+
 /** Item types worth firing [CoreGateway.preloadPlayback] for; a Series/Season/BoxSet card opens a
  * browse page on click, never `preparePlayback`.
  */
@@ -39,7 +44,7 @@ private val PRELOAD_PLAYABLE_ITEM_TYPES = setOf("Movie", "Episode")
  *   Compose doesn't guarantee unfocus/focus ordering on a fast hop, so an outgoing unfocus must
  *   never cancel the incoming card's just-scheduled timer.
  * - A card already fired for re-fires every [PRELOAD_REARM_MILLIS] while it stays focused, so a
- *   long dwell (reading a synopsis) never plays against a stale cache entry.
+ *   long dwell (reading a synopsis) never plays against a stale cache entry, up to [PRELOAD_MAX_FIRES].
  *
  * One instance ([default]) is shared across every dwell-preload call site (Home shelves, the
  * Home hero, library grid cells, the Detail episode grid).
@@ -49,6 +54,7 @@ class PreloadOnDwell(
     private val gateway: CoreGateway,
     private val dwellMillis: Long = PRELOAD_DWELL_MILLIS,
     private val reArmMillis: Long = PRELOAD_REARM_MILLIS,
+    private val maxFires: Int = PRELOAD_MAX_FIRES,
 ) {
     private var pendingJob: Job? = null
     private var pendingItemId: String? = null
@@ -108,13 +114,13 @@ class PreloadOnDwell(
         pendingJob = scope.launch { reArmLoop(itemId) }
     }
 
-    /** Runs forever, re-firing every [reArmMillis]: the caller has already fired once and set
-     * [firedForItemId]; cancelled (by [cancelPending]) on unfocus or a switch to a different item.
+    /** Fires up to [maxFires] times, [reArmMillis] apart: the caller has already set [firedForItemId];
+     * cancelled (by [cancelPending]) on unfocus or a switch to a different item.
      * Each fire waits for [AppForeground.browsing], so a card left focused behind the launcher or
      * the player does not keep negotiating.
      */
     private suspend fun reArmLoop(itemId: String) {
-        while (true) {
+        repeat(maxFires) {
             snapshotFlow { AppForeground.browsing.value }.first { it }
             gateway.preloadPlayback(itemId)
             delay(reArmMillis)

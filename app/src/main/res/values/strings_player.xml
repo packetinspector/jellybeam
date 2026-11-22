@@ -106,11 +106,20 @@
     <string name="player_track_loading">Loading…</string>
     <string name="player_track_unavailable">Unavailable</string>
     <string name="player_subtitle_unavailable">These subtitles couldn\'t be loaded</string>
+    <string name="player_track_change_failed">Couldn\'t switch tracks. Still playing the current one.</string>
 
     <!-- Fatal playback errors shown as a toast. -->
     <string name="player_error_generic">Playback error: %1$s</string>
     <string name="player_error_lost_connection">Playback error: lost connection to the server</string>
     <string name="player_error_direct_play_blocked">This file can\'t be Direct Played on this TV (%1$s). Server: %2$s. Set Quality to Auto in Settings › Playback to let the server transcode it.</string>
+    <string name="player_error_transcode_no_media">The server\'s conversion stopped producing video. The file may be shorter than its listed length.</string>
+    <string name="player_error_stuck_at_end">Playback stopped: the rest of this video couldn\'t be read.</string>
+    <string name="player_error_stalled_mid">Playback stopped: this video couldn\'t continue past this point.</string>
+    <string name="player_error_transcode_failed">The server couldn\'t convert this video for this TV.</string>
+    <string name="player_error_unplayable_track">This TV can\'t decode this %1$s (%2$s).</string>
+    <string name="player_error_unplayable_track_unconverted">This TV can\'t decode the %1$s the server sent (%2$s). If video transcoding is turned off for this account, the server can\'t convert it.</string>
+    <string name="player_error_track_video">video</string>
+    <string name="player_error_track_audio">audio</string>
 
     <!-- Watch together (docs/28 §1): room list, lobby and the group's notices. -->
     <string name="wt_eyebrow">WATCH TOGETHER</string>

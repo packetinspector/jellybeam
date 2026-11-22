@@ -80,6 +80,8 @@ settle_home() { # Back out of the player, make sure Home is resumed; sets RES (+
     case "$(resumed)" in *PlaybackActivity*) A shell input keyevent KEYCODE_BACK; sleep 1.5;; *) break;; esac
   done
   case "$(resumed)" in *MainActivity*) ;; *) RES="$RES+notHome";; esac
+  # Mini player on: Back leaves playback running in PiP, which would replay the item between runs.
+  if A shell dumpsys activity activities 2>/dev/null | grep -q 'mode=pinned'; then A shell input keyevent KEYCODE_MEDIA_STOP; sleep 2; fi
   sleep 4
 }
 

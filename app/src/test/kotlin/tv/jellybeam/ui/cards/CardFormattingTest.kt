@@ -158,13 +158,18 @@ class CardFormattingTest {
         assertEquals("Missing", CardFormatting.virtualStatusLabel(strings, "not-a-date"))
     }
 
+    /** docs/24: the core's `is_missing` reads the same table, so the label and the chip counts agree on every format. */
     @Test
-    fun `isMissing is true for past, null and unparseable dates and false for a future one`() {
-        val now = Instant.parse("2026-01-01T00:00:00Z")
-        assertTrue(CardFormatting.isMissing("2025-01-01T00:00:00Z", now))
-        assertTrue(CardFormatting.isMissing(null, now))
-        assertTrue(CardFormatting.isMissing("not-a-date", now))
-        assertFalse(CardFormatting.isMissing("2026-01-31T00:00:00Z", now))
+    fun `virtual status label follows the shared air-date table`() {
+        val now = Instant.parse("2026-01-15T12:00:00Z")
+        val table = java.io.File(System.getProperty("user.dir"), "../core/ffi/testdata/air-dates.tsv").readLines()
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+        assertTrue("the table loaded", table.size >= 10)
+        for (line in table) {
+            val (input, missing) = line.split('\t')
+            val label = CardFormatting.virtualStatusLabel(strings, input.takeUnless { it == "<none>" }, now, Locale.US)
+            assertEquals("air date \"$input\"", missing.toBoolean(), label == "Missing")
+        }
     }
 
     @Test

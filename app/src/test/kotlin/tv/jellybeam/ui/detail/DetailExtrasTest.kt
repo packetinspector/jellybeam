@@ -21,6 +21,7 @@ import tv.jellybeam.ui.cards.testCard
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ExtraItem
 import uniffi.jellybeam_core.ItemDetail
+import uniffi.jellybeam_core.Playability
 import uniffi.jellybeam_core.RemoteTrailer
 
 private val strings = ResourceUiStrings.default
@@ -64,6 +65,7 @@ private fun extrasDetail(
     childCount = null,
     directors = emptyList(),
     writers = emptyList(),
+    playability = Playability.Unknown,
     localTrailerCount = localTrailerCount,
     specialFeatureCount = specialFeatureCount,
     remoteTrailers = remoteTrailers,
@@ -291,8 +293,9 @@ class DetailExtrasModelTest {
             itemType = itemType,
             scopeSeason = scopeSeason,
             scopeEpisodes = emptyList(),
-            allEpisodes = emptyList(),
-            primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList()),
+            seasonStats = emptyList(),
+            seriesTarget = null,
+            primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, null),
             isFavorite = false,
             hasCollections = true,
             isAdministrator = true,

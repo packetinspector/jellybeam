@@ -46,6 +46,9 @@ private fun noFilters(): GridFilters = GridFilters(
     status = StatusFilter.ANY,
 )
 
+/** docs/16 §4.6: the library grid's first read, 64 rows at 8 columns. */
+private val FIRST_PAGE = GridPaging.firstPageSize(GRID_COLUMNS)
+
 private fun nameAsc(): GridSort = GridSort(GridSortField.NAME, descending = false)
 
 class LibraryViewModelTest {
@@ -92,7 +95,7 @@ class LibraryViewModelTest {
             assertEquals(nameAsc(), call.sort)
             assertEquals(noFilters(), call.filters)
             assertEquals(0u, call.offset)
-            assertEquals(200u, call.limit)
+            assertEquals(FIRST_PAGE.toUInt(), call.limit)
         }
     }
 
@@ -469,7 +472,7 @@ class LibraryViewModelTest {
                 assertEquals("persist count after intent $index", persistedBefore + index + 1, gateway.setLibraryGridPrefsCalls.size)
                 val lastQuery = gateway.libraryGridCalls.last()
                 assertEquals(0u, lastQuery.offset)
-                assertEquals(200u, lastQuery.limit)
+                assertEquals(FIRST_PAGE.toUInt(), lastQuery.limit)
             }
             assertEquals(queriesBefore + intents.size, gateway.libraryGridCalls.size)
         }
@@ -537,7 +540,7 @@ class LibraryViewModelTest {
         val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to nameItems))
 
         withLibraryViewModel(fake, view) { viewModel ->
-            assertEquals(200, viewModel.state.value.items.size)
+            assertEquals(FIRST_PAGE, viewModel.state.value.items.size)
 
             fake.libraryGridGate = CompletableDeferred()
             viewModel.loadNextPage()
@@ -583,18 +586,18 @@ class LibraryViewModelTest {
         val gateway = FakeCoreGateway(libraryGridByView = mapOf("view-1" to items))
 
         withLibraryViewModel(gateway, view) { viewModel ->
-            assertEquals(200, viewModel.state.value.items.size)
+            assertEquals(FIRST_PAGE, viewModel.state.value.items.size)
 
             viewModel.ensureLoadedThrough(350)
 
-            // offset 350 needs rows up to 350 + PAGE_SIZE(200) = 550: the 350 after the loaded 200,
+            // offset 350 needs rows up to 350 + PAGE_SIZE(200) = 550: the 486 after the loaded 64,
             // clamped to the 500 items available.
             assertEquals(500, viewModel.state.value.items.size)
             assertEquals(items.map { it.id }, viewModel.state.value.items.map { it.id })
             assertFalse(viewModel.state.value.hasMore)
             val call = gateway.libraryGridCalls.last()
-            assertEquals(200u, call.offset)
-            assertEquals(350u, call.limit)
+            assertEquals(FIRST_PAGE.toUInt(), call.offset)
+            assertEquals(486u, call.limit)
         }
     }
 
@@ -605,7 +608,7 @@ class LibraryViewModelTest {
         val gateway = FakeCoreGateway(libraryGridByView = mapOf("view-1" to items))
 
         withLibraryViewModel(gateway, view) { viewModel ->
-            assertFalse(viewModel.state.value.hasMore) // only 50 items, less than PAGE_SIZE
+            assertFalse(viewModel.state.value.hasMore) // only 50 items, less than a first page
             val callsBefore = gateway.libraryGridCalls.size
 
             val result = viewModel.ensureLoadedThrough(1000)
@@ -624,7 +627,7 @@ class LibraryViewModelTest {
         val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to items))
 
         withLibraryViewModel(fake, view) { viewModel ->
-            assertEquals(200, viewModel.state.value.items.size)
+            assertEquals(FIRST_PAGE, viewModel.state.value.items.size)
 
             // Block the next-page load in flight.
             fake.libraryGridGate = CompletableDeferred()
@@ -657,14 +660,41 @@ class LibraryViewModelTest {
         val gateway = FakeCoreGateway(libraryGridByView = mapOf(view.id to items))
 
         withLibraryViewModel(gateway, view) { viewModel ->
-            assertEquals(200, viewModel.state.value.items.size)
+            assertEquals(FIRST_PAGE, viewModel.state.value.items.size)
             viewModel.loadNextPage()
             runCurrent()
 
             assertEquals(250, viewModel.state.value.items.size)
             assertFalse(viewModel.state.value.hasMore)
-            assertEquals(200u, gateway.libraryGridCalls.last().offset)
+            assertEquals(FIRST_PAGE.toUInt(), gateway.libraryGridCalls.last().offset)
             assertEquals(200u, gateway.libraryGridCalls.last().limit)
+        }
+    }
+
+    /** docs/16 §4.6: a change refresh re-reads everything loaded, not just a first page. */
+    @Test
+    fun `a change refresh after an append re-reads the whole loaded prefix`() = runTest {
+        val view = ViewSnapshot(id = "view-1", name = "Movies", kind = ViewKind.LIBRARY)
+        val items = (0 until 500).map { testCard(id = "item-$it", name = "Item $it") }
+        val fake = FakeCoreGateway(libraryGridByView = mapOf(view.id to items))
+        val changes = MutableSharedFlow<ChangeEvent>(extraBufferCapacity = 4)
+        val gateway = object : CoreGateway by fake {
+            override fun changeEvents(): Flow<ChangeEvent> = changes
+        }
+
+        withLibraryViewModel(gateway, view) { viewModel ->
+            viewModel.loadNextPage()
+            runCurrent()
+            assertEquals(FIRST_PAGE + 200, viewModel.state.value.items.size)
+
+            changes.tryEmit(ChangeEvent.Refresh)
+            runCurrent()
+
+            val call = fake.libraryGridCalls.last()
+            assertEquals(0u, call.offset)
+            assertEquals((FIRST_PAGE + 200).toUInt(), call.limit)
+            assertEquals(items.take(FIRST_PAGE + 200).map { it.id }, viewModel.state.value.items.map { it.id })
+            assertTrue(viewModel.state.value.hasMore)
         }
     }
 
@@ -698,14 +728,14 @@ class LibraryViewModelTest {
         val gateway = FakeCoreGateway(libraryGridByView = mapOf(view.id to items))
 
         withLibraryViewModel(gateway, view) { viewModel ->
-            assertEquals(200, viewModel.state.value.items.size)
+            assertEquals(FIRST_PAGE, viewModel.state.value.items.size)
             assertTrue(viewModel.state.value.hasMore)
 
             gateway.libraryGridFails = true
             viewModel.loadNextPage()
             runCurrent()
 
-            assertEquals(200, viewModel.state.value.items.size)
+            assertEquals(FIRST_PAGE, viewModel.state.value.items.size)
             assertTrue(viewModel.state.value.hasMore)
             assertFalse(viewModel.state.value.isLoadingMore)
         }
@@ -1109,7 +1139,7 @@ class LibraryViewModelTest {
         val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to nameOrder))
 
         withLibraryViewModel(fake, view) { viewModel ->
-            assertEquals(200, viewModel.state.value.items.size)
+            assertEquals(FIRST_PAGE, viewModel.state.value.items.size)
 
             val tailGate = CompletableDeferred<Unit>()
             fake.libraryGridGate = tailGate
@@ -1123,12 +1153,12 @@ class LibraryViewModelTest {
             fake.libraryGridByView = mapOf("view-1" to yearOrder)
             viewModel.setSort(GridSortField.YEAR)
             runCurrent()
-            assertEquals(yearOrder.take(200).map { it.id }, viewModel.state.value.items.map { it.id })
+            assertEquals(yearOrder.take(FIRST_PAGE).map { it.id }, viewModel.state.value.items.map { it.id })
 
             tailGate.complete(Unit)
             runCurrent()
 
-            assertEquals(yearOrder.take(200).map { it.id }, viewModel.state.value.items.map { it.id })
+            assertEquals(yearOrder.take(FIRST_PAGE).map { it.id }, viewModel.state.value.items.map { it.id })
             assertTrue(viewModel.state.value.hasMore)
             assertFalse(viewModel.state.value.isLoadingMore)
         }
@@ -1141,7 +1171,7 @@ class LibraryViewModelTest {
         val fake = FakeCoreGateway(libraryGridByView = mapOf("view-1" to nameOrder))
 
         withLibraryViewModel(fake, view) { viewModel ->
-            assertEquals(200, viewModel.state.value.items.size)
+            assertEquals(FIRST_PAGE, viewModel.state.value.items.size)
 
             val tailGate = CompletableDeferred<Unit>()
             fake.libraryGridGate = tailGate
@@ -1160,7 +1190,7 @@ class LibraryViewModelTest {
             runCurrent()
             jump.join()
 
-            assertEquals(yearOrder.take(200).map { it.id }, viewModel.state.value.items.map { it.id })
+            assertEquals(yearOrder.take(FIRST_PAGE).map { it.id }, viewModel.state.value.items.map { it.id })
             // Coverage is reported against the new result, which stops short of the offset.
             assertEquals(false, covered)
             assertFalse(viewModel.state.value.isLoadingMore)

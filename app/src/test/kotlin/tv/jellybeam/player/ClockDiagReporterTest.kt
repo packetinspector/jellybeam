@@ -54,7 +54,7 @@ class ClockDiagReporterTest {
         assertEquals(1, clamps.size)
         assertEquals("start", clamps[0].rule)
         assertEquals(listOf("out", "reported", "bound", "faults"), clamps[0].fields.map { it.first })
-        assertTrue(logged.any { it.startsWith("clock clamp rule=start reported=") })
+        assertTrue(logged.any { it.startsWith("clock would-clamp rule=start reported=") })
     }
 
     @Test

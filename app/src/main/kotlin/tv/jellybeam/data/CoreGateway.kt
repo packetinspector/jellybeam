@@ -86,6 +86,7 @@ import uniffi.jellybeam_core.SeerrRequestInput
 import uniffi.jellybeam_core.SeerrRequestOptions
 import uniffi.jellybeam_core.SeerrStatus
 import uniffi.jellybeam_core.SeerrTvDetail
+import uniffi.jellybeam_core.SeriesSummary
 import uniffi.jellybeam_core.ServerDetails
 import uniffi.jellybeam_core.ServerInfoSnapshot
 import uniffi.jellybeam_core.Settings
@@ -102,6 +103,8 @@ import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
 import uniffi.jellybeam_core.TrackMemoryFfi
+import uniffi.jellybeam_core.TranscodeCauseFfi
+import uniffi.jellybeam_core.TranscodeStreamsFfi
 import uniffi.jellybeam_core.TrickplayMetaFfi
 import uniffi.jellybeam_core.TrickplayTileFfi
 import uniffi.jellybeam_core.ViewSnapshot
@@ -388,11 +391,11 @@ interface CoreGateway {
      * as a server transcode from [positionTicks] after direct play proves unplayable. [reason]
      * is free text surfaced via [tv.jellybeam.player.PlaybackUiState.transcodeReason]. Refuses with
      * [CoreException.WouldTranscode] when `Settings.playbackQuality` is `DirectPlay`.
-     * Also renegotiates a playing transcode for a new subtitle choice (§3.1): [failed] is the
-     * session's fallback cause, if any, and [subtitleStreamIndex] the stream to name (`-1` none);
-     * [audioStreamIndex] is the audio stream to carry (`null` leaves the server's default).
+     * Also renegotiates a playing transcode for a new track choice (§3.1): [failed] is the
+     * session's fallback cause, if any, [streams] the policy's or the named ones, and [cause]
+     * whether the playing session retires now or plays on until [commitTranscode].
      * [playSessionId] and [request] guard staleness (§2.1): throws
-     * [CoreException.StalePlaybackSession] if superseded.
+     * [CoreException.StalePlaybackSession] if superseded. The plan only starts at [commitTranscode].
      */
     @Throws(CoreException::class)
     suspend fun prepareTranscodeFallback(
@@ -401,10 +404,16 @@ interface CoreGateway {
         reason: String,
         playSessionId: String,
         failed: FailedTrackFfi?,
-        subtitleStreamIndex: Int?,
-        audioStreamIndex: Int?,
+        streams: TranscodeStreamsFfi,
+        cause: TranscodeCauseFfi,
         request: PlaybackRequest,
     ): PlaybackPlan
+
+    /** docs/18 §2.1: starts the transcode [request] prepared as [playSessionId]; throws
+     * [CoreException.StalePlaybackSession] once a newer request, a stop or an account reset dropped it.
+     */
+    @Throws(CoreException::class)
+    suspend fun commitTranscode(playSessionId: String, request: PlaybackRequest)
 
     /**
      * Focus-dwell preload (`Settings.preloadOnFocus`, default on): best-effort playback-handshake
@@ -424,12 +433,24 @@ interface CoreGateway {
 
     /**
      * All of [seriesId]'s episodes across every season, season-then-episode order (Specials
-     * first), in one call (docs/11 item 11 Series Play/Resume) -- lets
-     * [tv.jellybeam.ui.detail.DetailViewModel] resolve the primary-action button without fetching
-     * every season individually. Empty means the series has none; a mirror that is not open yet
-     * throws [BrowseNotReady] and a failed query [BrowseFailed] (docs/07 §5).
+     * first), for a caller that needs every id (the series menu's random pick, Watch Together's
+     * queue); a screen's counts come from [seriesSummary]. Empty means the series has none; a mirror
+     * that is not open yet throws [BrowseNotReady] and a failed query [BrowseFailed] (docs/07 §5).
      */
     suspend fun seriesEpisodes(seriesId: String): List<Card>
+
+    /**
+     * docs/11 §12: one season's episodes in index order, virtual ones included whatever the setting
+     * (the caller applies `show_virtual_episodes`). Throws as [seriesEpisodes] does (docs/07 §5).
+     */
+    suspend fun seasonEpisodes(seasonId: String): List<Card>
+
+    /**
+     * docs/11 item 11 / §12: [seriesId]'s Play pick (resume, else next unplayed, else -- or when
+     * [replay] -- the first episode; `null` when nothing is playable) and per-season counts, from
+     * one mirror walk with no episode list crossing FFI. Throws as [seriesEpisodes] does (docs/07 §5).
+     */
+    suspend fun seriesSummary(seriesId: String, replay: Boolean): SeriesSummary
 
     /** Both episode-edge controls from one lookup; the Rust side prefers the mirror, falling
      * back to one live series request only when the episode can't be placed locally.
@@ -586,20 +607,20 @@ interface CoreGateway {
     suspend fun lyrics(itemId: String, accountEpoch: ULong): Lyrics
 
     /** Automatic track selection (docs/09 step 3): resolves an audio/subtitle decision for
-     * [tracks] against `Settings.language` and [seriesId]'s remembered choice (`null` for a
-     * non-episodic item means no per-series memory).
+     * [tracks] against `Settings.language` and [subjectId]'s remembered choice (a series, else the
+     * item: `PlaybackPlan.trackMemorySubject`; `null` means no memory).
      */
-    suspend fun resolveTracks(seriesId: String?, tracks: List<TrackInfo>): TrackDecisionFfi
+    suspend fun resolveTracks(subjectId: String?, tracks: List<TrackInfo>): TrackDecisionFfi
 
-    /** Persists [seriesId]'s remembered choice for [kind], consumed by the next [resolveTracks]; subtitle
-     * `Off` is a choice of its own and `Unset` forgets it (docs/18 §3.1). A `Key` must be [trackPrefKeyOf]'s result.
+    /** Persists [subjectId]'s remembered choice for [kind], consumed by the next [resolveTracks]; subtitle
+     * `Off` is a choice of its own and `Unset` forgets it (docs/18 §3.1). A `Track` must be [trackMemoryOf]'s result.
      */
-    suspend fun rememberTrackMemory(seriesId: String, kind: TrackKindFfi, memory: TrackMemoryFfi)
+    suspend fun rememberTrackMemory(subjectId: String, kind: TrackKindFfi, memory: TrackMemoryFfi)
 
-    /** Pure delegate to `track_pref_key_of`: the persistence key a [TrackInfo] is remembered under
-     * (language, else title). No I/O; not `suspend`.
+    /** Pure delegate to `track_memory_of`: what picking [track] remembers (its language, kind flags
+     * and title; `Unset` with neither language nor title). No I/O; not `suspend`.
      */
-    fun trackPrefKeyOf(track: TrackInfo): String?
+    fun trackMemoryOf(track: TrackInfo): TrackMemoryFfi
 
     /** Trickplay tile-sheet image URL for [tv.jellybeam.player.TrickplayPreviewer], or `null` with no
      * signed-in client. `suspend` (unlike [imageUrl]): called once per debounced seek gesture.
@@ -701,6 +722,10 @@ interface CoreGateway {
     /** docs/07 Watch state: the app came to the foreground; the core refreshes played state in
      * the background. Runs on [Dispatchers.IO]; the core never does network work inline. */
     suspend fun onForeground() {}
+
+    /** docs/07 Watch state: the app left the screen; the core's periodic backstops sleep until the
+     * next [onForeground]. Runs on [Dispatchers.IO]. */
+    suspend fun onBackground() {}
 
     /** `current_user().policy.is_administrator`, cached per session on the Rust side -- gates the
      * Refresh metadata row (docs/19 §1.1).
@@ -1216,13 +1241,16 @@ internal class RealCoreGateway(
         reason: String,
         playSessionId: String,
         failed: FailedTrackFfi?,
-        subtitleStreamIndex: Int?,
-        audioStreamIndex: Int?,
+        streams: TranscodeStreamsFfi,
+        cause: TranscodeCauseFfi,
         request: PlaybackRequest,
     ): PlaybackPlan =
         ffi("ffi.prepareTranscodeFallback", reauthorize = false) {
-            prepareTranscodeFallback(itemId, positionTicks, reason, playSessionId, failed, subtitleStreamIndex, audioStreamIndex, request)
+            prepareTranscodeFallback(itemId, positionTicks, reason, playSessionId, failed, streams, cause, request)
         }
+
+    override suspend fun commitTranscode(playSessionId: String, request: PlaybackRequest) =
+        ffi("ffi.commitTranscode", reauthorize = false) { commitTranscode(playSessionId, request) }
 
     override suspend fun preloadPlayback(itemId: String, accountEpoch: ULong?) =
         withContext(Dispatchers.IO) {
@@ -1235,6 +1263,12 @@ internal class RealCoreGateway(
 
     override suspend fun seriesEpisodes(seriesId: String): List<Card> =
         ffi("ffi.seriesEpisodes") { seriesEpisodesRead(seriesId) }.rowsOrThrow()
+
+    override suspend fun seasonEpisodes(seasonId: String): List<Card> =
+        ffi("ffi.seasonEpisodes") { seasonEpisodesRead(seasonId) }.rowsOrThrow()
+
+    override suspend fun seriesSummary(seriesId: String, replay: Boolean): SeriesSummary =
+        ffi("ffi.seriesSummary") { seriesSummaryRead(seriesId, replay) }.summaryOrThrow()
 
     override suspend fun episodeNeighbors(itemId: String, seriesId: String, accountEpoch: ULong?): EpisodeNeighbors? =
         ffi("ffi.episodeNeighbors") { episodeNeighbors(itemId, seriesId, accountEpoch) }
@@ -1355,13 +1389,13 @@ internal class RealCoreGateway(
 
     override suspend fun lyrics(itemId: String, accountEpoch: ULong): Lyrics = ffi("ffi.lyrics") { lyrics(itemId, accountEpoch) }
 
-    override suspend fun resolveTracks(seriesId: String?, tracks: List<TrackInfo>): TrackDecisionFfi =
-        ffi("ffi.resolveTracks") { resolveTracks(seriesId, tracks) }
+    override suspend fun resolveTracks(subjectId: String?, tracks: List<TrackInfo>): TrackDecisionFfi =
+        ffi("ffi.resolveTracks") { resolveTracks(subjectId, tracks) }
 
-    override suspend fun rememberTrackMemory(seriesId: String, kind: TrackKindFfi, memory: TrackMemoryFfi) =
-        ffi("ffi.rememberTrackMemory") { rememberTrackMemory(seriesId, kind, memory) }
+    override suspend fun rememberTrackMemory(subjectId: String, kind: TrackKindFfi, memory: TrackMemoryFfi) =
+        ffi("ffi.rememberTrackMemory") { rememberTrackMemory(subjectId, kind, memory) }
 
-    override fun trackPrefKeyOf(track: TrackInfo): String? = uniffi.jellybeam_core.trackPrefKeyOf(track)
+    override fun trackMemoryOf(track: TrackInfo): TrackMemoryFfi = uniffi.jellybeam_core.trackMemoryOf(track)
 
     override suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt, accountEpoch: ULong?): String? =
         ffi("ffi.trickplayTileUrl") { trickplayTileUrl(itemId, width, imageIndex, accountEpoch) }
@@ -1458,6 +1492,8 @@ internal class RealCoreGateway(
         ffi("ffi.validateSession") { validateSession() }
 
     override suspend fun onForeground() = ffi("ffi.onForeground") { onForeground() }
+
+    override suspend fun onBackground() = ffi("ffi.onBackground") { onBackground() }
 
     override suspend fun isAdministrator(): Boolean =
         ffi("ffi.isAdministrator") { isAdministrator() }

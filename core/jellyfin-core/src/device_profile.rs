@@ -5,6 +5,7 @@
 //! `serde_json::Value` into `jellyfin_api::models::DeviceProfile` (identical JSON keys). Tests
 //! here assert against [`RawDeviceProfile`] directly.
 
+use jellyfin_api::models::{MediaSourceInfo, MediaStream, MediaStreamType};
 use serde::{Deserialize, Serialize};
 
 /// HLS/TS video codecs the transcoder falls back to (VideoToolbox hardware-encodes both).
@@ -326,9 +327,8 @@ impl VideoCodec {
         }
     }
 
-    /// The reverse of [`Self::as_str`], plus server aliases (`"avc"`/`"h265"`), used by Auto mode's
-    /// local-codec-corroboration check (docs/18-playback-quality.md §2); `codec` must be
-    /// lowercased. `None` for a codec with no [`VideoCodec`] variant: never locally supported.
+    /// The reverse of [`Self::as_str`], plus server aliases (`"avc"`/`"h265"`), used by
+    /// [`profile_miss`] (docs/18 §6); `codec` must be lowercased. `None` for a codec with no [`VideoCodec`] variant: never locally supported.
     pub fn from_server_codec(codec: &str) -> Option<VideoCodec> {
         match codec {
             "h264" | "avc" => Some(VideoCodec::H264),
@@ -481,9 +481,8 @@ pub fn android_tv_profile(
 }
 
 /// The advertised video codec set: the baseline filtered to what [`AndroidTvCaps::video`] reports
-/// a decoder for, falling back to [`ANDROID_CONSERVATIVE_VIDEO_CODEC_FLOOR`] when empty. `pub`
-/// (docs/18-playback-quality.md §2): also used by Auto mode's local-codec-corroboration check.
-pub fn android_direct_play_video_codecs(caps: &AndroidTvCaps) -> Vec<VideoCodec> {
+/// a decoder for, falling back to [`ANDROID_CONSERVATIVE_VIDEO_CODEC_FLOOR`] when empty.
+fn android_direct_play_video_codecs(caps: &AndroidTvCaps) -> Vec<VideoCodec> {
     if caps.video.is_empty() {
         return ANDROID_CONSERVATIVE_VIDEO_CODEC_FLOOR.to_vec();
     }
@@ -686,6 +685,151 @@ fn android_subtitle_profiles() -> Vec<SubtitleProfile> {
         profiles.push(subtitle_profile(format, SubtitleDeliveryMethod::Encode));
     }
     profiles
+}
+
+/// docs/18 §6: the first part of a source the device profile rejects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissKind {
+    VideoCodec,
+    VideoProfile,
+    VideoLevel,
+    Resolution,
+    VideoRange,
+    VideoBitrate,
+    AudioCodec,
+}
+
+/// A [`MissKind`] with the source's own value (codec name, profile, level, ...), for the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileMiss {
+    pub kind: MissKind,
+    pub value: String,
+}
+
+/// docs/18 §6: [`profile_miss`]'s answer; `Blind` is a source with no video codec to judge by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    Blind,
+    Pass,
+    Miss(ProfileMiss),
+}
+
+impl Verdict {
+    pub fn is_blind(&self) -> bool {
+        matches!(self, Self::Blind)
+    }
+
+    /// The miss, if any; a blind source misses nothing.
+    pub fn miss(self) -> Option<ProfileMiss> {
+        match self {
+            Self::Miss(miss) => Some(miss),
+            Self::Blind | Self::Pass => None,
+        }
+    }
+}
+
+/// docs/18 §6: the first fact of `source` that `profile`'s Video DirectPlayProfile or video
+/// CodecProfiles reject. A fact the stream doesn't state passes here although the server fails an
+/// `IsRequired` unknown: the cell never claims "won't play" without evidence. The container is
+/// not judged (a remux direct-streams); the audio judged is the server's default track (its
+/// `DefaultAudioStreamIndex`, else `IsDefault`, else the first).
+pub fn profile_miss(profile: &RawDeviceProfile, source: &MediaSourceInfo) -> Verdict {
+    let of_type = |kind| {
+        source
+            .media_streams
+            .iter()
+            .filter(move |s| s.type_ == Some(kind))
+    };
+    let codec_of = |s: &MediaStream| {
+        s.codec
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .map(str::to_lowercase)
+    };
+    // The server judges the first video stream; one without a codec leaves the source blind.
+    let Some((video, video_codec)) = of_type(MediaStreamType::Video)
+        .next()
+        .and_then(|s| Some((s, codec_of(s)?)))
+    else {
+        return Verdict::Blind;
+    };
+    let audio_codec = source
+        .default_audio_stream_index
+        .and_then(|i| of_type(MediaStreamType::Audio).find(|s| s.index == Some(i)))
+        .or_else(|| of_type(MediaStreamType::Audio).find(|s| s.is_default == Some(true)))
+        .or_else(|| of_type(MediaStreamType::Audio).next())
+        .and_then(codec_of);
+    let wire =
+        VideoCodec::from_server_codec(&video_codec).map_or(video_codec.as_str(), |v| v.as_str());
+    let listed = |list: Option<&str>, value: &str| {
+        list.is_none_or(|list| {
+            list.split(',')
+                .any(|entry| entry.eq_ignore_ascii_case(value))
+        })
+    };
+    let miss = |kind, value: String| Verdict::Miss(ProfileMiss { kind, value });
+
+    let direct = profile
+        .direct_play_profiles
+        .iter()
+        .find(|p| p.kind == Some(DlnaProfileType::Video));
+    if let Some(direct) = direct {
+        if !listed(direct.video_codec.as_deref(), wire) {
+            return miss(MissKind::VideoCodec, video_codec);
+        }
+        if let Some(codec) = audio_codec.filter(|c| !listed(direct.audio_codec.as_deref(), c)) {
+            return miss(MissKind::AudioCodec, codec);
+        }
+    }
+    profile
+        .codec_profiles
+        .iter()
+        .filter(|p| p.kind == Some(CodecType::Video) && listed(p.codec.as_deref(), wire))
+        .filter(|p| {
+            p.apply_conditions
+                .iter()
+                .all(|c| matches!(judge(c, video), Some(Ok(()))))
+        })
+        .flat_map(|p| &p.conditions)
+        .find_map(|c| judge(c, video)?.err())
+        .map_or(Verdict::Pass, Verdict::Miss)
+}
+
+/// The stream's own value for a condition property, with the miss it would cause; `None` when the
+/// stream doesn't state it or the property isn't one a video stream can be judged by.
+fn stream_fact(property: ProfileConditionValue, s: &MediaStream) -> Option<(MissKind, String)> {
+    Some(match property {
+        ProfileConditionValue::VideoProfile => (MissKind::VideoProfile, s.profile.clone()?),
+        ProfileConditionValue::VideoLevel => (MissKind::VideoLevel, s.level?.to_string()),
+        ProfileConditionValue::Width => (MissKind::Resolution, s.width?.to_string()),
+        ProfileConditionValue::Height => (MissKind::Resolution, s.height?.to_string()),
+        ProfileConditionValue::VideoRangeType => (
+            MissKind::VideoRange,
+            s.video_range_type.as_ref()?.to_string(),
+        ),
+        ProfileConditionValue::VideoBitrate => (MissKind::VideoBitrate, s.bit_rate?.to_string()),
+        _ => return None,
+    })
+}
+
+/// Whether `s` satisfies `cond` (strings case-insensitive, `|` lists, numbers as `f64`): `Err`
+/// carries the miss it would be; `None` when the stream states no value to judge.
+fn judge(cond: &ProfileCondition, s: &MediaStream) -> Option<Result<(), ProfileMiss>> {
+    let (kind, have) = stream_fact(cond.property?, s)?;
+    let want = cond.value.as_deref()?;
+    let listed = || want.split('|').any(|w| have.eq_ignore_ascii_case(w));
+    let numbers = || Some((have.parse::<f64>().ok()?, want.parse::<f64>().ok()?));
+    let holds = match cond.condition? {
+        ProfileConditionType::Equals | ProfileConditionType::EqualsAny => listed(),
+        ProfileConditionType::NotEquals => !listed(),
+        ProfileConditionType::LessThanEqual => numbers().map(|(h, w)| h <= w)?,
+        ProfileConditionType::GreaterThanEqual => numbers().map(|(h, w)| h >= w)?,
+    };
+    Some(if holds {
+        Ok(())
+    } else {
+        Err(ProfileMiss { kind, value: have })
+    })
 }
 
 #[cfg(test)]
@@ -1332,7 +1476,7 @@ mod tests {
         assert!(!dump.contains("IsInterlaced"));
     }
 
-    // --- VideoCodec::from_server_codec / android_direct_play_video_codecs
+    // --- VideoCodec::from_server_codec
     // (docs/18-playback-quality.md §2) ---
 
     #[test]
@@ -1367,15 +1511,237 @@ mod tests {
         assert_eq!(VideoCodec::from_server_codec("made-up-codec"), None);
     }
 
+    // -- profile_miss (docs/18 §6) --
+
+    fn stream(kind: MediaStreamType, codec: &str) -> MediaStream {
+        MediaStream {
+            type_: Some(kind),
+            codec: Some(codec.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn video(codec: &str) -> MediaStream {
+        stream(MediaStreamType::Video, codec)
+    }
+
+    fn audio(codec: &str, is_default: bool) -> MediaStream {
+        MediaStream {
+            is_default: Some(is_default),
+            ..stream(MediaStreamType::Audio, codec)
+        }
+    }
+
+    /// H.264 unconstrained, HEVC main-only up to level 153 and 1920 wide with DOVI excluded, and
+    /// a 20 Mbps ceiling: one row of the table per rejected fact.
+    fn miss_caps() -> AndroidTvCaps {
+        let hevc = VideoCodecCaps {
+            max_width: Some(1920),
+            unsupported_video_ranges: vec!["DOVI".to_string()],
+            ..hevc_caps(&["main"], Some(153))
+        };
+        AndroidTvCaps {
+            max_streaming_bitrate: Some(20_000_000),
+            video: vec![
+                VideoCodecCaps {
+                    codec: VideoCodec::H264,
+                    ..hevc_caps(&[], None)
+                },
+                hevc,
+            ],
+        }
+    }
+
+    fn miss_of(
+        caps: &AndroidTvCaps,
+        tolerate: bool,
+        streams: Vec<MediaStream>,
+    ) -> Option<ProfileMiss> {
+        let source = MediaSourceInfo {
+            media_streams: streams,
+            ..Default::default()
+        };
+        profile_miss(&android_tv_profile(caps, tolerate), &source).miss()
+    }
+
+    fn miss(kind: MissKind, value: &str) -> Option<ProfileMiss> {
+        Some(ProfileMiss {
+            kind,
+            value: value.to_string(),
+        })
+    }
+
     #[test]
-    fn android_direct_play_video_codecs_is_reachable_as_a_public_fn() {
+    fn profile_miss_names_the_first_fact_the_profile_rejects() {
+        let hevc = |edit: fn(&mut MediaStream)| {
+            let mut stream = video("hevc");
+            edit(&mut stream);
+            stream
+        };
+        let rows: Vec<(&str, Vec<MediaStream>, Option<ProfileMiss>)> = vec![
+            (
+                "no decoder",
+                vec![video("av1")],
+                miss(MissKind::VideoCodec, "av1"),
+            ),
+            (
+                "profile",
+                vec![hevc(|s| s.profile = Some("Main 10".to_string()))],
+                miss(MissKind::VideoProfile, "Main 10"),
+            ),
+            (
+                "level",
+                vec![hevc(|s| s.level = Some(186.0))],
+                miss(MissKind::VideoLevel, "186"),
+            ),
+            (
+                "width",
+                vec![hevc(|s| s.width = Some(3840))],
+                miss(MissKind::Resolution, "3840"),
+            ),
+            (
+                "range",
+                vec![hevc(|s| {
+                    s.video_range_type = Some(jellyfin_api::models::VideoRangeType::Dovi)
+                })],
+                miss(MissKind::VideoRange, "DOVI"),
+            ),
+            (
+                "bitrate",
+                vec![hevc(|s| s.bit_rate = Some(40_000_000))],
+                miss(MissKind::VideoBitrate, "40000000"),
+            ),
+            (
+                "audio",
+                vec![video("hevc"), audio("wmav2", true)],
+                miss(MissKind::AudioCodec, "wmav2"),
+            ),
+            (
+                "an unlisted range the exclusion does not name",
+                vec![hevc(|s| {
+                    s.video_range_type = Some(jellyfin_api::models::VideoRangeType::Hdr10)
+                })],
+                None,
+            ),
+            (
+                "facts within every limit",
+                vec![
+                    hevc(|s| {
+                        s.profile = Some("Main".to_string());
+                        s.level = Some(150.0);
+                        s.width = Some(1920);
+                        s.bit_rate = Some(10_000_000);
+                    }),
+                    audio("aac", true),
+                ],
+                None,
+            ),
+            ("no stated facts", vec![hevc(|_| {})], None),
+            ("h265 alias", vec![video("h265")], None),
+            ("avc alias", vec![video("AVC")], None),
+        ];
+        for (label, streams, expected) in rows {
+            assert_eq!(miss_of(&miss_caps(), false, streams), expected, "{label}");
+        }
+        assert_eq!(
+            miss_of(&miss_caps(), false, vec![audio("aac", true)]),
+            None,
+            "no video stream"
+        );
+    }
+
+    #[test]
+    fn profile_miss_ignores_a_level_the_profile_does_not_enforce() {
+        let level = || {
+            vec![MediaStream {
+                level: Some(186.0),
+                ..video("hevc")
+            }]
+        };
+        assert_eq!(miss_of(&miss_caps(), true, level()), None);
+        assert_eq!(
+            miss_of(&miss_caps(), false, level()),
+            miss(MissKind::VideoLevel, "186")
+        );
+    }
+
+    #[test]
+    fn profile_miss_accepts_a_profile_the_decoder_lists() {
+        let main10 = || {
+            vec![MediaStream {
+                profile: Some("Main 10".to_string()),
+                ..video("hevc")
+            }]
+        };
         let caps = AndroidTvCaps {
             max_streaming_bitrate: None,
-            video: vec![hevc_caps(&["main"], None)],
+            video: vec![hevc_caps(&["main", "main 10"], None)],
+        };
+        assert_eq!(miss_of(&caps, true, main10()), None);
+    }
+
+    /// The server judges the default audio track, else the first.
+    #[test]
+    fn profile_miss_judges_the_default_audio_stream() {
+        let streams = |first_default| {
+            vec![
+                video("h264"),
+                audio("aac", first_default),
+                audio("wmav2", !first_default),
+            ]
         };
         assert_eq!(
-            android_direct_play_video_codecs(&caps),
-            vec![VideoCodec::Hevc]
+            miss_of(&miss_caps(), true, streams(false)),
+            miss(MissKind::AudioCodec, "wmav2")
         );
+        assert_eq!(miss_of(&miss_caps(), true, streams(true)), None);
+    }
+
+    #[test]
+    fn profile_miss_is_blind_without_a_video_codec() {
+        let blind = |streams| MediaSourceInfo {
+            media_streams: streams,
+            ..Default::default()
+        };
+        let profile = android_tv_profile(&miss_caps(), true);
+        let no_codec = MediaStream {
+            codec: None,
+            ..video("h264")
+        };
+        assert_eq!(
+            profile_miss(&profile, &blind(vec![no_codec])),
+            Verdict::Blind
+        );
+        assert_eq!(profile_miss(&profile, &blind(vec![])), Verdict::Blind);
+        assert_eq!(
+            profile_miss(&profile, &blind(vec![video("h264")])),
+            Verdict::Pass
+        );
+    }
+
+    /// The server's `DefaultAudioStreamIndex` outranks `IsDefault`, which outranks order.
+    #[test]
+    fn profile_miss_prefers_the_sources_default_audio_index() {
+        let source = |default_index| MediaSourceInfo {
+            default_audio_stream_index: Some(default_index),
+            media_streams: vec![
+                video("h264"),
+                MediaStream {
+                    index: Some(1),
+                    ..audio("aac", true)
+                },
+                MediaStream {
+                    index: Some(2),
+                    ..audio("wmav2", false)
+                },
+            ],
+            ..Default::default()
+        };
+        let profile = android_tv_profile(&miss_caps(), true);
+        assert_eq!(
+            profile_miss(&profile, &source(2)).miss(),
+            miss(MissKind::AudioCodec, "wmav2")
+        );
+        assert_eq!(profile_miss(&profile, &source(1)), Verdict::Pass);
     }
 }

@@ -24,12 +24,16 @@ the entry named here is the one to extend.
 ### Foreground / background
 
 - **Enters:** `MainActivity.kt` `onActivityStart`, called from the `LifecycleEventObserver` in
-  `JellybeamRoot` on `ON_START` with at least one account.
+  `JellybeamRoot` on every `ON_START` and `ON_STOP` of `MainActivity` (so `PlaybackActivity` on
+  top counts as background); only `checkSession` needs an account.
 - **Fans out:** `checkSession(force = false)` (at most once a minute) → `CoreGateway.validateSession`;
   `CoreGateway.onForeground` → `object.rs` `JellybeamCore::on_foreground` →
   `Mirror::request_user_state_refresh(UserStateReason::Foreground)`. The mirror's refresher
   coalesces it with `Startup`, `Reconnect` and `Timer` (all from `sync.rs`) and
-  `user_state.rs` `user_state::due` decides whether it runs.
+  `user_state.rs` `user_state::due` decides whether it runs. `on_foreground` and
+  `on_background` (from the same observer on `ON_STOP`) write `JellybeamCore.presence`, the one
+  presence owner; `media_cache::foreground_tick` parks `sync.rs` `reconcile_timer` and
+  `spawn_server_version_poll` while it reads `Background`.
 - **Resumed state** is written in `MainActivity.onResume` / `onPause`: `AppForeground.browsing`
   (the one resumed bit; `retainedLayerIsActive` reads it), `AppForeground.resumeCount`,
   `UpdateCoordinator.resume` / `pause`. Process-level
@@ -175,7 +179,9 @@ the entry named here is the one to extend.
 | Settings record | `SettingsStore.update` (persists through `JellybeamCore::set_settings`) | `SettingsViewModel`, `PlaybackViewModel` | — / — / not account-scoped |
 | Pending 401 | `AuthorizationRecoveryCoordinator.pending` | `JellybeamRoot` | `consume` / — / `noteReauthorized` |
 | Playback request | `PlaybackViewModel.claimRequest` → `currentRequest`, `accountEpoch` | `adoptPlan`, `publishFailure` | `retireRequests` / `retireRequests` / `closeForAccountChange` |
+| Track choice (audio/subtitle) | `TrackChoice` reducer (`player/TrackChoice.kt`), single writer `PlaybackViewModel.sendTrack`; the core owns the canonical transcode rows (`PlaybackPlan.track_rows`) and `commit_transcode` | player picker, `PlaybackViewModel` effects | a new plan resets it / a fallback landing keeps it / session end clears it |
 | Reporting session | `PlaybackViewModel.owner` (`SessionOwner`) | every `SessionScope.ifCurrent` | `endSessionForStop`, `abandonPlaybackOnce` / same / `closeForAccountChange` |
+| Playback end (per load: real end, stubs, safety net) | `PlaybackViewModel.sendEnd` → `reducePlaybackEnd` (`PlaybackEnd.kt`) on Main; inputs from `PlayerHolder.onEndInput` tagged with the load generation | `endSessionForStop` (`endStopTicks`) | a newer `LoadOpened` replaces it / `Released` in `endSessionOnce` / — |
 | Core reporting session | `object.rs` `State.reporting`, `PlaybackOwner::claim` | `report_position`, `stop_playback` | `release_claim` / `stop_playback`, `abandon_playback` / `end_playback_locked` (leave) or parked |
 | Warm-up results | `LaunchWarmup` slots | `JellybeamRoot`, `HomeFeed` | — / taken once / `LaunchWarmup.discard` |
 | Back stack, per-screen view models | `JellybeamRoot.navigate`; the epoch-keyed restore effect sets the first stack; `resetSessionState` blanks it | `RetainedScreenLayer` | — / — / `resetSessionState` clears stores and stack |

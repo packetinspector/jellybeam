@@ -5,7 +5,7 @@ package tv.jellybeam.player.ass
  * reading after lines that began earlier and still show; these say where those lines' blocks sit, so
  * the player fetches just them (docs/13). Positions are absolute file offsets of each block's cluster.
  */
-class SubtitleCues(val tracks: Set<Int>) {
+class SubtitleCues(val tracks: Set<Int>, private val limit: Int = MAX_SUBTITLE_CUES) {
     private var size = 0
     private var track = IntArray(64)
     private var timeUs = LongArray(64)
@@ -15,9 +15,9 @@ class SubtitleCues(val tracks: Set<Int>) {
 
     val count: Int get() = size
 
-    /** Loader thread, in file order; one past [MAX_SUBTITLE_CUES] is dropped, so a hostile index can't grow memory. */
+    /** Loader thread, in file order; one past [limit] is dropped, so a hostile index can't grow memory. */
     fun add(cue: SubtitleCue) {
-        if (cue.track !in tracks || size >= MAX_SUBTITLE_CUES) return
+        if (cue.track !in tracks || size >= limit) return
         if (size == timeUs.size) grow()
         track[size] = cue.track
         timeUs[size] = cue.timeUs
@@ -26,6 +26,9 @@ class SubtitleCues(val tracks: Set<Int>) {
         relative[size] = cue.relativePosition
         size++
     }
+
+    /** Every entry, in file order. */
+    fun entries(): List<SubtitleCue> = List(size) { SubtitleCue(track[it], timeUs[it], durationUs[it], cluster[it], relative[it]) }
 
     private fun grow() {
         val n = size * 2

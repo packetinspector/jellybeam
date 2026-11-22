@@ -6,7 +6,11 @@ use crate::types::Card;
 
 /// Continue Watching, most recently played first, capped at `size`.
 pub(super) fn resume(mirror: &Mirror, size: u32) -> Vec<Card> {
-    mirror.resume(size).into_iter().map(Card::from).collect()
+    mirror
+        .resume(size)
+        .into_iter()
+        .map(Card::list_cell)
+        .collect()
 }
 
 /// Next Up without anything already in `resume` (docs/07 §1), in server order, capped at
@@ -14,7 +18,11 @@ pub(super) fn resume(mirror: &Mirror, size: u32) -> Vec<Card> {
 pub(super) fn next_up(mirror: &Mirror, resume: &[Card], size: u32) -> Vec<Card> {
     let fetch = size.saturating_add(u32::try_from(resume.len()).unwrap_or(u32::MAX));
     next_up_beside_resume(
-        mirror.next_up(fetch).into_iter().map(Card::from).collect(),
+        mirror
+            .next_up(fetch)
+            .into_iter()
+            .map(Card::list_cell)
+            .collect(),
         resume,
         size as usize,
     )

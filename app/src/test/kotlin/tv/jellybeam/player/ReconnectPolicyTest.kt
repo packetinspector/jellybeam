@@ -4,6 +4,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import androidx.media3.common.ParserException
+import androidx.media3.common.PlaybackException
+import tv.jellybeam.player.ass.SeekIndexMiss
+import tv.jellybeam.player.ass.isSeekIndexMiss
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -19,6 +23,22 @@ private class MediaCodecRendererDecoderInitializationException(message: String) 
 private class ParserException(message: String) : Exception(message)
 
 class ReconnectPolicyTest {
+
+    /** docs/18 §5.4: which failures retry cold once, with no reconnect episode. */
+    @Test
+    fun `only a seek-index miss retries cold, once per play session`() {
+        val miss = PlaybackException("parse", SeekIndexMiss(IllegalStateException("No valid varint length mask found")), PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED)
+        val coldParse = PlaybackException("parse", ParserException.createForMalformedContainer("bad", null), PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED)
+        val network = PlaybackException("net", UnknownHostException("x"), PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED)
+        assertTrue("hit + parse error", ReconnectPolicy.retriesCold(isSeekIndexMiss(miss), "s1", retriedSession = null))
+        assertFalse("its cold retry failing again", ReconnectPolicy.retriesCold(isSeekIndexMiss(miss), "s1", retriedSession = "s1"))
+        assertTrue("a later play session", ReconnectPolicy.retriesCold(isSeekIndexMiss(miss), "s2", retriedSession = "s1"))
+        assertFalse("no session", ReconnectPolicy.retriesCold(isSeekIndexMiss(miss), null, retriedSession = null))
+        assertFalse("cold + parse error", ReconnectPolicy.retriesCold(isSeekIndexMiss(coldParse), "s1", retriedSession = null))
+        assertFalse("hit + network error", ReconnectPolicy.retriesCold(isSeekIndexMiss(network), "s1", retriedSession = null))
+        assertTrue("which still reconnects as before", ReconnectPolicy.isRecoverable(network))
+        assertFalse(ReconnectPolicy.isRecoverable(miss))
+    }
 
     // -- isRecoverable: classification --------------------------------
 

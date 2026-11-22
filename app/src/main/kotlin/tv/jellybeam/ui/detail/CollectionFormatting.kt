@@ -7,6 +7,8 @@ import tv.jellybeam.ui.cards.CardFormatting
 import tv.jellybeam.ui.cards.WatchIndicator
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
+import uniffi.jellybeam_core.SeriesPlayKind
+import uniffi.jellybeam_core.SeriesSummary
 
 /**
  * Pure rules for Jellyfin BoxSet (collection) UI (docs/11 §Collection, docs/07 §Collection card),
@@ -62,46 +64,26 @@ object CollectionFormatting {
     fun playTarget(members: List<Card>): PlayTarget? = playCandidates(members).firstOrNull()
 
     /**
-     * The pill's action: the first candidate that resolves, a Series to its episode via
-     * [episodesOf]. A Series with no episode yields to the next candidate; one whose fetch fails
-     * (`null`) keeps [previous] if it already targeted that series, else yields too.
+     * The pill's action: the first candidate that resolves, a Series to the core's Play pick
+     * via [playOf] (docs/11 item 11; `replay` asks for the first episode from the beginning). A
+     * Series with no target yields to the next candidate; one whose read fails (`null`) keeps
+     * [previous] if it already targeted that series, else yields too.
      */
     suspend fun resolvePlay(
-        strings: UiStrings,
         members: List<Card>,
         previous: CollectionPlay?,
-        episodesOf: suspend (Card) -> List<Card>?,
+        playOf: suspend (series: Card, replay: Boolean) -> SeriesSummary?,
     ): CollectionPlay? {
         for (target in playCandidates(members)) {
             if (target.member.itemType != SERIES_ITEM_TYPE) {
                 return CollectionPlay(target.member, episode = null, fromStart = target.replay, replayAll = target.replay)
             }
-            val episodes = episodesOf(target.member)
+            val read = playOf(target.member, target.replay)
                 ?: if (previous?.member?.id == target.member.id) return previous else continue
-            val pick = seriesPlayEpisode(strings, target.member, episodes, target.replay) ?: continue
-            return CollectionPlay(target.member, pick.episode, fromStart = pick.fromStart, replayAll = target.replay)
+            val pick = read.target ?: continue
+            return CollectionPlay(target.member, pick.episode, fromStart = pick.kind == SeriesPlayKind.REPLAY, replayAll = target.replay)
         }
         return null
-    }
-
-    /** A Series target resolved to the episode to start; [fromStart] ignores a saved position. */
-    data class EpisodePick(val episode: Card, val fromStart: Boolean)
-
-    /**
-     * Same order as the series page's Play pill ([DetailFormatting.resolvePrimaryAction]): first
-     * episode with progress, else first unplayed; [replay] (or nothing left unplayed) starts the
-     * first non-Specials episode from the beginning. `null` when the series has no episode.
-     */
-    fun seriesPlayEpisode(strings: UiStrings, series: Card, episodes: List<Card>, replay: Boolean): EpisodePick? {
-        if (!replay) {
-            val action = DetailFormatting.resolvePrimaryAction(strings, series, episodes)
-            if (action is DetailFormatting.PrimaryAction.Playable) {
-                episodes.firstOrNull { it.id == action.targetId }?.let { return EpisodePick(it, fromStart = false) }
-            }
-        }
-        val playable = episodes.filterNot { it.isVirtual }
-        val first = playable.firstOrNull { it.parentIndexNumber != 0 } ?: playable.firstOrNull() ?: return null
-        return EpisodePick(first, fromStart = true)
     }
 
     /** What the Play pill does: [replayAll] flips its label; [episode] is set for a Series member. */

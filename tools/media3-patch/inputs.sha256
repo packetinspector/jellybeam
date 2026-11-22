@@ -1,0 +1,16 @@
+# docs/06: pinned inputs of tools/media3-patch/build.sh -- sha256, file, url. Sources are tag 1.11.1 (8c6678b657ede1e7883fc164ef73ed483c7796c3).
+60b10b5ef5769b79570172e015b8159405c92f034ba88b9391a977589c9deb4e  annotation-jvm-1.6.0.jar  https://dl.google.com/dl/android/maven2/androidx/annotation/annotation-jvm/1.6.0/annotation-jvm-1.6.0.jar
+588592baec110837c33ce0c82bb76464203e6b0621177bbe5d88779001a6f1ed  media3-exoplayer-1.11.1.aar  https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer/1.11.1/media3-exoplayer-1.11.1.aar
+f540fd426f3ed2cf58792fad094052876817d764f88b2a072e530105dfe9d797  media3-exoplayer-1.11.1.pom  https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer/1.11.1/media3-exoplayer-1.11.1.pom
+50813cf219c7c93ed8a32a750891ca6d1280729ecf7a90c49567adacd67ef31b  media3-common-1.11.1.aar  https://dl.google.com/dl/android/maven2/androidx/media3/media3-common/1.11.1/media3-common-1.11.1.aar
+930fca2f018f06f1d08c12599f8c97f31eddbd728edee5de06eb53a882f8fc54  media3-container-1.11.1.aar  https://dl.google.com/dl/android/maven2/androidx/media3/media3-container/1.11.1/media3-container-1.11.1.aar
+490fd23c7562a6a1183d63bf854b291ae3a77dce5a151450aa1937148c80c60b  media3-datasource-1.11.1.aar  https://dl.google.com/dl/android/maven2/androidx/media3/media3-datasource/1.11.1/media3-datasource-1.11.1.aar
+c3bcd704959026e0d644b0260f9e682a2e26e7357c2cf82d990bcb323f800d49  media3-decoder-1.11.1.aar  https://dl.google.com/dl/android/maven2/androidx/media3/media3-decoder/1.11.1/media3-decoder-1.11.1.aar
+6b2d58d23a0c53425249d8b7c945600019d61a8b404c8fb8cd9ca860c5738508  media3-extractor-1.11.1.aar  https://dl.google.com/dl/android/maven2/androidx/media3/media3-extractor/1.11.1/media3-extractor-1.11.1.aar
+520e6f814e42a7d428db187ac073b453c0fcba0f4f5f4edd1cf33fafd2cfb740  media3-database-1.11.1.aar  https://dl.google.com/dl/android/maven2/androidx/media3/media3-database/1.11.1/media3-database-1.11.1.aar
+e4d49dc3880b7b7437ea54ce71461e02897faa4e1ecc53e63ecadb1a14c20c9c  annotation-experimental-1.3.1.aar  https://dl.google.com/dl/android/maven2/androidx/annotation/annotation-experimental/1.3.1/annotation-experimental-1.3.1.aar
+2c3e41d1b380f2044d257947a3aa82dabf3ae4b978622745254aa18b6cf89ab0  guava-33.3.1-android.jar  https://repo1.maven.org/maven2/com/google/guava/guava/33.3.1-android/guava-33.3.1-android.jar
+f3fc8a3a0a4020706a373b00e7f57c2512dd26d1f83d28c7d38768f8682b231e  error_prone_annotations-2.28.0.jar  https://repo1.maven.org/maven2/com/google/errorprone/error_prone_annotations/2.28.0/error_prone_annotations-2.28.0.jar
+3fbc2e98f05854c3df16df9abaa955b91b15b3ecac33623208ed6424640ef0f6  checker-qual-3.43.0.jar  https://repo1.maven.org/maven2/org/checkerframework/checker-qual/3.43.0/checker-qual-3.43.0.jar
+a2f14b737b0586cb1acb3f60d9969e8d703d318bb3115b9b1d68f402db259e98  AudioTrackPositionTracker.java  https://raw.githubusercontent.com/androidx/media/8c6678b657ede1e7883fc164ef73ed483c7796c3/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/AudioTrackPositionTracker.java
+a918358e0264e8768bd0c3ddcac51ed10b13e6f2b1cfb2bc97aab6d7f83e28c4  DefaultAudioSink.java  https://raw.githubusercontent.com/androidx/media/8c6678b657ede1e7883fc164ef73ed483c7796c3/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/DefaultAudioSink.java

@@ -3,8 +3,6 @@ package tv.jellybeam.player
 import androidx.media3.common.Player
 import uniffi.jellybeam_core.SyncPlayGroup
 import uniffi.jellybeam_core.SyncPlayRole
-import uniffi.jellybeam_core.PlayMethodFfi
-import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.SyncPlayInput
 import uniffi.jellybeam_core.SyncPlaySeverity
 
@@ -30,12 +28,12 @@ internal fun PlayerMode.Group.send(event: (tag: ULong) -> GroupEvent.Tagged) = e
 /** docs/28 §4: a transport press asks the group; the player moves only on the server's directive. */
 internal fun PlayerMode.Group.request(input: SyncPlayInput) = send { GroupEvent.UserTransport(it, input) }
 
-/** docs/28 §5: READY answers the issued load or a stall, a stall while meaning to play is buffering, and the end is the group's to handle. */
+/** docs/28 §5: READY answers the issued load or a stall, and a stall while meaning to play is buffering; the end is
+ * reported once, by the playback end owner (docs/18 §7). */
 internal fun PlayerMode.Group.reportState(playbackState: Int, player: PlaybackPlayer) {
     when (playbackState) {
         Player.STATE_READY -> if (loadIssued) send { GroupEvent.PlayerReady(it, player.currentPositionTicks()) }
         Player.STATE_BUFFERING -> if (player.playWhenReady) send(GroupEvent::PlayerBuffering)
-        Player.STATE_ENDED -> if (player.playbackState == Player.STATE_ENDED) send(GroupEvent::PlayerEnded)
     }
 }
 
@@ -48,9 +46,8 @@ internal fun seeksAfterGroupSeek(pending: List<Long>, ranTicks: Long): List<Long
     return if (ours < 0) emptyList() else pending.drop(ours + 1)
 }
 
-/** docs/28 §5: a group never renegotiates a transcode, so it refuses a stream-row pick and any pick off a burned-in stream. */
-internal fun groupRefusesSubtitlePick(mode: PlayerMode, plan: PlaybackPlan?, streamRow: Boolean): Boolean =
-    mode is PlayerMode.Group && (streamRow || plan?.playMethod == PlayMethodFfi.TRANSCODE && plan.burnedSubtitleIndex != null)
+/** docs/28 §5: a group never renegotiates a transcode, so it refuses only a pick that needs a negotiation. */
+internal fun groupRefusesSubtitlePick(inGroup: Boolean, needsNegotiation: Boolean): Boolean = inGroup && needsNegotiation
 
 /**
  * docs/28 §1: a skip in a group is one group seek, so only the host's own setting may auto-skip; a guest gets the

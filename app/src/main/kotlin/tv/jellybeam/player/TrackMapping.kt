@@ -14,8 +14,8 @@ import uniffi.jellybeam_core.TrackKindFfi
  *
  * **Id scheme**: `id = groupIndex * 1000 + trackIndex`, only meaningful against the same [Tracks]
  * snapshot since Media3 renumbers groups/tracks on every `onTracksChanged`; an id must be consumed
- * via [resolve] before the next announcement, never persisted (per-series memory instead keys on
- * [uniffi.jellybeam_core.trackPrefKeyOf]'s stable language/title string).
+ * via [resolve] before the next announcement, never persisted (memory instead keeps
+ * [uniffi.jellybeam_core.trackMemoryOf]'s stable identity).
  *
  * **Forced-flag source**: [Format.selectionFlags] `and` [C.SELECTION_FLAG_FORCED] -- Media3 1.9.0
  * has no `ROLE_FLAG_FORCED_SUBTITLE` constant.
@@ -52,6 +52,7 @@ object TrackMapping {
                     isDefault = format.selectionFlags and C.SELECTION_FLAG_DEFAULT != 0,
                     isSelected = group.isTrackSelected(trackIndex),
                     isForced = format.selectionFlags and C.SELECTION_FLAG_FORCED != 0,
+                    isHearingImpaired = false, // Media3 has no SDH flag; the server's facts fill it (docs/12 §16)
                 )
             }
         }

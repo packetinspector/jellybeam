@@ -267,8 +267,8 @@ class JellybeamRenderersFactory(
     }
 
     /**
-     * docs/18 §5.1: the stock sink with its outputs wrapped in [PlausibleClockAudioOutput], so a
-     * freshly created passthrough track can't report a position ahead of what it has played.
+     * docs/18 §5.1: the stock sink with its outputs wrapped in [PlausibleClockAudioOutput], which
+     * observes each output's position (would-clamp log) and feeds the music tap.
      */
     override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioOutputPlaybackParams: Boolean): AudioSink =
         DefaultAudioSink.Builder(context)

@@ -20,6 +20,7 @@ import tv.jellybeam.player.music.MusicSource
 import tv.jellybeam.player.music.TransportOp
 import tv.jellybeam.ui.cards.testCard
 import uniffi.jellybeam_core.ItemDetail
+import uniffi.jellybeam_core.Playability
 
 /** docs/18 §2.1: Now Playing reads a session's metadata on the session's own account, parked or not. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -121,6 +122,7 @@ class NowPlayingAccountTest {
             childCount = null,
             directors = emptyList(),
             writers = emptyList(),
+            playability = Playability.Unknown,
         )
     }
 }

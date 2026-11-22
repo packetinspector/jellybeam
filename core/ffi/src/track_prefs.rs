@@ -1,5 +1,6 @@
-//! Per-series audio/subtitle track memory: `<data_dir>/track-prefs.json`,
-//! mapping a series id to a `playback_policy::prefs::SeriesTrackPref`.
+//! Per-subject audio/subtitle track memory: `<data_dir>/track-prefs.json`, mapping a series id (or
+//! the item id for an item with no series: a movie keeps its own choice) to a
+//! `playback_policy::prefs::SeriesTrackPref`.
 //! Written via [`crate::JellybeamCore::remember_track_memory`], read via
 //! [`crate::JellybeamCore::resolve_tracks`] (docs/12 "Choices are remembered per series").
 //!
@@ -15,18 +16,18 @@ use playback_policy::prefs::{SeriesTrackPref, TrackMemory};
 
 use crate::types::TrackKindFfi;
 
-/// Series id -> that series' remembered audio/subtitle track preference.
+/// Subject id (series, or the item for a movie) -> its remembered audio/subtitle track preference.
 pub(crate) type TrackPrefsFile = HashMap<String, SeriesTrackPref>;
 
 fn path(data_dir: &Path) -> PathBuf {
     data_dir.join("track-prefs.json")
 }
 
-/// Sets one half of `series_id`'s memory. A pairing with no memory (video, or audio `Off`, since
+/// Sets one half of `subject_id`'s memory. A pairing with no memory (video, or audio `Off`, since
 /// audio has none) is refused with a warning and writes nothing; returns whether `prefs` changed.
 pub(crate) fn remember(
     prefs: &mut TrackPrefsFile,
-    series_id: String,
+    subject_id: String,
     kind: TrackKindFfi,
     memory: TrackMemory,
 ) -> bool {
@@ -39,11 +40,11 @@ pub(crate) fn remember(
             false
         }
         (TrackKindFfi::Audio, memory) => {
-            prefs.entry(series_id).or_default().audio = memory;
+            prefs.entry(subject_id).or_default().audio = memory;
             true
         }
         (TrackKindFfi::Subtitle, memory) => {
-            prefs.entry(series_id).or_default().subtitle = memory;
+            prefs.entry(subject_id).or_default().subtitle = memory;
             true
         }
     }

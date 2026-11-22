@@ -122,4 +122,12 @@
     <string name="detail_extra_type_clip">CLIP</string>
     <string name="detail_extra_type_sample">SAMPLE</string>
     <string name="detail_extra_type_other">EXTRA</string>
+
+    <!-- docs/18 §6: the spec capsule's last cell, uppercase like its neighbours. -->
+    <string name="detail_playability_direct_play">DIRECT PLAY</string>
+    <string name="detail_playability_will_transcode">WILL TRANSCODE</string>
+    <string name="detail_playability_will_transcode_reason">WILL TRANSCODE (%1$s)</string>
+    <string name="detail_playability_wont_play">WON\'T PLAY</string>
+    <string name="detail_playability_wont_play_reason">WON\'T PLAY (%1$s)</string>
+    <string name="detail_playability_no_server_transcoding">NO SERVER TRANSCODING</string>
 </resources>

@@ -55,16 +55,51 @@ class LoadRetryPolicyTest {
 
     @Test
     fun `temporary HTTP statuses retry and permanent client statuses do not`() {
-        listOf(408, 425, 429, 500, 502, 503, 504).forEach { status ->
-            assertEquals("status $status", transient, LoadRetryPolicy.classifyHttpResponseCode(status))
+        for (transcode in listOf(false, true)) {
+            listOf(408, 425, 429).forEach { status ->
+                assertEquals("status $status transcode=$transcode", transient, LoadRetryPolicy.classifyHttpResponseCode(status, transcode))
+            }
+            listOf(400, 401, 403, 404, 416, 501).forEach { status ->
+                assertEquals(
+                    "status $status transcode=$transcode",
+                    LoadRetryPolicy.FailureKind.PERMANENT,
+                    LoadRetryPolicy.classifyHttpResponseCode(status, transcode),
+                )
+            }
         }
-        listOf(400, 401, 403, 404, 416, 501).forEach { status ->
-            assertEquals(
-                "status $status",
-                LoadRetryPolicy.FailureKind.PERMANENT,
-                LoadRetryPolicy.classifyHttpResponseCode(status),
-            )
+    }
+
+    @Test
+    fun `every retryable 5xx is a server failure on a transcode, unless a 503 names its wait, and transient on direct play`() {
+        for (status in listOf(500, 502, 503, 504)) {
+            assertEquals("$status", LoadRetryPolicy.FailureKind.SERVER_FAILURE, LoadRetryPolicy.classifyHttpResponseCode(status, transcode = true))
+            assertEquals("$status", transient, LoadRetryPolicy.classifyHttpResponseCode(status, transcode = false))
+            assertEquals("$status", transient, LoadRetryPolicy.classifyHttpResponseCode(status, transcode = false, retryAfter = true))
         }
+        assertEquals(transient, LoadRetryPolicy.classifyHttpResponseCode(503, transcode = true, retryAfter = true))
+        assertEquals(LoadRetryPolicy.FailureKind.SERVER_FAILURE, LoadRetryPolicy.classifyHttpResponseCode(502, transcode = true, retryAfter = true))
+    }
+
+    @Test
+    fun `a server failure retries once after 2s then gives up whatever the elapsed time`() {
+        val serverFailure = LoadRetryPolicy.FailureKind.SERVER_FAILURE
+        for (elapsedMs in listOf(0L, 1_000L, 30_000L)) {
+            assertEquals("elapsed $elapsedMs", LoadRetryPolicy.Decision.Retry(2_000L), LoadRetryPolicy.decide(serverFailure, 1, elapsedMs))
+            for (attempt in 2..6) {
+                assertEquals(
+                    "attempt $attempt elapsed $elapsedMs",
+                    LoadRetryPolicy.Decision.GiveUp,
+                    LoadRetryPolicy.decide(serverFailure, attempt, elapsedMs),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `a direct play 500 keeps the 90s window`() {
+        val kind = LoadRetryPolicy.classifyHttpResponseCode(500, transcode = false)
+        assertEquals(LoadRetryPolicy.Decision.Retry(8_000L), LoadRetryPolicy.decide(kind, attempt = 6, elapsedMs = 60_000L))
+        assertEquals(LoadRetryPolicy.Decision.GiveUp, LoadRetryPolicy.decide(kind, attempt = 6, elapsedMs = 90_000L))
     }
 
     @Test
@@ -118,9 +153,9 @@ class LoadRetryPolicyTest {
     }
 
     @Test
-    fun `minimum retry threshold still covers the no-progress opening schedule`() {
-        assertEquals(13, LoadRetryPolicy.MINIMUM_LOADABLE_RETRY_COUNT)
-        assertTrue(LoadRetryPolicy.MINIMUM_LOADABLE_RETRY_COUNT > LoadRetryPolicy.BACKOFF_SCHEDULE_MS.size)
+    fun `a still-retrying load never surfaces - only a give-up does`() {
+        assertEquals(Int.MAX_VALUE, LoadRetryPolicy.MINIMUM_LOADABLE_RETRY_COUNT)
+        assertEquals(Int.MAX_VALUE, NetworkAwareLoadErrorHandlingPolicy().getMinimumLoadableRetryCount(androidx.media3.common.C.DATA_TYPE_MEDIA))
     }
 
     @Test

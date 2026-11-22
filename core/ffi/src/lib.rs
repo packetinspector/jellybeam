@@ -75,7 +75,8 @@ pub use types::{
     MirrorLibrary, MirrorStats, MusicArtistRow, MusicGenreRow, PersonInfo, PlayMethodFfi,
     PlaybackOsdDetail, PlaybackPlan, PlaybackRequest, QuickConnectSession, ServerDetails,
     ServerInfoSnapshot, SongSource, SortOrder, StatusFilter, SubtitleActionFfi,
-    SubtitleDeliveryFfi, TrackDecisionFfi, TrackInfo, TrackKindFfi, TrackMemoryFfi,
+    SubtitleDeliveryFfi, TrackDecisionFfi, TrackDeliveryFfi, TrackIdentityFfi, TrackInfo,
+    TrackKindFfi, TrackMemoryFfi, TrackRowFfi, TranscodeCauseFfi, TranscodeStreamsFfi,
     TrickplayMetaFfi, TrickplayTileFfi, VideoCaps, VideoCodecId, ViewSnapshot, WatchedFilter,
 };
 
@@ -135,13 +136,17 @@ pub fn outro_start_secs_from_segments(segments: Vec<MediaSegment>) -> Option<f64
         .map(|s| playback_policy::time::ticks_to_secs(s.start_ticks))
 }
 
-/// Delegate to `playback_policy::tracks::track_pref_key`: the persistence
-/// key a [`TrackInfo`] is remembered under (language if present, else
-/// title). Feeds [`JellybeamCore::remember_track_memory`]'s `Key`
-/// (docs/09 step 3b).
+/// Delegate to `playback_policy::tracks::track_identity`: the memory a [`TrackInfo`] is
+/// remembered under (language, title, forced/SDH, codec), `Unset` for a track with neither
+/// language nor title. Feeds [`JellybeamCore::remember_track_memory`] (docs/12).
 #[uniffi::export]
-pub fn track_pref_key_of(track: TrackInfo) -> Option<String> {
-    playback_policy::tracks::track_pref_key(&track.into())
+pub fn track_memory_of(track: TrackInfo) -> TrackMemoryFfi {
+    match playback_policy::tracks::track_identity(&track.into()) {
+        Some(identity) => TrackMemoryFfi::Track {
+            identity: identity.into(),
+        },
+        None => TrackMemoryFfi::Unset,
+    }
 }
 
 /// Delegate to `playback_policy::trickplay::locate`: which sprite-sheet
@@ -277,6 +282,7 @@ pub fn mirror_smoke_test() -> String {
         client,
         bus_rx,
         std::sync::Arc::default(),
+        tokio::sync::watch::channel(media_cache::AppPresence::Foreground).1,
         std::sync::Arc::new(std::collections::HashSet::new),
     ));
 
@@ -328,25 +334,46 @@ mod tests {
             is_default: false,
             is_selected: false,
             is_forced: false,
+            is_hearing_impaired: false,
+        }
+    }
+
+    fn identity_of(memory: TrackMemoryFfi) -> TrackIdentityFfi {
+        match memory {
+            TrackMemoryFfi::Track { identity } => identity,
+            other => panic!("expected a Track memory, got {other:?}"),
         }
     }
 
     #[test]
-    fn track_pref_key_of_prefers_lang_over_title() {
-        let track = sample_track(Some("eng"), Some("Commentary"));
-        assert_eq!(track_pref_key_of(track), Some("eng".to_string()));
+    fn track_memory_of_keeps_the_normalized_language_and_the_kind_flags() {
+        let mut track = sample_track(Some("EN"), Some("English SDH"));
+        track.is_forced = true;
+        track.is_hearing_impaired = true;
+        let identity = identity_of(track_memory_of(track));
+        assert_eq!(
+            identity,
+            TrackIdentityFfi {
+                lang: Some("eng".to_string()),
+                title: Some("English SDH".to_string()),
+                forced: true,
+                sdh: true,
+                codec: Some("aac".to_string()),
+            }
+        );
     }
 
     #[test]
-    fn track_pref_key_of_falls_back_to_title_without_a_lang() {
-        let track = sample_track(None, Some("Commentary"));
-        assert_eq!(track_pref_key_of(track), Some("Commentary".to_string()));
+    fn track_memory_of_a_title_only_track_has_no_language() {
+        let identity = identity_of(track_memory_of(sample_track(None, Some("Commentary"))));
+        assert_eq!(identity.lang, None);
+        assert_eq!(identity.title, Some("Commentary".to_string()));
     }
 
     #[test]
-    fn track_pref_key_of_is_none_without_lang_or_title() {
+    fn track_memory_of_is_unset_without_lang_or_title() {
         let track = sample_track(None, None);
-        assert_eq!(track_pref_key_of(track), None);
+        assert_eq!(track_memory_of(track), TrackMemoryFfi::Unset);
     }
 
     #[test]

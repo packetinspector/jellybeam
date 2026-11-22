@@ -39,7 +39,11 @@ pub(super) fn build(mirror: &Mirror, settings: &Settings) -> ClassicHome {
     let resume = blocks::resume(mirror, size);
     let next_up = blocks::next_up(mirror, &resume, size);
     let favorites = if settings.home_show_favorites {
-        mirror.favorites(size).into_iter().map(Card::from).collect()
+        mirror
+            .favorites(size)
+            .into_iter()
+            .map(Card::list_cell)
+            .collect()
     } else {
         Vec::new()
     };
@@ -63,7 +67,7 @@ fn latest_shelves(mirror: &Mirror, settings: &Settings) -> Vec<HomeShelf> {
                     settings.hide_watched_in_latest,
                 )
                 .into_iter()
-                .map(Card::from)
+                .map(Card::list_cell)
                 .collect();
             HomeShelf {
                 source: ShelfSource::Latest {

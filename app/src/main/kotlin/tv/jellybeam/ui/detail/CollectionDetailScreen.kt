@@ -96,7 +96,12 @@ private const val PLAY_KEY = "action:primary"
 @Composable
 internal fun CollectionDetailScreen(
     card: Card,
-    state: DetailUiState,
+    /** BoxSet members in server order; empty until [membersSettled]. */
+    members: List<Card>,
+    membersSettled: Boolean,
+    memberSeasonCounts: Map<String, Int>,
+    /** What the Play pill does; `null` for an empty collection. */
+    play: CollectionFormatting.CollectionPlay?,
     viewModel: DetailViewModel,
     onOpenDetail: (Card) -> Unit,
     isTop: Boolean,
@@ -108,8 +113,6 @@ internal fun CollectionDetailScreen(
     val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
-    val members = state.members
-    val play = state.collectionPlay
     val strings = rememberUiStrings()
 
     // The pill resolves with the members (one state write), so [ready] gates the seed on it.
@@ -124,7 +127,7 @@ internal fun CollectionDetailScreen(
     FocusRestorer(
         memory = memory,
         isTop = isTop,
-        ready = state.membersSettled,
+        ready = membersSettled,
         fallback = collectionFallback,
         tag = "detail-collection",
     )
@@ -234,7 +237,7 @@ internal fun CollectionDetailScreen(
                     overflow = TextOverflow.Ellipsis,
                     style = DETAIL_TITLE_STYLE,
                 )
-                if (state.membersSettled) {
+                if (membersSettled) {
                     BasicText(
                         text = CollectionFormatting.metaLine(strings, members),
                         maxLines = 1,
@@ -275,7 +278,7 @@ internal fun CollectionDetailScreen(
             if (members.isNotEmpty()) {
                 MemberRow(
                     members = members,
-                    seasonCounts = state.memberSeasonCounts,
+                    seasonCounts = memberSeasonCounts,
                     upNextId = play?.takeIf { !it.replayAll }?.member?.id,
                     onOpenDetail = onOpenDetail,
                     memory = memory,

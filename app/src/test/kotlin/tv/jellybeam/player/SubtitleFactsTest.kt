@@ -4,21 +4,20 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.jellybeam_core.EmbeddedSubtitleFfi
-import uniffi.jellybeam_core.ExternalSubtitleFfi
 import uniffi.jellybeam_core.SubtitleDeliveryFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
 
-/** docs/12 §16: the server's subtitle facts reach a row only when the file's streams pair up with the player's tracks. */
+/** docs/12 §16: a Direct Play file's server facts reach a row only when its streams pair up with the player's tracks. */
 class SubtitleFactsTest {
     private fun text(id: Long, lang: String?, title: String? = null) = TrackInfo(
         id = id, kind = TrackKindFfi.SUBTITLE, title = title, lang = lang, codec = "text/x-ssa",
-        isDefault = false, isSelected = false, isForced = false,
+        isDefault = false, isSelected = false, isForced = false, isHearingImpaired = false,
     )
 
     private fun audio(id: Long) = TrackInfo(
         id = id, kind = TrackKindFfi.AUDIO, title = null, lang = "en", codec = "audio/ac3",
-        isDefault = false, isSelected = false, isForced = false,
+        isDefault = false, isSelected = false, isForced = false, isHearingImpaired = false,
     )
 
     private fun stream(
@@ -35,12 +34,23 @@ class SubtitleFactsTest {
         displayTitle = displayTitle, delivery = delivery, hearingImpaired = sdh,
     )
 
-    private fun facts(
-        infos: List<TrackInfo>,
-        streams: List<EmbeddedSubtitleFfi>,
-        transcoding: Boolean = false,
-        sidecars: List<ExternalSubtitleFfi> = emptyList(),
-    ) = serverSubtitleFacts(infos, streams, transcoding, sidecars)
+    private fun facts(infos: List<TrackInfo>, streams: List<EmbeddedSubtitleFfi>) = serverSubtitleFacts(infos, streams)
+
+    @Test
+    fun `withServerFacts copies SDH, forced and a non-blank codec onto the paired subtitle rows only`() {
+        val infos = listOf(audio(0), text(1000, "eng").copy(codec = "application/x-subrip"), text(2000, "eng"), text(3000, "fra"))
+        val facts = mapOf(
+            0L to SubtitleFacts(hearingImpaired = true, forced = true, codec = "eac3"),
+            1000L to SubtitleFacts(hearingImpaired = true, forced = true, codec = "subrip"),
+            2000L to SubtitleFacts(hearingImpaired = false, forced = false, codec = " "),
+        )
+        val got = withServerFacts(infos, facts)
+        assertEquals("the audio row has no subtitle facts to take", infos[0], got[0])
+        assertEquals(infos[1].copy(codec = "subrip", isForced = true, isHearingImpaired = true), got[1])
+        assertEquals("a blank server codec keeps the player's", infos[2], got[2])
+        assertEquals("no facts, no change", infos[3], got[3])
+        assertEquals(infos, withServerFacts(infos, emptyMap()))
+    }
 
     @Test
     fun `titles that disagree give no facts, and a title on one side only proves nothing`() {
@@ -98,26 +108,5 @@ class SubtitleFactsTest {
             streams = listOf(stream(2, "eng", sdh = true), stream(7, "eng", delivery = SubtitleDeliveryFfi.HLS)),
         )
         assertEquals(true, got[1000L]?.hearingImpaired)
-    }
-
-    @Test
-    fun `a transcode reads each manifest rendition's own stream and every stream row's`() {
-        val signs = stream(2, "eng", sdh = false, codec = "ass", title = "Signs", displayTitle = "Signs - English", delivery = SubtitleDeliveryFfi.ENCODE)
-        val full = stream(3, "eng", sdh = true, codec = "subrip", title = "Full", displayTitle = "Full - English - SDH", delivery = SubtitleDeliveryFfi.HLS)
-        val got = facts(
-            infos = listOf(audio(0), text(1000, "eng", "Full - English - SDH")),
-            streams = listOf(signs, full),
-            transcoding = true,
-        )
-        assertEquals(SubtitleFacts(hearingImpaired = true, forced = false, codec = "subrip"), got[1000L])
-        assertEquals(true, got[streamRowId(3)]?.hearingImpaired)
-        assertEquals(false, got[streamRowId(2)]?.hearingImpaired)
-    }
-
-    @Test
-    fun `a sidecar carries its own flags by id`() {
-        val sidecar = ExternalSubtitleFfi(index = 5, codec = "srt", language = "eng", displayTitle = null, isDefault = false, isForced = true, hearingImpaired = true)
-        val got = facts(emptyList(), emptyList(), sidecars = listOf(sidecar))
-        assertEquals(SubtitleFacts(hearingImpaired = true, forced = true, codec = "srt"), got[ExternalSubtitles.idFor(5)])
     }
 }

@@ -85,62 +85,62 @@ class DetailRegionsTest {
         seasonsSettled: Boolean,
         hasSeasons: Boolean,
         hasSelectedSeason: Boolean,
-        isLoadingEpisodes: Boolean,
         hasEpisodes: Boolean,
-    ) = episodeShelfShow(seasonsSettled, hasSeasons, hasSelectedSeason, isLoadingEpisodes, hasEpisodes)
+    ) = episodeShelfShow(seasonsSettled, hasSeasons, hasSelectedSeason, hasEpisodes)
 
     @Test
     fun `episodeShelfShow is a skeleton before seasons settle`() {
-        assertEquals(RegionShow.SKELETON, shelf(false, false, false, false, false))
+        assertEquals(RegionShow.SKELETON, shelf(false, false, false, false))
     }
 
     @Test
     fun `episodeShelfShow keeps its skeleton in the gap between seasons settling and the resume season being selected`() {
-        // Seasons landed, the per-episode answer has not: no selection, no loading flag, no episodes.
-        assertEquals(RegionShow.SKELETON, shelf(true, true, false, false, false))
-    }
-
-    @Test
-    fun `episodeShelfShow is a skeleton while the selected season's episodes load`() {
-        assertEquals(RegionShow.SKELETON, shelf(true, true, true, true, false))
+        // Seasons landed, the per-episode answer or the first season read has not: no selection, no episodes.
+        assertEquals(RegionShow.SKELETON, shelf(true, true, false, false))
     }
 
     @Test
     fun `episodeShelfShow shows content once episodes are there`() {
-        assertEquals(RegionShow.CONTENT, shelf(true, true, true, false, true))
+        assertEquals(RegionShow.CONTENT, shelf(true, true, true, true))
     }
 
     @Test
     fun `episodeShelfShow is gone for a series that settled with no seasons`() {
-        assertEquals(RegionShow.GONE, shelf(true, false, false, false, false))
+        assertEquals(RegionShow.GONE, shelf(true, false, false, false))
     }
 
     @Test
     fun `episodeShelfShow is gone for a selected season that settled with no episodes`() {
-        assertEquals(RegionShow.GONE, shelf(true, true, true, false, false))
+        assertEquals(RegionShow.GONE, shelf(true, true, true, false))
     }
 
     @Test
     fun `episodeShelfShow is gone once seasons settled empty, even with stale episodes`() {
-        assertEquals(RegionShow.GONE, shelf(true, false, true, false, true))
-        assertEquals(RegionShow.CONTENT, shelf(false, false, true, false, true))
+        assertEquals(RegionShow.GONE, shelf(true, false, true, true))
+        assertEquals(RegionShow.CONTENT, shelf(false, false, true, true))
     }
 
     @Test
     fun `episodeShelfShow shows content whenever episodes exist, even with seasons unsettled`() {
-        assertEquals(RegionShow.CONTENT, shelf(false, false, false, false, true))
-        assertEquals(RegionShow.CONTENT, shelf(true, true, false, false, true))
-        assertEquals(RegionShow.CONTENT, shelf(true, true, true, true, true))
+        assertEquals(RegionShow.CONTENT, shelf(false, false, false, true))
+        assertEquals(RegionShow.CONTENT, shelf(true, true, false, true))
     }
 
     @Test
-    fun `episodeShelfShow is a skeleton while unsettled even if a season is selected or loading`() {
-        assertEquals(RegionShow.SKELETON, shelf(false, true, true, true, false))
-        assertEquals(RegionShow.SKELETON, shelf(false, true, true, false, false))
+    fun `episodeShelfShow is a skeleton while unsettled even if a season is selected`() {
+        assertEquals(RegionShow.SKELETON, shelf(false, true, true, false))
     }
 
     @Test
     fun `episodeShelfShow with no seasons settles gone even if a stale loading flag is set`() {
-        assertEquals(RegionShow.GONE, shelf(true, false, false, true, false))
+        assertEquals(RegionShow.GONE, shelf(true, false, false, false))
+    }
+
+    @Test
+    fun `the episode shelf takes focus only while no season switch is pending`() {
+        assertTrue("first pick landed", episodeShelfEnterable(requestedSeasonId = "s1", shownSeasonId = "s1"))
+        assertTrue("nothing asked for yet", episodeShelfEnterable(requestedSeasonId = null, shownSeasonId = null))
+        assertFalse("switch to s2 still reading: the shelf shows s1", episodeShelfEnterable(requestedSeasonId = "s2", shownSeasonId = "s1"))
+        assertFalse("first pick still reading", episodeShelfEnterable(requestedSeasonId = "s1", shownSeasonId = null))
     }
 }

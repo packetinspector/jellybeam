@@ -22,7 +22,7 @@ A, B       a git ref (built in a throwaway worktree, cached by sha in internal/p
 --out      default internal/perf-ab/<timestamp>; results.csv, summary.md and logs/ land there.
 Serials: TV / EMU from the environment, else internal/device.env. Item for ttff on emu: JB_ITEM_ID, else
 the first unplayed 5+ minute movie on JB_SERVER (default http://10.0.2.2:8098, JB_USER sam, JB_PASS showcase;
-tools/showcase-server). Emulator: mini player is forced off (adb root) and restored; on the TV it must be off.
+tools/showcase-server). Emulator: mini player is forced off (adb root) and restored; on the TV, settle_home stops any PiP playback.
 Stop playback and screensavers first; no builds, adb installs or other input while this runs.
 EOF2
 }
@@ -95,7 +95,7 @@ PY
 # Emulator only (adb root): mini player off for the run, original settings.json restored on exit.
 SETTINGS=/data/user/0/$PKG/files/jellybeam/settings.json
 mini_player_off() {
-  if [ "$DEVICE" = tv ]; then echo "mini player: cannot be checked without root; it must be off (default)"; return 0; fi
+  if [ "$DEVICE" = tv ]; then echo "mini player: cannot be forced off without root; PiP playback is stopped after each run"; return 0; fi
   A root >/dev/null 2>&1; sleep 2
   A shell am force-stop "$PKG"
   A pull "$SETTINGS" "$OUT/settings.orig.json" >/dev/null 2>&1 || { echo "mini player: no settings.json yet (default off)"; return 0; }

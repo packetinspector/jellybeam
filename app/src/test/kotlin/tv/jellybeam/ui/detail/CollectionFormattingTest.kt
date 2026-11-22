@@ -11,6 +11,8 @@ import tv.jellybeam.ui.cards.ArtSource
 import tv.jellybeam.ui.cards.WatchIndicator
 import tv.jellybeam.ui.cards.testCard
 import uniffi.jellybeam_core.ImageKind
+import uniffi.jellybeam_core.SeriesPlayKind
+import uniffi.jellybeam_core.SeriesSummary
 
 private val strings = ResourceUiStrings.default
 
@@ -79,7 +81,7 @@ class CollectionFormattingTest {
     @Test
     fun `a series with no episode yields to the next candidate`() = runTest {
         val members = listOf(series("empty", unplayed = 1), movie("film", runtimeMinutes = 90))
-        val play = CollectionFormatting.resolvePlay(strings, members, previous = null) { emptyList() }!!
+        val play = CollectionFormatting.resolvePlay(members, previous = null) { _, _ -> SeriesSummary(null, emptyList()) }!!
         assertEquals("film", play.targetId)
     }
 
@@ -87,20 +89,26 @@ class CollectionFormattingTest {
     fun `a failed episode fetch keeps the previous target only when it was that series`() = runTest {
         val members = listOf(series("s", unplayed = 2), movie("film"))
         val sameSeries = CollectionFormatting.CollectionPlay(series("s", unplayed = 2), episode("e", 1, 2), fromStart = false, replayAll = false)
-        assertEquals(sameSeries, CollectionFormatting.resolvePlay(strings, members, sameSeries) { null })
+        assertEquals(sameSeries, CollectionFormatting.resolvePlay(members, sameSeries) { _, _ -> null })
 
         // A stale target elsewhere (finished or removed) never survives; the next candidate wins.
         val elsewhere = CollectionFormatting.CollectionPlay(movie("gone"), null, fromStart = false, replayAll = false)
-        assertEquals("film", CollectionFormatting.resolvePlay(strings, members, elsewhere) { null }!!.targetId)
+        assertEquals("film", CollectionFormatting.resolvePlay(members, elsewhere) { _, _ -> null }!!.targetId)
     }
 
     @Test
     fun `a series target resolves to its episode and only a fully watched collection replays`() = runTest {
         val ep = episode("e", 1, 3)
-        val play = CollectionFormatting.resolvePlay(strings, listOf(series("s", unplayed = 1)), previous = null) { listOf(ep) }!!
+        val asked = mutableListOf<Boolean>()
+        val play = CollectionFormatting.resolvePlay(listOf(series("s", unplayed = 1)), previous = null) { _, replay ->
+            asked += replay
+            SeriesSummary(testSeriesPlay(ep, kind = SeriesPlayKind.NEXT_UP), emptyList())
+        }!!
         assertEquals("e", play.targetId)
+        assertEquals(listOf(false), asked)
         assertFalse(play.replayAll)
-        assertNull(CollectionFormatting.resolvePlay(strings, emptyList(), previous = null) { error("no fetch for an empty collection") })
+        assertFalse(play.fromStart)
+        assertNull(CollectionFormatting.resolvePlay(emptyList(), previous = null) { _, _ -> error("no fetch for an empty collection") })
     }
 
     @Test
@@ -128,31 +136,18 @@ class CollectionFormattingTest {
         testCard(id = id, itemType = "Episode", parentIndexNumber = season, indexNumber = number, played = played, positionTicks = positionTicks)
 
     @Test
-    fun `a series target resolves to the first episode with progress else the first unplayed`() {
-        val show = series("s", unplayed = 2)
-        val episodes = listOf(episode("e1", 1, 1, played = true), episode("e2", 1, 2), episode("e3", 1, 3, positionTicks = 7))
-        val pick = CollectionFormatting.seriesPlayEpisode(strings, show, episodes, replay = false)!!
-        assertEquals("e3", pick.episode.id)
-        assertFalse(pick.fromStart)
-        val noProgress = CollectionFormatting.seriesPlayEpisode(strings, show, episodes.filter { it.id != "e3" }, replay = false)!!
-        assertEquals("e2", noProgress.episode.id)
-    }
-
-    @Test
-    fun `a series replay starts the first regular episode from the beginning, skipping Specials`() {
-        val episodes = listOf(episode("sp", 0, 1, played = true), episode("e1", 1, 1, played = true))
-        val pick = CollectionFormatting.seriesPlayEpisode(strings, series("s"), episodes, replay = true)!!
-        assertEquals("e1", pick.episode.id)
-        assertTrue(pick.fromStart)
-    }
-
-    @Test
-    fun `a series with nothing unplayed falls back to a start-over of the first episode`() {
-        val episodes = listOf(episode("e1", 1, 1, played = true))
-        val pick = CollectionFormatting.seriesPlayEpisode(strings, series("s", unplayed = 1), episodes, replay = false)!!
-        assertEquals("e1", pick.episode.id)
-        assertTrue(pick.fromStart)
-        assertNull(CollectionFormatting.seriesPlayEpisode(strings, series("s"), emptyList(), replay = false))
+    fun `a fully watched series asks the core for a replay and starts it from the beginning`() = runTest {
+        val ep = episode("e1", 1, 1, played = true, positionTicks = 7)
+        val asked = mutableListOf<Boolean>()
+        val play = CollectionFormatting.resolvePlay(listOf(series("s", played = true)), previous = null) { _, replay ->
+            asked += replay
+            SeriesSummary(testSeriesPlay(ep, kind = SeriesPlayKind.REPLAY), emptyList())
+        }!!
+        assertEquals(listOf(true), asked)
+        assertEquals("e1", play.targetId)
+        assertTrue(play.fromStart)
+        assertTrue(play.replayAll)
+        assertFalse(play.resuming)
     }
 
     // -- play pill text ----------------------------------------------------

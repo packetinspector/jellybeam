@@ -7,6 +7,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -243,17 +244,15 @@ class HomeFeed<T : Any, U>(
      * Runs for the feed's whole lifetime, independently of [refreshSnapshot] (see
      * [SYNC_POLL_INTERVAL_MS]); a JVM test must cancel [scope] before its `runTest` body ends.
      *
-     * docs/17-mini-player.md §6: the timer keeps running while hidden, but the FFI call is skipped
-     * while [active] is false, since nobody can see the syncing indicator on a screen that isn't
-     * top.
+     * docs/17-mini-player.md §6: suspended while [active] is false, since nobody can see the syncing
+     * indicator on a screen that isn't top, and an idle hidden Home should not wake every few seconds.
      */
     private suspend fun pollSyncing() {
         while (true) {
-            if (active.value) {
-                val syncing = gateway.isSyncing()
-                val progress = if (syncing) (gateway.syncStatus() as? SyncStatus.Syncing)?.let { syncProgressText(strings, it) } else null
-                _state.update { it.copy(chrome = it.chrome.copy(isSyncing = syncing, syncProgressText = progress)) }
-            }
+            active.first { it }
+            val syncing = gateway.isSyncing()
+            val progress = if (syncing) (gateway.syncStatus() as? SyncStatus.Syncing)?.let { syncProgressText(strings, it) } else null
+            _state.update { it.copy(chrome = it.chrome.copy(isSyncing = syncing, syncProgressText = progress)) }
             delay(SYNC_POLL_INTERVAL_MS)
         }
     }

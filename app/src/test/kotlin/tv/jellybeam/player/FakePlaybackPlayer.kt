@@ -105,6 +105,22 @@ class FakePlaybackPlayer : PlaybackPlayer {
 
     override fun hasExhaustedLoadRetryBudget(): Boolean = loadRetryBudgetExhausted
 
+    var bufferedToEnd = false
+    override fun bufferedToEnd(): Boolean = bufferedToEnd
+
+    override var isLoading: Boolean = false
+    override var seekInFlight: Boolean = false
+
+    /** The current load's generation, bumped by [load] as [PlayerHolder.load] does. */
+    var loadSeq = 0L
+        private set
+
+    /** docs/18 §7: the current load's gate posting a read of segment [index] with video. */
+    fun serverRead(index: Int, endMs: Long) = onEndInput?.invoke(EndEvent.MediaArrived(loadSeq, index, endMs))
+
+    /** docs/18 §7: the current load's gate tripping at the run starting at segment [index]. */
+    fun serverTripped(index: Int, startMs: Long) = onEndInput?.invoke(EndEvent.Tripped(loadSeq, index, startMs))
+
     override var isPlaying: Boolean = false
     override var playbackState: Int = Player.STATE_IDLE
 
@@ -127,6 +143,7 @@ class FakePlaybackPlayer : PlaybackPlayer {
         lastLoadStart = start
         lastFullAssStyling = fullAssStyling
         loadedPlans += plan
+        onEndInput?.invoke(EndEvent.LoadOpened(++loadSeq))
         delayMemory.load(plan.itemId)
         // The real per-load reset (docs/18 §3.1), so a test sees what a reload does to text.
         trackSelectionParameters = trackSelectionBaseline(trackSelectionParameters)
@@ -189,6 +206,13 @@ class FakePlaybackPlayer : PlaybackPlayer {
         stopAndClearCallCount++
     }
 
+    var forgetSeekIndexCallCount: Int = 0
+        private set
+
+    override fun forgetSeekIndex() {
+        forgetSeekIndexCallCount++
+    }
+
     /** Every [retryAfterError] call, in order, as `(positionTicks, playing)`. */
     val retryAfterErrorCalls = mutableListOf<Pair<Long, Boolean>>()
 
@@ -199,6 +223,7 @@ class FakePlaybackPlayer : PlaybackPlayer {
      */
     override fun retryAfterError(positionTicks: Long, playing: Boolean) {
         retryAfterErrorCalls.add(positionTicks to playing)
+        onEndInput?.invoke(EndEvent.Reprepared(loadSeq))
         this.positionTicks = positionTicks
         this.playWhenReady = playing
     }
@@ -213,6 +238,8 @@ class FakePlaybackPlayer : PlaybackPlayer {
      * wired, unlike the [Player.Listener] list above.
      */
     override var onVideoDecoderInitialized: ((String) -> Unit)? = null
+
+    override var onEndInput: ((EndEvent) -> Unit)? = null
 
     val applyTrackDecisionCalls = mutableListOf<Pair<TrackDecisionFfi, Tracks>>()
 
@@ -281,6 +308,7 @@ class FakePlaybackPlayer : PlaybackPlayer {
 
     /** Simulates `Player.Listener.onRenderedFirstFrame()` (docs/12 "Buffering treatments"). */
     fun fireRenderedFirstFrame() {
+        onEndInput?.invoke(EndEvent.FirstFrame(loadSeq)) // the holder's own listener runs first
         listeners.toList().forEach { it.onRenderedFirstFrame() }
     }
 }

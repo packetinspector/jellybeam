@@ -103,7 +103,6 @@ internal val PAGE_MARGIN = 32.dp
  * [CELL_WIDTH_MIN] is set just under that so it floors smaller windows.
  */
 private val CELL_GAP = 12.dp
-private const val GRID_COLUMNS = 8
 private val CELL_WIDTH_MIN = 100.dp
 private val CELL_WIDTH_MAX = 220.dp
 
@@ -642,7 +641,7 @@ fun LibraryScreen(
                     entries = railEntries,
                     railIndex = railIndex,
                     onRailIndexChange = { railIndex = it },
-                    focusedIndex = focusedIndex,
+                    focusedIndex = { focusedIndex },
                     gridState = gridState,
                     viewModel = viewModel,
                     memory = memory,

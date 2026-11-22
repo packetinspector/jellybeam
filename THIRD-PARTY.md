@@ -17,13 +17,13 @@ distributed under. Jellybeam TV's own code is GPL-3.0-or-later — see
 | androidx.lifecycle:lifecycle-runtime-ktx | 2.8.7 | Apache-2.0 |
 | androidx.lifecycle:lifecycle-viewmodel-ktx | 2.8.7 | Apache-2.0 |
 | androidx.lifecycle:lifecycle-viewmodel-compose | 2.8.7 | Apache-2.0 |
-| androidx.media3:media3-exoplayer | 1.9.0 | Apache-2.0 |
-| androidx.media3:media3-ui | 1.9.0 | Apache-2.0 |
-| androidx.media3:media3-exoplayer-hls | 1.9.0 | Apache-2.0 |
-| androidx.media3:media3-datasource-okhttp | 1.9.0 | Apache-2.0 |
-| androidx.media3:media3-session | 1.9.0 | Apache-2.0 |
+| androidx.media3:media3-exoplayer | 1.11.1-jb1 (1.11.1 + upstream 4c95cd9, `tools/media3-patch`) | Apache-2.0 |
+| androidx.media3:media3-ui | 1.11.1 | Apache-2.0 |
+| androidx.media3:media3-exoplayer-hls | 1.11.1 | Apache-2.0 |
+| androidx.media3:media3-datasource-okhttp | 1.11.1 | Apache-2.0 |
+| androidx.media3:media3-session | 1.11.1 | Apache-2.0 |
 | androidx.profileinstaller:profileinstaller | 1.4.1 | Apache-2.0 |
-| org.jellyfin.media3:media3-ffmpeg-decoder | 1.8.0+1 | **GPL-3.0** |
+| org.jellyfin.media3:media3-ffmpeg-decoder | 1.9.0+1 | **GPL-3.0** |
 | io.coil-kt:coil-compose | 2.7.0 | Apache-2.0 |
 | org.jetbrains.kotlinx:kotlinx-coroutines-android | 1.9.0 | Apache-2.0 |
 | com.android.tools:desugar_jdk_libs | 2.1.2 | Apache-2.0 |

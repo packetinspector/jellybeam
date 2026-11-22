@@ -31,8 +31,8 @@ distrusts. The evidence Auto uses, in order:
    → the device profile carried honest per-profile level ceilings, so the
    verdict is the TV's own declared limits talking. Transcode up front.
 3. **The server says transcode and the file's video codec is not one this
-   TV's decoder probe advertises** (`android_direct_play_video_codecs`,
-   the probed-and-baselined list the profile itself is built from) → the
+   TV's decoder probe advertises** (a `VideoCodec` miss from
+   `profile_miss` against the profile itself, §6) → the
    verdict is corroborated by local knowledge. Transcode up front, reason
    "no `<codec>` decoder on this TV".
 4. **Otherwise attempt Direct Play** (the static stream; the verdict is
@@ -117,8 +117,7 @@ fields. Presets are a Kotlin concern (the chip row), the core accepts any
   - mode Auto: `DirectPlay` decision → plan with `server_verdict: None`;
     `Transcode` decision → Transcode plan up front when
     `tolerate_mislabeled_levels` is off (reason: the server's reasons) or
-    when the source's video codec is not in
-    `android_direct_play_video_codecs(caps)` (reason "no `<codec>` decoder
+    when `profile_miss` names the source's video codec (§6; reason "no `<codec>` decoder
     on this TV"); otherwise an attempt-anyway DirectPlay plan on
     `direct_url` with `server_verdict: Some(reasons)`.
 - `prepare_transcode_fallback(item_id, position_ticks, reason) ->
@@ -149,10 +148,12 @@ fields. Presets are a Kotlin concern (the chip row), the core accepts any
   reason, play_session_id, failed, subtitle_stream_index,
   audio_stream_index, request)`; both stream indexes are sent beside the
   `MediaSourceId` (`None` leaves the server's default, §3.1).
-- `preload_playback` caches DirectPlay plans only (an attempt-anyway plan
-  included — its URL is position-independent); a Transcode plan is never
-  cached (its HLS URL embeds the start position), and preload is a no-op
-  in Cap mode.
+- `preload_playback` caches a DirectPlay plan whole (an attempt-anyway plan
+  included — its URL is position-independent), and preload is a no-op in
+  Cap mode. Of an Auto Transcode answer it caches only the chosen source,
+  never its URL or session (the HLS URL embeds the start position): Play
+  skips its first `PlaybackInfo` and asks only the second (§3.2), so a
+  dwelled-on transcode costs the server one call fewer.
 - `prepare_playback` joins a same-item in-flight preload instead of
   aborting it, reusing the negotiation already under way; a preload for
   any other item is aborted and Play negotiates at once, never waiting on it.
@@ -181,6 +182,15 @@ overlap a negotiation; these rules give every overlap one outcome.
   `StalePlaybackSession`. A failed negotiation gives up its claim if it
   still holds it and is undone (the playing account reverts), so it
   neither owns playback nor gets parked, and never revives older work.
+- **Renegotiation installs on commit.** A renegotiation (a track pick on a
+  transcode, a chained change) prepares its new session beside the playing
+  one and installs it only when Kotlin commits it (`commit_transcode`),
+  which retires the old session where the new one takes over. A failed
+  renegotiation leaves the playing session reporting and its stream
+  playing; the player shows a short notice. Only a failed fallback (the old
+  stream is already dead) or a player error during one ends playback. A
+  prepared session dropped on any claim-clearing path (stop, replacement,
+  account change) never starts.
 - **Stop / abandon** take the `play_session_id` they are for. If it names the
   active session, that session (and its sidecars) is retired; a newer
   pending claim is untouched. If it names the session a pending fallback
@@ -304,7 +314,8 @@ Session threading rules shared by every path above:
   next-up item), alongside Home shelves and Detail. A fired item re-arms
   itself every `PRELOAD_REARM_MILLIS` (mirrors §2's Rust TTL) while it
   stays focused, cancelled on unfocus, so a long dwell never plays against
-  a stale cache entry.
+  a stale cache entry; it stops after `PRELOAD_MAX_FIRES` (~2.5 min), so an
+  idle screen stops asking the server.
 - Settings: `SettingsViewModel.selectPlaybackQuality(PlaybackQuality)`;
   `ChipFieldRow` "Quality" first in the Playback section, key
   `playback/quality`, chips Direct Play / Auto / 20 Mbps / 8 Mbps /
@@ -369,20 +380,46 @@ Session threading rules shared by every path above:
 
 ### 3.1 Track selection lifecycle
 
-- **Automatic resolution is generation-guarded and cancellable.**
-  `resolveTrackSelectionOnce`'s `gateway.resolveTracks` round trip is a real
-  suspend call, so a session change or an explicit `chooseAudio`/
-  `chooseSubtitle` pick can land while it's still pending. The launched job
-  is held in `trackSelectionJob` and cancelled outright by `start`'s
-  per-session reset, by `endSessionForStop`/`abandonPlaybackOnce` (same set
-  of leftover-job cancels as the reconnect/buffering/library-info jobs), and
-  by `chooseAudio`/`chooseSubtitle` before applying the manual decision.
-  Belt and braces: the coroutine also re-checks its captured
-  `SessionScope` and a `manualTrackChoiceMade` flag before applying, same
-  "cancellation is cooperative, re-check on the other side too" shape
-  `maybeFallBackToTranscode` already uses for the transcode-fallback result.
-  A late automatic result can therefore never overwrite a newer session or a
-  manual pick that beat it.
+- **One reducer owns the track choice.** `TrackChoice` (`player/TrackChoice.kt`)
+  holds the current audio and subtitle choice; `PlaybackViewModel.sendTrack`
+  is its single writer, and effects (apply, negotiate, commit, notice) run
+  from its result. A manual pick, a landing, a fallback reload and the
+  start decision are all events to it; none writes the choice elsewhere.
+- **A transcode's start choice is final.** The player never re-runs the
+  policy on a transcode: the core decides at negotiation and the plan
+  carries the outcome. Start rule: the core names the policy's subtitle
+  unless the URL already names that same index; Off or a sidecar names
+  `-1` only when the first URL burns a subtitle or names one; audio is
+  named when it differs from the delivered stream; `MediaSourceId` is
+  always sent (JF12 honours `SubtitleStreamIndex` and `AudioStreamIndex`
+  only with it). `PlaybackPlan.burned_subtitle_index` is read from the
+  transcode URL (`SubtitleMethod=Encode` plus an index);
+  `delivered_audio_index` is the negotiated audio stream, else the
+  source's default, `None` on Direct Play. A fallback before any choice
+  asks the core for the policy. If a landing burns a stream the choice
+  didn't ask for, it is logged once (`playback.burn_ignored`, docs/21) and
+  never retried.
+- **The plan carries the track rows.** `PlaybackPlan.track_rows` is the one
+  canonical row list for a transcode (streams, titles verbatim, language,
+  codec, default/forced/SDH, delivery: rendition, burned, needs
+  negotiation, sidecar, delivered or source audio, selected); empty on
+  Direct Play. The picker shows it, with Media3's rendition ids overlaid by
+  `DisplayTitle` (the manifest's NAME), only where the label names exactly
+  one rendition and one Media3 track, or, failing that, as its language's
+  only rendition. Every announcement re-resolves a shown text through the
+  same map (switching or turning it off, never negotiating). Once Media3 announces the loaded stream, a rendition it lacks
+  or can't match needs a negotiation. A rendition picked before the
+  announcement waits for it: shown if announced, else negotiated (refused
+  in a group). A reloaded plan's text the announcement lacks stays off,
+  the choice kept.
+- **A pick negotiates only when it must.** Moving off a burned stream, or
+  picking a stream the manifest doesn't carry (ASS and bitmaps reach a
+  transcode only burned in; some text isn't in the manifest), needs a
+  negotiation; every other pick is a Media3 selection. Picking the stream
+  already burned in is a no-op. At most one negotiation per user action; a
+  choice changed while one is in flight chains one more from the landed
+  session. In a watch-together group none of these picks is allowed
+  (docs/28 §1). Every renegotiation resends the session's copy policy (§2).
 - **Every `load()` starts from a clean per-item track baseline.** `PlayerHolder`
   is a process-wide singleton with one `ExoPlayer`; without a reset, a
   previous item's applied decision (a per-series subtitle Off's
@@ -396,68 +433,6 @@ Session threading rules shared by every path above:
   viewport preference anywhere) is touched. This is what makes
   `SubtitleActionFfi.LEAVE` mean "this item's own default", never "whatever
   the previous item left selected".
-- **A same-item fallback reload restores the choice.** The view model
-  records the subtitle and audio choice as it applies one, manual or
-  automatic (Off, the player's default, a sidecar, or an embedded track's
-  language, title and forced flag); Media3's announced selection lags a pick,
-  so it is never read back for this. Before the fallback's `load()` resets
-  the baseline, that record is captured: an automatic decision still in
-  flight counts as undecided, and the new load resolves afresh through Rust.
-  Otherwise text is turned off at once (no track id needed) and an embedded
-  choice is matched again on the first announcement carrying that kind (an
-  empty or audio-only announcement keeps it pending): a unique language and
-  forced match wins, an exact title breaks ties, and ambiguity is no match,
-  never the first candidate, since tracks carry no role. No match leaves
-  text off silently; audio keeps the player's default. A manual pick clears
-  whatever is still pending. The test player applies decisions through the
-  same `trackSelectionBaseline` and `withTrackDecision` as `PlayerHolder`.
-- **The negotiation carries the subtitle choice, so nothing the viewer turned
-  off is burned in.** No Media3 selection can remove pixels, so every transcode
-  negotiation names the stream the recorded choice wants
-  (`subtitleStreamIndexFor`): Off or a sidecar names none (`-1`), an embedded
-  choice names its matched stream from `PlaybackPlan.embedded_subtitles`
-  (same matching policy; ambiguous or missing names none; a pick from a
-  stream row below names that row's stream while it still carries the
-  picked identity, since two untitled same-language streams match alike),
-  and an undecided
-  or default choice leaves the server's default, which is what the Direct
-  Play player showed. JF12 honours `SubtitleStreamIndex` only with
-  `MediaSourceId` (dev-server evidence: an ASS-default file burned in for
-  omitted, `-1` and `2` alike without it; with it, `-1` drops the stream and
-  `2` burns it in). `PlaybackPlan.burned_subtitle_index` is read from the
-  transcode URL and needs both `SubtitleMethod=Encode` and an index (a `-1`
-  negotiation still says Encode, with no index). While transcoding, the
-  picker also lists the plan's streams no Media3 track carries
-  (`transcodeStreamRows`): ASS and bitmaps, which reach a transcode only
-  burned in, the burned one selected, and text the manifest lacks (below).
-  Picking an ASS or bitmap stream renegotiates with it burned in, picking
-  such text renegotiates naming it, and moving off a burned one (Off, a
-  sidecar, a delivered track) renegotiates without it; picking the one
-  already burned in is a no-op; in a watch-together group none of these
-  picks is allowed (docs/28 §1). A choice changed while a negotiation is
-  in flight is renegotiated from the landed session before anything loads,
-  as often as the choice keeps changing (a landing that contradicts it never
-  loads: burned-in pixels can't be turned off), and every renegotiation
-  resends the session's copy policy
-  (§2), so a subtitle change never lets a failed stream be copied back.
-- **A transcode starts with the policy's subtitle.** Before the transcode
-  negotiation `prepare_playback` sends (Auto's second, sidecar-free one;
-  Cap's repeat), `policy_subtitle_for_transcode` runs the track policy over
-  what the player will list: sidecars, then the streams only a negotiation
-  shows. A stream pick is named with its `MediaSourceId`, so the server
-  never starts a transcode only to restart it with the subtitle (each
-  restart re-reads the file to extract the text). A sidecar, Off, Leave or
-  a URL already naming a stream sends nothing, and a pick the player still
-  disagrees with renegotiates as before.
-- **The negotiation carries the audio choice.** A transcode's HLS holds one
-  audio stream, so Media3 can list only that one; picking another
-  renegotiates naming it (`AudioStreamIndex`, honoured only with
-  `MediaSourceId`, like the subtitle index). `PlaybackPlan.audio_streams`
-  lists the source's indexed audio streams (`DisplayTitle` verbatim), and
-  `delivered_audio_index` is the one a Transcode plan carries: the
-  negotiation's `AudioStreamIndex`, else the source's
-  `DefaultAudioStreamIndex`; `None` on Direct Play, whose file holds every
-  stream for the player to pick.
 - **Text subtitles in a transcode are drawn by the player, never burned in.**
   The profile lists `Hls` ahead of `External` for SRT and WebVTT, since the
   server takes the first matching profile and reads `Hls` only in a
@@ -469,9 +444,9 @@ Session threading rules shared by every path above:
   `PlaybackPlan.embedded_subtitles` therefore holds the embedded streams
   plus the sidecars the server delivers by `Hls`, each with its
   `DeliveryMethod` and `DisplayTitle`. Each rendition is labelled with its
-  stream's `DisplayTitle`, so `manifestTrackInfos` gives a delivered
+  stream's `DisplayTitle`, so the plan's track rows give a delivered
   rendition its stream's title and flags (identities then match Direct
-  Play's for reapply, memory and negotiation) and drops renditions of
+  Play's for reapply, memory and negotiation) and drop renditions of
   streams the server burns in instead, so an ASS copy is never offered as
   plain text. The server pins every cue to the bottom line (Media3 reads
   it as line -1), which would bypass the viewer's vertical position and
@@ -546,12 +521,16 @@ Every subtitle path (stock text, plain and styled ASS, both sidecar kinds) draws
 the media position minus the viewer's subtitle delay (docs/12 §16). The video is never re-prepared, so a pick or a switch never rebuffers. The row
 reads `Loading…` until the file is in; a fetch or parse failure (or a file with
 no cues) marks it `Unavailable`, returns subtitles to Off and shows a short
-notice, and the video plays on. Sidecar indices belong to one media source: a
-transcode fallback on the same source keeps the showing sidecar, one that moves
-to another source drops every cached file and re-picks the same language and
-title there. A fetch the old session refuses mid-swap is not the file failing:
-the pick stays chosen and Loading, and is asked again under the new session
-once it exists; a later pick or Off in between wins.
+notice, and the video plays on. Sidecar indices belong to one media source.
+A committed renegotiation reloads the player, which clears the overlay, so a
+showing sidecar is asked for again under the new session: cached cues show at
+once, a styled script loads again. A plan on another source drops every cached
+file and re-picks the same language and title there. While a renegotiation
+swaps sessions, a sidecar is held, not shown, until the new plan commits: a
+fetch the old session refuses (not the file failing), and a file loaded over a
+burned subtitle, which is never drawn over the burn. If the renegotiation
+fails, a held file shows only when the plan on screen burns nothing; a later
+pick or Off in between wins.
 It never changes the play method, so Direct Play stays Direct Play.
 
 ## 4. On-device test cases
@@ -592,6 +571,10 @@ Rule: **a seek never fires while the previous seek is still in flight.**
 - A landing timeout of 2.5 seconds fires the held target anyway; that
   re-seek is exactly the manual recovery the viewer performed. With
   nothing held the timeout clears the in-flight state and logs a stall.
+  On a Transcode plan the timeout is 20 seconds (§7): a seek past the
+  server's encode lands only after the server restarts ffmpeg there, so an
+  early re-issue would restart it again. The timeout is an upper bound; a
+  seek inside what the encode has produced still lands at once.
 - Stop, retry after an error, and a media item change reset the
   serializer. The retry path's own seek bypasses it.
 
@@ -638,6 +621,23 @@ once in an evening; with it, no seek ever overlapped another and no
 freeze occurred.
 
 ### 5.1 Audio clock guard
+
+**Root cause, fixed at the source:** Media3 1.11.1 counted any decrease of
+the AudioTrack's playback head as a 32-bit wrap. While the released track
+and its replacement share one direct output during a flush, the head can
+read lower, so the position jumped 2^32 frames ahead and Media3 then
+reported the frames written: the 44,739 s reading below, and the stepped
+position that dropped video frames on a later item. Upstream 4c95cd9
+treats a decrease under 2^31 frames as a reset; the app ships it
+backported (docs/06 "Patched Media3"). The guard below is now observe-only:
+it returns the raw position and logs `clock would-clamp` where it would
+have acted. On a test TV with E-AC3 passthrough the patched build showed
+only brief `start` faults on a fresh track after a seek (over within a few
+reads), never a latch, and no stall; the guard is deleted once real use
+shows the same. The output provider also logs, only when they change,
+`audio support mime=<encoded> level=<n> offload=<0|1>` (whether Media3 may
+send that format as passthrough) and `audio out encoding=<n> offload=<0|1>
+rate=<Hz>`, so a TV that stops offering passthrough mid-session is visible.
 
 Serialized seeks still stalled: two skips 1.35 s apart on an HEVC/E-AC3
 episode, both landed via first frame, and 49 ms after the second landing
@@ -688,8 +688,8 @@ item. Nothing ever goes backwards. `player/AudioClockGuard.kt` applies it in a
 the extension point Media3 documents for wrapping the AudioTrack output. The
 renderer stays ready, the video clock never sees a 2.5 s jump (so no
 drop-to-keyframe codec flush either), and the seek path is untouched.
-Logging, tag `JellybeamSeek`, numbers only: `clock clamp rule=<start|jump|ceiling>
-reported=<ms> bound=<ms>` on each fault of an output (first 20), `clock clamps=<n> maxExcess=<ms>
+Logging, tag `JellybeamSeek`, numbers only: `clock would-clamp rule=<start|jump|ceiling>
+reported=<ms> bound=<ms>` on each fault of an output (first 20), `clock would-clamps=<n> maxExcess=<ms>
 start=<n> jump=<n> ceiling=<n>` on release, and the always-on `clock drift out=<n> ppm=<n>
 span=<s> lag=<ms> clamps=<n>` once a minute (the raw position's rate against
 `nanoTime`; a final line with `final=1` at release). Tests are trace tests: the
@@ -705,18 +705,148 @@ landings, median 1.0 s, fastest 112 ms, the same as before the guard.
 
 ### 5.2 Resume seek lands on the previous keyframe
 
-Rule: **a resume's saved position lands on the keyframe at or before it, never mid-GOP.**
-`setMediaItem(item, startPositionMs)` applies the initial position exactly, so the video renderer
-decodes and discards every frame from the last keyframe up to it -- up to half a GOP of wasted
-decode before the first visible frame. `PlayerHolder.load` sets `SeekParameters.PREVIOUS_SYNC`
-before `prepare()`, then issues one `seekTo(startPositionMs)` on the first `onTracksChanged` with
-a non-empty `Tracks` (the period is prepared; Media3's `SeekMap` biases the landing to the
-preceding sync sample, an in-buffer seek). Normal `SeekParameters` are restored on the first
-landing signal (`onRenderedFirstFrame`/`STATE_READY`, whichever first) so a later user skip keeps
-its usual exact-seek semantics. The resume target takes `SeekSerializer`'s in-flight slot at
-the media-item transition, before playback input can be accepted, and the player seek itself is
-issued once tracks are known: a D-pad skip pressed while the player is still preparing is held
-behind it and replayed on top after it lands (§5), never overwritten by a resume seek that
-arrives later. Both steps are guarded by `PlayerHolder`'s own load generation, so a listener
-callback left over from a replaced item can never fire them (`ResumeSeekOrderingTest`). A Transcode (HLS) plan is untouched -- its
-segment boundaries already govern this. `player/PlayerHolder.kt`'s `ResumeSeekGate`, unit-tested.
+Rule: **a resume's saved position lands on the keyframe at or before it, never mid-GOP, positioned
+once.** `setMediaItem(item, startPositionMs)` alone applies the position exactly, decoding and
+discarding every frame from the last keyframe up to it; a second `seekTo` after preparation would
+cancel the first request at the resume cluster and reopen the same bytes on a new connection
+(+90-160 ms to first frame on a remote server). So `ItemBoundMediaSourceFactory` wraps a resume
+load's source in `ResumeSnapMediaSource`, whose period's first `selectTracks` starts at
+`getAdjustedSeekPositionUs(position, PREVIOUS_SYNC)`; Media3 adopts the position `selectTracks`
+returns as the period's start, so the first request opens at the keyframe and no seek follows. An
+unseekable file snaps to 0, as any seek into it would. One-shot per source: a retry's re-created
+period keeps its exact position. The resume target takes `SeekSerializer`'s in-flight slot at the
+media-item transition, before playback input can be accepted, and the first landing signal
+(`onRenderedFirstFrame`/`STATE_READY`) frees it: a D-pad skip pressed while the player is still
+preparing is held and replayed on top (§5). The reservation is keyed on `PlayerHolder`'s load
+generation, so a transition left over from a replaced item reserves nothing
+(`ResumeSeekOrderingTest`). A Transcode (HLS) plan, a Watch Together exact start and an external
+start never snap (`loadOpening`'s `armResume`). `ResumeSnapMediaSourceTest`, `ResumeSeekGateTest`.
+
+### 5.3 Container reads are buffered
+
+Rule: **an extractor's small reads never reach OkHttp one by one.** Media3's extractors read
+container fields a few bytes at a time (an MKV Cues index is mostly 1-4-byte EBML fields), and
+`DefaultExtractorInput` passes each read straight to the `DataSource`; through OkHttp, Okio and
+Media3's transfer reporting each call costs far more than its bytes. A 2 h movie's Cues index
+(about 1.6 MB, read before tracks are known) took ~0.9 s of loader-thread CPU on the TV this way.
+`CancelingDataSource` serves any read smaller than `READ_AHEAD_BYTES` (16 KiB) from a buffer it
+fills with one upstream read; a larger read goes straight upstream with no extra copy. An upstream
+read returns whatever bytes have arrived, so the buffer never waits for data the extractor didn't
+ask for. `open` and `close` drop buffered bytes, and the abandoned-read tracker and the
+transcode segment gate (§7) count bytes as they leave the network, unchanged.
+
+### 5.4 Seek index cache
+
+Rule: **a warm start of a Matroska file never requests its Cues.** When the Cues sit after the
+first cluster, Media3 seeks to them before it can report tracks: one more range request for the
+file's tail (~200-340 ms to a remote server) and, for a 2 h film's ~1.6 MB index, ~0.5 s of
+parsing. So the first load of a file stores a compact seek index and later loads use it instead.
+
+- **What is stored.** `AssMatroskaExtractor` collects the cues of Media3's seek track (the last
+  default video track, else the first video, else the last default audio, else the first audio)
+  as (time, segment start + CueClusterPosition), drops trailing cues at or past the duration as
+  Media3's `ChunkIndex` does, and stores them under `cacheDir/seekidx` (`SeekIndexStore`) only
+  when the Cues followed the first cluster, Media3 built a seekable map from them, there are at
+  least 2 entries, every offset is inside the file and every entry answers Media3's own map with
+  itself (checked off the loader thread before writing). The SSA tracks' Cues entries (docs/13's
+  earlier-starting lines) and the time scale are stored with it, collected even with full styling
+  off, so a later styled start needs no Cues pass either.
+- **Bounds.** A cue within 500 ms of the last kept one is dropped and more than 65,536 kept cues
+  abandon the index; out-of-order cues, which Media3 sorts, abandon it too, and so do more than
+  16,384 SSA entries. At most 32 files and 2 MB, least recently used first; a hit marks its file
+  used. Writes go to a temp file renamed into place (`LruFileDir`, shared with the trickplay sheet
+  cache); a damaged or other-version file is deleted on read.
+- **Only resumes keep one.** An item played to its end (the end reducer's played-through effect,
+  solo or group) drops its index, keyed from the same stream URL, so the cache holds in-progress
+  items only; a stop mid-file keeps it. A stop the server counts as watched without reaching the
+  end has no single owner in the app (the server and the core's mirror decide it), so that index
+  ages out by LRU.
+- **Key and validation.** Only a static stream is cached, keyed by a hash of host, port, path and
+  `mediaSourceId`: no token or per-play parameter takes part and the URL never reaches disk. A
+  stored index is used only when the response's size (Content-Range total, else Content-Length)
+  matches and its Last-Modified/ETag hash matches (both absent counts as a match).
+- **Hit path.** The extractor is built with `FLAG_DISABLE_SEEK_FOR_CUES`, so Media3 reports tracks
+  at the end of Tracks and an Unseekable map at the first cluster; `AttachmentSeekingExtractor`'s
+  output swaps that for `CachedSeekMap`, which answers exactly as Media3's `ChunkIndex` over the
+  same points (the point at or before, plus the next one, which §5.2's snapping needs), and with
+  full styling on hands the stored SSA entries to the styled renderer there, as the Cues pass would.
+  A hit whose segment start, first cluster or duration (beyond 1 ms) no longer match, or whose read
+  then fails to parse, ends early or throws any non-network error (a file rewritten under the same
+  size and Last-Modified), drops its index at once and fails as `SeekIndexMiss`, never playing on
+  unseekable; `ReconnectPolicy.retriesCold` re-prepares that play session cold once, with no
+  reconnect episode or message. Its second failure, a cold failure and a network failure take the
+  usual path, and a network failure keeps the index. A seekable map from Media3 is never
+  replaced, and Cues reached at the end of playback neither re-emit a map nor rewrite the index.
+- **Landing.** With keyframes closer than 500 ms, a resume or seek can land up to that much before
+  the keyframe Media3's full index would pick; the extra frames decode and are discarded.
+
+`MatroskaSeekIndexTest`, `SeekIndexStoreTest`.
+
+## 6. Detail playability
+
+The Movie and Episode detail pages end the spec capsule with one cell that says what pressing
+Play will do on this TV, so a file the TV can't play is visible before Play is pressed:
+
+| Cell | When | Tier |
+|---|---|---|
+| `DIRECT PLAY` | Some version passes this TV's device profile, or Auto would attempt Direct Play despite a miss (§1.1 row 4: Tolerate on, not a missing decoder) | notable (Panna) |
+| `WILL TRANSCODE (X)` | No version passes and Auto transcodes up front (no decoder for the codec, or any miss with Tolerate off); transcoding allowed or unknown | baseline (Grigio) |
+| `WILL TRANSCODE` | Any bitrate cap (every file transcodes), transcoding allowed or unknown | baseline (Grigio) |
+| `WON'T PLAY (X)` | No version passes and nothing will convert it: Direct Play mode, or Auto transcoding up front where the server forbids video transcoding for this user | warning (Ambra) |
+| none | No stream facts (the mirror's first paint, a Series) | — |
+
+**One rule set.** The verdict evaluates each `MediaSource` against the same `RawDeviceProfile`
+`android_tv_profile` sends the server (`jellyfin_core::profile_miss`): the Direct Play
+profile's codec lists, then every video `CodecProfile` that applies (its `ApplyConditions`
+hold), condition by condition. A stream fact the server didn't send passes here, though the
+server fails an `IsRequired` unknown: the cell never claims "won't play" without evidence. The
+container is not judged (a remux still plays direct). The audio judged is the server's default
+track: `DefaultAudioStreamIndex`, else the stream flagged default, else the first. Auto's
+up-front transcode (§1.1 rows 2-3) and this cell ask one predicate
+(`auto_transcodes_up_front`), so they can't disagree for any miss.
+
+**Versions.** Playback takes the first version the server can play direct, so the cell says
+`DIRECT PLAY` when any version passes; the reason otherwise comes from the first version. A
+version with no video codec to judge may be the one playback picks, so with no pass and any
+such version the cell is absent rather than `WON'T PLAY`; a bitrate cap ignores misses.
+
+**`X`** names the failing property in the capsule's own vocabulary: the video or audio codec,
+the video profile, the HDR label, the resolution or the bitrate; it is the judged version's own
+value, carried in `Playability.value`, not read off the page's default streams. A level miss (only
+with "Tolerate mislabeled levels" off) and a missing fact show the cell without brackets.
+
+**Transcoding allowed.** `UserPolicy.EnableVideoPlaybackTranscoding`, cached per account from
+the `/Users/Me` reply `validate_session` (launch, account switch, foreground) and
+`is_administrator` already fetch. A detail load that finds it unknown fetches `/Users/Me`
+itself, only when the verdict differs between allowed and forbidden (Cap, or Auto transcoding
+up front), and the same reply caches the role, so `is_administrator`'s call from the page
+costs nothing more. Unknown (a failed fetch too) is treated as allowed. A server
+with transcoding off for everyone (no ffmpeg) is not visible to the client; the play-time
+refusal still covers it.
+
+**Not judged.** Subtitle-driven transcodes (burn-in) and Auto's play-time software-decoder
+fallback (§1.1 row 4): `DIRECT PLAY` is the profile's prediction.
+
+**Idle cost.** Computed once per live detail record from data that record already carries; no
+timer or collector, and no request beyond the `/Users/Me` the page asks for anyway.
+
+## 7. Server cost bounds
+
+A Transcode plan costs the server an ffmpeg process per (re)start, and Jellyfin
+starts a fresh one for every segment request that finds no live job or lands
+past its encode. The player bounds what it asks for:
+
+| Case | Rule | Launches |
+|---|---|---|
+| The server's ffmpeg fails (HTTP 500, or 502/503/504 as a proxy relays it, on a segment or playlist) | One retry after 2 s, then "The server couldn't convert this video for this TV." Counted on Media3's `errorCount`, which an HLS retry never resets; variant exclusion is off for it. Only a 503 with Retry-After keeps the 90 s window. Direct Play keeps it for every 5xx: there it costs no ffmpeg. | ≤ 2 |
+| A file whose streams end before its listed length | Two segments in a row with no video frame (no video PES; the server's past-the-end stub carries only tables and an audio packet, while every real segment starts with a keyframe, however black, silent or static) mean the server has no media from the first of them on. Counted on the loader thread as each whole read ends; a resumed read or bytes that aren't plain 188-byte TS prove nothing and break the run; a request the server holds past the 20 s read timeout counts as video-less only right after one that was (a held first post-end request stays a network error, bounded by the 90 s retry window); from then on that load never requests a segment at or past that point (a held load re-checks locally every 5 s, prepared or not, and never surfaces as an error; a back-skip, seek or retry never re-opens it). The gate keeps counting after a trip: a lower run trips again lower (a seek into the void, then back and playing forward), a higher one never raises the end. Buffered real media plays out; once tripped, a playing stall decides, outside a seek in flight (a seek's own stall belongs to the seek serializer until it lands or times out, then the buffering tick decides; the loader may never ask past the end when its buffer is full), never while paused (it decides once play resumes), and it ends the session by where it lands: within two segments of a known real end with everything up to it buffered, a normal end (reported at the full runtime, so watched, then next-up or exit; in a group, the group's end like a natural one); past the end, a quiet close resuming two segments before the real end (the last real segment can hold a single frame), so a resume plays out to a normal end; with no real media read on this load, "The server's conversion stopped producing video." A stall anywhere else is an ordinary rebuffer. The real end is known only when the run directly follows a segment read with media on this load (a resumed read counts), and is then the run's start; until then only a stall at or past the run's start ends it. Every later read raises the real end. A stop never reports a position in the stubs. Segment times come from the URL's runtimeTicks/actualSegmentLengthTicks, else index × 6 s. Transcode loads only: Direct Play reads pass through. | ≤ 2 past the end, per load (per stretch of stubs a seek lands in; Jellyfin 10.11 can hold a third request open indefinitely, which a third count would wait on forever) |
+| Playing and buffering with nothing loading or seeking, yet the position hasn't moved for 15 s, whatever is buffered (a copied last segment whose truncated final PES never delivers end of stream; a mid-file timestamp gap the renderers can't cross) | Safety net: first one re-seek to the position through the seek serializer, the viewer's manual fix (a `player.stallRecover` diag line), once per load; frozen 15 s again, or any player failure within a second of where that re-seek was spent (the held request's IO timeout), stop with "Playback stopped: the rest of this video couldn't be read." when everything up to the listed end is buffered, else "Playback stopped: this video couldn't continue past this point."; reported at the current position, never watched, with a `player.stalledForGood` diag line (position, buffered ahead, each audio/video renderer's state). Never before this load's first frame, counted again after a retry re-prepares (a cold software decoder can take tens of seconds over a full buffer), while paused (a pause restarts the 15 s), while a load or a seek is in flight, or while the position moves; timed on a monotonic clock. Group members too. | ≤ 2 |
+| A burst of skips during a slow encode | §5's landing timeout is 20 s on a Transcode plan, so held presses coalesce into one final seek. | ≤ 2 per burst |
+| The server sends video this TV can't decode (e.g. it remuxes AV1 because the account may not transcode video) | Every track of the type rejected and no fallback left: end with a message naming the track and its codec, never a black picture or silent playback. Not while a fallback negotiates. | 1 |
+| A source larger than this TV's decoder | A software decoder reports the largest size it decodes at 24 fps, not its independent width/height ceilings, so the server's transcode scales down to it. A hardware decoder keeps its ceilings. | 1 |
+
+One owner decides every end of a load (rows 2 and 3, and a natural end): `PlaybackViewModel.sendEnd` →
+`reducePlaybackEnd` (`PlaybackEnd.kt`), fed by `PlayerHolder` and `OutOfMediaGate` events tagged with the load
+generation, so a late event from an earlier load changes nothing. `LoadRetryPolicy`, `SeekSerializer` via `loadOpening`, `PlaybackViewModel.onTracksChanged`,
+`DeviceCapsProbe`; unit-tested. `tools/ffmpeg-launches.sh` counts launches per scenario
+from the server's log.

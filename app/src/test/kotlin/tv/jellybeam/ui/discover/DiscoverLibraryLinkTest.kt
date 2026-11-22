@@ -14,6 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import uniffi.jellybeam_core.ItemDetail
+import uniffi.jellybeam_core.Playability
 
 /** Same bare-minimum fixture shape as [tv.jellybeam.ui.detail.DetailViewModelTest]'s own
  * `testItemDetail`.
@@ -48,6 +49,7 @@ private fun testItemDetail(id: String = "item-1", name: String = "Synthetic Epis
     childCount = null,
     directors = emptyList(),
     writers = emptyList(),
+    playability = Playability.Unknown,
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)

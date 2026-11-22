@@ -380,7 +380,16 @@ strip.
 
 ### 4.6 Paging
 
-`LibraryViewModel` keeps its growing-prefix model (200 per page). A rail
+`LibraryViewModel` keeps its growing-prefix model. The first read (the
+initial load and every sort/filter requery) is eight grid rows, 64 cards at
+8 columns: about three screens of the ~2.5 rows a screen shows, so first
+paint reads a third of what it used to while the scroll-ahead trigger (three
+rows from the end) still fires well before the user reaches the edge. Every
+later page is 200 (`GridPaging.PAGE_SIZE`), sized for throughput. A change
+refresh re-reads the whole loaded prefix (never less than a first page), so
+a focused card deep in the grid stays loaded across refreshes and a return
+from Detail; live channel listings (network, not mirror) keep 200 for every
+page. Grid cards carry no overview (docs/07 §5). A rail
 jump to offset `n` first ensures the loaded rows cover `n + PAGE_SIZE`,
 reading only the missing tail and appending it by id, then scrolls to
 `n`'s row start. A mirror change between those reads can duplicate (dropped)

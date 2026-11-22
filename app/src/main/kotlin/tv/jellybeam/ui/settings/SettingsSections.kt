@@ -51,6 +51,7 @@ import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingMode
 import uniffi.jellybeam_core.SubtitleColorPreset
+import uniffi.jellybeam_core.SubtitleModeSetting
 import uniffi.jellybeam_core.SubtitlePositionPreset
 import tv.jellybeam.ui.common.JellybeamTextField
 
@@ -288,6 +289,13 @@ internal fun PlaybackSectionContent(state: SettingsUiState, viewModel: SettingsV
             onSelect = viewModel::selectPlaybackQuality,
             chipLabel = { playbackQualityChipLabel(it) },
             chipKey = ::playbackQualityChipKey,
+        )
+        LanguageChipRow(
+            label = stringResource(R.string.settings_audio_language),
+            description = stringResource(R.string.settings_desc_playback_audio_language),
+            key = "playback/audio_language",
+            selected = settings.language.audio,
+            onSelect = viewModel::selectAudioLanguage,
         )
         PresetChipRow(
             label = stringResource(R.string.settings_skip_back),
@@ -636,8 +644,27 @@ private fun subtitleColorChipLabel(color: SubtitleColorPreset): String = when (c
 internal fun SubtitlesSectionContent(state: SettingsUiState, viewModel: SettingsViewModel) {
     val settings = state.settings
     val overridden = Modifier.alpha(if (settings.subtitleUseSystemStyle) SETTINGS_DISABLED_ALPHA else 1f)
+    // docs/09: only Subtitle mode Always reads the language; the row stays editable.
+    val languageUnused = Modifier.alpha(if (settings.language.subtitleMode == SubtitleModeSetting.ALWAYS) 1f else SETTINGS_DISABLED_ALPHA)
 
     Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
+        PresetChipRow(
+            label = stringResource(R.string.settings_subtitle_mode),
+            description = stringResource(R.string.settings_desc_subtitles_subtitle_mode),
+            key = "subtitles/subtitle_mode",
+            options = SubtitleModeSetting.entries,
+            selected = settings.language.subtitleMode,
+            onSelect = viewModel::selectSubtitleMode,
+            chipLabel = { subtitleModeChipLabel(it) },
+        )
+        LanguageChipRow(
+            label = stringResource(R.string.settings_subtitle_language),
+            description = stringResource(R.string.settings_desc_subtitles_subtitle_language),
+            key = "subtitles/subtitle_language",
+            selected = settings.language.subtitle,
+            onSelect = viewModel::selectSubtitleLanguage,
+            modifier = languageUnused,
+        )
         PresetChipRow(
             label = stringResource(R.string.settings_subtitle_size),
             description = stringResource(R.string.settings_desc_subtitles_subtitle_size),

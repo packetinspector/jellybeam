@@ -5,22 +5,28 @@ import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.ParserException
 import androidx.media3.common.text.Cue
 import androidx.media3.common.util.Consumer
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.util.Util
 import androidx.media3.exoplayer.BaseRenderer
 import androidx.media3.exoplayer.RendererCapabilities
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.Extractor
 import androidx.media3.extractor.ExtractorInput
+import androidx.media3.extractor.ExtractorOutput
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.PositionHolder
+import androidx.media3.extractor.SeekMap
+import androidx.media3.extractor.TrackOutput
 import androidx.media3.extractor.mkv.EbmlProcessor
 import androidx.media3.extractor.mkv.MatroskaExtractor
 import androidx.media3.extractor.text.CuesWithTiming
 import androidx.media3.extractor.text.DefaultSubtitleParserFactory
 import androidx.media3.extractor.text.SubtitleParser
+import java.io.EOFException
 import kotlin.math.abs
 import tv.jellybeam.player.subtitleClockUs
 import uniffi.jellybeam_core.AssOverlay
@@ -129,10 +135,12 @@ private class UnpinningVttParser(private val delegate: SubtitleParser) : Subtitl
 /**
  * [DefaultExtractorsFactory] with its Matroska extractor swapped for [AssMatroskaExtractor]. [fonts] is
  * already bound to one item ([ItemBoundMediaSourceFactory]), so a late loader thread can't bind a newer one.
+ * [seekIndexes] null keeps no seek indexes (docs/18 §5.4).
  */
 @OptIn(UnstableApi::class)
 class AssExtractorsFactory(
     private val fonts: AssFontSink,
+    private val seekIndexes: SeekIndexStore? = null,
     private val base: DefaultExtractorsFactory = DefaultExtractorsFactory(),
 ) : ExtractorsFactory {
     private var subtitleParserFactory: SubtitleParser.Factory = DefaultSubtitleParserFactory()
@@ -166,12 +174,22 @@ class AssExtractorsFactory(
         return this
     }
 
-    override fun createExtractors(): Array<Extractor> = swap(base.createExtractors())
+    override fun createExtractors(): Array<Extractor> = swap(base.createExtractors(), seekIndex = null)
 
     override fun createExtractors(uri: Uri, responseHeaders: Map<String, List<String>>): Array<Extractor> =
-        swap(base.createExtractors(uri, responseHeaders))
+        swap(base.createExtractors(uri, responseHeaders), seekIndexSlot(uri.toString(), responseHeaders))
 
-    private fun swap(extractors: Array<Extractor>): Array<Extractor> = Array(extractors.size) { i ->
+    /** Loader thread, once per load (docs/18 §5.4): the stored index is a hit only for the same size and validator. */
+    internal fun seekIndexSlot(url: String, responseHeaders: Map<String, List<String>>): SeekIndexSlot? {
+        val store = seekIndexes ?: return null
+        val key = seekIndexKey(url) ?: return null
+        val length = contentLengthOf(responseHeaders) ?: return null
+        val validator = validatorOf(responseHeaders)
+        val hit = store.read(key)?.takeIf { it.contentLength == length && it.validator == validator }
+        return SeekIndexSlot(store, key, length, validator, hit, persist = hit == null)
+    }
+
+    internal fun swap(extractors: Array<Extractor>, seekIndex: SeekIndexSlot?): Array<Extractor> = Array(extractors.size) { i ->
         val e = extractors[i]
         if (e is MatroskaExtractor && e !is AssMatroskaExtractor) {
             AttachmentSeekingExtractor(
@@ -179,6 +197,7 @@ class AssExtractorsFactory(
                     subtitleParserFactory,
                     matroskaFlags(transcoding, parseHagc),
                     fonts,
+                    seekIndex = seekIndex,
                 ),
             )
         } else {
@@ -196,7 +215,8 @@ fun matroskaFlags(transcoding: Boolean, parseHagc: Boolean): Int =
 /**
  * docs/13: the attachments block is one unknown element, styled or not, so no font byte is read before
  * the first frame; its range goes to [fonts] when styled. [AttachmentSeekingExtractor] turns a large
- * skip into a seek. Uses MatroskaExtractor's protected element hooks; no reflection.
+ * skip into a seek. Uses MatroskaExtractor's protected element hooks; no reflection. docs/18 §5.4: with a
+ * [seekIndex] hit the Cues are never sought, and the cached map stands in for Media3's Unseekable one.
  */
 @OptIn(UnstableApi::class)
 class AssMatroskaExtractor(
@@ -204,15 +224,20 @@ class AssMatroskaExtractor(
     flags: Int,
     private val fonts: AssFontSink,
     seekPastBytes: Int = SEEK_PAST_ATTACHMENTS_BYTES,
-) : MatroskaExtractor(subtitleParserFactory, flags) {
+    seekIndex: SeekIndexSlot? = null,
+) : MatroskaExtractor(subtitleParserFactory, if (seekIndex?.hit != null) flags or FLAG_DISABLE_SEEK_FOR_CUES else flags) {
+    private val indexer = seekIndex?.let(::MatroskaSeekIndexer)
+
     // Cues of SSA tracks (docs/13): the tracks, the segment's data start and time scale, then each CuePoint.
     private val ssaTracks = mutableSetOf<Int>()
     private var trackNumber = -1
     private var trackCodec: String? = null
     private var trackEncoded = false
+    private var trackDefault = true
     private var segmentStart = 0L
     private var timecodeScaleNs = DEFAULT_TIMECODE_SCALE_NS
     private var cues: SubtitleCues? = null
+    private var cuesForFonts = false
     private var cueTime = 0L
     private var cueTrack = -1
     private var cueCluster = -1L
@@ -247,10 +272,20 @@ class AssMatroskaExtractor(
                 trackNumber = -1
                 trackCodec = null
                 trackEncoded = false
+                trackDefault = true
             }
             ID_CONTENT_ENCODING -> trackEncoded = true
-            // Only the styled renderer reads earlier-starting lines back (docs/13).
-            ID_CUES -> if (fonts.wantsFonts()) cues = SubtitleCues(ssaTracks.toSet())
+            ID_CLUSTER -> indexer?.cluster(contentPosition)
+            ID_CUES -> {
+                indexer?.cuesStarted()
+                // Only the styled renderer reads earlier-starting lines back (docs/13); a stored index keeps them for it.
+                cuesForFonts = fonts.wantsFonts()
+                cues = when {
+                    cuesForFonts -> SubtitleCues(ssaTracks.toSet())
+                    indexer?.persists == true -> SubtitleCues(ssaTracks.toSet(), limit = MAX_STORED_SUBTITLE_CUES + 1)
+                    else -> null
+                }
+            }
             ID_CUE_POINT -> cueTime = 0L
             ID_CUE_TRACK_POSITIONS -> {
                 cueTrack = -1
@@ -265,13 +300,47 @@ class AssMatroskaExtractor(
     override fun endMasterElement(id: Int) {
         when (id) {
             // An encoded (compressed) track's blocks can't be read back as-is, so it gets no cues.
-            ID_TRACK_ENTRY -> if (isSsaCodec(trackCodec) && !trackEncoded && trackNumber > 0) ssaTracks += trackNumber
-            ID_CUE_TRACK_POSITIONS -> if (cueCluster >= 0 && cueRelative >= 0) {
-                cues?.add(SubtitleCue(cueTrack, cueTime, cueDuration, segmentStart + cueCluster, cueRelative))
+            ID_TRACK_ENTRY -> {
+                if (isSsaCodec(trackCodec) && !trackEncoded && trackNumber > 0) ssaTracks += trackNumber
+                indexer?.trackEntry(trackNumber, trackDefault)
             }
-            ID_CUES -> cues?.takeIf { it.count > 0 }?.let { fonts.subtitleCues(it, timecodeScaleNs) }
+            ID_CUE_TRACK_POSITIONS -> {
+                if (cueCluster >= 0 && cueRelative >= 0) {
+                    cues?.add(SubtitleCue(cueTrack, cueTime, cueDuration, segmentStart + cueCluster, cueRelative))
+                }
+                if (cueCluster >= 0) indexer?.cue(cueTrack, cueTime, segmentStart + cueCluster)
+            }
+            ID_CUES -> if (cuesForFonts) deliver(cues, timecodeScaleNs)
         }
         super.endMasterElement(id)
+        // After Media3 has emitted its seek map from these Cues, which the index checks itself against.
+        if (id == ID_CUES) indexer?.cuesEnded(segmentStart, cues, timecodeScaleNs)
+    }
+
+    private fun deliver(subtitles: SubtitleCues?, scaleNs: Long) {
+        subtitles?.takeIf { it.count > 0 }?.let { fonts.subtitleCues(it, scaleNs) }
+    }
+
+    /** docs/18 §5.4: a hit hands the styled renderer the SSA Cues entries the skipped Cues pass would have. */
+    private fun deliverStored(index: SeekIndex) {
+        if (index.subtitleCues.isEmpty() || !fonts.wantsFonts()) return
+        deliver(SubtitleCues(ssaTracks.toSet()).apply { index.subtitleCues.forEach(::add) }, index.timecodeScaleNs)
+    }
+
+    internal fun seekIndexMiss(error: Exception): SeekIndexMiss? = indexer?.miss(error)
+
+    /** docs/18 §5.4: [output] as the seek index sees it: Media3's tracks are noted, and its seek map may be swapped. */
+    internal fun seekIndexOutput(output: ExtractorOutput): ExtractorOutput {
+        val indexer = indexer ?: return output
+        return object : ExtractorOutput by output {
+            override fun track(id: Int, type: Int): TrackOutput = output.track(id, type).also { indexer.track(id, type) }
+
+            override fun seekMap(seekMap: SeekMap) {
+                val map = indexer.seekMap(seekMap, segmentStart)
+                if (map is CachedSeekMap) deliverStored(map.index)
+                output.seekMap(map)
+            }
+        }
     }
 
     override fun integerElement(id: Int, value: Long) {
@@ -282,6 +351,7 @@ class AssMatroskaExtractor(
             }
             ID_TIMECODE_SCALE -> timecodeScaleNs = value
             ID_TRACK_NUMBER -> trackNumber = value.toInt()
+            ID_FLAG_DEFAULT -> trackDefault = value == 1L
             ID_CUE_TIME -> cueTime = scaled(value)
             ID_CUE_TRACK -> cueTrack = value.toInt()
             ID_CUE_CLUSTER_POSITION -> cueCluster = value
@@ -290,7 +360,8 @@ class AssMatroskaExtractor(
         super.integerElement(id, value)
     }
 
-    private fun scaled(timecode: Long): Long = timecode * timecodeScaleNs / 1000
+    /** Media3's own timecode scaling, so cue times match its seek points exactly. */
+    private fun scaled(timecode: Long): Long = Util.scaleLargeTimestamp(timecode, timecodeScaleNs, 1000)
 
     override fun stringElement(id: Int, value: String) {
         if (id == ID_CODEC_ID) trackCodec = value
@@ -303,6 +374,8 @@ class AssMatroskaExtractor(
         const val ID_TIMECODE_SCALE = 0x2AD7B1
         const val ID_TRACK_ENTRY = 0xAE
         const val ID_TRACK_NUMBER = 0xD7
+        const val ID_FLAG_DEFAULT = 0x88
+        const val ID_CLUSTER = 0x1F43B675
         const val ID_CODEC_ID = 0x86
         const val ID_CONTENT_ENCODING = 0x6240
         const val ID_CUES = 0x1C53BB6B
@@ -325,11 +398,20 @@ class AssMatroskaExtractor(
 class AttachmentSeekingExtractor(private val inner: AssMatroskaExtractor) : Extractor by inner {
     private val skips = inner.skips
 
+    override fun init(output: ExtractorOutput) = inner.init(inner.seekIndexOutput(output))
+
     override fun read(input: ExtractorInput, seekPosition: PositionHolder): Int = try {
         inner.read(skips.wrap(input), seekPosition)
     } catch (seek: SeekPast) {
         seekPosition.position = seek.target
         Extractor.RESULT_SEEK
+    } catch (e: ParserException) {
+        throw inner.seekIndexMiss(e) ?: e
+    } catch (e: EOFException) {
+        throw inner.seekIndexMiss(e) ?: e
+    } catch (e: RuntimeException) {
+        // Media3's EBML reader throws IllegalStateException on bytes that aren't an element, as a stale offset lands.
+        throw inner.seekIndexMiss(e) ?: e
     }
 
     override fun seek(position: Long, timeUs: Long) {

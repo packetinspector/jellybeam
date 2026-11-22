@@ -10,16 +10,19 @@ import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.exoplayer.util.ReleasableExecutor
 import androidx.media3.extractor.text.SubtitleParser
 import com.google.common.base.Supplier
+import tv.jellybeam.player.ResumeSnapMediaSource
 
 /**
  * docs/13: builds a fresh factory per item, each around `fonts.forItem()`, so the sink's generation is
  * taken when ExoPlayer creates the item's media source (application thread, inside `setMediaItem`, after
  * `load`'s generation bump), not when a loader thread makes the extractor, which an old item can do late.
- * Setters are remembered and applied to every factory built; the last call per setter wins.
+ * Setters are remembered and applied to every factory built; the last call per setter wins. [snapFirstSelection] is
+ * read then too: docs/18 §5.2, a resume's source is wrapped so its first track selection lands on a keyframe.
  */
 @OptIn(UnstableApi::class)
 class ItemBoundMediaSourceFactory(
     private val fonts: AssFontSink,
+    private val snapFirstSelection: () -> Boolean = { false },
     private val build: (AssFontSink) -> MediaSource.Factory,
 ) : MediaSource.Factory {
     private val settings = LinkedHashMap<String, (MediaSource.Factory) -> Unit>()
@@ -29,7 +32,8 @@ class ItemBoundMediaSourceFactory(
     override fun createMediaSource(mediaItem: MediaItem): MediaSource {
         val factory = build(fonts.forItem())
         settings.values.forEach { it(factory) }
-        return factory.createMediaSource(mediaItem)
+        val source = factory.createMediaSource(mediaItem)
+        return if (snapFirstSelection()) ResumeSnapMediaSource(source) else source
     }
 
     override fun getSupportedTypes(): IntArray = probe.supportedTypes

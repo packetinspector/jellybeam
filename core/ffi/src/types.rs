@@ -231,6 +231,17 @@ impl From<media_cache::CardRow> for Card {
     }
 }
 
+impl Card {
+    /// docs/07 §5: grid, shelf and search cells never draw the overview, so their reads leave it
+    /// off the FFI; Detail opens on [`crate::JellybeamCore::card_by_id`]'s full card.
+    pub(crate) fn list_cell(row: media_cache::CardRow) -> Self {
+        Self::from(media_cache::CardRow {
+            overview: None,
+            ..row
+        })
+    }
+}
+
 /// `GET /Items/{itemId}/Similar` returns raw `BaseItemDto`s off the wire,
 /// never through `Mirror`; `library_id` is always `None`. Fallible (unlike
 /// [`Card::from`]): a missing wire id means "skip this row".
@@ -336,6 +347,26 @@ pub enum FailedTrackFfi {
     Unknown,
 }
 
+/// docs/18 §3.1: the streams a transcode fallback asks for: the policy's, while the viewer's
+/// choice is undecided, or the ones that choice names (`None` leaves the server's pick).
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscodeStreamsFfi {
+    Policy,
+    Named {
+        subtitle: Option<i32>,
+        audio: Option<i32>,
+    },
+}
+
+/// docs/18 §2.1: why a transcode is renegotiated. `Fallback`: the playing stream failed, so its
+/// session stops being current at once and ends if the negotiation fails. `Renegotiate`: the
+/// viewer's choice needs other streams, so its session plays and reports on until the commit.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscodeCauseFfi {
+    Fallback,
+    Renegotiate,
+}
+
 /// docs/18 §2.1: one Kotlin playback request. `seq` is minted on the main thread before dispatch,
 /// so native admission follows viewer order; `account_epoch` is the epoch the request was minted
 /// under ([`crate::JellybeamCore::account_epoch`]).
@@ -413,6 +444,58 @@ pub enum BrowseRead {
     Failed,
     /// The rows, genuinely empty or not.
     Items { cards: Vec<Card> },
+}
+
+/// docs/11 item 11: why [`SeriesPlayTarget::episode`] was picked.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeriesPlayKind {
+    /// The first episode with a saved position.
+    Resume,
+    /// Nothing in progress: the first unplayed episode.
+    NextUp,
+    /// Asked for, or nothing left unplayed: the first episode, from the beginning.
+    Replay,
+}
+
+/// docs/11 item 11: a series' Play target, so a screen never marshals every episode to pick one.
+#[derive(uniffi::Record, Debug, Clone, PartialEq)]
+pub struct SeriesPlayTarget {
+    pub episode: Card,
+    /// The season row the episode was listed under (docs/15 §5 resume season).
+    pub season_id: String,
+    pub kind: SeriesPlayKind,
+}
+
+/// docs/11 §12 / docs/19: one season's counts for the chip marker and the series-scope menu.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct SeasonStats {
+    pub season_id: String,
+    /// Real (non-virtual) episodes.
+    pub have: u32,
+    /// Real episodes marked played.
+    pub watched: u32,
+    /// Virtual episodes not airing later (docs/24).
+    pub missing: u32,
+    /// Any episode, virtual included, played or part-watched (docs/19 §1.2).
+    pub any_progress: bool,
+}
+
+/// docs/11 item 11 / §12: what the series page needs from its episodes, without the episodes.
+#[derive(uniffi::Record, Debug, Clone, PartialEq)]
+pub struct SeriesSummary {
+    pub target: Option<SeriesPlayTarget>,
+    /// In season order, one per season row.
+    pub seasons: Vec<SeasonStats>,
+}
+
+/// docs/07 §5 outcomes of [`crate::JellybeamCore::series_summary_read`]. Unboxed: it is built
+/// once per read and moved straight across FFI.
+#[allow(clippy::large_enum_variant)]
+#[derive(uniffi::Enum, Debug, Clone, PartialEq)]
+pub enum SeriesSummaryRead {
+    NotReady,
+    Failed,
+    Resolved { summary: SeriesSummary },
 }
 
 /// One in-progress Jellyfin Quick Connect handshake. `code` is shown on the
@@ -800,6 +883,119 @@ pub struct ItemDetail {
     /// dropped.
     #[uniffi(default = [])]
     pub remote_trailers: Vec<RemoteTrailer>,
+    /// docs/18 §6: whether this TV can play the item; `Unknown` until `get_item_detail`
+    /// judges it (the mirror's first paint carries none).
+    pub playability: Playability,
+}
+
+/// docs/18 §6: the part of an item the Detail page names when it can't direct play.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayabilityReason {
+    VideoCodec,
+    VideoProfile,
+    VideoLevel,
+    Resolution,
+    VideoRange,
+    VideoBitrate,
+    AudioCodec,
+    NoServerTranscoding,
+}
+
+impl From<jellyfin_core::MissKind> for PlayabilityReason {
+    fn from(kind: jellyfin_core::MissKind) -> Self {
+        use jellyfin_core::MissKind;
+        match kind {
+            MissKind::VideoCodec => Self::VideoCodec,
+            MissKind::VideoProfile => Self::VideoProfile,
+            MissKind::VideoLevel => Self::VideoLevel,
+            MissKind::Resolution => Self::Resolution,
+            MissKind::VideoRange => Self::VideoRange,
+            MissKind::VideoBitrate => Self::VideoBitrate,
+            MissKind::AudioCodec => Self::AudioCodec,
+        }
+    }
+}
+
+/// docs/18 §6: what this TV does with an item under the playback mode in force. `value` is the
+/// judged version's own value for `reason` (codec, profile, HDR label, bps, level, width or
+/// height), `None` for a cap or a forbidden transcode.
+#[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
+pub enum Playability {
+    DirectPlay,
+    WillTranscode {
+        reason: Option<PlayabilityReason>,
+        value: Option<String>,
+    },
+    WontPlay {
+        reason: PlayabilityReason,
+        value: Option<String>,
+    },
+    Unknown,
+}
+
+/// docs/18 §1.1: whether Auto transcodes before trying Direct Play: with Tolerate off (the
+/// profile's level ceilings are honest) or when the TV has no decoder for the codec; any other
+/// miss is a Direct Play attempt. `resolve_plan` and [`playability`] both ask this.
+pub(crate) fn auto_transcodes_up_front(
+    miss: Option<&jellyfin_core::ProfileMiss>,
+    tolerate_mislabeled_levels: bool,
+) -> bool {
+    !tolerate_mislabeled_levels
+        || miss.is_some_and(|miss| miss.kind == jellyfin_core::MissKind::VideoCodec)
+}
+
+/// docs/18 §6: playability of an item whose versions are `sources`, judged against the very
+/// `profile` the server is sent; `video_transcoding` is the account policy's flag, `None` when not
+/// yet read. Playback takes the first direct-playable version, so one such version is enough.
+pub(crate) fn playability(
+    profile: &jellyfin_core::RawDeviceProfile,
+    sources: &[jellyfin_api::models::MediaSourceInfo],
+    quality: &crate::settings::PlaybackQuality,
+    video_transcoding: Option<bool>,
+    tolerate_mislabeled_levels: bool,
+) -> Playability {
+    use crate::settings::PlaybackQuality;
+    use jellyfin_core::Verdict;
+    let verdicts: Vec<_> = sources
+        .iter()
+        .map(|source| jellyfin_core::profile_miss(profile, source))
+        .collect();
+    if verdicts.iter().all(Verdict::is_blind) {
+        return Playability::Unknown;
+    }
+    let pass = verdicts.contains(&Verdict::Pass);
+    // Playback may pick a version with no codec to judge, so no miss is certain.
+    let undecided = !pass && verdicts.iter().any(Verdict::is_blind);
+    let miss = verdicts.iter().find_map(|verdict| match verdict {
+        Verdict::Miss(miss) if !pass => Some(miss),
+        _ => None,
+    });
+    let may_transcode = video_transcoding != Some(false);
+    match (quality, miss) {
+        (PlaybackQuality::Cap { .. }, _) if may_transcode => Playability::WillTranscode {
+            reason: None,
+            value: None,
+        },
+        (PlaybackQuality::Cap { .. }, _) => Playability::WontPlay {
+            reason: PlayabilityReason::NoServerTranscoding,
+            value: None,
+        },
+        _ if undecided => Playability::Unknown,
+        (_, None) => Playability::DirectPlay,
+        (PlaybackQuality::Auto, miss @ Some(_))
+            if !auto_transcodes_up_front(miss, tolerate_mislabeled_levels) =>
+        {
+            Playability::DirectPlay
+        }
+        (PlaybackQuality::Auto, Some(miss)) if may_transcode => Playability::WillTranscode {
+            reason: Some(miss.kind.into()),
+            value: Some(miss.value.clone()),
+        },
+        (_, Some(miss)) => Playability::WontPlay {
+            reason: miss.kind.into(),
+            value: Some(miss.value.clone()),
+        },
+    }
 }
 
 /// One external trailer link from `RemoteTrailers`.
@@ -923,6 +1119,7 @@ impl From<&jellyfin_api::models::BaseItemDto> for ItemDetail {
                 .iter()
                 .filter_map(|media_url| RemoteTrailer::try_from(media_url).ok())
                 .collect(),
+            playability: Playability::Unknown,
         }
     }
 }
@@ -1839,61 +2036,87 @@ fn url_param<'a>(url: &'a str, name: &str) -> Option<&'a str> {
 /// docs/18 §3.1: the subtitle index a transcode URL burns in. Both parameters are needed: a
 /// `SubtitleStreamIndex=-1` negotiation still says `SubtitleMethod=Encode` with no index.
 pub(crate) fn burned_subtitle_index(url: &str) -> Option<i32> {
-    if !url_param(url, "SubtitleMethod")?.eq_ignore_ascii_case("Encode") {
-        return None;
-    }
+    url_subtitle_index(url).filter(|_| {
+        url_param(url, "SubtitleMethod").is_some_and(|m| m.eq_ignore_ascii_case("Encode"))
+    })
+}
+
+/// The subtitle index `url` names (`SubtitleStreamIndex` ≥ 0), whatever the method.
+fn url_subtitle_index(url: &str) -> Option<i32> {
     url_param(url, "SubtitleStreamIndex")?
         .parse()
         .ok()
         .filter(|index: &i32| *index >= 0)
 }
 
-/// docs/18 §3.1: the subtitle stream a transcode names up front, so the player's own policy pick
-/// lands without a restart: the policy runs over what the player lists (sidecars, then streams
-/// only a negotiation shows) and only a stream pick is named; a URL already naming one keeps it.
-pub(crate) fn policy_subtitle_for_transcode(
+/// docs/18 §3.1: how a transcode delivers one row of its canonical track list.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackDeliveryFfi {
+    /// A WebVTT rendition in the transcode's HLS manifest.
+    Rendition,
+    /// Burned into the video; only a renegotiation removes it.
+    Burned,
+    /// A stream the transcode shows only once a renegotiation names it.
+    NeedsNegotiation,
+    /// A sidecar file the player fetches on its own.
+    Sidecar,
+    /// The one audio stream the transcode carries.
+    DeliveredAudio,
+    /// An audio stream the transcode delivers only once a renegotiation names it.
+    SourceAudio,
+}
+
+/// docs/18 §3.1: one row of a transcode's canonical track list, keyed by its server stream
+/// index; the policy reads these rows and the picker shows them, so both see one list.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct TrackRowFfi {
+    pub kind: TrackKindFfi,
+    pub stream_index: i32,
+    /// The stream's own title (a sidecar's label), which Media3 reports too.
+    pub title: Option<String>,
+    /// The server's label, shown verbatim (docs/05).
+    pub display_title: Option<String>,
+    pub lang: Option<String>,
+    pub codec: Option<String>,
+    pub is_default: bool,
+    pub is_forced: bool,
+    pub is_hearing_impaired: bool,
+    pub delivery: TrackDeliveryFfi,
+    /// The delivered audio stream or the burned subtitle: what plays without a renegotiation.
+    pub is_selected: bool,
+}
+
+impl From<&TrackRowFfi> for playback_policy::tracks::Track {
+    fn from(row: &TrackRowFfi) -> Self {
+        playback_policy::tracks::Track {
+            id: i64::from(row.stream_index),
+            kind: row.kind.into(),
+            title: row.title.clone(),
+            lang: row.lang.clone(),
+            codec: row.codec.clone(),
+            default: row.is_default,
+            selected: row.is_selected,
+            forced: row.is_forced,
+            hearing_impaired: row.is_hearing_impaired,
+        }
+    }
+}
+
+/// docs/18 §3.1: a transcode's canonical track list -- audio, then the subtitle streams a
+/// negotiation can name, then sidecars, each in server order as Direct Play lists them. The
+/// delivered audio (`requested` when `url` names none) and the burned stream are selected; Hls
+/// streams are renditions only while `url` names one, since the manifest then carries them all.
+pub(crate) fn transcode_track_rows(
     source: &jellyfin_api::models::MediaSourceInfo,
     url: &str,
-    series_pref: Option<&playback_policy::prefs::SeriesTrackPref>,
-    global: &playback_policy::prefs::LanguagePrefs,
-) -> Option<i32> {
-    use playback_policy::tracks::{resolve_track_selection, SubtitleDecision, Track, TrackKind};
-    if url_param(url, "SubtitleStreamIndex").is_some_and(|v| v.parse::<i32>().is_ok_and(|i| i >= 0))
-    {
-        return None;
-    }
-    let subtitle = |id: i64,
-                    title: Option<String>,
-                    lang: Option<String>,
-                    codec: Option<String>,
-                    default: bool,
-                    forced: bool| Track {
-        id,
-        kind: TrackKind::Subtitle,
-        title,
-        lang,
-        codec,
-        default,
-        selected: false,
-        forced,
-    };
-    // Sidecar ids are negative so they never collide with a stream index.
-    let sidecars = external_subtitles_of(source, |u| Some(u.to_string()))
+    requested: Option<i32>,
+    sidecars: &[ExternalSubtitleFfi],
+) -> Vec<TrackRowFfi> {
+    let delivered = delivered_audio_index(PlayMethodFfi::Transcode, url, requested, source);
+    let burned = burned_subtitle_index(url);
+    let streams: Vec<EmbeddedSubtitleFfi> = embedded_subtitles_of(source)
         .into_iter()
-        .map(|s| {
-            let t = s.track;
-            subtitle(
-                -1 - i64::from(t.index),
-                t.display_title,
-                t.language,
-                Some(t.codec),
-                t.is_default,
-                t.is_forced,
-            )
-        });
-    // A stream offered as External here is embedded; the transcode profile shows it as a row too.
-    let rows = embedded_subtitles_of(source)
-        .into_iter()
+        // A stream offered as External here is embedded; the transcode profile shows it too.
         .filter(|s| {
             matches!(
                 s.delivery,
@@ -1904,21 +2127,143 @@ pub(crate) fn policy_subtitle_for_transcode(
                 )
             )
         })
-        .map(|s| {
-            subtitle(
-                i64::from(s.index),
-                s.title,
-                s.language,
-                s.codec,
-                s.default,
-                s.forced,
-            )
+        .collect();
+    let manifest_text = burned.is_none()
+        && url_subtitle_index(url).is_some_and(|named| {
+            streams
+                .iter()
+                .any(|s| s.index == named && s.delivery == Some(SubtitleDeliveryFfi::Hls))
         });
-    let tracks: Vec<Track> = sidecars.chain(rows).collect();
-    match resolve_track_selection(&tracks, series_pref, global).subtitle {
-        SubtitleDecision::Track(id) if id >= 0 => i32::try_from(id).ok(),
-        _ => None,
-    }
+    let audio = audio_streams_of(source).into_iter().map(|a| {
+        let selected = Some(a.index) == delivered;
+        TrackRowFfi {
+            kind: TrackKindFfi::Audio,
+            stream_index: a.index,
+            title: a.title,
+            display_title: a.display_title,
+            lang: a.language,
+            codec: a.codec,
+            is_default: a.is_default,
+            is_forced: false,
+            is_hearing_impaired: false,
+            delivery: if selected {
+                TrackDeliveryFfi::DeliveredAudio
+            } else {
+                TrackDeliveryFfi::SourceAudio
+            },
+            is_selected: selected,
+        }
+    });
+    let subtitles = streams.into_iter().map(|s| {
+        let selected = Some(s.index) == burned;
+        let delivery = if selected {
+            TrackDeliveryFfi::Burned
+        } else if manifest_text && s.delivery == Some(SubtitleDeliveryFfi::Hls) {
+            TrackDeliveryFfi::Rendition
+        } else {
+            TrackDeliveryFfi::NeedsNegotiation
+        };
+        TrackRowFfi {
+            kind: TrackKindFfi::Subtitle,
+            stream_index: s.index,
+            title: s.title,
+            display_title: s.display_title,
+            lang: s.language,
+            codec: s.codec,
+            is_default: s.default,
+            is_forced: s.forced,
+            is_hearing_impaired: s.hearing_impaired,
+            delivery,
+            is_selected: selected,
+        }
+    });
+    audio
+        .chain(subtitles)
+        .chain(sidecar_track_rows(sidecars))
+        .collect()
+}
+
+/// docs/18 §3.2: a plan's fetchable `sidecars` as rows, labelled as the picker labels each one
+/// (title and label both the server's); every plan ends its rows with these.
+pub(crate) fn sidecar_track_rows(
+    sidecars: &[ExternalSubtitleFfi],
+) -> impl Iterator<Item = TrackRowFfi> + '_ {
+    sidecars.iter().map(|t| TrackRowFfi {
+        kind: TrackKindFfi::Subtitle,
+        stream_index: t.index,
+        title: t.display_title.clone(),
+        display_title: t.display_title.clone(),
+        lang: t.language.clone(),
+        codec: Some(t.codec.clone()),
+        is_default: t.is_default,
+        is_forced: t.is_forced,
+        is_hearing_impaired: t.hearing_impaired,
+        delivery: TrackDeliveryFfi::Sidecar,
+        is_selected: false,
+    })
+}
+
+/// docs/18 §3.1: the streams a transcode negotiation names; `None` leaves the server's pick, a
+/// subtitle of `-1` shows none. JF12 honours either index only beside `media_source_id`.
+pub(crate) struct NamedStreams {
+    pub(crate) media_source_id: Option<String>,
+    pub(crate) audio: Option<i32>,
+    pub(crate) subtitle: Option<i32>,
+}
+
+/// docs/18 §3.1: whether a second negotiation follows the first anyway (Auto's) or costs one
+/// more `PlaybackInfo` (Cap's, a fallback's), which only a burn worth removing earns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SecondNegotiation {
+    Always,
+    IfNamed,
+}
+
+/// docs/18 §3.1: one policy run over a transcode's canonical rows, and the streams its start
+/// rule names: audio when it differs from the delivered stream; once a second negotiation runs
+/// anyway, every subtitle pick, so its own default can't replace it; else a stream pick `url`
+/// neither names nor carries as a rendition, and `-1` for Off or a sidecar over a burn.
+/// Nothing for Leave; `None` when nothing is named.
+pub(crate) fn policy_streams_for_transcode(
+    rows: &[TrackRowFfi],
+    url: &str,
+    media_source_id: Option<String>,
+    series_pref: Option<&playback_policy::prefs::SeriesTrackPref>,
+    global: &playback_policy::prefs::LanguagePrefs,
+    second: SecondNegotiation,
+) -> (TrackDecisionFfi, Option<NamedStreams>) {
+    use playback_policy::tracks::{resolve_track_selection, SubtitleDecision, Track};
+    let tracks: Vec<Track> = rows.iter().map(Track::from).collect();
+    let decision = resolve_track_selection(&tracks, series_pref, global);
+    let row = |id: i64| rows.iter().find(|r| i64::from(r.stream_index) == id);
+    let audio = decision
+        .audio
+        .and_then(row)
+        .filter(|r| r.delivery == TrackDeliveryFfi::SourceAudio)
+        .map(|r| r.stream_index);
+    let renegotiates = second == SecondNegotiation::Always || audio.is_some();
+    let shows_none = || (renegotiates || burned_subtitle_index(url).is_some()).then_some(-1);
+    let subtitle = match decision.subtitle {
+        SubtitleDecision::Leave => None,
+        SubtitleDecision::Off => shows_none(),
+        SubtitleDecision::Track(id) => match row(id) {
+            Some(r) if r.delivery == TrackDeliveryFfi::Sidecar => shows_none(),
+            Some(r)
+                if renegotiates
+                    || (r.delivery != TrackDeliveryFfi::Rendition
+                        && url_subtitle_index(url) != Some(r.stream_index)) =>
+            {
+                Some(r.stream_index)
+            }
+            _ => None,
+        },
+    };
+    let named = (audio.is_some() || subtitle.is_some()).then_some(NamedStreams {
+        media_source_id,
+        audio,
+        subtitle,
+    });
+    (decision.into(), named)
 }
 
 /// The plan Kotlin's Media3 player executes, returned by
@@ -1959,6 +2304,10 @@ pub struct PlaybackPlan {
     /// The item's own `SeriesId`, if any (`None` for a Movie): docs/09 step
     /// 3 keys per-series track memory on this, not the individual episode.
     pub series_id: Option<String>,
+    /// docs/12: the id the viewer's track memory is kept under for this item
+    /// ([`playback_policy::prefs::track_memory_subject`]): the series for an episode, the item
+    /// itself for a movie. Kotlin remembers and resolves under this and never derives it.
+    pub track_memory_subject: String,
     /// docs/18-playback-quality.md §3.2: the source's sidecar subtitle files, unfetched; Kotlin
     /// fetches one only when it is chosen.
     pub external_subtitles: Vec<ExternalSubtitleFfi>,
@@ -1975,6 +2324,14 @@ pub struct PlaybackPlan {
     /// docs/18 §3.1: the audio stream a Transcode plan delivers; `None` on Direct Play.
     #[uniffi(default = None)]
     pub delivered_audio_index: Option<i32>,
+    /// docs/18 §3.1: the policy decision this negotiation ran and its URL carries, ids being
+    /// stream indexes; `None` when it ran none (Direct Play, a fallback naming its streams).
+    #[uniffi(default = None)]
+    pub policy_decision: Option<TrackDecisionFfi>,
+    /// docs/18 §3.1: a Transcode plan's canonical track list ([`transcode_track_rows`]), the
+    /// policy's input and the picker's rows; on Direct Play only its sidecars (§3.2).
+    #[uniffi(default = [])]
+    pub track_rows: Vec<TrackRowFfi>,
     // `outro_start_secs`/`trickplay` don't live here: neither is needed to
     // start a frame, and Kotlin fetches both separately (fire-and-forget).
 }
@@ -2066,13 +2423,51 @@ pub enum TrackKindFfi {
     Subtitle,
 }
 
+/// What distinguishes one remembered track from its siblings (docs/12 "Choices are remembered per
+/// series"). Mirrors `playback_policy::prefs::TrackIdentity`; `sdh` stays short on the wire like the
+/// on-disk shape.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct TrackIdentityFfi {
+    pub lang: Option<String>,
+    pub title: Option<String>,
+    pub forced: bool,
+    pub sdh: bool,
+    pub codec: Option<String>,
+}
+
+impl From<TrackIdentityFfi> for playback_policy::prefs::TrackIdentity {
+    fn from(identity: TrackIdentityFfi) -> Self {
+        Self {
+            lang: identity.lang,
+            title: identity.title,
+            forced: identity.forced,
+            sdh: identity.sdh,
+            codec: identity.codec,
+        }
+    }
+}
+
+impl From<playback_policy::prefs::TrackIdentity> for TrackIdentityFfi {
+    fn from(identity: playback_policy::prefs::TrackIdentity) -> Self {
+        Self {
+            lang: identity.lang,
+            title: identity.title,
+            forced: identity.forced,
+            sdh: identity.sdh,
+            codec: identity.codec,
+        }
+    }
+}
+
 /// One half of a series' remembered track choice (docs/18 §3.1): `Off` is a choice, `Unset`
-/// forgets it. Mirrors `playback_policy::prefs::TrackMemory`.
+/// forgets it. Mirrors `playback_policy::prefs::TrackMemory`; Kotlin writes `Track` (from
+/// [`crate::track_memory_of`]), `Key` is the legacy language-only shape.
 #[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
 pub enum TrackMemoryFfi {
     Unset,
     Off,
     Key { key: String },
+    Track { identity: TrackIdentityFfi },
 }
 
 impl From<TrackMemoryFfi> for playback_policy::prefs::TrackMemory {
@@ -2081,6 +2476,7 @@ impl From<TrackMemoryFfi> for playback_policy::prefs::TrackMemory {
             TrackMemoryFfi::Unset => Self::Unset,
             TrackMemoryFfi::Off => Self::Off,
             TrackMemoryFfi::Key { key } => Self::Key(key),
+            TrackMemoryFfi::Track { identity } => Self::Track(identity.into()),
         }
     }
 }
@@ -2111,6 +2507,8 @@ pub struct TrackInfo {
     pub is_default: bool,
     pub is_selected: bool,
     pub is_forced: bool,
+    /// The server's hearing-impaired (SDH) flag for this track.
+    pub is_hearing_impaired: bool,
 }
 
 impl From<TrackInfo> for playback_policy::tracks::Track {
@@ -2124,6 +2522,7 @@ impl From<TrackInfo> for playback_policy::tracks::Track {
             default: info.is_default,
             selected: info.is_selected,
             forced: info.is_forced,
+            hearing_impaired: info.is_hearing_impaired,
         }
     }
 }
@@ -2323,17 +2722,192 @@ mod tests {
         }
     }
 
+    /// `source`'s sidecar descriptors, every delivery URL resolving.
+    fn sidecars_of(source: &jellyfin_api::models::MediaSourceInfo) -> Vec<ExternalSubtitleFfi> {
+        let sources = external_subtitles_of(source, |u| Some(u.to_string()));
+        sources.into_iter().map(|s| s.track).collect()
+    }
+
     const PLAIN_URL: &str = "/videos/x/master.m3u8?VideoCodec=h264&AudioStreamIndex=1";
+
+    /// [`policy_streams_for_transcode`] over `source`'s canonical rows at a Cap start.
+    fn named_streams(
+        source: &jellyfin_api::models::MediaSourceInfo,
+        url: &str,
+        series_pref: Option<&playback_policy::prefs::SeriesTrackPref>,
+        global: &playback_policy::prefs::LanguagePrefs,
+    ) -> Option<NamedStreams> {
+        let rows = transcode_track_rows(source, url, None, &sidecars_of(source));
+        policy_streams_for_transcode(
+            &rows,
+            url,
+            Some("ms-1".into()),
+            series_pref,
+            global,
+            SecondNegotiation::IfNamed,
+        )
+        .1
+    }
+
+    /// The subtitle half of [`named_streams`].
+    fn subtitle_named(
+        source: &jellyfin_api::models::MediaSourceInfo,
+        url: &str,
+        series_pref: Option<&playback_policy::prefs::SeriesTrackPref>,
+        global: &playback_policy::prefs::LanguagePrefs,
+    ) -> Option<i32> {
+        named_streams(source, url, series_pref, global).and_then(|n| n.subtitle)
+    }
+
+    fn only_forced() -> playback_policy::prefs::LanguagePrefs {
+        playback_policy::prefs::LanguagePrefs {
+            audio: None,
+            subtitle: None,
+            subtitle_mode: playback_policy::prefs::SubtitleMode::OnlyForced,
+        }
+    }
+
+    /// docs/18 §3.1: OnlyForced reads the audio the transcode delivers, not the default flag, so
+    /// a start on the second audio stream names that language's forced stream.
+    #[test]
+    fn only_forced_follows_the_delivered_audio_not_the_default_flag() {
+        use jellyfin_api::models::{MediaStream, MediaStreamType, SubtitleDeliveryMethod};
+        let mut source = policy_source();
+        let audio = |index, lang: &str, default| MediaStream {
+            index: Some(index),
+            type_: Some(MediaStreamType::Audio),
+            language: Some(lang.into()),
+            is_default: Some(default),
+            ..Default::default()
+        };
+        let forced = |index, lang: &str| MediaStream {
+            index: Some(index),
+            type_: Some(MediaStreamType::Subtitle),
+            is_external: Some(false),
+            is_forced: Some(true),
+            language: Some(lang.into()),
+            codec: Some("subrip".into()),
+            delivery_method: Some(SubtitleDeliveryMethod::Hls),
+            ..Default::default()
+        };
+        source.media_streams.extend([
+            audio(1, "fre", true),
+            audio(6, "eng", false),
+            forced(5, "fre"),
+            forced(7, "eng"),
+        ]);
+        let url = "/videos/x/master.m3u8?VideoCodec=h264&AudioStreamIndex=6";
+        let named = named_streams(&source, url, None, &only_forced()).expect("a forced stream");
+        assert_eq!((named.audio, named.subtitle), (None, Some(7)));
+    }
+
+    /// docs/18 §3.1 (B1): a stream the server burned on its own is replaced by the policy's pick,
+    /// or by none for Off; a burn of the policy's own pick stays.
+    #[test]
+    fn a_server_default_burn_is_replaced_by_the_policy_stream() {
+        use playback_policy::prefs::{LanguagePrefs, SubtitleMode};
+        let mut source = policy_source();
+        source.media_streams[2].is_default = Some(true);
+        let burned = format!("{PLAIN_URL}&SubtitleStreamIndex=4&SubtitleMethod=Encode");
+        let off = LanguagePrefs {
+            audio: None,
+            subtitle: None,
+            subtitle_mode: SubtitleMode::None,
+        };
+        let pgs_only = |mut source: jellyfin_api::models::MediaSourceInfo| {
+            source.media_streams.retain(|s| s.index == Some(4));
+            source
+        };
+        let cases = [
+            ("French", source.clone(), always("fre"), Some(2)),
+            ("Off", source.clone(), off, Some(-1)),
+            (
+                "the burned stream itself",
+                pgs_only(source),
+                always("eng"),
+                None,
+            ),
+        ];
+        for (label, source, prefs, expected) in cases {
+            assert_eq!(
+                subtitle_named(&source, &burned, None, &prefs),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// docs/18 §3.1: OnlyForced names the forced stream in the source audio's language, which the
+    /// one policy run now sees beside the subtitles.
+    #[test]
+    fn only_forced_names_the_forced_stream_in_the_delivered_audio_language() {
+        use jellyfin_api::models::{MediaStream, MediaStreamType, SubtitleDeliveryMethod};
+        let mut source = policy_source();
+        source.media_streams.extend([
+            MediaStream {
+                index: Some(1),
+                type_: Some(MediaStreamType::Audio),
+                language: Some("fre".into()),
+                is_default: Some(true),
+                ..Default::default()
+            },
+            MediaStream {
+                index: Some(5),
+                type_: Some(MediaStreamType::Subtitle),
+                is_external: Some(false),
+                is_forced: Some(true),
+                language: Some("fre".into()),
+                codec: Some("subrip".into()),
+                delivery_method: Some(SubtitleDeliveryMethod::Hls),
+                ..Default::default()
+            },
+        ]);
+        let named =
+            named_streams(&source, PLAIN_URL, None, &only_forced()).expect("the forced stream");
+        assert_eq!((named.audio, named.subtitle), (None, Some(5)));
+    }
+
+    /// docs/18 §3.1: once an audio pick renegotiates anyway, the subtitle pick rides along, so
+    /// that negotiation's own default can't replace a rendition or Off.
+    #[test]
+    fn an_audio_renegotiation_names_the_subtitle_pick_too() {
+        use jellyfin_api::models::{MediaStream, MediaStreamType};
+        use playback_policy::prefs::{LanguagePrefs, SubtitleMode};
+        let mut source = policy_source();
+        for (index, lang, default) in [(1, "eng", true), (6, "jpn", false)] {
+            source.media_streams.push(MediaStream {
+                index: Some(index),
+                type_: Some(MediaStreamType::Audio),
+                language: Some(lang.into()),
+                is_default: Some(default),
+                ..Default::default()
+            });
+        }
+        let url = format!("{PLAIN_URL}&SubtitleStreamIndex=2&SubtitleMethod=Hls");
+        let prefs = |subtitle_mode| LanguagePrefs {
+            audio: Some("jpn".into()),
+            subtitle: Some("eng".into()),
+            subtitle_mode,
+        };
+        for (mode, expected) in [(SubtitleMode::Always, 3), (SubtitleMode::None, -1)] {
+            let named = named_streams(&source, &url, None, &prefs(mode)).expect("the audio pick");
+            assert_eq!(
+                (named.audio, named.subtitle),
+                (Some(6), Some(expected)),
+                "{mode:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_transcode_names_the_stream_the_policy_would_pick() {
         let source = policy_source();
         assert_eq!(
-            policy_subtitle_for_transcode(&source, PLAIN_URL, None, &always("eng")),
+            subtitle_named(&source, PLAIN_URL, None, &always("eng")),
             Some(3)
         );
         assert_eq!(
-            policy_subtitle_for_transcode(&source, PLAIN_URL, None, &always("fre")),
+            subtitle_named(&source, PLAIN_URL, None, &always("fre")),
             Some(2)
         );
     }
@@ -2353,7 +2927,7 @@ mod tests {
             SubtitleMode::OnlyForced,
         ] {
             assert_eq!(
-                policy_subtitle_for_transcode(&source, PLAIN_URL, None, &mode(m)),
+                subtitle_named(&source, PLAIN_URL, None, &mode(m)),
                 None,
                 "{m:?}"
             );
@@ -2363,19 +2937,21 @@ mod tests {
             subtitle: TrackMemory::Off,
         };
         assert_eq!(
-            policy_subtitle_for_transcode(&source, PLAIN_URL, Some(&off), &always("eng")),
+            subtitle_named(&source, PLAIN_URL, Some(&off), &always("eng")),
             None
         );
-        // A URL that already names a stream keeps it.
+        // B1: a URL naming another stream than the policy's pick is renegotiated to the pick.
         let named = format!("{PLAIN_URL}&SubtitleStreamIndex=4&SubtitleMethod=Encode");
         assert_eq!(
-            policy_subtitle_for_transcode(&source, &named, None, &always("eng")),
-            None
+            subtitle_named(&source, &named, None, &always("eng")),
+            Some(3)
         );
     }
 
+    /// docs/18 §3.1 (C4): a sidecar pick shows no stream, which costs a negotiation only when the
+    /// server burned or named one.
     #[test]
-    fn series_memory_names_its_stream_and_a_matching_sidecar_names_none() {
+    fn series_memory_names_its_stream_and_a_sidecar_pick_names_none_over_a_burn() {
         use jellyfin_api::models::{MediaStream, MediaStreamType, SubtitleDeliveryMethod};
         use playback_policy::prefs::{SeriesTrackPref, TrackMemory};
         let mut source = policy_source();
@@ -2384,24 +2960,260 @@ mod tests {
             subtitle: TrackMemory::Key("fre".into()),
         };
         assert_eq!(
-            policy_subtitle_for_transcode(&source, PLAIN_URL, Some(&french), &always("eng")),
+            subtitle_named(&source, PLAIN_URL, Some(&french), &always("eng")),
             Some(2)
         );
-        // The player lists sidecars before streams, so an English sidecar wins and needs no stream.
         source.media_streams.push(MediaStream {
             index: Some(9),
             type_: Some(MediaStreamType::Subtitle),
             is_external: Some(true),
-            language: Some("eng".into()),
+            language: Some("ger".into()),
             codec: Some("srt".into()),
             delivery_method: Some(SubtitleDeliveryMethod::External),
             delivery_url: Some("/Videos/x/Subtitles/9/Stream.srt".into()),
             ..Default::default()
         });
-        assert_eq!(
-            policy_subtitle_for_transcode(&source, PLAIN_URL, None, &always("eng")),
-            None
-        );
+        let burned = format!("{PLAIN_URL}&SubtitleStreamIndex=4&SubtitleMethod=Encode");
+        for (url, expected) in [(PLAIN_URL, None), (burned.as_str(), Some(-1))] {
+            assert_eq!(
+                subtitle_named(&source, url, None, &always("ger")),
+                expected,
+                "{url}"
+            );
+        }
+    }
+
+    /// docs/18 §3.1 (Q3): the policy picks one identity over a transcode's server rows and over
+    /// the Media3 rows Direct Play reports for the same file (two-letter languages, mime codecs).
+    #[test]
+    fn server_stream_and_media3_rows_pick_one_identity() {
+        use jellyfin_api::models::{
+            MediaSourceInfo, MediaStream, MediaStreamType, SubtitleDeliveryMethod as Method,
+        };
+        use playback_policy::prefs::{
+            LanguagePrefs, SeriesTrackPref, SubtitleMode, TrackIdentity, TrackMemory,
+        };
+        use playback_policy::tracks::{
+            resolve_track_selection, SubtitleDecision, Track, TrackKind,
+        };
+        // (index, kind, title, server lang, Media3 lang, server codec, Media3 codec, forced, method)
+        let streams = [
+            (
+                1,
+                TrackKind::Audio,
+                "English 5.1",
+                "eng",
+                "en",
+                "ac3",
+                "audio/ac3",
+                false,
+                None,
+            ),
+            (
+                2,
+                TrackKind::Audio,
+                "Japanese",
+                "jpn",
+                "ja",
+                "aac",
+                "audio/mp4a-latm",
+                false,
+                None,
+            ),
+            (
+                3,
+                TrackKind::Subtitle,
+                "English",
+                "eng",
+                "en",
+                "subrip",
+                "application/x-subrip",
+                false,
+                Some(Method::Hls),
+            ),
+            (
+                4,
+                TrackKind::Subtitle,
+                "English Forced",
+                "eng",
+                "en",
+                "subrip",
+                "application/x-subrip",
+                true,
+                Some(Method::Hls),
+            ),
+            (
+                5,
+                TrackKind::Subtitle,
+                "French",
+                "fre",
+                "fr",
+                "ass",
+                "text/x-ssa",
+                false,
+                Some(Method::Encode),
+            ),
+            (
+                9,
+                TrackKind::Subtitle,
+                "German",
+                "ger",
+                "de",
+                "srt",
+                "application/x-subrip",
+                false,
+                Some(Method::External),
+            ),
+            (
+                10,
+                TrackKind::Subtitle,
+                "English file",
+                "eng",
+                "en",
+                "srt",
+                "application/x-subrip",
+                false,
+                Some(Method::External),
+            ),
+        ];
+        let source = MediaSourceInfo {
+            default_audio_stream_index: Some(1),
+            media_streams: streams
+                .iter()
+                .map(
+                    |(index, kind, title, lang, _, codec, _, forced, method)| MediaStream {
+                        index: Some(*index),
+                        type_: Some(if *kind == TrackKind::Audio {
+                            MediaStreamType::Audio
+                        } else {
+                            MediaStreamType::Subtitle
+                        }),
+                        title: Some(title.to_string()),
+                        display_title: Some(title.to_string()),
+                        language: Some(lang.to_string()),
+                        codec: Some(codec.to_string()),
+                        is_forced: Some(*forced),
+                        is_default: Some(*index == 1),
+                        is_external: Some(*index >= 9),
+                        delivery_method: *method,
+                        delivery_url: (*index >= 9)
+                            .then(|| format!("/Videos/x/Subtitles/{index}/Stream.srt")),
+                        ..Default::default()
+                    },
+                )
+                .collect(),
+            ..Default::default()
+        };
+        let url = "/videos/x/master.m3u8?AudioStreamIndex=1";
+        let server: Vec<Track> = transcode_track_rows(&source, url, None, &sidecars_of(&source))
+            .iter()
+            .map(Track::from)
+            .collect();
+        let media3: Vec<Track> = streams
+            .iter()
+            .map(|(index, kind, title, _, lang, _, codec, forced, _)| Track {
+                id: 1000 + i64::from(*index),
+                kind: *kind,
+                title: Some(title.to_string()),
+                lang: Some(lang.to_string()),
+                codec: Some(codec.to_string()),
+                default: *index == 1,
+                selected: *index == 1,
+                forced: *forced,
+                hearing_impaired: false,
+            })
+            .collect();
+        let title_of = |tracks: &[Track], id: Option<i64>| {
+            id.and_then(|id| tracks.iter().find(|t| t.id == id))
+                .and_then(|t| t.title.clone())
+        };
+        let pick = |tracks: &[Track], pref: Option<&SeriesTrackPref>, global: &LanguagePrefs| {
+            let decision = resolve_track_selection(tracks, pref, global);
+            let subtitle = match decision.subtitle {
+                SubtitleDecision::Track(id) => title_of(tracks, Some(id)),
+                SubtitleDecision::Leave | SubtitleDecision::Off => None,
+            };
+            (title_of(tracks, decision.audio), subtitle)
+        };
+        let prefs = |audio: Option<&str>, subtitle: Option<&str>, subtitle_mode| LanguagePrefs {
+            audio: audio.map(str::to_string),
+            subtitle: subtitle.map(str::to_string),
+            subtitle_mode,
+        };
+        let memory = |lang: &str, forced, codec: &str| SeriesTrackPref {
+            audio: TrackMemory::Unset,
+            subtitle: TrackMemory::Track(TrackIdentity {
+                lang: Some(lang.to_string()),
+                title: None,
+                forced,
+                sdh: false,
+                codec: Some(codec.to_string()),
+            }),
+        };
+        let cases = [
+            (
+                "English, a stream before a sidecar",
+                None,
+                prefs(None, Some("eng"), SubtitleMode::Always),
+                None,
+                Some("English"),
+            ),
+            (
+                "French",
+                None,
+                prefs(None, Some("fre"), SubtitleMode::Always),
+                None,
+                Some("French"),
+            ),
+            (
+                "German sidecar",
+                None,
+                prefs(None, Some("de"), SubtitleMode::Always),
+                None,
+                Some("German"),
+            ),
+            (
+                "Japanese audio",
+                None,
+                prefs(Some("ja"), None, SubtitleMode::Default),
+                Some("Japanese"),
+                None,
+            ),
+            (
+                "only forced",
+                None,
+                prefs(None, None, SubtitleMode::OnlyForced),
+                None,
+                Some("English Forced"),
+            ),
+            (
+                "Media3 memory",
+                Some(memory("fr", false, "text/x-ssa")),
+                prefs(None, None, SubtitleMode::Default),
+                None,
+                Some("French"),
+            ),
+            (
+                "server memory",
+                Some(memory("eng", true, "subrip")),
+                prefs(None, None, SubtitleMode::Default),
+                None,
+                Some("English Forced"),
+            ),
+        ];
+        for (label, pref, global, audio, subtitle) in cases {
+            let want = (audio.map(str::to_string), subtitle.map(str::to_string));
+            assert_eq!(
+                pick(&server, pref.as_ref(), &global),
+                want,
+                "{label}: server rows"
+            );
+            assert_eq!(
+                pick(&media3, pref.as_ref(), &global),
+                want,
+                "{label}: Media3 rows"
+            );
+        }
     }
 
     #[test]
@@ -3048,6 +3860,7 @@ mod tests {
             is_default: true,
             is_selected: false,
             is_forced: true,
+            is_hearing_impaired: false,
         }
     }
 
@@ -3766,6 +4579,24 @@ mod tests {
         );
     }
 
+    /// A list cell drops only the overview; every other field matches the full card.
+    #[test]
+    fn a_list_cell_is_the_full_card_without_its_overview() {
+        let row = media_cache::CardRow {
+            overview: Some("Synthetic synopsis".to_string()),
+            ..crate::object::tests::grace_row("Movie", Some(42))
+        };
+        let full = Card::from(row.clone());
+        assert_eq!(full.overview.as_deref(), Some("Synthetic synopsis"));
+        assert_eq!(
+            Card::list_cell(row),
+            Card {
+                overview: None,
+                ..full
+            }
+        );
+    }
+
     /// A mirrored row's play count and album artist id reach its card unchanged.
     #[test]
     fn card_from_a_mirror_row_carries_play_count_and_album_artist_id() {
@@ -3843,5 +4674,268 @@ mod tests {
     fn card_try_from_base_item_dto_without_id_fails() {
         let dto = jellyfin_api::models::BaseItemDto::default();
         assert!(Card::try_from(&dto).is_err());
+    }
+
+    // -- playability (docs/18 §6) --
+
+    /// An unconstrained H.264 decoder plus an HEVC one that lists Main only.
+    fn playability_profile(tolerate: bool) -> jellyfin_core::RawDeviceProfile {
+        let decoder = |codec, profiles: &[&str]| jellyfin_core::VideoCodecCaps {
+            codec,
+            profiles: profiles.iter().map(|p| p.to_string()).collect(),
+            max_level: None,
+            profile_levels: vec![],
+            max_width: None,
+            max_height: None,
+            unsupported_video_ranges: vec![],
+        };
+        let caps = jellyfin_core::AndroidTvCaps {
+            max_streaming_bitrate: None,
+            video: vec![
+                decoder(jellyfin_core::VideoCodec::H264, &[]),
+                decoder(jellyfin_core::VideoCodec::Hevc, &["main"]),
+            ],
+        };
+        jellyfin_core::android_tv_profile(&caps, tolerate)
+    }
+
+    /// An HEVC Main 10 version: the decoder exists, its profile is not listed.
+    fn main10_version() -> jellyfin_api::models::MediaSourceInfo {
+        let mut source = version("hevc");
+        source.media_streams[0].profile = Some("Main 10".to_string());
+        source
+    }
+
+    fn version(codec: &str) -> jellyfin_api::models::MediaSourceInfo {
+        use jellyfin_api::models::{MediaSourceInfo, MediaStream, MediaStreamType};
+        MediaSourceInfo {
+            media_streams: vec![MediaStream {
+                type_: Some(MediaStreamType::Video),
+                codec: Some(codec.to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn playability_follows_the_mode_the_miss_and_the_transcoding_policy() {
+        use crate::settings::PlaybackQuality::{Auto, Cap, DirectPlay as Direct};
+        use Playability::{DirectPlay, Unknown, WillTranscode, WontPlay};
+        let wont = |codec: &str| WontPlay {
+            reason: PlayabilityReason::VideoCodec,
+            value: Some(codec.to_string()),
+        };
+        let will = |codec: &str| WillTranscode {
+            reason: Some(PlayabilityReason::VideoCodec),
+            value: Some(codec.to_string()),
+        };
+        let transcodes = || WillTranscode {
+            reason: None,
+            value: None,
+        };
+        let cap = Cap { max_bps: 8_000_000 };
+        let no_stream = jellyfin_api::models::MediaSourceInfo::default();
+        // (label, sources, quality, video_transcoding, expected)
+        let rows = [
+            (
+                "direct play, plays",
+                vec![version("h264")],
+                Direct,
+                Some(true),
+                DirectPlay,
+            ),
+            (
+                "direct play, miss",
+                vec![version("av1")],
+                Direct,
+                Some(true),
+                wont("av1"),
+            ),
+            (
+                "auto, plays",
+                vec![version("h264")],
+                Auto,
+                Some(false),
+                DirectPlay,
+            ),
+            (
+                "auto, miss, allowed",
+                vec![version("av1")],
+                Auto,
+                Some(true),
+                will("av1"),
+            ),
+            (
+                "auto, miss, unknown policy",
+                vec![version("av1")],
+                Auto,
+                None,
+                will("av1"),
+            ),
+            (
+                "auto, miss, forbidden",
+                vec![version("av1")],
+                Auto,
+                Some(false),
+                wont("av1"),
+            ),
+            (
+                "cap, allowed",
+                vec![version("h264")],
+                cap,
+                Some(true),
+                transcodes(),
+            ),
+            (
+                "cap, unknown policy",
+                vec![version("h264")],
+                cap,
+                None,
+                transcodes(),
+            ),
+            (
+                "cap, forbidden",
+                vec![version("h264")],
+                cap,
+                Some(false),
+                WontPlay {
+                    reason: PlayabilityReason::NoServerTranscoding,
+                    value: None,
+                },
+            ),
+            (
+                "one playable version",
+                vec![version("av1"), version("h264")],
+                Direct,
+                Some(true),
+                DirectPlay,
+            ),
+            (
+                "first version names the miss",
+                vec![version("av1"), version("mpeg4")],
+                Direct,
+                Some(true),
+                wont("av1"),
+            ),
+            (
+                "no streams",
+                vec![no_stream.clone()],
+                Auto,
+                Some(true),
+                Unknown,
+            ),
+            (
+                "a miss beside a blind version stays unknown, direct play",
+                vec![version("av1"), no_stream.clone()],
+                Direct,
+                Some(true),
+                Unknown,
+            ),
+            (
+                "a miss beside a blind version stays unknown, auto",
+                vec![no_stream.clone(), version("av1")],
+                Auto,
+                Some(false),
+                Unknown,
+            ),
+            (
+                "a blind version beside a pass plays",
+                vec![no_stream.clone(), version("h264")],
+                Direct,
+                Some(true),
+                DirectPlay,
+            ),
+            (
+                "cap ignores misses beside a blind version",
+                vec![version("av1"), no_stream],
+                cap,
+                Some(true),
+                transcodes(),
+            ),
+            (
+                "no sources",
+                vec![],
+                Cap { max_bps: 1 },
+                Some(false),
+                Unknown,
+            ),
+        ];
+        for (label, sources, quality, transcoding, expected) in rows {
+            assert_eq!(
+                playability(
+                    &playability_profile(true),
+                    &sources,
+                    &quality,
+                    transcoding,
+                    true
+                ),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// The cell says what Play does: Auto transcodes up front only for a missing decoder, or
+    /// any miss with Tolerate off; any other miss is a Direct Play attempt (`resolve_plan`).
+    #[test]
+    fn playability_auto_matches_what_play_does_for_a_non_codec_miss() {
+        use crate::settings::PlaybackQuality::{Auto, DirectPlay as Direct};
+        use Playability::{DirectPlay, WillTranscode, WontPlay};
+        let profile = PlayabilityReason::VideoProfile;
+        // (label, quality, tolerate, video_transcoding, expected)
+        let rows = [
+            ("tolerate on", Auto, true, Some(true), DirectPlay),
+            (
+                "tolerate on, forbidden",
+                Auto,
+                true,
+                Some(false),
+                DirectPlay,
+            ),
+            (
+                "tolerate off",
+                Auto,
+                false,
+                Some(true),
+                WillTranscode {
+                    reason: Some(profile),
+                    value: Some("Main 10".to_string()),
+                },
+            ),
+            (
+                "tolerate off, forbidden",
+                Auto,
+                false,
+                Some(false),
+                WontPlay {
+                    reason: profile,
+                    value: Some("Main 10".to_string()),
+                },
+            ),
+            (
+                "direct play mode refuses any miss",
+                Direct,
+                true,
+                Some(true),
+                WontPlay {
+                    reason: profile,
+                    value: Some("Main 10".to_string()),
+                },
+            ),
+        ];
+        for (label, quality, tolerate, transcoding, expected) in rows {
+            assert_eq!(
+                playability(
+                    &playability_profile(tolerate),
+                    &[main10_version()],
+                    &quality,
+                    transcoding,
+                    tolerate
+                ),
+                expected,
+                "{label}"
+            );
+        }
     }
 }

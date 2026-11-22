@@ -23,11 +23,13 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import uniffi.jellybeam_core.LanguageSettings
 import uniffi.jellybeam_core.OsdDetailSetting
 import uniffi.jellybeam_core.PlaybackQuality
 import uniffi.jellybeam_core.ResumeArt
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.Settings
+import uniffi.jellybeam_core.SubtitleModeSetting
 import uniffi.jellybeam_core.StillWatchingMode
 import uniffi.jellybeam_core.SubtitleColorPreset
 import uniffi.jellybeam_core.SubtitlePositionPreset
@@ -448,6 +450,45 @@ class SettingsViewModelTest {
         viewModel.selectSubtitlePosition(SubtitlePositionPreset.HIGHEST)
 
         assertEquals(seeded.copy(subtitlePosition = SubtitlePositionPreset.HIGHEST), viewModel.state.value.settings)
+    }
+
+    @Test
+    fun `selecting a subtitle mode writes only that language field`() = runTest {
+        val seeded = defaultTestSettings().copy(language = LanguageSettings(audio = "jpn", subtitle = "eng", subtitleMode = SubtitleModeSetting.DEFAULT))
+        val gateway = FakeCoreGateway(settings = seeded)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
+
+        viewModel.selectSubtitleMode(SubtitleModeSetting.ALWAYS)
+
+        val expected = seeded.copy(language = seeded.language.copy(subtitleMode = SubtitleModeSetting.ALWAYS))
+        assertEquals(expected, viewModel.state.value.settings)
+        assertEquals(expected, gateway.setSettingsCalls.single())
+    }
+
+    @Test
+    fun `selecting a subtitle language writes only that language field and Any clears it`() = runTest {
+        val seeded = defaultTestSettings().copy(language = LanguageSettings(audio = "jpn", subtitle = null, subtitleMode = SubtitleModeSetting.ALWAYS))
+        val gateway = FakeCoreGateway(settings = seeded)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
+
+        viewModel.selectSubtitleLanguage("fre")
+        assertEquals(seeded.copy(language = seeded.language.copy(subtitle = "fre")), viewModel.state.value.settings)
+
+        viewModel.selectSubtitleLanguage(null)
+        assertEquals(seeded, viewModel.state.value.settings)
+    }
+
+    @Test
+    fun `selecting an audio language writes only that language field and Any clears it`() = runTest {
+        val seeded = defaultTestSettings().copy(language = LanguageSettings(audio = null, subtitle = "eng", subtitleMode = SubtitleModeSetting.ONLY_FORCED))
+        val gateway = FakeCoreGateway(settings = seeded)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
+
+        viewModel.selectAudioLanguage("jpn")
+        assertEquals(seeded.copy(language = seeded.language.copy(audio = "jpn")), viewModel.state.value.settings)
+
+        viewModel.selectAudioLanguage(null)
+        assertEquals(seeded, viewModel.state.value.settings)
     }
 
     @Test

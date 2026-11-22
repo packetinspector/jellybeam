@@ -37,6 +37,7 @@ import tv.jellybeam.perf.PerfLog
 import tv.jellybeam.player.DeviceCapsProbe
 import tv.jellybeam.player.OkHttpSheetFetcher
 import tv.jellybeam.player.SheetFetcher
+import tv.jellybeam.player.ass.SeekIndexStore
 import tv.jellybeam.player.PlayerHolder
 import tv.jellybeam.player.music.AndroidMusicServiceHost
 import tv.jellybeam.player.music.MusicPlaybackOwner
@@ -153,6 +154,9 @@ object AppGraph {
     /** Trickplay sheet transport (docs/12 §11): the player's OkHttp client plus a small file
      * cache under the app cache dir. */
     val trickplayFetcher: SheetFetcher by lazy { OkHttpSheetFetcher(httpClient, File(appContext.cacheDir, "trickplay")) }
+
+    /** docs/18 §5.4: Matroska seek indexes under the app cache dir, resolved on a loader thread's first use. */
+    val seekIndexStore: SeekIndexStore by lazy { SeekIndexStore({ File(appContext.cacheDir, "seekidx") }, processScope) }
 
     /**
      * Shared client for the player's Direct Play range requests ([PlayerHolder.buildPlayer]):

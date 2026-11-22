@@ -11,7 +11,9 @@ package tv.jellybeam.player
  * Pure Kotlin, single-threaded by contract (main thread only, no locking); [nowMs] is threaded
  * through each call so tests can drive time without a real clock.
  */
-internal class SeekSerializer(private val landingTimeoutMs: Long = LANDING_TIMEOUT_MS) {
+internal class SeekSerializer {
+    /** How long a seek may stay in flight before [stalled] recovers it; set per load from [loadOpening]. */
+    var landingTimeoutMs: Long = LANDING_TIMEOUT_MS
 
     sealed interface Decision {
         /** Nothing was in flight -- the caller must issue [targetMs] immediately. */
@@ -93,5 +95,9 @@ internal class SeekSerializer(private val landingTimeoutMs: Long = LANDING_TIMEO
 
     companion object {
         const val LANDING_TIMEOUT_MS = 2_500L
+
+        /** On a transcode a seek past the encode edge lands only after the server restarts ffmpeg, so an early
+         * re-issue restarts it again. */
+        const val TRANSCODE_LANDING_TIMEOUT_MS = 20_000L
     }
 }

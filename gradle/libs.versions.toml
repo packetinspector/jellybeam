@@ -14,6 +14,9 @@ androidx-core = "1.18.0"
 androidx-core-splashscreen = "1.2.0"
 androidx-lifecycle = "2.8.7"
 androidx-media3 = "1.11.1"
+# docs/06 "Patched Media3": 1.11.1 + upstream 4c95cd9 (a position decrease is not a 32-bit wrap),
+# built by tools/media3-patch from third_party/maven; forced for every request in build.gradle.kts.
+androidx-media3-exoplayer = "1.11.1-jb1"
 # Explicit pin -- ProfileInstaller/ProfileVerifier were previously only
 # transitive via compose/activity. Pinned so the embedded Baseline Profile
 # (app/src/main/baseline-prof.txt) and the profile-status log line
@@ -56,7 +59,7 @@ androidx-lifecycle-viewmodel-ktx = { module = "androidx.lifecycle:lifecycle-view
 androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "androidx-lifecycle" }
 coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinx-coroutines" }
-androidx-media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "androidx-media3" }
+androidx-media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "androidx-media3-exoplayer" }
 androidx-media3-ui = { module = "androidx.media3:media3-ui", version.ref = "androidx-media3" }
 # HLS extractor/manifest support (docs/18-playback-quality.md §3): the Auto/
 # Cap transcode fallback loads the server's transcoded stream as an HLS

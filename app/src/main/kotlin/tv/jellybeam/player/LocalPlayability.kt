@@ -29,12 +29,14 @@ internal object LocalPlayability {
         C.FORMAT_UNSUPPORTED_DRM,
     )
 
-    fun unplayableReason(tracks: Tracks): String? = unplayable(tracks)?.second
+    /** The unplayable track type (docs/18 §2: the fallback must not copy it back), its first [mime], and the reason. */
+    data class Unplayable(val failed: FailedTrackFfi, val reason: String, val mime: String)
 
-    /** The unplayable track type (docs/18 §2: the fallback must not copy it back) and its reason. */
-    fun unplayable(tracks: Tracks): Pair<FailedTrackFfi, String>? =
-        unsupportedTypeReason(tracks, C.TRACK_TYPE_VIDEO, "video")?.let { FailedTrackFfi.VIDEO to it }
-            ?: unsupportedTypeReason(tracks, C.TRACK_TYPE_AUDIO, "audio")?.let { FailedTrackFfi.AUDIO to it }
+    fun unplayableReason(tracks: Tracks): String? = unplayable(tracks)?.reason
+
+    fun unplayable(tracks: Tracks): Unplayable? =
+        unsupportedType(tracks, C.TRACK_TYPE_VIDEO, FailedTrackFfi.VIDEO, "video")
+            ?: unsupportedType(tracks, C.TRACK_TYPE_AUDIO, FailedTrackFfi.AUDIO, "audio")
 
     /** docs/18 §2: a renderer error names its failing format's type; anything else is unattributed. */
     fun failedTrack(error: PlaybackException): FailedTrackFfi {
@@ -51,7 +53,7 @@ internal object LocalPlayability {
     /** `Tracks.Group` has no direct type accessor in Media3 1.9.0; mirrors
      * [TrackMapping.toTrackInfos]'s own `mediaTrackGroup.type` read.
      */
-    private fun unsupportedTypeReason(tracks: Tracks, type: Int, label: String): String? {
+    private fun unsupportedType(tracks: Tracks, type: Int, failed: FailedTrackFfi, label: String): Unplayable? {
         if (!tracks.containsType(type)) return null
         var firstMime: String? = null
         var sawTrack = false
@@ -64,6 +66,7 @@ internal object LocalPlayability {
             }
         }
         if (!sawTrack) return null
-        return "No decoder on this device for the $label track (${firstMime ?: "unknown"})"
+        val mime = firstMime ?: "unknown"
+        return Unplayable(failed, "No decoder on this device for the $label track ($mime)", mime)
     }
 }

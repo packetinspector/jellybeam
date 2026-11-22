@@ -5,9 +5,8 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * docs/18 §5.2: the resume seek and a user skip interleave through [SeekSerializer] in the order
- * [PlayerHolder] drives them (load -> transition -> input -> tracks -> landing), so a skip pressed
- * while the player is still preparing lands on top of the resume instead of being overwritten.
+ * docs/18 §5.2: a resume and a user skip interleave through [SeekSerializer] in the order [PlayerHolder] drives them
+ * (load -> transition -> input -> landing). The resume itself is never a player seek: its source starts at the keyframe.
  */
 class ResumeSeekOrderingTest {
     private val gate = ResumeSeekGate()
@@ -18,45 +17,31 @@ class ResumeSeekOrderingTest {
         if (seeks.request(targetMs, nowMs) is SeekSerializer.Decision.Issue) issued += targetMs
     }
 
-    private fun tracksChanged(seekability: Seekability = Seekability.SEEKABLE) {
-        resumeSeekToIssue(gate, seeks, 1L, seekability)?.let { issued += it }
-    }
-
     private fun landed(nowMs: Long) {
         seeks.landed(nowMs)?.let { issued += it }
     }
 
     @Test
-    fun `a skip pressed before tracks arrive replays on top of the resume, never the reverse`() {
+    fun `a resume issues no player seek and its landing frees the slot`() {
         gate.arm(1L, 42_000L)
         assertEquals(42_000L, reserveResumeSeek(gate, seeks, 1L, nowMs = 0L))
+        assertEquals(42_000L, seeks.inFlightTargetMs)
 
-        userSkip(52_000L, nowMs = 100L) // held: the reservation owns the slot
-        tracksChanged() // the resume seek goes to the player
-        landed(nowMs = 400L) // the held skip replays
-        landed(nowMs = 800L)
+        landed(nowMs = 400L)
 
-        assertEquals(listOf(42_000L, 52_000L), issued)
+        assertEquals(emptyList<Long>(), issued)
         assertNull(seeks.inFlightTargetMs)
     }
 
     @Test
-    fun `a skip pressed after the resume seek is issued is held until it lands`() {
+    fun `a skip pressed while the resume prepares is held and replays on its landing`() {
         gate.arm(1L, 42_000L)
         reserveResumeSeek(gate, seeks, 1L, nowMs = 0L)
-        tracksChanged()
-        userSkip(52_000L, nowMs = 200L)
-        landed(nowMs = 400L)
 
-        assertEquals(listOf(42_000L, 52_000L), issued)
-    }
-
-    @Test
-    fun `without a reservation a user seek already in flight wins and the resume snap is dropped`() {
-        gate.arm(1L, 42_000L)
         userSkip(52_000L, nowMs = 100L)
-        tracksChanged()
-        landed(nowMs = 400L)
+        assertEquals(emptyList<Long>(), issued)
+        landed(nowMs = 400L) // the resume's first frame: the held skip replays
+        landed(nowMs = 800L)
 
         assertEquals(listOf(52_000L), issued)
         assertNull(seeks.inFlightTargetMs)
@@ -67,25 +52,25 @@ class ResumeSeekOrderingTest {
         gate.reset()
         assertNull(reserveResumeSeek(gate, seeks, 1L, nowMs = 0L))
         userSkip(10_000L, nowMs = 100L)
-        tracksChanged()
 
         assertEquals(listOf(10_000L), issued)
     }
 
     @Test
-    fun `a stale generation reserves and issues nothing`() {
+    fun `a stale generation reserves nothing`() {
         gate.arm(1L, 42_000L)
         assertNull(reserveResumeSeek(gate, seeks, 2L, nowMs = 0L))
-        assertNull(resumeSeekToIssue(gate, seeks, 2L, Seekability.SEEKABLE))
+        assertNull(seeks.inFlightTargetMs)
     }
 
+    /** docs/12 §9: an unseekable file's source starts at 0 with no seek; its landing still frees the slot. */
     @Test
-    fun `an unseekable file never gets the resume seek and frees the slot`() {
+    fun `an unseekable resume issues nothing and frees the slot on landing`() {
         gate.arm(1L, 42_000L)
         reserveResumeSeek(gate, seeks, 1L, nowMs = 0L)
-        tracksChanged(Seekability.UNSEEKABLE)
+        landed(nowMs = 300L)
+        userSkip(5_000L, nowMs = 400L)
 
-        assertEquals(emptyList<Long>(), issued)
-        assertNull(seeks.inFlightTargetMs)
+        assertEquals(listOf(5_000L), issued)
     }
 }

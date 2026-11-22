@@ -73,6 +73,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.profileinstaller.ProfileVerifier
 import tv.jellybeam.data.CoreGateway
+import tv.jellybeam.nav.AsyncOpens
 import tv.jellybeam.nav.ExitConfirmationGate
 import tv.jellybeam.nav.NavBackStack
 import tv.jellybeam.nav.Screen
@@ -512,6 +513,8 @@ internal suspend fun handleOpenDetail(
     navigate: (NavBackStack) -> Unit,
 ) {
     if (readyStack.isHomeRooted) {
+        // docs/10 `detail.push` starts at the request, so the card lookup is counted.
+        PerfLog.markDetailPush()
         val card = resolveLibraryCard(gateway, request.kind.item)
         if (stillPending() != request) return
         if (card != null) {
@@ -529,17 +532,37 @@ internal suspend fun handleOpenDetail(
 
 private const val EPISODE_ITEM_TYPE = "Episode"
 
-/** docs/07 Watch state: one ON_START with an account runs the session check and the core's
- * foreground refresh, once each; `foreground` must hop off Main itself (the gateway does). */
+/** docs/07 §5: a card opening Detail without an overview (a list cell) needs the mirror's full card. */
+internal fun needsMirrorCard(card: Card): Boolean =
+    card.overview == null && screenForLibraryCard(card) is Screen.Detail
+
+/**
+ * docs/07 §5: the card Detail opens on, so the overview is there on its first frame (docs/11
+ * Loading state); [card] itself when it needs no read or the mirror has no such item.
+ */
+internal suspend fun cardForOpen(gateway: CoreGateway, card: Card): Card {
+    if (!needsMirrorCard(card)) return card
+    return runCatchingCancellable { gateway.cardById(card.id) }.getOrNull() ?: card
+}
+
+/** docs/02 Foreground / background: every ON_START sends `foreground` and every ON_STOP
+ * `background`, account or not, so a recreate that starts before accounts load never leaves the
+ * core asleep; only the session check needs an account. Both callbacks hop off Main themselves. */
 internal fun onActivityStart(
     event: Lifecycle.Event,
     hasAccounts: Boolean,
     checkSession: () -> Unit,
     foreground: () -> Unit,
+    background: () -> Unit,
 ) {
-    if (event != Lifecycle.Event.ON_START || !hasAccounts) return
-    checkSession()
-    foreground()
+    when (event) {
+        Lifecycle.Event.ON_START -> {
+            if (hasAccounts) checkSession()
+            foreground()
+        }
+        Lifecycle.Event.ON_STOP -> background()
+        else -> Unit
+    }
 }
 
 /** Foreground returns re-validate the saved token at most this often; see `checkSession`. */
@@ -573,15 +596,10 @@ private fun SignInSurface(content: @Composable () -> Unit) {
 }
 
 /**
- * [Screen.Detail]'s fresh-entry perf mark (docs/10-perf-logging.md `detail.push`): every push or
- * sibling-replace that lands a NEW Detail screen. Never call these from a Back pop -- popping
- * reveals a Detail entry already on the stack, not a fresh one, and goes through
- * [NavBackStack.pop] directly, which never touches these helpers.
+ * A fresh Detail push. docs/10-perf-logging.md `detail.push` is marked by the caller when the open
+ * is asked for, so a card read before the push counts; a Back pop never marks.
  */
-private fun NavBackStack.pushDetail(card: Card): NavBackStack {
-    PerfLog.markDetailPush()
-    return push(Screen.Detail(card))
-}
+private fun NavBackStack.pushDetail(card: Card): NavBackStack = push(Screen.Detail(card))
 
 /** docs/29 §9: [screenForLibraryCard]'s page for [card]; a Detail push keeps its perf mark. */
 private fun NavBackStack.pushCard(card: Card): NavBackStack = when (val screen = screenForLibraryCard(card)) {
@@ -589,10 +607,7 @@ private fun NavBackStack.pushCard(card: Card): NavBackStack = when (val screen =
     else -> push(screen)
 }
 
-private fun NavBackStack.replaceDetail(card: Card): NavBackStack {
-    PerfLog.markDetailPush()
-    return replace(Screen.Detail(card))
-}
+private fun NavBackStack.replaceDetail(card: Card): NavBackStack = replace(Screen.Detail(card))
 
 /**
  * The identity a [ScreenViewModelStoreOwner] is tracked under -- `null` for screens that don't
@@ -945,6 +960,7 @@ private fun JellybeamRoot(
                 hasAccounts = accounts.isNotEmpty(),
                 checkSession = { checkSession(force = false) },
                 foreground = { composableScope.launch { runCatchingCancellable { gateway.onForeground() } } },
+                background = { composableScope.launch { runCatchingCancellable { gateway.onBackground() } } },
             )
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -1207,8 +1223,29 @@ private fun JellybeamRoot(
                     if (live != null) latestNavigate.value(change(live))
                 }
             }
+            // docs/07 §5: a list card opens Detail on the mirror's full card, read first; it lands
+            // only per [asyncOpenLands]. Any other card navigates at once, still dropping an older open.
+            val asyncOpens = remember { AsyncOpens { rootFocus.backPresses } }
+            val openResolved: (Card, (NavBackStack, Card) -> NavBackStack) -> Unit = remember {
+                { card, change ->
+                    val origin = backStack
+                    if (origin != null) {
+                        val ticket = asyncOpens.issue(origin)
+                        // docs/10 `detail.push` starts at the click, so the card read is counted.
+                        if (screenForLibraryCard(card) is Screen.Detail) PerfLog.markDetailPush()
+                        if (!needsMirrorCard(card)) {
+                            go { change(it, card) }
+                        } else {
+                            composableScope.launch {
+                                val full = cardForOpen(gateway, card)
+                                if (asyncOpens.lands(ticket, backStack)) go { change(it, full) }
+                            }
+                        }
+                    }
+                }
+            }
             // docs/29 §9: a music card from Home or Search opens its music page, anything else Detail.
-            val openDetail: (Card) -> Unit = remember { { card -> go { it.pushCard(card) } } }
+            val openDetail: (Card) -> Unit = remember { { card -> openResolved(card) { stack, full -> stack.pushCard(full) } } }
 
             // docs/29 §9 G2/G3: the bar's art block and the drawer's Now playing entry.
             val openNowPlaying: () -> Unit = remember { { go { it.toNowPlaying() } } }
@@ -1240,12 +1277,16 @@ private fun JellybeamRoot(
             // page: no matching item is indistinguishable here from a transient network failure.
             val openDiscoverLibraryItem: (String) -> Unit = remember {
                 { itemId ->
-                    // Only onto the stack it was asked from: a Back, drawer pick or account reset
-                    // during the lookup drops it.
+                    // Same landing rule as [openResolved]; the card is already the mirror's (or its
+                    // rebuild), so it pushes without a second read.
                     val origin = backStack
-                    composableScope.launch {
-                        val card = resolveLibraryCard(gateway, itemId)
-                        if (card != null && backStack === origin) openDetail(card)
+                    if (origin != null) {
+                        val ticket = asyncOpens.issue(origin)
+                        PerfLog.markDetailPush()
+                        composableScope.launch {
+                            val card = resolveLibraryCard(gateway, itemId)
+                            if (card != null && asyncOpens.lands(ticket, backStack)) go { it.pushCard(card) }
+                        }
                     }
                 }
             }
@@ -1310,14 +1351,7 @@ private fun JellybeamRoot(
                                     ) {
                                         LibraryScreen(
                                             view = entry.view,
-                                            onOpenDetail = { card ->
-                                                // screenForLibraryCard resolves a channel-folder item
-                                                // to another Library level instead of Detail -- only
-                                                // mark the genuine Detail case.
-                                                val screen = screenForLibraryCard(card)
-                                                if (screen is Screen.Detail) PerfLog.markDetailPush()
-                                                go { it.push(screen) }
-                                            },
+                                            onOpenDetail = openDetail,
                                             isTop = isTop,
                                         )
                                     }
@@ -1374,11 +1408,13 @@ private fun JellybeamRoot(
                                         onOpenDiscover = { navigateFromDrawer(Screen.Discover) },
                                         onOpenNowPlaying = openNowPlaying,
                                     ) {
+                                        // Captures the id, not [stack], so a push keeps this layer's callback equal.
+                                        val entryId = stack.ids[index]
                                         DetailScreen(
                                             card = entry.card,
                                             isTop = isTop,
                                             // docs/07 §5: the mirror dropped this title; pops only this entry, and only while it is the top.
-                                            onRemoved = { go { it.popIfTop(stack.ids[index]) } },
+                                            onRemoved = { go { it.popIfTop(entryId) } },
                                             onOpenDetail = { card ->
                                                 // docs/07 §5: a sibling-episode switch replaces the
                                                 // top entry so Back skips visited
@@ -1386,8 +1422,8 @@ private fun JellybeamRoot(
                                                 // non-episode card still pushes.
                                                 val stayingOnSiblingEpisode = entry.card.itemType == EPISODE_ITEM_TYPE &&
                                                     card.itemType == EPISODE_ITEM_TYPE
-                                                go { live ->
-                                                    if (stayingOnSiblingEpisode) live.replaceDetail(card) else live.pushDetail(card)
+                                                openResolved(card) { live, full ->
+                                                    if (stayingOnSiblingEpisode) live.replaceDetail(full) else live.pushDetail(full)
                                                 }
                                             },
                                             onOpenPerson = { person ->
@@ -1588,12 +1624,14 @@ private fun JellybeamRoot(
                                 is Screen.WatchTogether -> CompositionLocalProvider(
                                     LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                 ) {
+                                    // Captures the id, not [stack], so a push keeps this layer's callback equal.
+                                    val entryId = stack.ids[index]
                                     DrawerlessLayer {
                                         WatchTogetherScreen(
                                             itemId = entry.itemId,
                                             resumeTicks = entry.resumeTicks,
                                             isTop = isTop,
-                                            onExit = { go { it.popIfTop(stack.ids[index]) } },
+                                            onExit = { go { it.popIfTop(entryId) } },
                                             onChooseTitle = { go { it.push(Screen.Search) } },
                                         )
                                     }
@@ -1636,7 +1674,9 @@ private fun JellybeamRoot(
                                 Screen.MusicNowPlaying, Screen.MusicQueue -> CompositionLocalProvider(
                                     LocalViewModelStoreOwner provides screenStoreOwners.getOrPut(entry.viewModelStoreKey(stack.ids[index])!!) { ScreenViewModelStoreOwner() },
                                 ) {
-                                    val leave = { go { it.popIfTop(stack.ids[index]) } }
+                                    // Captures the id, not [stack], so a push keeps this layer's callback equal.
+                                    val entryId = stack.ids[index]
+                                    val leave = remember(entryId) { { go { it.popIfTop(entryId) } } }
                                     Box(Modifier.musicTrackKeys()) {
                                         if (entry == Screen.MusicNowPlaying) {
                                             MusicNowPlayingScreen(isTop, musicNav, onOpenQueue = { go { it.push(Screen.MusicQueue) } }, onExit = leave)

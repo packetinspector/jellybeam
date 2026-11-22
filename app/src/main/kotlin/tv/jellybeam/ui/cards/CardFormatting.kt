@@ -61,13 +61,22 @@ object CardFormatting {
         return strings.get(R.string.card_time_left, formatRuntime(strings, remaining))
     }
 
-    private fun futureAirDate(premiereDate: String?, now: Instant): OffsetDateTime? =
-        premiereDate
-            ?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }
-            ?.takeIf { it.toInstant().isAfter(now) }
+    /**
+     * The RFC3339 forms the core's `is_missing` accepts for every format Jellyfin emits, pinned by the
+     * shared table `core/ffi/testdata/air-dates.tsv`: `T`, `t` or space, seconds required, any
+     * fraction length, `Z`/`z` or `±hh:mm`. Not full chrono parity: a leap second, U+2212 or an
+     * offset past ±18:00 may differ.
+     */
+    private val RFC3339 = Regex("""(\d{4}-\d{2}-\d{2})[Tt ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?([Zz]|[+-]\d{2}:\d{2})""")
 
-    /** docs/24: a virtual episode is "missing" unless it has a parseable, future RFC3339 `premiereDate`. */
-    fun isMissing(premiereDate: String?, now: Instant = Instant.now()): Boolean = futureAirDate(premiereDate, now) == null
+    /** docs/24: the air date when [premiereDate] is RFC3339 and after [now], else `null` ("Missing"). */
+    private fun futureAirDate(premiereDate: String?, now: Instant): OffsetDateTime? {
+        val match = premiereDate?.let { RFC3339.matchEntire(it) } ?: return null
+        val (date, time, fraction, offset) = match.destructured
+        val nanos = if (fraction.isEmpty()) "" else "." + fraction.take(9)
+        val iso = date + "T" + time + nanos + (if (offset.equals("z", ignoreCase = true)) "Z" else offset)
+        return runCatching { OffsetDateTime.parse(iso) }.getOrNull()?.takeIf { it.toInstant().isAfter(now) }
+    }
 
     /** "Airs {abbrev date}" for a parseable, future `premiereDate` (RFC3339); "Missing" otherwise
      * (absent, unparseable, or past).

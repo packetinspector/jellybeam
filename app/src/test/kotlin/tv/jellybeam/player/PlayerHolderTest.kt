@@ -18,7 +18,6 @@ import org.junit.Test
  * `applyTrackDecision()` end-to-end.
  */
 class PlayerHolderTest {
-
     /** A minimal single-format group, enough to build a [TrackSelectionOverride] against. */
     private fun group(mimeType: String) = TrackGroup(Format.Builder().setSampleMimeType(mimeType).build())
 
@@ -63,6 +62,17 @@ class PlayerHolderTest {
         assertEquals(withPreferredLanguage.preferredAudioLanguages, baseline.preferredAudioLanguages)
     }
 
+    private fun landing(transcode: Boolean) = if (transcode) 20_000L else 2_500L
+
+    @Test
+    fun `a seek waits 2500 ms to land on direct play and 20000 ms on a transcode, group loads included`() {
+        val starts = listOf(LoadStart.Resume, LoadStart.At(ticks = 1L), LoadStart.GroupExactPaused(ticks = 1L))
+        for (start in starts) {
+            assertEquals("$start", 2_500L, loadOpening(420_000_000L, transcode = false, start).seekLandingTimeoutMs)
+            assertEquals("$start", 20_000L, loadOpening(420_000_000L, transcode = true, start).seekLandingTimeoutMs)
+        }
+    }
+
     @Test
     fun `group loads never arm the keyframe resume`() {
         // docs/28 §5 inv 11: a keyframe-snapped landing would make the server re-send Seek forever.
@@ -87,11 +97,11 @@ class PlayerHolderTest {
         // docs/05 external: START_MS is an absolute position, direct play and transcode alike.
         for (transcode in listOf(false, true)) {
             assertEquals(
-                LoadOpening(12_345L, armResume = false, playWhenReady = true),
+                LoadOpening(12_345L, armResume = false, playWhenReady = true, landing(transcode)),
                 loadOpening(planStartTicks = 420_000_000L, transcode = transcode, LoadStart.At(ticks = 123_456_789L)),
             )
         }
-        assertEquals(LoadOpening(0L, armResume = false, playWhenReady = true), loadOpening(420_000_000L, false, LoadStart.At(0L)))
+        assertEquals(LoadOpening(0L, armResume = false, playWhenReady = true, 2_500L), loadOpening(420_000_000L, false, LoadStart.At(0L)))
     }
 
     @Test
@@ -121,9 +131,9 @@ class PlayerHolderTest {
 
     @Test
     fun `a resume load still lands on the keyframe and plays, except a transcode`() {
-        assertEquals(LoadOpening(42_000L, armResume = true, playWhenReady = true), loadOpening(420_000_000L, false, LoadStart.Resume))
-        assertEquals(LoadOpening(42_000L, armResume = false, playWhenReady = true), loadOpening(420_000_000L, true, LoadStart.Resume))
-        assertEquals(LoadOpening(0L, armResume = false, playWhenReady = true), loadOpening(0L, false, LoadStart.Resume))
+        assertEquals(LoadOpening(42_000L, armResume = true, playWhenReady = true, 2_500L), loadOpening(420_000_000L, false, LoadStart.Resume))
+        assertEquals(LoadOpening(42_000L, armResume = false, playWhenReady = true, 20_000L), loadOpening(420_000_000L, true, LoadStart.Resume))
+        assertEquals(LoadOpening(0L, armResume = false, playWhenReady = true, 2_500L), loadOpening(0L, false, LoadStart.Resume))
     }
 
     @Test

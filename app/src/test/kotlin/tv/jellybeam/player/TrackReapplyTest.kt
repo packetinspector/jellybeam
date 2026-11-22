@@ -2,34 +2,20 @@ package tv.jellybeam.player
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.jellybeam_core.AudioStreamFfi
 import uniffi.jellybeam_core.EmbeddedSubtitleFfi
-import uniffi.jellybeam_core.SubtitleActionFfi
-import uniffi.jellybeam_core.SubtitleDeliveryFfi
-import uniffi.jellybeam_core.TrackDecisionFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
 
 /** docs/18 §3.1: what survives a reload, and how an embedded track is found again. */
 class TrackReapplyTest {
 
-    private fun sub(id: Long, lang: String?, title: String? = null, forced: Boolean = false, selected: Boolean = false) =
-        TrackInfo(id = id, kind = TrackKindFfi.SUBTITLE, title = title, lang = lang, codec = "srt", isDefault = false, isSelected = selected, isForced = forced)
+    private fun sub(id: Long, lang: String?, title: String? = null, forced: Boolean = false, selected: Boolean = false, sdh: Boolean = false) =
+        TrackInfo(id = id, kind = TrackKindFfi.SUBTITLE, title = title, lang = lang, codec = "srt", isDefault = false, isSelected = selected, isForced = forced, isHearingImpaired = sdh)
 
     private fun audio(id: Long, lang: String?, selected: Boolean = false) =
-        TrackInfo(id = id, kind = TrackKindFfi.AUDIO, title = null, lang = lang, codec = "aac", isDefault = false, isSelected = selected, isForced = false)
-
-    @Test
-    fun `the choice before a reload is the recorded one unless undecided or a sidecar shows`() {
-        val embedded = TextChoice.Embedded(sub(3, "en", "Full").identity())
-        assertEquals(TextChoice.Auto, textChoiceBeforeReload(decided = false, sidecarActive = true, recorded = embedded))
-        assertEquals(TextChoice.Sidecar, textChoiceBeforeReload(decided = true, sidecarActive = true, recorded = embedded))
-        assertEquals(embedded, textChoiceBeforeReload(decided = true, sidecarActive = false, recorded = embedded))
-        assertEquals(TextChoice.Off, textChoiceBeforeReload(decided = true, sidecarActive = false, recorded = TextChoice.Off))
-        assertEquals(TextChoice.Leave, textChoiceBeforeReload(decided = true, sidecarActive = false, recorded = TextChoice.Leave))
-    }
+        TrackInfo(id = id, kind = TrackKindFfi.AUDIO, title = null, lang = lang, codec = "aac", isDefault = false, isSelected = selected, isForced = false, isHearingImpaired = false)
 
     @Test
     fun `language codes of either length compare equal`() {
@@ -81,13 +67,38 @@ class TrackReapplyTest {
     }
 
     @Test
-    fun `a negotiation names the chosen stream, none for Off or a sidecar, nothing when undecided`() {
+    fun `matching tries title and SDH, then title, then SDH, then language and forced only`() {
+        val twinsSdh = listOf(sub(10, "en", "English"), sub(11, "en", "English", sdh = true))
+        assertEquals("exact title and SDH", 11L, matchTrack(sub(0, "en", "English", sdh = true).identity(), TrackKindFfi.SUBTITLE, twinsSdh)?.id)
+        assertEquals(10L, matchTrack(sub(0, "en", "English").identity(), TrackKindFfi.SUBTITLE, twinsSdh)?.id)
+        val retitled = listOf(sub(10, "en", "Full"), sub(11, "en", "Hearing", sdh = true))
+        assertEquals("title gone, SDH tells them apart", 11L, matchTrack(sub(0, "en", "English", sdh = true).identity(), TrackKindFfi.SUBTITLE, retitled)?.id)
+        assertEquals(10L, matchTrack(sub(0, "en", "English").identity(), TrackKindFfi.SUBTITLE, retitled)?.id)
+        assertEquals("SDH flag lost, the unique language still matches", 10L, matchTrack(sub(0, "en", "English", sdh = true).identity(), TrackKindFfi.SUBTITLE, listOf(sub(10, "en", "English"), sub(11, "fr")))?.id)
+        assertEquals("an unpaired Direct Play pick knows no SDH, its title still finds it", 11L, matchTrack(sub(0, "en", "English SDH").identity(), TrackKindFfi.SUBTITLE, listOf(sub(10, "en", "English"), sub(11, "en", "English SDH", sdh = true)))?.id)
+        assertNull("true duplicates stay ambiguous", matchTrack(sub(0, "en", "English", sdh = true).identity(), TrackKindFfi.SUBTITLE, listOf(sub(10, "en", "English", sdh = true), sub(11, "en", "English", sdh = true))))
+        assertNull("same title, no SDH flag wanted, two plain twins", matchTrack(sub(0, "en", "English").identity(), TrackKindFfi.SUBTITLE, listOf(sub(10, "en", "English"), sub(11, "en", "English"), sub(12, "en", "English", sdh = true))))
+    }
+
+    @Test
+    fun `a negotiation keeps SDH and plain apart when their titles match`() {
+        val streams = listOf(
+            EmbeddedSubtitleFfi(index = 2, language = "eng", title = "English", forced = false, default = false, codec = "subrip"),
+            EmbeddedSubtitleFfi(index = 3, language = "eng", title = "English", forced = false, default = false, codec = "subrip", hearingImpaired = true),
+        )
+        assertEquals(3, subtitleStreamIndexFor(TextChoice.Embedded(sub(0, "en", "English", sdh = true).identity()), streams))
+        assertEquals(2, subtitleStreamIndexFor(TextChoice.Embedded(sub(0, "en", "English").identity()), streams))
+        val duplicates = streams.map { it.copy(hearingImpaired = false) }
+        assertEquals("true duplicates name none", NO_SUBTITLE_STREAM, subtitleStreamIndexFor(TextChoice.Embedded(sub(0, "en", "English").identity()), duplicates))
+    }
+
+    @Test
+    fun `a negotiation names the chosen stream, none for Off or a sidecar, nothing for the default`() {
         val streams = listOf(
             EmbeddedSubtitleFfi(index = 2, language = "eng", title = null, forced = false, default = false, codec = "ass"),
             EmbeddedSubtitleFfi(index = 3, language = "eng", title = "Signs", forced = true, default = false, codec = "ass"),
             EmbeddedSubtitleFfi(index = 4, language = "fre", title = null, forced = false, default = false, codec = "srt"),
         )
-        assertNull(subtitleStreamIndexFor(TextChoice.Auto, streams))
         assertNull(subtitleStreamIndexFor(TextChoice.Leave, streams))
         assertEquals(NO_SUBTITLE_STREAM, subtitleStreamIndexFor(TextChoice.Off, streams))
         assertEquals(NO_SUBTITLE_STREAM, subtitleStreamIndexFor(TextChoice.Sidecar, streams))
@@ -110,81 +121,12 @@ class TrackReapplyTest {
         assertEquals("a stream that no longer carries the identity is not named", NO_SUBTITLE_STREAM, subtitleStreamIndexFor(renamed, streams))
     }
 
-    @Test
-    fun `a decision naming a burn-in-only stream turns player text off and hands the stream on`() {
-        val burnable = listOf(sub(streamRowId(3), "en", forced = true))
-        val picks = TrackDecisionFfi(audioTrackId = 7, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = streamRowId(3))
-        val off = TrackDecisionFfi(audioTrackId = 7, subtitleAction = SubtitleActionFfi.OFF, subtitleTrackId = null)
-        assertEquals(off to burnable.single(), routeStreamRow(picks, burnable))
-        val delivered = picks.copy(subtitleTrackId = 4)
-        assertEquals(delivered to null, routeStreamRow(delivered, burnable))
-        assertEquals(off to null, routeStreamRow(off, burnable))
-    }
-
-    @Test
-    fun `the policy sees rows needing no renegotiation first`() {
-        val delivered = sub(4, "en")
-        val sidecar = sub(ExternalSubtitles.idFor(0), "en")
-        val burned = sub(streamRowId(2), "eng", selected = true)
-        val unburned = sub(streamRowId(3), "eng")
-        assertEquals(listOf(delivered, burned, sidecar, unburned), policyTracks(listOf(delivered), listOf(sidecar), listOf(unburned, burned)))
-    }
-
-    @Test
-    fun `a transcode lists manifest text only while the manifest has none, and never as burned in`() {
-        val ass = EmbeddedSubtitleFfi(index = 2, language = "eng", title = null, forced = false, default = true, codec = "ass", delivery = SubtitleDeliveryFfi.ENCODE)
-        val srt = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "English", forced = false, default = false, codec = "subrip", delivery = SubtitleDeliveryFfi.HLS)
-        val ttml = EmbeddedSubtitleFfi(index = 4, language = "fre", title = null, forced = false, default = false, codec = "ttml", delivery = SubtitleDeliveryFfi.EXTERNAL)
-        val unknown = EmbeddedSubtitleFfi(index = 5, language = "ger", title = null, forced = false, default = false, codec = "srt")
-        val streams = listOf(ass, srt, ttml, unknown)
-
-        val bare = transcodeStreamRows(streams, delivered = listOf(audio(0, "en")), shown = null)
-        assertEquals(listOf(streamRowId(2), streamRowId(3)), bare.map { it.id })
-        assertTrue(bare.none { it.isSelected })
-        assertEquals("a requested text stream reads selected while it negotiates", listOf(false, true), transcodeStreamRows(streams, emptyList(), shown = 3).map { it.isSelected })
-
-        val withManifest = transcodeStreamRows(streams, delivered = listOf(sub(1000, "en", "English")), shown = 2)
-        assertEquals("only what burns in is left to renegotiate for", listOf(streamRowId(2)), withManifest.map { it.id })
-        assertTrue(withManifest.single().isSelected)
-    }
-
-    @Test
-    fun `manifest text takes its stream's identity and drops copies of what burns in`() {
-        val srt = EmbeddedSubtitleFfi(index = 3, language = "eng", title = "English", forced = true, default = true, codec = "subrip", displayTitle = "English - SUBRIP", delivery = SubtitleDeliveryFfi.HLS)
-        val ass = EmbeddedSubtitleFfi(index = 2, language = "eng", title = "Signs", forced = false, default = false, codec = "ass", displayTitle = "Signs - English - ASS", delivery = SubtitleDeliveryFfi.ENCODE)
-        val infos = listOf(
-            audio(0, "eng"),
-            sub(1000, "en", "English - SUBRIP"),
-            sub(2000, "eng", "Signs - English - ASS"),
-            sub(3000, "eng", "Sidecar - English - ASS - External"),
-        )
-        val got = manifestTrackInfos(infos, listOf(ass, srt))
-        assertEquals(listOf(0L, 1000L), got.map { it.id })
-        assertEquals(TrackIdentity("eng", "English", forced = true), got[1].identity())
-        assertEquals("subrip", got[1].codec)
-        assertTrue("the file's default flag, not the manifest's", got[1].isDefault)
-        assertEquals("no manifest stream, no manifest text to map", infos, manifestTrackInfos(infos, listOf(ass)))
-    }
-
     // -- docs/18 §3.1: the negotiation carries the audio choice ----------------------------------
 
     private val mainAudio = AudioStreamFfi(index = 1, displayTitle = "English - AAC - Stereo - Default", language = "eng", codec = "aac", channels = 2, isDefault = true)
     private val commentary = AudioStreamFfi(index = 3, displayTitle = "Commentary - English - AAC - Stereo", title = "Commentary", language = "eng", codec = "aac", channels = 2, isDefault = false)
     private val japanese = AudioStreamFfi(index = 4, displayTitle = null, language = "jpn", codec = "ac3", channels = 6, isDefault = false)
     private val audioStreams = listOf(mainAudio, commentary, japanese)
-
-    @Test
-    fun `a transcode's audio rows are every source stream, titled as Direct Play titles them, the delivered one selected`() {
-        val rows = transcodeAudioRows(audioStreams, shown = 3)
-        assertEquals(listOf(streamRowId(1), streamRowId(3), streamRowId(4)), rows.map { it.id })
-        assertTrue(rows.all { it.kind == TrackKindFfi.AUDIO })
-        assertEquals("the stream's own title, never the server's joined label", listOf(null, "Commentary", null), rows.map { it.title })
-        assertEquals(listOf("aac", "aac", "ac3"), rows.map { it.codec })
-        assertEquals(listOf(false, true, false), rows.map { it.isSelected })
-        assertEquals(listOf(true, false, false), rows.map { it.isDefault })
-        assertEquals(listOf("eng", "eng", "jpn"), rows.map { it.lang })
-        assertTrue("nothing delivered reads unselected", transcodeAudioRows(audioStreams, shown = null).none { it.isSelected })
-    }
 
     @Test
     fun `an audio negotiation names the picked stream while it keeps its identity, else the unique match, else the server's default`() {
@@ -198,7 +140,7 @@ class TrackReapplyTest {
         assertNull("an ambiguous language names none", audioStreamIndexFor(AudioChoice(audio(0, "en").identity()), twins))
         val second = streamAudioChoice(twins[1])
         assertEquals("only the row's own index tells unlabelled twins apart", 6, audioStreamIndexFor(second, twins))
-        val moved = AudioChoice(TrackIdentity("fra", null, forced = false), streamIndex = 3)
+        val moved = AudioChoice(TrackIdentity("fra", null, forced = false, sdh = false), streamIndex = 3)
         assertNull("a stream that no longer carries the identity is not named", audioStreamIndexFor(moved, audioStreams))
     }
 

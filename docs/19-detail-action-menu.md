@@ -67,7 +67,7 @@ fetch on open):
 | Add to / Remove from favorites | always; by `isFavorite` of the movie/episode/series. In season scope the row reads and writes the **series** flag. |
 | Play from the beginning | movie/episode: `positionTicks > 0`. Series: the primary action is a Resume (an in-progress episode exists); restarts that episode. Absent in season scope. |
 | Play next unwatched | series: the primary action resolves to a Playable target (`DetailFormatting.resolvePrimaryAction`); the row plays that same target. Season scope: first in-progress else first unplayed non-virtual episode of the selected season. Subtext `E{n}` when the target is in the selected season, `S{s} E{n}` otherwise, nothing when either number is missing. |
-| Play something random | scope has at least one non-virtual episode. `N` = that count (all episodes, watched or not). Picks uniformly, plays it with normal autoplay after. One episode, no queue. |
+| Play something random | scope has at least one non-virtual episode. `N` = that count (all episodes, watched or not): the shown season's in season scope, the core's season counts in series scope. Picks uniformly, plays it with normal autoplay after. One episode, no queue. Season scope picks from the shown season; series scope reads the series' episodes only when the row runs, never on page or menu open; one pick at a time, and closing the menu cancels it. |
 | Watch together | the primary action resolves to a Playable target (the same one Play would start); opens the host lobby holding it, with its resume position for the Start choice (docs/28 §1). |
 | Go to series | episode with a known `seriesId`; opens the series page (`DetailFormatting.seriesCardFrom`). Label `Go to series` with the series name as trailing subtext, verbatim, not re-cased. |
 | Add to collection | movie, series, episode; the session collections list is non-empty. Absent in season scope and while the list is unknown or empty. |
@@ -337,8 +337,8 @@ sealed interface MenuAction { MarkWatched, MarkUnwatched, MarkScopeWatched(count
 data class MenuRow(val action: MenuAction, val label: String, val subtext: String?)
 data class MenuGroupModel(val group: MenuGroup, val rows: List<MenuRow>)
 data class MenuModel(val groups: List<MenuGroupModel>, val focusOn: MenuAction?)
-data class MenuInput(card, itemType, scopeSeason: Card?, scopeEpisodes: List<Card>, allEpisodes: List<Card>,
-    primaryAction: PrimaryAction, isFavorite: Boolean, hasCollections: Boolean, isAdministrator: Boolean,
+data class MenuInput(card, itemType, scopeSeason: Card?, scopeEpisodes: List<Card>, seasonStats: List<SeasonStats>,
+    seriesTarget: Card?, primaryAction: PrimaryAction, isFavorite: Boolean, hasCollections: Boolean, isAdministrator: Boolean,
     seriesCard: Card?)
 fun buildMenu(input: MenuInput): MenuModel
 fun pickRandom(episodes: List<Card>, random: Random): Card?

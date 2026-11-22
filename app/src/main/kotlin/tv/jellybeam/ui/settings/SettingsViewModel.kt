@@ -392,6 +392,15 @@ class SettingsViewModel(
 
     fun selectAutoplayDelay(secs: UInt) = updateSettings { it.copy(autoplayDelaySecs = secs) }
 
+    fun selectSubtitleMode(mode: SubtitleModeSetting) =
+        updateSettings { it.copy(language = it.language.copy(subtitleMode = mode)) }
+
+    fun selectSubtitleLanguage(code: String?) =
+        updateSettings { it.copy(language = it.language.copy(subtitle = code)) }
+
+    fun selectAudioLanguage(code: String?) =
+        updateSettings { it.copy(language = it.language.copy(audio = code)) }
+
     fun selectSubtitleScale(scale: Float) = updateSettings { it.copy(subtitleScale = scale) }
 
     fun selectSubtitlePosition(position: SubtitlePositionPreset) =

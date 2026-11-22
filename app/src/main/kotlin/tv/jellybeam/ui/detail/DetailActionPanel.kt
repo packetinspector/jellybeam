@@ -68,6 +68,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
@@ -155,7 +156,8 @@ private fun groupLabelRes(group: MenuGroup): Int = when (group) {
 /**
  * §1.5's panel: three always-open groups, pinned to the right edge at [PANEL_WIDTH], sliding on
  * [offsetX] (animated by [DetailScreen] since the exit animation must outlive [menu] going
- * `null`). Traps focus, seeds [MenuModel.focusOn] (else row 0), and remembers the last first-level
+ * `null`; read at placement, so the slide never recomposes the rows). Traps focus, seeds
+ * [MenuModel.focusOn] (else row 0), and remembers the last first-level
  * row index so Back/Cancel return to the opening row. A collections level with no addable row
  * seeds an invisible anchor (docs/19 §1.3) and scrolls (up to 200); the first level never does. The
  * extras level is the same shape: its heading reads `LOADING` or the failure text until rows land.
@@ -170,7 +172,7 @@ internal fun DetailActionPanel(
     extras: ExtrasState,
     strings: UiStrings,
     confirm: BulkMarkConfirm?,
-    offsetX: Dp,
+    offsetX: () -> Dp,
     isTop: Boolean,
     onRunAction: (MenuAction) -> Unit,
     onEnterCollections: () -> Unit,
@@ -250,8 +252,7 @@ internal fun DetailActionPanel(
     }
 
     ActionPanelFrame(
-        offsetX = offsetX,
-        modifier = modifier,
+        modifier = modifier.offset { IntOffset(offsetX().roundToPx(), 0) },
         onPreviewKey = { event ->
             if (event.type != KeyEventType.KeyDown) return@ActionPanelFrame false
             // docs/19 §1.3: the confirm's pill pair is horizontal, so while it is up
@@ -373,18 +374,17 @@ internal class ConfirmGate {
 
 /**
  * §1.5's panel chrome, shared with the music menu (docs/29 §8.7): the leftward shadow, the ground with
- * its hairline, the focus trap, [ConfirmGate] and [onPreviewKey], sliding on [offsetX]; [content] is the padded column.
+ * its hairline, the focus trap, [ConfirmGate] and [onPreviewKey]; [content] is the padded column.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 internal fun ActionPanelFrame(
-    offsetX: Dp,
     onPreviewKey: (KeyEvent) -> Boolean,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val gate = remember { ConfirmGate() }
-    Row(modifier = modifier.fillMaxHeight().offset(x = offsetX)) {
+    Row(modifier = modifier.fillMaxHeight()) {
         // §1.5's leftward shadow: a horizontal gradient band in the same Row, tracking the panel's
         // slide.
         Box(

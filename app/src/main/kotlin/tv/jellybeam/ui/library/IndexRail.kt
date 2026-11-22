@@ -84,9 +84,10 @@ internal fun IndexRail(
     railIndex: Int,
     onRailIndexChange: (Int) -> Unit,
     /** The grid's focused cell, or `null` when focus is elsewhere; the unfocused rail's bright
-     * entry follows it, falling back to the first visible row with no focused cell.
+     * entry follows it, falling back to the first visible row with no focused cell. Read here, so a
+     * grid focus step recomposes the rail, not the Library page.
      */
-    focusedIndex: Int?,
+    focusedIndex: () -> Int?,
     gridState: LazyGridState,
     viewModel: LibraryViewModel,
     memory: FocusMemory,
@@ -107,7 +108,7 @@ internal fun IndexRail(
 
     // §4.4: the entry containing the first visible grid item is Panna when unfocused.
     val current by remember(entries, focusedIndex) {
-        derivedStateOf { IndexRailModel.entryIndexForOffset(entries, focusedIndex ?: gridState.firstVisibleItemIndex) }
+        derivedStateOf { IndexRailModel.entryIndexForOffset(entries, focusedIndex() ?: gridState.firstVisibleItemIndex) }
     }
 
     // docs/16 §4.4: Left from the rail focuses the entry's first poster, so the drawer's

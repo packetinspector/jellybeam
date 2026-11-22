@@ -177,6 +177,19 @@ class PreloadOnDwellTest {
     }
 
     @Test
+    fun `a card left focused stops re-firing after the cap`() = runTest {
+        val gateway = FakeCoreGateway()
+        val reArmMillis = 1_000L
+        val preload = PreloadOnDwell(scope = backgroundScope, gateway = gateway, reArmMillis = reArmMillis, maxFires = 3)
+
+        preload.onCardFocused("item-1", "Movie")
+        advanceTimeBy(PRELOAD_DWELL_MILLIS + 1)
+        advanceTimeBy(reArmMillis * 10)
+
+        assertEquals(listOf("item-1", "item-1", "item-1"), gateway.preloadPlaybackCalls)
+    }
+
+    @Test
     fun `losing focus before the TTL elapses cancels the re-arm timer`() = runTest {
         val gateway = FakeCoreGateway()
         val reArmMillis = 1_000L

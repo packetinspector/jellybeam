@@ -7,9 +7,9 @@ import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
 
 /** docs/18 §3.1: what identifies an embedded track across a reload, whose ids are not stable. */
-internal data class TrackIdentity(val lang: String?, val title: String?, val forced: Boolean)
+internal data class TrackIdentity(val lang: String?, val title: String?, val forced: Boolean, val sdh: Boolean)
 
-internal fun TrackInfo.identity() = TrackIdentity(lang = normalizedLanguage(lang), title = title?.trim()?.takeIf { it.isNotEmpty() }, forced = isForced)
+internal fun TrackInfo.identity() = TrackIdentity(lang = normalizedLanguage(lang), title = title?.trim()?.takeIf { it.isNotEmpty() }, forced = isForced, sdh = isHearingImpaired)
 
 /** ISO 639-1, -2/T and -2/B codes for the same language compare equal ("en", "eng"; "de", "ger");
  * unknown codes as-is.
@@ -28,20 +28,14 @@ private val BIBLIOGRAPHIC_TO_TERMINOLOGY = mapOf(
     "per" to "fas", "rum" to "ron", "slo" to "slk", "tib" to "bod", "wel" to "cym",
 )
 
-/**
- * docs/18 §3.1: the semantic subtitle choice a reload must restore, recorded when a decision is
- * applied (manual or automatic) rather than read back from Media3, whose announced selection lags.
- */
+/** docs/18 §3.1: the subtitle choice a transcode negotiation names a stream for. */
 internal sealed interface TextChoice {
-    /** Nothing decided yet (or a decision still in flight): the new load resolves through Rust. */
-    data object Auto : TextChoice
-
-    /** The decision left the player's own default; the new load's default stands. */
+    /** The player's or server's own default stands. */
     data object Leave : TextChoice
 
     data object Off : TextChoice
 
-    /** A sidecar is showing or loading; the sidecar adoption path restores it, text stays off. */
+    /** A sidecar shows instead, so no stream is burned in. */
     data object Sidecar : TextChoice
 
     /** [streamIndex]: the server stream a stream row named, which identity alone may not single out. */
@@ -53,67 +47,70 @@ internal sealed interface TextChoice {
  */
 internal data class AudioChoice(val identity: TrackIdentity, val streamIndex: Int? = null)
 
-/** What a reload restores: the subtitle choice, and the audio choice once one was decided. */
-internal data class ReloadChoice(val text: TextChoice, val audio: AudioChoice?)
-
-/** The choice to restore after a reload: undecided resolves afresh, a showing or loading sidecar
- * wins over what was [recorded] before it.
- */
-internal fun textChoiceBeforeReload(decided: Boolean, sidecarActive: Boolean, recorded: TextChoice): TextChoice = when {
-    !decided -> TextChoice.Auto
-    sidecarActive -> TextChoice.Sidecar
-    else -> recorded
-}
-
 /**
- * docs/18 §3.1 (section 6.3 policy): the one track of [kind] in [tracks] that is [wanted]. An exact
- * language, forced and title match wins; otherwise a unique language-and-forced match (titles get
- * rewritten or dropped by a transcode). Ambiguity is no match, never the first candidate: the
- * track list carries no role, so two same-language tracks can't be told apart safely.
+ * docs/18 §3.1 (section 6.3 policy): the one track of [kind] in [tracks] that is [wanted]. Among
+ * its language-and-forced matches the first unique tier wins: title and SDH, title, SDH, then none
+ * (titles get rewritten or dropped by a transcode; SDH is unknown on an unpaired Direct Play row). Ambiguity is no
+ * match, never the first candidate: two tracks equal in every tier can't be told apart safely.
  */
 internal fun matchTrack(wanted: TrackIdentity, kind: TrackKindFfi, tracks: List<TrackInfo>): TrackInfo? {
     val sameKind = tracks.filter { it.kind == kind }
     val sameLanguage = sameKind.filter { normalizedLanguage(it.lang) == wanted.lang && it.isForced == wanted.forced }
-    sameLanguage.filter { it.identity().title == wanted.title }.singleOrNull()?.let { return it }
-    return sameLanguage.singleOrNull()
+    val tiers = listOf<(TrackInfo) -> Boolean>(
+        { it.isHearingImpaired == wanted.sdh && it.identity().title == wanted.title },
+        { it.identity().title == wanted.title },
+        { it.isHearingImpaired == wanted.sdh },
+        { true },
+    )
+    return tiers.firstNotNullOfOrNull { tier -> sameLanguage.singleOrNull(tier) }
 }
 
 /**
  * docs/18 §3.1: the subtitle stream a transcode negotiation should name for [choice]. Off and a
  * sidecar name none (`-1`, so nothing is burned in); an embedded choice names the stream its row
  * named while that stream still carries its identity, else its matched stream, or none when
- * ambiguous or missing; an undecided or default choice leaves the server's default.
+ * ambiguous or missing; a default choice leaves the server's default.
  */
 internal fun subtitleStreamIndexFor(choice: TextChoice, embedded: List<EmbeddedSubtitleFfi>): Int? = when (choice) {
-    TextChoice.Auto, TextChoice.Leave -> null
+    TextChoice.Leave -> null
     TextChoice.Off, TextChoice.Sidecar -> NO_SUBTITLE_STREAM
     is TextChoice.Embedded -> {
-        val streams = embedded.map {
-            TrackInfo(id = it.index.toLong(), kind = TrackKindFfi.SUBTITLE, title = it.title, lang = it.language, codec = it.codec, isDefault = false, isSelected = false, isForced = it.forced)
-        }
+        val streams = embedded.map { it.toTrackInfo(it.index.toLong(), isDefault = false, isSelected = false) }
         val named = streams.firstOrNull { it.id == choice.streamIndex?.toLong() && it.identity() == choice.identity }
         (named ?: matchTrack(choice.identity, TrackKindFfi.SUBTITLE, streams))?.id?.toInt() ?: NO_SUBTITLE_STREAM
     }
 }
 
+/** The subtitle row for a server stream: its own title, language, codec and flags. */
+internal fun EmbeddedSubtitleFfi.toTrackInfo(id: Long, isDefault: Boolean, isSelected: Boolean) = TrackInfo(
+    id = id,
+    kind = TrackKindFfi.SUBTITLE,
+    title = title,
+    lang = language,
+    codec = codec,
+    isDefault = isDefault,
+    isSelected = isSelected,
+    isForced = forced,
+    isHearingImpaired = hearingImpaired,
+)
+
+/** docs/18 §3.1: what identifies [this] stream across reloads, as its row would. */
+internal fun EmbeddedSubtitleFfi.identity() = toTrackInfo(index.toLong(), isDefault = false, isSelected = false).identity()
+
 /** Jellyfin's "no subtitle stream" index. */
 internal const val NO_SUBTITLE_STREAM = -1
 
 
-/** docs/18 §3.1: a transcode's audio rows are every source stream, since its HLS carries only the
- * [shown] one; each is labelled as Direct Play labels it (docs/12 §16: the stream's own title, then language and format).
- */
-internal fun transcodeAudioRows(streams: List<AudioStreamFfi>, shown: Int?): List<TrackInfo> = streams.map { it.row(shown) }
-
-private fun AudioStreamFfi.row(shown: Int?) = TrackInfo(
+private fun AudioStreamFfi.row() = TrackInfo(
     id = streamRowId(index),
     kind = TrackKindFfi.AUDIO,
     title = title,
     lang = language,
     codec = codec,
     isDefault = isDefault,
-    isSelected = index == shown,
+    isSelected = false,
     isForced = false,
+    isHearingImpaired = false,
 )
 
 /**
@@ -125,7 +122,7 @@ internal fun audioStreamIndexFor(choice: AudioChoice?, streams: List<AudioStream
     choice ?: return null
     val named = streams.firstOrNull { it.index == choice.streamIndex && it.identity() == choice.identity }
     if (named != null) return named.index
-    val match = matchTrack(choice.identity, TrackKindFfi.AUDIO, streams.map { it.row(null) }) ?: return null
+    val match = matchTrack(choice.identity, TrackKindFfi.AUDIO, streams.map { it.row() }) ?: return null
     return streams.first { streamRowId(it.index) == match.id }.index
 }
 
@@ -139,7 +136,7 @@ internal fun audioChoiceOf(track: TrackInfo, delivered: AudioStreamFfi?): AudioC
 internal fun streamAudioChoice(stream: AudioStreamFfi): AudioChoice = AudioChoice(stream.identity(), stream.index)
 
 /** docs/18 §3.1: a stream's identity uses its own title, as the player reports it, not the server's display label. */
-private fun AudioStreamFfi.identity() = row(null).copy(title = title).identity()
+private fun AudioStreamFfi.identity() = row().copy(title = title).identity()
 
 /** docs/18 §3.1, docs/28 §1: what picking a transcode's audio stream does. */
 internal enum class AudioStreamPick { UNCHANGED, REFUSED, RENEGOTIATE }

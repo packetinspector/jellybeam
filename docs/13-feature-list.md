@@ -68,7 +68,11 @@ that opens the full text as a panel, a one-line directed-by / written-by /
 studio credit, the outlined spec capsule -- its audio cell carries an ATMOS or
 DTS:X suffix in the accent tier when the default track is object-based, read
 from the server's spatial-format field or, on servers that only say so in the
-stream profile, from there -- and a fixed-width cast row --
+stream profile, from there; its last cell says what Play will do on this TV:
+DIRECT PLAY, WILL TRANSCODE (with the reason, e.g. AV1) or, in amber, WON'T
+PLAY (AV1) when the Quality mode is Direct Play or the server doesn't allow
+this user to transcode, judged against the same device profile the server is
+sent, any version counting, docs/18 §6 -- and a fixed-width cast row --
 nothing overlaps however long the title, synopsis, or a cast name runs, and
 nothing moves while the page loads: each region still waiting on its data -- eyebrow,
 genre chips, credits, spec capsule, cast, Up Next, season chips, episode shelf --
@@ -329,7 +333,9 @@ replaces the countdown card with an explicit "Keep Watching" prompt once tripped
 reset by any key press — Stop reports the finished episode normally, never starts or
 marks the next one, and returns to its detail page;
 track selection
-(audio/subtitle) with per-series memory; subtitle mode Default/Always/
+(audio/subtitle) remembered per series, and per item for a movie, by language plus Forced/SDH, title and format (an "English" pick stays plain English even when an episode lists "English Forced" or "English SDH" first); a transcode starts on the remembered or preferred audio and subtitle, and a failed subtitle or audio switch during one keeps the current stream playing with a short notice; switching between subtitles a transcode already carries never restarts it, so it also works in watch-together;
+Settings › Subtitles sets Subtitle mode (Default, Always, Only forced, Off) and Subtitle language (used by Always, which prefers the plain track over Forced or SDH), Settings › Playback sets Audio language;
+subtitle mode Default/Always/
 OnlyForced/None (OnlyForced keeps a burned-in forced track when a transcode hides the audio language; a remembered language matches whether the next episode ships it embedded, burned in or as a sidecar); subtitle styling (size, vertical position, text color, bold,
 background opacity, or Android's system caption style); skip back/forward length presets (5/10/15/30/60s, default 10/10);
 a subtitle delay control (a "Subtitle delay" row ends the picker's Subtitles section while a real subtitle is selected; Select hides the OSD and opens a top strip with the signed value, a direction line and a ruler, where Left/Right shift the cues by 50 ms (250 ms once held a second) up to 5 s either way, OK resets, Back returns to the video; kept per item for the app session, reset when another subtitle track is picked, and shown on the stats sheet);
@@ -352,9 +358,10 @@ an item's detail page (docs/05); a request still waiting (server not reached yet
 focus-dwell preload: sustained focus on a playable Home/hero/library-grid/episode
 card—or reaching its high-intent Play/Resume action—prefetches the playback
 handshake, trimming press-Play latency, and re-arms itself while focus stays put
-past the cache's lifetime; also fires once for the next episode when the
+past the cache's lifetime (for about 2.5 minutes, then an idle screen stops asking); also fires once for the next episode when the
 autoplay countdown card appears, and a same-item Play press joins an in-flight
-prefetch instead of restarting it; metadata only, toggleable, and bounded to one
+prefetch instead of restarting it; an Auto-quality transcode started after the
+prefetch skips one server negotiation; metadata only, toggleable, and bounded to one
 cancellable request so browsing cannot build a speculative network backlog;
 redesigned player OSD (spec of record: docs/12-osd-ux-spec.md, read from
 source; docs/jellybeam-osd-handoff/ holds the design history) — glyph-only
@@ -396,8 +403,9 @@ autoplays inside the window; dismissing the window from the system UI or
 exiting Jellybeam stops playback with a final position report, never a headless
 player.
 
-**Resilience** — an audio clock guard keeps a skip from parking playback in an endless buffering state on boxes whose passthrough audio track reports a position ahead of what it has played (docs/18 §5.1) while following an audio clock that merely runs fast, so sound and picture stay in sync over long films, and logs the clock's drift rate once a minute (numbers only); network-aware load retry policy riding out Wi-Fi radio stalls
-(60s / 64MB buffer, up to 90s of retries before surfacing an error);
+**Fast start** — container metadata is read through a small buffer, so a long MKV whose seek index sits at the end of the file reaches its first frame up to ~0.4 s sooner on a TV (docs/18 §5.3); after the first play, such a file's seek index is kept on the device, so later starts skip reading it entirely (docs/18 §5.4).
+**Resilience** — passthrough audio no longer jumps ahead after a seek (Media3 with the upstream position fix, docs/06), so a skip never parks playback in an endless buffering state and the next item never stutters; an observe-only audio clock check logs any position that still runs ahead of what has played, the clock's drift rate once a minute and any change in passthrough support (numbers only, docs/18 §5.1); network-aware load retry policy riding out Wi-Fi radio stalls
+(60s / 64MB buffer, up to 90s of retries before surfacing an error); transcodes are bounded on the server's side (docs/18 §7): a failing server conversion is retried once and then reported, a burst of skips restarts the server's encode at most twice, a file whose streams end early stops asking the server once it runs dry and ends at the real end as a normal, watched end, a video that freezes with nothing loading gets one automatic re-seek and, if it is still frozen, stops with a message instead of spinning, video the TV can't decode ends with a message naming the codec instead of a black picture, and a software decoder's transcode is scaled to the size it can decode;
 reconnect with backoff on transient network errors, frozen resume position
 preserved across the interlock; transactional sync/sign-in (add-server and
 view-snapshot writes are all-or-nothing, revoked-library cleanup on
@@ -440,12 +448,12 @@ captured from `/System/Info/Public` at sign-in and persisted on the
 per-server session record (known offline at startup, survives restarts),
 refreshed on session restore, account switch, token reauthorization, every
 websocket reconnect (a server upgrade restarts the server and drops the
-socket) and a five-minute backstop poll, with a changed value emitted as a
+socket) and a five-minute backstop poll while the app is on screen, with a changed value emitted as a
 refresh event so gated screens re-evaluate; `server_at_least(major, minor)`
 fails closed (unknown version means "not at least") so 12.0-only calls stay
 on the 10.11 path until the version is known. The server's own name rides
 the same refresh and persist path for the About section.
-<!-- verified: core/jellyfin-api/src/lib.rs ServerVersion/PublicServerInfo/refresh_public_system_info; core/ffi/src/session.rs SessionFile.server_version/server_name; core/ffi/src/object.rs State.server_version, server_at_least, refresh_server_version_once, spawn_server_version_poll, spawn_bus_forwarder, SERVER_VERSION_REFRESH_INTERVAL; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt serverAtLeast -->
+<!-- verified: core/jellyfin-api/src/lib.rs ServerVersion/PublicServerInfo/refresh_public_system_info; core/ffi/src/session.rs SessionFile.server_version/server_name; core/ffi/src/object.rs State.server_version, server_at_least, refresh_server_version_once, spawn_server_version_poll, spawn_bus_forwarder, SERVER_VERSION_REFRESH_INTERVAL, on_background; core/media-cache/src/lib.rs foreground_tick; app/src/main/kotlin/tv/jellybeam/data/CoreGateway.kt serverAtLeast -->
 
 **Performance** — embedded Baseline Profile (`app/src/main/baseline-prof.txt`,
 merged with the profiles Compose/Coil/lifecycle ship): the release APK
@@ -628,7 +636,7 @@ public display.)*
   default, and choosing Off or another track re-requests the stream with
   the new choice; a paused video stays paused through the switch.
   <!-- verified: core/jellyfin-core/src/device_profile.rs transcoding_profile(caps) + android_subtitle_profiles (Hls before External); core/ffi/src/types.rs embedded_subtitles_of; core/ffi/src/object.rs fallback_options(); PlaybackViewModel choiceBeforeReload/armReapply/reapplyChoice, manifestTrackInfos + transcodeStreamRows -->
-  <!-- verified: core/ffi/src/object.rs resolve_plan() (Direct Play mode: Transcode decision -> CoreError::WouldTranscode; Auto: up-front transcode only when tolerate_mislabeled_levels is off or the codec is outside android_direct_play_video_codecs, else attempt-anyway Direct Play; Cap: force_transcode negotiation); app/src/main/kotlin/tv/jellybeam/player/LocalPlayability.kt, SoftwareDecoder.kt + PlaybackViewModel.maybeFallBackToTranscode() are the runtime fallback triggers -->
+  <!-- verified: core/ffi/src/object.rs resolve_plan() (Direct Play mode: Transcode decision -> CoreError::WouldTranscode; Auto: up-front transcode only when tolerate_mislabeled_levels is off or profile_miss names the video codec, else attempt-anyway Direct Play; Cap: force_transcode negotiation); app/src/main/kotlin/tv/jellybeam/player/LocalPlayability.kt, SoftwareDecoder.kt + PlaybackViewModel.maybeFallBackToTranscode() are the runtime fallback triggers -->
 
 - Works with Jellyfin 10.11 through 12.x, including 12.0's default of
   refusing legacy authorization: the app never depended on the removed
@@ -735,8 +743,8 @@ public display.)*
   changes to the mirror live — a library scan adding an episode, or the same
   account marking something watched from another device, shows up within a
   second with no refresh — with a delta sync on every start plus a
-  five-minute reconcile pass as the backstop for whatever the socket misses
-  while disconnected (screen off, brief network loss, a server restart);
+  five-minute reconcile pass while the app is on screen as the backstop for
+  whatever the socket misses while disconnected (screen off, brief network loss, a server restart);
   every screen refreshes live as the mirror changes. A title page for a
   movie or episode closes when the title is removed from the library, and a
   season or episode list that fails to load says so with a Retry instead of
@@ -907,6 +915,12 @@ public display.)*
 
 ## Planned
 
+- Remote control from the server (next release, docs/31): Jellyfin web
+  "Play on", Home Assistant and other controllers can play, pause, seek,
+  skip, switch tracks, set volume, open a page and show a message, at parity
+  with the official Android TV client; beyond it, type a search from the
+  phone, a full D-pad remote, stats on demand, Quality and music repeat/shuffle
+  from the remote.
 - Byte-level preload (buffering actual media bytes ahead of Play, not just
   the playback handshake -- see Shipped/Playback's focus-dwell preload for
   the metadata-only tier already in place).

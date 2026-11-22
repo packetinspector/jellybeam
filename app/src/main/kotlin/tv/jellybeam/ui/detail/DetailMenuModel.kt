@@ -9,6 +9,7 @@ import uniffi.jellybeam_core.CollectionInfo
 import uniffi.jellybeam_core.ExtraItem
 import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.RemoteTrailer
+import uniffi.jellybeam_core.SeasonStats
 
 /**
  * Pure, plain-Kotlin content model for the detail-page action panel (docs/19-detail-action-menu.md
@@ -63,7 +64,8 @@ data class MenuModel(val groups: List<MenuGroupModel>, val focusOn: MenuAction?)
  * [scopeSeason]: `null` at series-wide scope, or for Movie/Episode; set only once the viewer
  * explicitly picks a season chip (an auto-resolved resume-season highlight does not flip scope).
  * [scopeEpisodes]: the scoped season's episodes, empty unless [scopeSeason] is set.
- * [allEpisodes]: every episode of the series, all seasons; empty for Movie/Episode.
+ * [seasonStats]: the core's per-season counts (docs/11 §12); empty for Movie/Episode.
+ * [seriesTarget]: the episode the series pill plays, `null` without one.
  * [isFavorite]: always the series' flag in season scope (docs/19 §1.1).
  */
 data class MenuInput(
@@ -71,7 +73,8 @@ data class MenuInput(
     val itemType: String,
     val scopeSeason: Card?,
     val scopeEpisodes: List<Card>,
-    val allEpisodes: List<Card>,
+    val seasonStats: List<SeasonStats>,
+    val seriesTarget: Card?,
     val primaryAction: DetailFormatting.PrimaryAction,
     val isFavorite: Boolean,
     val hasCollections: Boolean,
@@ -85,10 +88,37 @@ data class MenuInput(
     val extrasAvailable: Boolean = false,
 )
 
+/**
+ * docs/19 §1.1/§1.2 counts for the menu's scope: real episodes unwatched/watched, and whether any
+ * episode is played or part-watched. A season scope counts the shown season itself, so its rows
+ * never depend on the summary being fresh; the series scope sums the core's [SeasonStats].
+ */
+data class ScopeCounts(val unwatched: Int, val watched: Int, val anyProgress: Boolean) {
+    val playable: Int get() = unwatched + watched
+
+    companion object {
+        fun of(input: MenuInput): ScopeCounts = if (input.scopeSeason != null) {
+            val real = input.scopeEpisodes.filterNot { it.isVirtual }
+            ScopeCounts(
+                unwatched = real.count { !it.played },
+                watched = real.count { it.played },
+                anyProgress = input.scopeEpisodes.any { it.played || it.positionTicks > 0 },
+            )
+        } else {
+            ScopeCounts(
+                unwatched = input.seasonStats.sumOf { (it.have - it.watched).toInt() },
+                watched = input.seasonStats.sumOf { it.watched.toInt() },
+                anyProgress = input.seasonStats.any { it.anyProgress },
+            )
+        }
+    }
+}
+
 /** docs/19 §1.1/§1.2: builds every group/row this input warrants, and which row focuses first. */
 fun buildMenu(strings: UiStrings, input: MenuInput): MenuModel {
-    val thisTitleRows = buildThisTitleRows(strings, input)
-    val playbackRows = buildPlaybackRows(strings, input)
+    val counts = ScopeCounts.of(input)
+    val thisTitleRows = buildThisTitleRows(strings, input, counts)
+    val playbackRows = buildPlaybackRows(strings, input, counts)
     val libraryRows = buildLibraryRows(strings, input)
 
     val groups = listOfNotNull(
@@ -100,8 +130,7 @@ fun buildMenu(strings: UiStrings, input: MenuInput): MenuModel {
     // §1.2: Series/season also counts "already played", asymmetric with Movie/Episode's
     // position-only rule.
     val hasProgress = if (input.itemType == SERIES_ITEM_TYPE) {
-        val scope = input.scopeSeason?.let { input.scopeEpisodes } ?: input.allEpisodes
-        scope.any { it.played || it.positionTicks > 0 }
+        counts.anyProgress
     } else {
         input.card.positionTicks > 0
     }
@@ -132,13 +161,12 @@ fun buildMenu(strings: UiStrings, input: MenuInput): MenuModel {
     return MenuModel(groups, focusOn)
 }
 
-private fun buildThisTitleRows(strings: UiStrings, input: MenuInput): List<MenuRow> {
+private fun buildThisTitleRows(strings: UiStrings, input: MenuInput, counts: ScopeCounts): List<MenuRow> {
     val rows = mutableListOf<MenuRow>()
     if (input.itemType == SERIES_ITEM_TYPE) {
         val isSeason = input.scopeSeason != null
-        val scopeEpisodes = (if (isSeason) input.scopeEpisodes else input.allEpisodes).filterNot { it.isVirtual }
-        val unwatchedCount = scopeEpisodes.count { !it.played }
-        val watchedCount = scopeEpisodes.count { it.played }
+        val unwatchedCount = counts.unwatched
+        val watchedCount = counts.watched
         if (unwatchedCount > 0) {
             rows += MenuRow(
                 action = MenuAction.MarkScopeWatched(unwatchedCount, isSeason),
@@ -178,14 +206,14 @@ private fun buildThisTitleRows(strings: UiStrings, input: MenuInput): List<MenuR
     return rows
 }
 
-private fun buildPlaybackRows(strings: UiStrings, input: MenuInput): List<MenuRow> {
+private fun buildPlaybackRows(strings: UiStrings, input: MenuInput, counts: ScopeCounts): List<MenuRow> {
     val rows = mutableListOf<MenuRow>()
     // docs/19 §Collection: a collection plays from its page's pill, never from the menu.
     if (input.itemType == BOXSET_ITEM_TYPE) return rows
     if (input.itemType == SERIES_ITEM_TYPE) {
         val isSeason = input.scopeSeason != null
-        val scopeEpisodes = (if (isSeason) input.scopeEpisodes else input.allEpisodes).filterNot { it.isVirtual }
         if (isSeason) {
+            val scopeEpisodes = input.scopeEpisodes.filterNot { it.isVirtual }
             val target = scopeEpisodes.firstOrNull { it.positionTicks > 0 } ?: scopeEpisodes.firstOrNull { !it.played }
             if (target != null) {
                 val subtext = playNextUnwatchedSubtext(strings, target, input.scopeSeason?.indexNumber)
@@ -194,7 +222,7 @@ private fun buildPlaybackRows(strings: UiStrings, input: MenuInput): List<MenuRo
         } else {
             val action = input.primaryAction
             if (action is DetailFormatting.PrimaryAction.Playable) {
-                val target = input.allEpisodes.firstOrNull { it.id == action.targetId }
+                val target = input.seriesTarget?.takeIf { it.id == action.targetId }
                 val subtext = target?.let { playNextUnwatchedSubtext(strings, it, input.highlightedSeasonNumber) }
                 rows += MenuRow(MenuAction.PlayNextUnwatched(action.targetId, subtext), strings.get(R.string.detail_menu_play_next_unwatched), subtext)
                 if (action.hasProgress) {
@@ -202,11 +230,12 @@ private fun buildPlaybackRows(strings: UiStrings, input: MenuInput): List<MenuRo
                 }
             }
         }
-        if (scopeEpisodes.isNotEmpty()) {
+        val playable = counts.playable
+        if (playable > 0) {
             rows += MenuRow(
-                action = MenuAction.PlayRandom(scopeEpisodes.size),
+                action = MenuAction.PlayRandom(playable),
                 label = strings.get(R.string.detail_menu_play_random),
-                subtext = strings.get(R.string.detail_menu_play_random_from, scopeEpisodes.size),
+                subtext = strings.get(R.string.detail_menu_play_random_from, playable),
             )
         }
     } else {
@@ -218,7 +247,7 @@ private fun buildPlaybackRows(strings: UiStrings, input: MenuInput): List<MenuRo
     // docs/28 §1: the group plays what Play would, so it exists only with a playable target.
     val action = input.primaryAction
     if (action is DetailFormatting.PrimaryAction.Playable) {
-        val target = if (action.targetId == input.card.id) input.card else input.allEpisodes.firstOrNull { it.id == action.targetId }
+        val target = if (action.targetId == input.card.id) input.card else input.seriesTarget?.takeIf { it.id == action.targetId }
         rows += MenuRow(MenuAction.WatchTogether(action.targetId, target?.positionTicks ?: 0L), strings.get(R.string.detail_menu_watch_together), null)
     }
     // docs/19 §1.3: last in the group, so it never moves the focus prediction (§1.2); its state column is the `▸` marker.

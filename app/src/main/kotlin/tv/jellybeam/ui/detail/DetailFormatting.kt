@@ -25,6 +25,11 @@ import kotlin.math.roundToInt
 import uniffi.jellybeam_core.MediaStreamInfo
 import uniffi.jellybeam_core.MediaStreamKind
 import uniffi.jellybeam_core.PersonInfo
+import uniffi.jellybeam_core.Playability
+import uniffi.jellybeam_core.PlayabilityReason
+import uniffi.jellybeam_core.SeasonStats
+import uniffi.jellybeam_core.SeriesPlayKind
+import uniffi.jellybeam_core.SeriesPlayTarget
 
 /** docs/11 §4 item 3: [LIBRARY] is the server's name (Pistacchio, verbatim); [STATUS] is generated text (Panna2). */
 enum class EyebrowKind { LIBRARY, STATUS }
@@ -60,15 +65,18 @@ object DetailFormatting {
     }
 
     /**
-     * Series/BoxSet change filter (docs/11 item 11). An unknown id refreshes a Series page only
-     * once the mirror confirms it belongs there, so a new episode reaches the memory-served
-     * season shelves without unrelated sync or userdata upserts re-querying the page.
+     * Series/BoxSet change filter (docs/11 item 11). An unknown upserted id refreshes a Series page
+     * only once the mirror confirms it belongs there, so unrelated sync or userdata upserts never
+     * re-query the page. A Series page holds only the shown season's ids, and a removed id can't be
+     * probed, so an unknown removal in the series' library ([libraryId]; unknown on either side
+     * counts) refreshes it: the summary's counts may have moved.
      */
     fun collectionChange(
         event: ChangeEvent,
         cardId: String,
         isSeries: Boolean,
         knownIds: Set<String>,
+        libraryId: String? = null,
     ): CollectionChange = when (event) {
         is ChangeEvent.Upserted -> when {
             knownIds.isEmpty() || event.ids.any { it == cardId || it in knownIds } -> CollectionChange.Affects
@@ -78,8 +86,12 @@ object DetailFormatting {
                 ?.let { CollectionChange.AffectsIfChildOf(it) }
                 ?: CollectionChange.Ignores
         }
-        is ChangeEvent.Removed ->
-            if (event.ids.any { it == cardId || it in knownIds }) CollectionChange.Affects else CollectionChange.Ignores
+        is ChangeEvent.Removed -> when {
+            event.ids.any { it == cardId || it in knownIds } -> CollectionChange.Affects
+            isSeries && event.ids.isNotEmpty() && (event.libraryId == null || libraryId == null || event.libraryId == libraryId) ->
+                CollectionChange.Affects
+            else -> CollectionChange.Ignores
+        }
         ChangeEvent.Refresh -> CollectionChange.Affects
         ChangeEvent.ViewsChanged -> CollectionChange.Ignores
     }
@@ -195,17 +207,15 @@ object DetailFormatting {
      * Movie/Episode (and [OTHER_SINGLE_VIDEO_ITEM_TYPES]): virtual -> [PrimaryAction.Unavailable]
      * with the virtual-status label; else "Resume" once `positionTicks > 0`, else "Play".
      *
-     * Series: resolved against [seriesEpisodes] (all episodes across every season, not just the
-     * selected tab). Specials (`parentIndexNumber == 0`) sort last, virtuals are skipped. First
-     * episode with progress wins: `"Resume S{n} E{n}"`, degrading to plain `"Resume"` when either
-     * number is missing; otherwise the first unplayed episode wins plain `"Play"`; otherwise
-     * [PrimaryAction.None] -- spec doesn't define a "rewatch" fallback when everything's watched.
+     * Series: labels the core's [seriesPlay] pick (docs/11 item 11, `pick_series_play`): Resume ->
+     * `"Resume S{n} E{n}"` (plain `"Resume"` when either number is missing), NextUp -> `"Play"`;
+     * Replay or no target -> [PrimaryAction.None], the spec defines no "rewatch" pill.
      */
-    fun resolvePrimaryAction(strings: UiStrings, card: Card, seriesEpisodes: List<Card>, now: Instant = Instant.now()): PrimaryAction =
+    fun resolvePrimaryAction(strings: UiStrings, card: Card, seriesPlay: SeriesPlayTarget?, now: Instant = Instant.now()): PrimaryAction =
         when (card.itemType) {
             MOVIE_ITEM_TYPE, EPISODE_ITEM_TYPE -> resolveSingleItemAction(strings, card, now)
             in OTHER_SINGLE_VIDEO_ITEM_TYPES -> resolveSingleItemAction(strings, card, now)
-            SERIES_ITEM_TYPE -> resolveSeriesAction(strings, seriesEpisodes)
+            SERIES_ITEM_TYPE -> resolveSeriesAction(strings, seriesPlay)
             else -> PrimaryAction.None
         }
 
@@ -219,23 +229,17 @@ object DetailFormatting {
         )
     }
 
-    /** Shared "which episode would a viewer hit next" ordering ([resolveSeriesAction],
-     * [resolveResumeSeason]): non-virtual, Specials pushed last via a stable sort.
-     */
-    private fun orderedPlayableEpisodes(seriesEpisodes: List<Card>): List<Card> =
-        seriesEpisodes.filterNot { it.isVirtual }.sortedBy { if (isSpecialEpisode(it)) 1 else 0 }
-
-    private fun resolveSeriesAction(strings: UiStrings, seriesEpisodes: List<Card>): PrimaryAction {
-        val candidates = orderedPlayableEpisodes(seriesEpisodes)
-        val resuming = candidates.firstOrNull { it.positionTicks > 0 }
-        if (resuming != null) {
-            val seasonEpisode = strictSeasonEpisode(strings, resuming.parentIndexNumber, resuming.indexNumber)
-            val label = if (seasonEpisode != null) strings.get(R.string.detail_resume_episode, seasonEpisode) else strings.get(R.string.detail_resume)
-            return PrimaryAction.Playable(label, resuming.id, hasProgress = true)
+    private fun resolveSeriesAction(strings: UiStrings, seriesPlay: SeriesPlayTarget?): PrimaryAction {
+        val episode = seriesPlay?.episode ?: return PrimaryAction.None
+        return when (seriesPlay.kind) {
+            SeriesPlayKind.RESUME -> {
+                val seasonEpisode = strictSeasonEpisode(strings, episode.parentIndexNumber, episode.indexNumber)
+                val label = if (seasonEpisode != null) strings.get(R.string.detail_resume_episode, seasonEpisode) else strings.get(R.string.detail_resume)
+                PrimaryAction.Playable(label, episode.id, hasProgress = true)
+            }
+            SeriesPlayKind.NEXT_UP -> PrimaryAction.Playable(strings.get(R.string.detail_play), episode.id, hasProgress = false)
+            SeriesPlayKind.REPLAY -> PrimaryAction.None
         }
-        val next = candidates.firstOrNull { !it.played }
-        if (next != null) return PrimaryAction.Playable(strings.get(R.string.detail_play), next.id, hasProgress = false)
-        return PrimaryAction.None
     }
 
     /** `"S{n} E{n}"`, but unlike [CardFormatting.seasonEpisodeLabel] degrades to `null` the moment
@@ -247,8 +251,6 @@ object DetailFormatting {
         } else {
             null
         }
-
-    private fun isSpecialEpisode(episode: Card): Boolean = episode.parentIndexNumber == 0
 
     /**
      * The pure "which target should this screen's initial focus seed land on" decision: primary
@@ -295,32 +297,20 @@ object DetailFormatting {
      */
     fun seasonsWithSpecialsLast(seasons: List<Card>): List<Card> = seasons.sortedBy { if (isSpecialSeason(it)) 1 else 0 }
 
-    /**
-     * One season's episodes derived from the whole-series list, equal to the core's
-     * `children(seasonId)`: match on `parentIndexNumber == season.indexNumber`, drop virtual
-     * Episodes unless [showVirtualEpisodes], order by `indexNumber` (nulls last). `null` when memory
-     * can't be faithful (no list, a season without a number, or an episode without a
-     * `parentIndexNumber`, which the core resolves through `parent_id`, a field [Card] lacks).
-     */
-    fun episodesOfSeason(season: Card, allEpisodes: List<Card>, showVirtualEpisodes: Boolean): List<Card>? {
-        val number = season.indexNumber ?: return null
-        if (allEpisodes.isEmpty() || allEpisodes.any { it.parentIndexNumber == null }) return null
-        return allEpisodes
-            .filter { it.parentIndexNumber == number && (showVirtualEpisodes || !it.isVirtual) }
-            .sortedWith(compareBy(nullsLast()) { it.indexNumber })
-    }
+    /** docs/09 `show_virtual_episodes`: a season's virtual episodes show only while the flag is on (unknown hides them). */
+    fun visibleEpisodes(episodes: List<Card>, showVirtualEpisodes: Boolean?): List<Card> =
+        if (showVirtualEpisodes == true) episodes else episodes.filterNot { it.isVirtual }
 
     /**
-     * docs/11 §12: a season chip's availability from the whole-series list, per docs/24 (an unaired
-     * virtual counts for nothing). `null` for Specials, a season [episodesOfSeason] can't match, or
-     * one with no real and no missing episodes.
+     * docs/11 §12: a season chip's availability from the core's [stats] for it, per docs/24 (an
+     * unaired virtual counts for nothing). `null` for Specials, a season without stats, or one with
+     * no real and no missing episodes.
      */
-    fun seasonAvailability(season: Card, allEpisodes: List<Card>, now: Instant): SeasonAvailability? {
-        if (isSpecialSeason(season)) return null
-        val episodes = episodesOfSeason(season, allEpisodes, showVirtualEpisodes = true) ?: return null
-        val have = episodes.count { !it.isVirtual }
-        val missing = episodes.count { it.isVirtual && CardFormatting.isMissing(it.premiereDate, now) }
-        return if (have + missing == 0) null else SeasonAvailability(have, have + missing)
+    fun seasonAvailability(season: Card, stats: SeasonStats?): SeasonAvailability? {
+        if (isSpecialSeason(season) || stats == null) return null
+        val have = stats.have.toInt()
+        val total = have + stats.missing.toInt()
+        return if (total == 0) null else SeasonAvailability(have, total)
     }
 
     /**
@@ -330,45 +320,34 @@ object DetailFormatting {
      * the first. Before [settled] a null stays null, and a removed pick is also null, so the resume
      * pick is never provisional (docs/15 §5).
      */
-    fun reconcileSelectedSeason(selectedId: String?, seasons: List<Card>, allEpisodes: List<Card>, settled: Boolean): String? {
+    fun reconcileSelectedSeason(selectedId: String?, seasons: List<Card>, seriesPlay: SeriesPlayTarget?, settled: Boolean): String? {
         if (selectedId == null && !settled) return null
         if (selectedId != null && (seasons.isEmpty() || seasons.any { it.id == selectedId })) return selectedId
         if (!settled) return null
-        return (resolveResumeSeason(seasons, allEpisodes) ?: seasons.firstOrNull())?.id
+        return (resolveResumeSeason(seasons, seriesPlay) ?: seasons.firstOrNull())?.id
     }
 
     /**
-     * Series page's initial season-chip preselection. Mirrors [resolveSeriesAction]'s priority so
-     * the chip always matches whichever episode the primary action button would play: (a) an
-     * in-progress episode's season wins outright; (b) else the first unplayed episode's season;
-     * (c) else falls back to [defaultSeason] (a fully-watched series has no spec'd "rewatch"
-     * target, so landing on season 1 is deliberate). [DetailViewModel] calls this exactly once per
-     * page visit, only after both seasons have loaded and `seriesEpisodes` has settled
-     * (docs/15-focus-and-selection.md §0.2/§5) -- an empty [seriesEpisodes] (no episodes, or a
-     * failed fetch) degrades to the per-season [Card.unplayedCount] fallback either way.
+     * docs/15 §5 initial season-chip preselection, matching the primary pill: the season of the
+     * core's Resume/NextUp [seriesPlay] pick; a Replay pick (fully watched: no "rewatch" target is
+     * spec'd) or a season not in [seasons] -> [defaultSeason]; no pick at all (no playable episode,
+     * or the read failed) -> the first non-Specials season with unplayed episodes, else [defaultSeason].
      */
-    fun resolveResumeSeason(seasons: List<Card>, seriesEpisodes: List<Card>): Card? {
+    fun resolveResumeSeason(seasons: List<Card>, seriesPlay: SeriesPlayTarget?): Card? {
         if (seasons.isEmpty()) return null
-        if (seriesEpisodes.isNotEmpty()) {
-            val candidates = orderedPlayableEpisodes(seriesEpisodes)
-            val target = candidates.firstOrNull { it.positionTicks > 0 } ?: candidates.firstOrNull { !it.played }
-            val targetSeason = target?.let { episode -> seasons.firstOrNull { it.indexNumber == episode.parentIndexNumber } }
-            if (targetSeason != null) return targetSeason
-            // Fully watched, or a season/episode data mismatch: documented season-1 fallback.
-            return defaultSeason(seasons)
+        if (seriesPlay != null) {
+            if (seriesPlay.kind == SeriesPlayKind.REPLAY) return defaultSeason(seasons)
+            return seasons.firstOrNull { it.id == seriesPlay.seasonId } ?: defaultSeason(seasons)
         }
-        // seriesEpisodes settled empty (no episodes, or the fetch failed): per-season unplayedCount
-        // is the best signal available.
-        val bySeasonCount = seasons.firstOrNull { !isSpecialSeason(it) && it.unplayedCount != 0L }
-        return bySeasonCount ?: defaultSeason(seasons)
+        return seasons.firstOrNull { !isSpecialSeason(it) && it.unplayedCount != 0L } ?: defaultSeason(seasons)
     }
 
     // -- Spec strip (docs/11 tier 1 item 1) -------------------------------
 
-    /** docs/11 item 1's three DATA-DRIVEN emphasis tiers -- see [classify]. Never hard-coded per
-     * call site.
+    /** docs/11 item 1's DATA-DRIVEN emphasis tiers -- see [classify]; WARNING is docs/18 §6's
+     * "won't play" cell. Never hard-coded per call site.
      */
-    enum class SpecWeight { BASELINE, NOTABLE, BEST_IN_CLASS }
+    enum class SpecWeight { BASELINE, NOTABLE, BEST_IN_CLASS, WARNING }
 
     /** One pill cell: a value string (already display-ready, e.g. `"1080P"`, `"HEVC"`) plus its
      * [classify]-derived tier.
@@ -376,7 +355,7 @@ object DetailFormatting {
     data class SpecField(val value: String, val weight: SpecWeight)
 
     private val BEST_IN_CLASS_TERMS = listOf("DOLBY VISION", "ATMOS", "DTS:X", "DTS-HD", "TRUEHD", "DTSHD")
-    private val NOTABLE_TERMS = listOf("4K", "8K", "2160P", "4320P", "HDR", "HLG", "HEVC", "AV1", "DIRECT PLAY")
+    private val NOTABLE_TERMS = listOf("4K", "8K", "2160P", "4320P", "HDR", "HLG", "HEVC", "AV1")
     private val LOSSLESS_WORDS = setOf("FLAC", "PCM", "ALAC")
     private val WORD_SPLIT = Regex("[^A-Z0-9]+")
 
@@ -457,6 +436,16 @@ object DetailFormatting {
 
     private fun formatMbps(bitRate: Int, locale: Locale): String = String.format(locale, "%.1f MBPS", bitRate / 1_000_000.0)
 
+    /** The video and audio streams the capsule labels: the first video, the default (else first) audio. */
+    private fun capsuleStreams(detail: ItemDetail): Pair<MediaStreamInfo?, MediaStreamInfo?> {
+        val video = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.VIDEO }
+        val audio = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.AUDIO && it.isDefault }
+            ?: detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.AUDIO }
+        return video to audio
+    }
+
+    private fun upperOrNull(codec: String?): String? = codec?.takeIf { it.isNotBlank() }?.uppercase()
+
     /**
      * docs/11 item 1's field order: RESOLUTION │ VIDEO CODEC │ BIT DEPTH │ HDR │ AUDIO(+ch) │
      * BITRATE │ CONTAINER. SIZE is omitted: [ItemDetail] carries no file-size field (TODO: needs
@@ -465,12 +454,10 @@ object DetailFormatting {
      * placeholdered.
      */
     fun specStripFields(strings: UiStrings, detail: ItemDetail, locale: Locale = AppLocale.format): List<SpecField> {
-        val video = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.VIDEO }
-        val audio = detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.AUDIO && it.isDefault }
-            ?: detail.mediaStreams.firstOrNull { it.streamType == MediaStreamKind.AUDIO }
+        val (video, audio) = capsuleStreams(detail)
         val out = mutableListOf<SpecField>()
         resolutionLabel(video?.width, video?.height)?.let { out += SpecField(it, classify(it)) }
-        video?.codec?.takeIf { it.isNotBlank() }?.uppercase()?.let { out += SpecField(it, classify(it)) }
+        upperOrNull(video?.codec)?.let { out += SpecField(it, classify(it)) }
         video?.bitDepth?.let {
             val value = "$it-BIT"
             out += SpecField(value, classify(value))
@@ -484,6 +471,42 @@ object DetailFormatting {
         containerLabel(detail.container)?.let { out += SpecField(it, classify(it)) }
         return out
     }
+
+    /**
+     * docs/18 §6: the capsule's last cell, what Play will do on this TV; null while [Playability] is
+     * Unknown. Tiers are set here, not by [classify], so the French text and an `X` like "HEVC" can't
+     * move them. `X` is the failing property as the capsule already labels it, omitted when the
+     * stream doesn't carry it (the stream info has no level).
+     */
+    fun playabilityField(strings: UiStrings, detail: ItemDetail, locale: Locale = AppLocale.format): SpecField? {
+        fun cell(plain: Int, withReason: Int, reason: PlayabilityReason?, value: String?, weight: SpecWeight): SpecField {
+            val label = reason?.let { playabilityReasonLabel(strings, detail, it, value, locale) }
+            return SpecField(if (label == null) strings.get(plain) else strings.get(withReason, label), weight)
+        }
+        return when (val verdict = detail.playability) {
+            Playability.DirectPlay -> SpecField(strings.get(R.string.detail_playability_direct_play), SpecWeight.NOTABLE)
+            is Playability.WillTranscode -> cell(
+                R.string.detail_playability_will_transcode, R.string.detail_playability_will_transcode_reason,
+                verdict.reason, verdict.value, SpecWeight.BASELINE,
+            )
+            is Playability.WontPlay -> cell(
+                R.string.detail_playability_wont_play, R.string.detail_playability_wont_play_reason,
+                verdict.reason, verdict.value, SpecWeight.WARNING,
+            )
+            Playability.Unknown -> null
+        }
+    }
+
+    /** docs/18 §6: [value] is the judged version's own fact; a resolution miss names one axis, so the label reads the page's video. */
+    private fun playabilityReasonLabel(strings: UiStrings, detail: ItemDetail, reason: PlayabilityReason, value: String?, locale: Locale): String? =
+        when (reason) {
+            PlayabilityReason.VIDEO_CODEC, PlayabilityReason.VIDEO_PROFILE, PlayabilityReason.AUDIO_CODEC -> upperOrNull(value)
+            PlayabilityReason.VIDEO_LEVEL -> null
+            PlayabilityReason.RESOLUTION -> capsuleStreams(detail).first?.let { resolutionLabel(it.width, it.height) }
+            PlayabilityReason.VIDEO_RANGE -> value?.let { hdrLabel(null, it) ?: upperOrNull(it) }
+            PlayabilityReason.VIDEO_BITRATE -> value?.toIntOrNull()?.takeIf { it > 0 }?.let { formatMbps(it, locale) }
+            PlayabilityReason.NO_SERVER_TRANSCODING -> strings.get(R.string.detail_playability_no_server_transcoding)
+        }
 
     // docs/11 tier 2 item 3: details footer.
 
@@ -560,6 +583,12 @@ object DetailFormatting {
         val trimmed = container?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         return trimmed.substringBefore(',').trim().takeIf { it.isNotEmpty() }?.uppercase(Locale.US)
     }
+
+    /**
+     * docs/11: the synopsis every Detail page draws: the item record's, else the card's, since a
+     * stripped list card (a failed mirror read, docs/07 §5) or a synthesized series card has none.
+     */
+    fun overview(card: Card, detail: ItemDetail?): String? = detail?.overview ?: card.overview
 
     /**
      * Builds a synthetic Series [Card] from an Episode's own fields for the "View Series" pill
@@ -856,11 +885,15 @@ object DetailFormatting {
     }
 
     /**
-     * The spec capsule's cells: [specStripFields] plus [extraFields] (the Movie page's file size).
-     * Empty before the detail record resolves, so one check serves "no capsule".
+     * The spec capsule's cells: [specStripFields], [extraFields] (the Movie page's file size), then
+     * [playabilityField]. Empty before the detail record resolves, so one check serves "no capsule".
      */
     fun specCapsuleFields(strings: UiStrings, detail: ItemDetail?, extraFields: List<SpecField> = emptyList()): List<SpecField> =
-        if (detail == null) emptyList() else specStripFields(strings, detail) + extraFields
+        if (detail == null) {
+            emptyList()
+        } else {
+            specStripFields(strings, detail) + extraFields + listOfNotNull(playabilityField(strings, detail))
+        }
 
     // docs/19 §1.5 panel-open reflow: pure arithmetic backing [ItemBoundaryLine] and DetailScreen's
     // per-frame LazyRow card-window sizing.

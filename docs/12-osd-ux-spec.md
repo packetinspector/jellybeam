@@ -567,7 +567,11 @@ tracking). Rows run edge to edge with no gap between them, padding 16×8, a 20dp
 a `✓` on the selected track, label Archivo 16sp Panna, meta Archivo 11sp
 Grigio; focused row = §12's Pistacchio fill with Notte text and markers. Opens
 with focus on the selected track; Up / Down clamp; Select chooses; Back,
-Escape or Menu close. Choices are remembered per series. A row's label is the
+Escape or Menu close. Choices are remembered per series, and a movie or other
+item with no series per item: the track's language, Forced and SDH flags, title and
+format, so the next episode gets the same kind of track (full, Forced or SDH)
+in that language, the closest on flags, then title, then format. A choice saved
+by an older build (language only) picks the plain track over Forced or SDH. A row's label is the
 server's track title verbatim, else the language's name in the app's language
 (a code with no name shows as written; `und` or none counts as absent), else
 `Track N` (a blank title counts as none). Its meta joins, with ` · `, the

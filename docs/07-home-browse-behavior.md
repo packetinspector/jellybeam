@@ -112,8 +112,16 @@ Play/Resume plays it.
 - Startup: persisted startup_screen matched against current session's libraries; Home default; stale id → Home (root.rs:2588-2601).
 - Enter/click on ANY card (Home or Library) opens Detail — never direct play (root.rs:4040-4097). Playback starts only from Detail's Play/Resume, or the episode-thumbnail one-click-play glyph (bottom-left of 16:9 thumb).
 - On an Episode detail page, activating a sibling episode swaps in place (`nav.replace`) — Back skips visited siblings; from Series/Season detail it pushes (`nav.go`).
+- **Detail opens on the mirror card.** Library grid, Home shelf (and hero) and search cards
+  cross the FFI without the overview, which no list cell draws (`Card::list_cell`); every other read
+  keeps it. Opening Detail from a card without one reads
+  `card_by_id` first and pushes the full card, so the overview is there on the first frame
+  (docs/11 Loading state); the push lands only while it is the newest open, on the stack it was
+  asked from, with no Back pressed since (Back at the Home root moves no stack but still drops it).
+  A card that already carries its overview, or opens a music page, navigates at once. A read that
+  fails opens on the card it was given; Detail then takes the overview from the item record.
 - History: browser-style back/forward stacks over Home / Library{id} / Detail{item_id}. Each stack entry carries an id from a counter that only grows, assigned at push; it keys the entry's retained layer and ViewModel, so pushing past the retention cap never re-keys an entry that stays.
-- **Browse reads.** `children_read` / `series_episodes_read` return `NotReady` (mirror not open), `Failed` (query failed) or `Items` (possibly empty). A screen keeps loading on `NotReady` for at most 10 s, then reads it as `Failed`; it shows an error with Retry on `Failed`, and treats only an empty `Items` as empty. A series page's list error follows the newest read of each list (seasons, all episodes, the selected season's episodes, a season served from memory included): a stale failure after a newer success never raises it. The library list (`views`) is read when the mirror opens and again on a views change or a merged `Refresh` (never on item changes); the core's change listener is registered before the mirror opens so no early event is lost, and Home and the drawer share it. A Movie/Episode page closes on a `Removed` for its item, or on a `Refresh` after which the mirror no longer holds it (a failed probe never closes it); it pops only its own entry, and only while that entry is on top. A playback stop reaching a page across an epoch gap (stops conflated) counts as a stop of an unknown item, so the page refreshes.
+- **Browse reads.** `children_read` / `season_episodes_read` / `series_episodes_read` / `series_summary_read` return `NotReady` (mirror not open), `Failed` (query failed) or a result (`Items`, possibly empty; `Resolved`, possibly with no target). A screen keeps loading on `NotReady` for at most 10 s, then reads it as `Failed`; it shows an error with Retry on `Failed`, and treats only an empty `Items` as empty. A series page's list error follows the newest read of each list (seasons, the series summary, the selected season's episodes): a stale failure after a newer success never raises it. The library list (`views`) is read when the mirror opens and again on a views change or a merged `Refresh` (never on item changes); the core's change listener is registered before the mirror opens so no early event is lost, and Home and the drawer share it. A Movie/Episode page closes on a `Removed` for its item, or on a `Refresh` after which the mirror no longer holds it (a failed probe never closes it); it pops only its own entry, and only while that entry is on top. A playback stop reaching a page across an epoch gap (stops conflated) counts as a stop of an unknown item, so the page refreshes.
 - **Nav drawer and menu spine.** The drawer opens on D-pad Left
   once `moveFocus(Left)` fails inside the screen (a true left edge, never a guess) and closes
   on Right or Back. Its closed edge is always on screen as the *menu spine*: a non-focusable
@@ -186,6 +194,10 @@ closes that gap:
   A foreground or timer trigger within 30 s of the last pass is skipped;
   startup runs unless a pass already ran, and reconnect always runs. A parked account isn't
   refreshed on foreground.
+- **Background**: while the app is off screen the reconcile timer and the
+  server-version poll do no work. A tick that lands in the background waits
+  for the return, then the timer restarts its full period; the return's own
+  foreground pass is the only catch-up.
 - **Pass**: Continue Watching (`/UserItems/Resume`), then an id-only walk of
   every played Movie, Episode, Video and Music Video under the snapshot rule
   above. The pass then compares the server's played and resume sets with the

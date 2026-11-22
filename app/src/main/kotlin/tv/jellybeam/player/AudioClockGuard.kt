@@ -2,6 +2,7 @@ package tv.jellybeam.player
 
 import android.util.Log
 import androidx.media3.common.C
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.util.Clock
 import androidx.media3.common.util.UnstableApi
@@ -31,10 +32,10 @@ internal enum class ClockRule { START, JUMP, CEILING }
  * measurably yet), [ClockRule.JUMP] (one step gains more than [JUMP_US] on play time) or
  * [ClockRule.CEILING] (the lead grows faster than [CEILING_PPM]). A smooth drift below the ceiling is
  * a real clock running fast and is followed: clamping it to wall time desynchronises sound and
- * picture by hundreds of ms per hour (#32). A lie is rebased: the output reports the raw position
- * minus the offset seen at the fault, so the track keeps its own rate, bounded below by
- * `play time - lag` and above by `play time + slack`; the offset ends when the raw position tells
- * the truth again.
+ * picture by hundreds of ms per hour (#32). A lie would be rebased to the raw position minus the
+ * offset seen at the fault, bounded below by `play time - lag` and above by `play time + slack`.
+ * Observe-only since the patched Media3 (docs/06): [filter] computes that position for the
+ * `would-clamp` log, and the output reports the raw position.
  *
  * Pure and JVM-tested; [PlausibleClockAudioOutput] feeds it the output's play/pause/flush calls.
  * Times are microseconds. [lagUs] is the route latency measured on the last healthy output
@@ -264,7 +265,7 @@ internal class ClockDiagReporter(
         val faults = guard.ruleCounts.sum()
         if (faults > faultsBefore && faults <= MAX_FAULT_EVENTS) {
             val rule = guard.lastRule?.name?.lowercase()
-            log("clock clamp rule=$rule reported=${reportedUs / 1000} bound=${positionUs / 1000}")
+            log("clock would-clamp rule=$rule reported=${reportedUs / 1000} bound=${positionUs / 1000}")
             if (enabled()) {
                 emit(ClockEvent("clamp", rule, listOf("out" to outputId.toLong(), "reported" to reportedUs / 1000, "bound" to positionUs / 1000, "faults" to faults.toLong())))
             }
@@ -280,7 +281,7 @@ internal class ClockDiagReporter(
         drift(guard, final = true)
         if (guard.clampCount > 0) {
             val c = guard.ruleCounts
-            log("clock clamps=${guard.clampCount} maxExcess=${guard.maxExcessUs / 1000} start=${c[0]} jump=${c[1]} ceiling=${c[2]}")
+            log("clock would-clamps=${guard.clampCount} maxExcess=${guard.maxExcessUs / 1000} start=${c[0]} jump=${c[1]} ceiling=${c[2]}")
             if (enabled()) {
                 emit(ClockEvent("summary", null, listOf("out" to outputId.toLong(), "clamps" to guard.clampCount.toLong(), "maxExcess" to guard.maxExcessUs / 1000, "start" to c[0].toLong(), "jump" to c[1].toLong(), "ceiling" to c[2].toLong())))
             }
@@ -295,7 +296,7 @@ internal class ClockDiagReporter(
     private fun drift(guard: AudioClockGuard, final: Boolean) {
         val ppm = guard.drift.ppm ?: return
         val d = guard.drift
-        log("clock drift out=$outputId ppm=$ppm span=${d.spanS} lag=${d.lagMs} clamps=${guard.clampCount}" + if (final) " final=1" else "")
+        log("clock drift out=$outputId ppm=$ppm span=${d.spanS} lag=${d.lagMs} would-clamps=${guard.clampCount}" + if (final) " final=1" else "")
         if (enabled()) {
             emit(ClockEvent("drift", null, listOf("out" to outputId.toLong(), "ppm" to ppm, "span" to d.spanS, "lag" to d.lagMs, "clamps" to guard.clampCount.toLong(), "final" to if (final) 1L else 0L)))
         }
@@ -316,7 +317,7 @@ internal fun DiagLog.clockEvent(e: ClockEvent) = event("audio.clock") {
     for ((k, v) in e.fields) num(k, v)
 }
 
-/** An [AudioOutput] whose position passes through [AudioClockGuard]; see that class. */
+/** An [AudioOutput] whose position [AudioClockGuard] observes (docs/18 §5.1), and which feeds the music [PcmTap]. */
 @UnstableApi
 internal class PlausibleClockAudioOutput(
     delegate: AudioOutput,
@@ -369,15 +370,16 @@ internal class PlausibleClockAudioOutput(
         guard.onStop()
     }
 
+    // docs/18 §5.1: observe-only since the patched Media3 (docs/06); the guard logs what it would clamp, the raw position is returned.
     override fun getPositionUs(): Long {
         val reportedUs = super.getPositionUs()
         if (reportedUs < 0) return reportedUs
         val faultsBefore = guard.ruleCounts.sum()
         val now = nowUs
-        val positionUs = guard.filter(reportedUs, now, speed)
-        reporter.onRead(guard, reportedUs, positionUs, faultsBefore, now)
-        tap?.onPosition(positionUs, now * 1000, guard.isPlaying, speed)
-        return positionUs
+        val wouldReportUs = guard.filter(reportedUs, now, speed)
+        reporter.onRead(guard, reportedUs, wouldReportUs, faultsBefore, now)
+        tap?.onPosition(reportedUs, now * 1000, guard.isPlaying, speed)
+        return reportedUs
     }
 
     override fun release() {
@@ -401,7 +403,12 @@ internal class PlausibleClockAudioOutput(
 internal class PlausibleClockAudioOutputProvider(
     delegate: AudioOutputProvider,
     private val tap: PcmTap? = null,
+    private val log: (String) -> Unit = { Log.i(SEEK_LOG_TAG, it) },
 ) : ForwardingAudioOutputProvider(delegate) {
+
+    /** Last logged answer per encoded MIME type, so a passthrough loss is logged once, when it happens. */
+    private val loggedSupport = HashMap<String, Int>(4)
+    private var loggedOutput = -1
 
     private var clock: Clock = Clock.DEFAULT
 
@@ -414,7 +421,25 @@ internal class PlausibleClockAudioOutputProvider(
         super.setClock(clock)
     }
 
+    // docs/18 §5.1: whether an encoded format may go out as passthrough is decided here; log each change.
+    override fun getFormatSupport(formatConfig: AudioOutputProvider.FormatConfig): AudioOutputProvider.FormatSupport {
+        val support = super.getFormatSupport(formatConfig)
+        val mime = formatConfig.format.sampleMimeType
+        if (mime != null && mime != MimeTypes.AUDIO_RAW) {
+            val key = support.supportLevel * 2 + if (support.isFormatSupportedForOffload) 1 else 0
+            if (loggedSupport.put(mime, key) != key) {
+                log("audio support mime=$mime level=${support.supportLevel} offload=${support.isFormatSupportedForOffload}")
+            }
+        }
+        return support
+    }
+
     override fun getAudioOutput(config: AudioOutputProvider.OutputConfig): AudioOutput {
+        val kind = config.encoding * 2 + if (config.isOffload) 1 else 0
+        if (kind != loggedOutput) {
+            loggedOutput = kind
+            log("audio out encoding=${config.encoding} offload=${config.isOffload} rate=${config.sampleRate}")
+        }
         val output = PlausibleClockAudioOutput(
             delegate = super.getAudioOutput(config),
             clock = clock,

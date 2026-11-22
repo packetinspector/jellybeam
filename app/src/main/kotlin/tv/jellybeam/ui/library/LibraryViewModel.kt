@@ -80,8 +80,9 @@ data class LibraryUiState(
 )
 
 /**
- * Loads one library's poster grid in bounded 200-item pages. Mirror events refresh the loaded
- * prefix from offset zero, so an insertion ahead of an offset boundary can't leave it stale.
+ * Loads one library's poster grid in bounded pages, the first a few screens and the rest
+ * [GridPaging.PAGE_SIZE] (docs/16 §4.6). Mirror events refresh the loaded prefix from offset zero,
+ * so an insertion ahead of an offset boundary can't leave it stale.
  *
  * Sort/filter (docs/16-library-sort-filter.md): every `ViewKind.LIBRARY` view pages through
  * [CoreGateway.libraryGrid] (only a [tv.jellybeam.ui.library.supportsSortFilter] library shows the
@@ -107,10 +108,6 @@ class LibraryViewModel(
     /** Where the sort/filter prefs are written, so a cleared screen still persists the latest intent (docs/16 §5). */
     private val persistScope: CoroutineScope = AppGraph.processScope,
 ) : ViewModel() {
-
-    private companion object {
-        const val PAGE_SIZE = 200
-    }
 
     /**
      * Members per BoxSet id, loaded lazily per visible card (docs/07 §Collection card): the stack
@@ -331,7 +328,7 @@ class LibraryViewModel(
     )
 
     /**
-     * Growing-prefix refresh: re-fetches items `0..max(PAGE_SIZE, current size)` under the current
+     * Growing-prefix refresh: re-fetches items `0..`[GridPaging.refreshSize] under the current
      * [LibraryUiState.sort]/[filters], plus [counts]/[groups], then [loadGenresIfNeeded]
      * (docs/16 §4.6). Used by [init]'s first load and [changeRefreshScheduler]; never by a
      * sort/filter intent, which drops the old prefix instead (see [requery]).
@@ -350,13 +347,13 @@ class LibraryViewModel(
             pagingMutex.withLock {
                 // Live listing has no mirror behind it: always re-pulled from the top.
                 val page = runCatchingCancellable {
-                    gateway.liveChildren(view.id, 0u, PAGE_SIZE.toUInt(), liveSortFor(view.kind))
+                    gateway.liveChildren(view.id, 0u, GridPaging.PAGE_SIZE.toUInt(), liveSortFor(view.kind))
                 }.getOrElse {
                     // Fail soft: keep whatever was already on screen rather than blanking the grid.
                     _state.update { it.copy(isLoading = false, isLoadingMore = false) }
                     return@withLock
                 }
-                _state.update { it.copy(isLoading = false, items = page, hasMore = page.size == PAGE_SIZE, isLoadingMore = false) }
+                _state.update { it.copy(isLoading = false, items = page, hasMore = page.size == GridPaging.PAGE_SIZE, isLoadingMore = false) }
             }
             return
         }
@@ -370,7 +367,7 @@ class LibraryViewModel(
             myGeneration = generation
             mySeq = ++readSeq
             current = _state.value
-            val requested = maxOf(PAGE_SIZE, current.items.size)
+            val requested = GridPaging.refreshSize(current.items.size, GRID_COLUMNS)
             val items = gateway.libraryGrid(view.id, current.sort, current.filters, 0u, requested.toUInt())
             if (myGeneration != generation || mySeq != readSeq) {
                 stale = true
@@ -427,14 +424,14 @@ class LibraryViewModel(
 
     /**
      * A sort/filter intent's re-query (docs/16 §4.2: results change on Select, never on focus
-     * move): drops the loaded prefix and re-fetches one [PAGE_SIZE] page from offset 0 under the
+     * move): drops the loaded prefix and re-fetches a first page from offset 0 under the
      * just-updated sort/filters, plus counts/groups, then [loadGenresIfNeeded]. Null-vs-empty
      * coalescing: see [GridRead]/[applying] -- a stale-but-populated grid beats an empty one.
      */
     private suspend fun requery() {
         val current = _state.value
         val mySeq = ++readSeq
-        val read = readGrid(current.sort, current.filters, PAGE_SIZE)
+        val read = readGrid(current.sort, current.filters, GridPaging.firstPageSize(GRID_COLUMNS))
         // A read that started after this one owns the grid, whichever lands first.
         if (mySeq != readSeq) return
         _state.update { it.applying(read) }
@@ -527,9 +524,9 @@ class LibraryViewModel(
                     // so a later scroll retries instead of being permanently stranded.
                     val page = runCatchingCancellable {
                         if (view.kind.isLive) {
-                            gateway.liveChildren(view.id, offset.toUInt(), PAGE_SIZE.toUInt(), liveSortFor(view.kind))
+                            gateway.liveChildren(view.id, offset.toUInt(), GridPaging.PAGE_SIZE.toUInt(), liveSortFor(view.kind))
                         } else {
-                            gateway.libraryGrid(view.id, state.sort, state.filters, offset.toUInt(), PAGE_SIZE.toUInt())
+                            gateway.libraryGrid(view.id, state.sort, state.filters, offset.toUInt(), GridPaging.PAGE_SIZE.toUInt())
                         }
                     }.getOrElse { return@withLock } ?: return@withLock
                     if (myGeneration != generation) {
@@ -537,7 +534,7 @@ class LibraryViewModel(
                         // this stale page must not be appended on top.
                         return@withLock
                     }
-                    _state.update { if (it.items !== state.items) it else appendPage(it, page, PAGE_SIZE) }
+                    _state.update { if (it.items !== state.items) it else appendPage(it, page, GridPaging.PAGE_SIZE) }
                 } finally {
                     _state.update { it.copy(isLoadingMore = false) }
                 }
@@ -547,7 +544,7 @@ class LibraryViewModel(
 
     /**
      * Rail-jump loader (docs/16 §4.4/§4.6): if the grid doesn't cover [offset] and more exists,
-     * fetches only the missing tail `items.size..offset + PAGE_SIZE` and appends it by id
+     * fetches only the missing tail ([GridPaging.tailSize]) and appends it by id
      * ([appendPage]). A mirror change between reads can duplicate (dropped) or skip a row; the
      * change event's [refresh] re-reads the whole prefix and heals it. Returns whether it covers
      * [offset] -- `false` when beyond what the gateway has or the initial load hasn't landed.
@@ -563,9 +560,8 @@ class LibraryViewModel(
         val myGeneration = generation
         _state.update { it.copy(isLoadingMore = true) }
         try {
-            // Only the missing tail: [items.size, offset + PAGE_SIZE), appended by id.
             val start = current.items.size
-            val requested = maxOf(offset + PAGE_SIZE - start, PAGE_SIZE)
+            val requested = GridPaging.tailSize(start, offset)
             val page = gateway.libraryGrid(view.id, current.sort, current.filters, start.toUInt(), requested.toUInt())
             if (myGeneration != generation) {
                 // A newer intent's requery() already replaced items from offset 0 under the new

@@ -257,6 +257,26 @@ private fun mapAv1(info: ProbedCodecInfo): VideoCaps {
     )
 }
 
+// docs/18: the joint size check runs at the cinema floor, so a 24 fps 4K film isn't pushed to
+// transcode by a 30 fps test.
+private const val PROBE_FRAME_RATE = 24.0
+
+private val FALLBACK_SIZES = listOf(7680 to 4320, 4096 to 2160, 3840 to 2160, 2560 to 1440, 1920 to 1080, 1280 to 720)
+
+/**
+ * docs/18: a hardware decoder keeps its independent upper bounds (its size answers are
+ * conservative and Direct Play must not be lost); a software decoder reports the largest size it
+ * jointly supports, or its uppers if none, because independent uppers advertise sizes it cannot decode.
+ */
+internal fun largestSupportedResolution(
+    isSoftware: Boolean,
+    uppers: Pair<Int, Int>,
+    supported: (width: Int, height: Int, frameRate: Double) -> Boolean,
+): Pair<Int, Int> {
+    if (!isSoftware) return uppers
+    return (listOf(uppers) + FALLBACK_SIZES).firstOrNull { (w, h) -> supported(w, h, PROBE_FRAME_RATE) } ?: uppers
+}
+
 /**
  * Probes this device's `MediaCodec` video decoders into the [DeviceCaps] shape
  * `JellybeamCoreInterface.setDeviceCaps` expects; run once, off the main thread, before playback.
@@ -274,6 +294,17 @@ object DeviceCapsProbe {
 
     private fun probeUnsafe(): DeviceCaps {
         val decoders = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filterNot { it.isEncoder }
+        // One classification feeds both the size check and SoftwareDecoder (published below).
+        val softwareDecoderNames = decoders
+            .filter { info ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    info.isSoftwareOnly
+                } else {
+                    SoftwareDecoder.matchesNameHeuristic(info.name)
+                }
+            }
+            .map { it.name }
+            .toSet()
 
         fun hasMime(mime: String): Boolean =
             decoders.any { info -> info.supportedTypes.any { it.equals(mime, ignoreCase = true) } }
@@ -297,8 +328,11 @@ object DeviceCapsProbe {
                     val videoCaps = info.getCapabilitiesForType(mime)?.videoCapabilities ?: continue
                     val width = videoCaps.supportedWidths?.upper ?: continue
                     val height = videoCaps.supportedHeights?.upper ?: continue
-                    maxWidth = maxOf(maxWidth, width)
-                    maxHeight = maxOf(maxHeight, height)
+                    val (w, h) = largestSupportedResolution(info.name in softwareDecoderNames, width to height) { cw, ch, fps ->
+                        videoCaps.areSizeAndRateSupported(cw, ch, fps)
+                    }
+                    maxWidth = maxOf(maxWidth, w)
+                    maxHeight = maxOf(maxHeight, h)
                 } catch (_: IllegalArgumentException) {
                     // This decoder doesn't actually support `mime` -- skip it.
                 }
@@ -348,21 +382,11 @@ object DeviceCapsProbe {
         ).mapNotNull { (codec, info) -> mapCodecInfo(codec, info) }
 
         val hevcProfiles = videoCaps.firstOrNull { it.codec == VideoCodecId.HEVC }?.profiles.orEmpty()
-        Log.i(TAG, "device caps probe: codecs=${videoCaps.map { it.codec }} hevcProfiles=$hevcProfiles")
+        Log.i(TAG, "device caps probe: codecs=${videoCaps.map { "${it.codec}:${it.maxWidth}x${it.maxHeight}" }} hevcProfiles=$hevcProfiles")
 
-        // docs/18-playback-quality.md §3: reuses this enumeration to publish software-only decoder
-        // names for SoftwareDecoder's hot path. Deliberately last: if anything above throws,
+        // docs/18-playback-quality.md §3: publishes the software-only set for SoftwareDecoder's hot
+        // path. Deliberately last: if anything above throws,
         // probe()'s fail-open catch means SoftwareDecoder keeps whatever set it already had.
-        val softwareDecoderNames = decoders
-            .filter { info ->
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    info.isSoftwareOnly
-                } else {
-                    SoftwareDecoder.matchesNameHeuristic(info.name)
-                }
-            }
-            .map { it.name }
-            .toSet()
         SoftwareDecoder.rememberProbedSoftwareDecoders(softwareDecoderNames)
 
         return DeviceCaps(maxStreamingBitrate = null, video = videoCaps)

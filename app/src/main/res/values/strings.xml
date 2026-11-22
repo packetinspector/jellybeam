@@ -261,6 +261,8 @@
     <string name="settings_quality_direct_play">Direct Play</string>
     <string name="settings_quality_auto">Auto</string>
     <string name="settings_quality_mbps">%1$d Mbps</string>
+    <string name="settings_audio_language">Audio language</string>
+    <string name="settings_desc_playback_audio_language">The audio language to start in when a series or movie has no remembered choice; Any keeps the server\'s default track.</string>
     <string name="settings_skip_back">Skip back</string>
     <string name="settings_desc_playback_skip_back">How far the Rewind button jumps back during playback.</string>
     <string name="settings_skip_forward">Skip forward</string>
@@ -361,6 +363,15 @@
     <string name="settings_osd_detail_note">Full adds a codec strip, an ends-at clock, a buffered progress bar, and playback speed and stats controls.</string>
 
     <!-- Subtitles section: style preset rows and chip labels. -->
+    <string name="settings_subtitle_mode">Subtitle mode</string>
+    <string name="settings_desc_subtitles_subtitle_mode">Default keeps the server\'s choice, Always uses your subtitle language, Only forced shows forced subtitles in the audio language, and Off shows none.</string>
+    <string name="settings_subtitle_mode_default">Default</string>
+    <string name="settings_subtitle_mode_always">Always</string>
+    <string name="settings_subtitle_mode_only_forced">Only forced</string>
+    <string name="settings_subtitle_mode_off">Off</string>
+    <string name="settings_subtitle_language">Subtitle language</string>
+    <string name="settings_desc_subtitles_subtitle_language">The language subtitles start in when Subtitle mode is Always.</string>
+    <string name="settings_language_any">Any</string>
     <string name="settings_subtitle_size">Size</string>
     <string name="settings_desc_subtitles_subtitle_size">The text size used for subtitles during playback.</string>
     <string name="settings_subtitle_position">Vertical position</string>

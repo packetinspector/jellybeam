@@ -124,4 +124,33 @@ class GridPagingTest {
         assertEquals(0, GridPaging.rowStart(5, columns))
         assertEquals(24, GridPaging.rowStart(24, columns))
     }
+
+    // ---- read sizes (docs/16 §4.6) ----
+
+    @Test
+    fun `the first read covers eight rows, about three screens of the grid`() {
+        assertEquals(64, GridPaging.firstPageSize(columns))
+    }
+
+    @Test
+    fun `later pages stay sized for throughput`() {
+        assertEquals(200, GridPaging.PAGE_SIZE)
+    }
+
+    @Test
+    fun `a refresh re-reads at least a first page`() {
+        assertEquals(64, GridPaging.refreshSize(loaded = 0, columns = columns))
+        assertEquals(64, GridPaging.refreshSize(loaded = 30, columns = columns))
+    }
+
+    @Test
+    fun `a refresh re-reads the whole loaded prefix past the first page`() {
+        assertEquals(264, GridPaging.refreshSize(loaded = 264, columns = columns))
+    }
+
+    @Test
+    fun `a rail jump reads the missing tail through one page past its offset`() {
+        assertEquals(486, GridPaging.tailSize(loaded = 64, offset = 350))
+        assertEquals(200, GridPaging.tailSize(loaded = 64, offset = 10))
+    }
 }

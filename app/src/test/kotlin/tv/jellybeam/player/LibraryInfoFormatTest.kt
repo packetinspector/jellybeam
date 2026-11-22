@@ -9,6 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.PersonInfo
+import uniffi.jellybeam_core.Playability
 
 class LibraryInfoFormatTest {
     private val strings = ResourceUiStrings.default
@@ -48,6 +49,7 @@ class LibraryInfoFormatTest {
         childCount = null,
         directors = listOf("Dina Director"),
         writers = listOf("Will Writer"),
+        playability = Playability.Unknown,
     )
 
     // -- buildSheet (docs/jellybeam-osd-handoff §8a) --------------------------
@@ -119,6 +121,7 @@ class LibraryInfoFormatTest {
             childCount = null,
             directors = emptyList(),
             writers = emptyList(),
+            playability = Playability.Unknown,
         )
         val sheet = LibraryInfoFormat.buildSheet(strings, sparse)
 

@@ -26,7 +26,7 @@ app/src/main/kotlin/tv/jellybeam/player/TrickplayPreviewer.kt | val decoder = ru
 # Media3 subtitle parser factory on the playback thread
 app/src/main/kotlin/tv/jellybeam/player/ass/PlainSsa.kt | parser = runCatching { DefaultSubtitleParserFactory().create(format) }.getOrNull()
 # date parse, pure
-app/src/main/kotlin/tv/jellybeam/ui/cards/CardFormatting.kt | ?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() }
+app/src/main/kotlin/tv/jellybeam/ui/cards/CardFormatting.kt | return runCatching { OffsetDateTime.parse(iso) }.getOrNull()?.takeIf { it.toInstant().isAfter(now) }
 # URI parse, pure
 app/src/main/kotlin/tv/jellybeam/ui/common/EmptyStateFormat.kt | val uri = runCatching { URI(serverUrl ?: return null) }.getOrNull() ?: return null
 # date parse, pure

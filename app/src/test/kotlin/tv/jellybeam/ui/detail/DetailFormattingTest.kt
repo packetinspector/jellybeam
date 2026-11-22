@@ -18,6 +18,11 @@ import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.MediaStreamInfo
 import uniffi.jellybeam_core.MediaStreamKind
 import uniffi.jellybeam_core.PersonInfo
+import uniffi.jellybeam_core.Playability
+import uniffi.jellybeam_core.PlayabilityReason
+import uniffi.jellybeam_core.SeasonStats
+import uniffi.jellybeam_core.SeriesPlayKind
+import uniffi.jellybeam_core.SeriesPlayTarget
 
 private val strings = ResourceUiStrings.default
 
@@ -83,6 +88,7 @@ private fun testItemDetail(
     container: String? = null,
     people: List<PersonInfo> = emptyList(),
     mediaStreams: List<MediaStreamInfo> = emptyList(),
+    playability: Playability = Playability.Unknown,
 ): ItemDetail = ItemDetail(
     id = id,
     name = "Item",
@@ -113,6 +119,7 @@ private fun testItemDetail(
     childCount = null,
     directors = emptyList(),
     writers = emptyList(),
+    playability = playability,
 )
 
 class DetailFormattingTest {
@@ -235,14 +242,14 @@ class DetailFormattingTest {
     @Test
     fun `an unstarted Movie resolves to plain Play`() {
         val movie = testCard(itemType = "Movie", id = "m1", positionTicks = 0)
-        val action = DetailFormatting.resolvePrimaryAction(strings, movie, emptyList())
+        val action = DetailFormatting.resolvePrimaryAction(strings, movie, null)
         assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "m1", hasProgress = false), action)
     }
 
     @Test
     fun `a Movie with progress resolves to Resume and carries hasProgress`() {
         val movie = testCard(itemType = "Movie", id = "m1", positionTicks = 500)
-        val action = DetailFormatting.resolvePrimaryAction(strings, movie, emptyList())
+        val action = DetailFormatting.resolvePrimaryAction(strings, movie, null)
         assertEquals(DetailFormatting.PrimaryAction.Playable("Resume", "m1", hasProgress = true), action)
     }
 
@@ -251,12 +258,12 @@ class DetailFormattingTest {
         val fresh = testCard(itemType = "Video", id = "v1", positionTicks = 0)
         assertEquals(
             DetailFormatting.PrimaryAction.Playable("Play", "v1", hasProgress = false),
-            DetailFormatting.resolvePrimaryAction(strings, fresh, emptyList()),
+            DetailFormatting.resolvePrimaryAction(strings, fresh, null),
         )
         val started = testCard(itemType = "Video", id = "v1", positionTicks = 500)
         assertEquals(
             DetailFormatting.PrimaryAction.Playable("Resume", "v1", hasProgress = true),
-            DetailFormatting.resolvePrimaryAction(strings, started, emptyList()),
+            DetailFormatting.resolvePrimaryAction(strings, started, null),
         )
     }
 
@@ -264,107 +271,68 @@ class DetailFormattingTest {
     fun `MusicVideo and Recording are playable single items, a folder is not`() {
         for (type in listOf("MusicVideo", "Recording")) {
             val card = testCard(itemType = type, id = "x1", positionTicks = 0)
-            assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "x1", hasProgress = false), DetailFormatting.resolvePrimaryAction(strings, card, emptyList()))
+            assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "x1", hasProgress = false), DetailFormatting.resolvePrimaryAction(strings, card, null))
         }
         val folder = testCard(itemType = "ChannelFolderItem", id = "f1", positionTicks = 0)
-        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, folder, emptyList()))
+        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, folder, null))
     }
 
     @Test
     fun `a virtual Episode is Unavailable with the virtual-status label, not Playable`() {
         val now = Instant.parse("2026-01-01T00:00:00Z")
         val episode = testCard(itemType = "Episode", isVirtual = true, premiereDate = "2026-03-04T00:00:00Z")
-        val action = DetailFormatting.resolvePrimaryAction(strings, episode, emptyList(), now)
+        val action = DetailFormatting.resolvePrimaryAction(strings, episode, null, now)
         assertEquals(DetailFormatting.PrimaryAction.Unavailable("Airs Mar 4"), action)
     }
 
     @Test
     fun `an unknown item type resolves to None`() {
         val boxSet = testCard(itemType = "BoxSet")
-        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, boxSet, emptyList()))
+        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, boxSet, null))
     }
 
-    // -- resolvePrimaryAction: Series -------------------------------------
+    // -- resolvePrimaryAction: Series (the pick is the core's, pinned in next_episode.rs) --
 
     @Test
-    fun `a Series resumes the first in-progress episode with a full S-E label`() {
+    fun `a Series Resume pick labels Resume with a full S-E`() {
         val series = testCard(itemType = "Series")
         val resuming = testCard(id = "ep-6", itemType = "Episode", parentIndexNumber = 2, indexNumber = 6, positionTicks = 100)
-        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(resuming))
+        val action = DetailFormatting.resolvePrimaryAction(strings, series, testSeriesPlay(resuming))
         assertEquals(DetailFormatting.PrimaryAction.Playable("Resume S2 E6", "ep-6", hasProgress = true), action)
     }
 
     @Test
     fun `a Series resume target missing either S or E number degrades to plain Resume, never S question E`() {
         val series = testCard(itemType = "Series")
-        val resuming = testCard(id = "ep-6", itemType = "Episode", parentIndexNumber = null, indexNumber = 6, positionTicks = 100)
-        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(resuming))
-        assertEquals(DetailFormatting.PrimaryAction.Playable("Resume", "ep-6", hasProgress = true), action)
-    }
-
-    @Test
-    fun `a Series with nothing in progress falls to the first unplayed episode as plain Play`() {
-        val series = testCard(itemType = "Series")
-        val watched = testCard(id = "ep-1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
-        val unplayed = testCard(id = "ep-2", itemType = "Episode", parentIndexNumber = 1, indexNumber = 2, played = false)
-        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(watched, unplayed))
-        assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "ep-2", hasProgress = false), action)
-    }
-
-    @Test
-    fun `a Series with an unplayed Special earlier in the list still prefers a later non-special episode`() {
-        val series = testCard(itemType = "Series")
-        val special = testCard(id = "sp-1", itemType = "Episode", parentIndexNumber = 0, indexNumber = 1, played = false)
-        val normal = testCard(id = "ep-1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = false)
-        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(special, normal))
-        assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "ep-1", hasProgress = false), action)
-    }
-
-    @Test
-    fun `a Series skips a virtual episode even if it has progress`() {
-        val series = testCard(itemType = "Series")
-        val virtualResuming = testCard(
-            id = "virt-1",
-            itemType = "Episode",
-            parentIndexNumber = 1,
-            indexNumber = 1,
-            positionTicks = 100,
-            isVirtual = true,
+        val noSeason = testCard(id = "ep-6", itemType = "Episode", parentIndexNumber = null, indexNumber = 6, positionTicks = 100)
+        val noEpisode = testCard(id = "ep-7", itemType = "Episode", parentIndexNumber = 2, indexNumber = null, positionTicks = 100)
+        assertEquals(
+            DetailFormatting.PrimaryAction.Playable("Resume", "ep-6", hasProgress = true),
+            DetailFormatting.resolvePrimaryAction(strings, series, testSeriesPlay(noSeason)),
         )
-        val unplayed = testCard(id = "ep-2", itemType = "Episode", parentIndexNumber = 1, indexNumber = 2, played = false)
-        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(virtualResuming, unplayed))
+        assertEquals(
+            DetailFormatting.PrimaryAction.Playable("Resume", "ep-7", hasProgress = true),
+            DetailFormatting.resolvePrimaryAction(strings, series, testSeriesPlay(noEpisode)),
+        )
+    }
+
+    @Test
+    fun `a Series NextUp pick is plain Play without progress`() {
+        val series = testCard(itemType = "Series")
+        val unplayed = testCard(id = "ep-2", itemType = "Episode", parentIndexNumber = 1, indexNumber = 2)
+        val action = DetailFormatting.resolvePrimaryAction(strings, series, testSeriesPlay(unplayed, kind = SeriesPlayKind.NEXT_UP))
         assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "ep-2", hasProgress = false), action)
     }
 
     @Test
-    fun `a Series with every loaded episode already played and none in progress resolves to None`() {
+    fun `a Series Replay pick or no pick resolves to None -- no rewatch pill is spec'd`() {
         val series = testCard(itemType = "Series")
         val watched = testCard(id = "ep-1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
-        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, series, listOf(watched)))
-    }
-
-    @Test
-    fun `a Series with no loaded episodes resolves to None`() {
-        val series = testCard(itemType = "Series")
-        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, series, emptyList()))
-    }
-
-    @Test
-    fun `docs-11 item 11 cross-season fix -- resume target in a later season still wins over an earlier season's episodes`() {
-        val series = testCard(itemType = "Series")
-        val season1Watched = testCard(id = "s1e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
-        val season2Resuming = testCard(id = "s2e3", itemType = "Episode", parentIndexNumber = 2, indexNumber = 3, positionTicks = 100)
-        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(season1Watched, season2Resuming))
-        assertEquals(DetailFormatting.PrimaryAction.Playable("Resume S2 E3", "s2e3", hasProgress = true), action)
-    }
-
-    @Test
-    fun `docs-11 item 11 cross-season fix -- next-unplayed in a later season still wins when the selected season is fully watched`() {
-        val series = testCard(itemType = "Series")
-        val season1Watched = testCard(id = "s1e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
-        val season2Unplayed = testCard(id = "s2e1", itemType = "Episode", parentIndexNumber = 2, indexNumber = 1, played = false)
-        val action = DetailFormatting.resolvePrimaryAction(strings, series, listOf(season1Watched, season2Unplayed))
-        assertEquals(DetailFormatting.PrimaryAction.Playable("Play", "s2e1", hasProgress = false), action)
+        assertEquals(
+            DetailFormatting.PrimaryAction.None,
+            DetailFormatting.resolvePrimaryAction(strings, series, testSeriesPlay(watched, kind = SeriesPlayKind.REPLAY)),
+        )
+        assertEquals(DetailFormatting.PrimaryAction.None, DetailFormatting.resolvePrimaryAction(strings, series, null))
     }
 
     // -- defaultSeason / seasonsWithSpecialsLast --------------------------
@@ -415,57 +383,39 @@ class DetailFormattingTest {
     // -- resolveResumeSeason (series page resume-season preselection) ----
 
     @Test
-    fun `resolveResumeSeason lands on the season holding an in-progress episode mid-series`() {
+    fun `resolveResumeSeason lands on the Resume or NextUp pick's season`() {
         val season1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
         val season2 = testCard(id = "s2", itemType = "Season", indexNumber = 2)
         val season3 = testCard(id = "s3", itemType = "Season", indexNumber = 3)
-        val s1e1 = testCard(id = "s1e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
         val s2e2 = testCard(id = "s2e2", itemType = "Episode", parentIndexNumber = 2, indexNumber = 2, positionTicks = 500)
-        val s3e1 = testCard(id = "s3e1", itemType = "Episode", parentIndexNumber = 3, indexNumber = 1, played = false)
-        val resolved = DetailFormatting.resolveResumeSeason(listOf(season1, season2, season3), listOf(s1e1, s2e2, s3e1))
-        assertEquals(season2, resolved)
+        val s3e1 = testCard(id = "s3e1", itemType = "Episode", parentIndexNumber = 3, indexNumber = 1)
+        val seasons = listOf(season1, season2, season3)
+        assertEquals(season2, DetailFormatting.resolveResumeSeason(seasons, testSeriesPlay(s2e2, seasonId = "s2")))
+        assertEquals(season3, DetailFormatting.resolveResumeSeason(seasons, testSeriesPlay(s3e1, seasonId = "s3", kind = SeriesPlayKind.NEXT_UP)))
     }
 
     @Test
     fun `resolveResumeSeason falls back to the first season for a fully-watched series -- documented, no rewatch target spec'd`() {
+        val specials = testCard(id = "s0", itemType = "Season", indexNumber = 0, name = "Specials")
         val season1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
         val season2 = testCard(id = "s2", itemType = "Season", indexNumber = 2)
-        val s1e1 = testCard(id = "s1e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
         val s2e1 = testCard(id = "s2e1", itemType = "Episode", parentIndexNumber = 2, indexNumber = 1, played = true)
-        val resolved = DetailFormatting.resolveResumeSeason(listOf(season1, season2), listOf(s1e1, s2e1))
-        assertEquals(season1, resolved)
+        val replay = testSeriesPlay(s2e1, seasonId = "s2", kind = SeriesPlayKind.REPLAY)
+        assertEquals(season1, DetailFormatting.resolveResumeSeason(listOf(specials, season1, season2), replay))
     }
 
     @Test
-    fun `resolveResumeSeason lands on season 1 when nothing has been watched at all`() {
-        val season1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
-        val season2 = testCard(id = "s2", itemType = "Season", indexNumber = 2)
-        val s1e1 = testCard(id = "s1e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = false)
-        val s2e1 = testCard(id = "s2e1", itemType = "Episode", parentIndexNumber = 2, indexNumber = 1, played = false)
-        val resolved = DetailFormatting.resolveResumeSeason(listOf(season1, season2), listOf(s1e1, s2e1))
-        assertEquals(season1, resolved)
-    }
-
-    @Test
-    fun `resolveResumeSeason on a single-season series always returns that one season`() {
-        val onlySeason = testCard(id = "s1", itemType = "Season", indexNumber = 1)
-        val episode = testCard(id = "e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, positionTicks = 200)
-        assertEquals(onlySeason, DetailFormatting.resolveResumeSeason(listOf(onlySeason), listOf(episode)))
-        assertEquals(onlySeason, DetailFormatting.resolveResumeSeason(listOf(onlySeason), emptyList()))
-    }
-
-    @Test
-    fun `resolveResumeSeason with no per-episode userdata yet falls back to each season's own unplayedCount`() {
+    fun `resolveResumeSeason with no pick falls back to each season's own unplayedCount`() {
         val season1 = testCard(id = "s1", itemType = "Season", indexNumber = 1, unplayedCount = 0)
         val season2 = testCard(id = "s2", itemType = "Season", indexNumber = 2, unplayedCount = 4)
-        assertEquals(season2, DetailFormatting.resolveResumeSeason(listOf(season1, season2), emptyList()))
+        assertEquals(season2, DetailFormatting.resolveResumeSeason(listOf(season1, season2), null))
     }
 
     @Test
     fun `resolveResumeSeason treats a missing unplayedCount as eligible, not as fully watched`() {
         val season1 = testCard(id = "s1", itemType = "Season", indexNumber = 1, unplayedCount = null)
         val season2 = testCard(id = "s2", itemType = "Season", indexNumber = 2, unplayedCount = null)
-        assertEquals(season1, DetailFormatting.resolveResumeSeason(listOf(season1, season2), emptyList()))
+        assertEquals(season1, DetailFormatting.resolveResumeSeason(listOf(season1, season2), null))
     }
 
     @Test
@@ -473,19 +423,19 @@ class DetailFormattingTest {
         val specials = testCard(id = "s0", itemType = "Season", indexNumber = 0, name = "Specials", unplayedCount = 3)
         val season1 = testCard(id = "s1", itemType = "Season", indexNumber = 1, unplayedCount = 0)
         val season2 = testCard(id = "s2", itemType = "Season", indexNumber = 2, unplayedCount = 5)
-        assertEquals(season2, DetailFormatting.resolveResumeSeason(listOf(specials, season1, season2), emptyList()))
+        assertEquals(season2, DetailFormatting.resolveResumeSeason(listOf(specials, season1, season2), null))
     }
 
     @Test
     fun `resolveResumeSeason is null for an empty season list`() {
-        assertNull(DetailFormatting.resolveResumeSeason(emptyList(), emptyList()))
+        assertNull(DetailFormatting.resolveResumeSeason(emptyList(), null))
     }
 
     @Test
-    fun `resolveResumeSeason falls back to defaultSeason when the resume episode's season isn't in the loaded list`() {
+    fun `resolveResumeSeason falls back to defaultSeason when the pick's season isn't in the loaded list`() {
         val season1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
         val orphanEpisode = testCard(id = "e9", itemType = "Episode", parentIndexNumber = 9, indexNumber = 1, positionTicks = 100)
-        assertEquals(season1, DetailFormatting.resolveResumeSeason(listOf(season1), listOf(orphanEpisode)))
+        assertEquals(season1, DetailFormatting.resolveResumeSeason(listOf(season1), testSeriesPlay(orphanEpisode, seasonId = "s9")))
     }
 
     // -- classify (spec strip emphasis tiers) -----------------------------
@@ -616,6 +566,83 @@ class DetailFormattingTest {
 
         assertEquals("EAC3 5.1 ATMOS", audio.value)
         assertEquals(DetailFormatting.SpecWeight.BEST_IN_CLASS, audio.weight)
+    }
+
+    // -- playabilityField (docs/18 §6) ---------------------------------------
+
+    private fun playabilityCell(playability: Playability, streams: List<MediaStreamInfo> = emptyList()) =
+        DetailFormatting.playabilityField(
+            strings,
+            testItemDetail(mediaStreams = streams, playability = playability),
+            locale = Locale.US,
+        )
+
+    private val dolbyVisionVideo = testStream(
+        MediaStreamKind.VIDEO, codec = "hevc", width = 3840, height = 2160, bitRate = 80_000_000,
+        profile = "Main 10", videoRangeType = "DOVI",
+    )
+    private val eac3Audio = testStream(MediaStreamKind.AUDIO, codec = "eac3", channels = 6, isDefault = true)
+
+    @Test
+    fun `playabilityField words each state and tiers it`() {
+        val cases = listOf(
+            Playability.DirectPlay to DetailFormatting.SpecField("DIRECT PLAY", DetailFormatting.SpecWeight.NOTABLE),
+            Playability.WillTranscode(reason = null, value = null) to DetailFormatting.SpecField("WILL TRANSCODE", DetailFormatting.SpecWeight.BASELINE),
+            Playability.WillTranscode(PlayabilityReason.VIDEO_CODEC, "hevc") to
+                DetailFormatting.SpecField("WILL TRANSCODE (HEVC)", DetailFormatting.SpecWeight.BASELINE),
+            Playability.WontPlay(PlayabilityReason.VIDEO_CODEC, "hevc") to
+                DetailFormatting.SpecField("WON'T PLAY (HEVC)", DetailFormatting.SpecWeight.WARNING),
+            Playability.WontPlay(PlayabilityReason.NO_SERVER_TRANSCODING, null) to
+                DetailFormatting.SpecField("WON'T PLAY (NO SERVER TRANSCODING)", DetailFormatting.SpecWeight.WARNING),
+        )
+        for ((playability, expected) in cases) {
+            assertEquals(playability.toString(), expected, playabilityCell(playability, listOf(dolbyVisionVideo)))
+        }
+    }
+
+    @Test
+    fun `playabilityField is absent while the verdict is Unknown`() {
+        assertNull(playabilityCell(Playability.Unknown, listOf(dolbyVisionVideo)))
+    }
+
+    @Test
+    fun `playabilityField names the judged fact in the capsule's own vocabulary`() {
+        val streams = listOf(dolbyVisionVideo, eac3Audio)
+        val labels = listOf(
+            Triple(PlayabilityReason.VIDEO_CODEC, "hevc", "WON'T PLAY (HEVC)"),
+            Triple(PlayabilityReason.VIDEO_PROFILE, "Main 10", "WON'T PLAY (MAIN 10)"),
+            Triple(PlayabilityReason.RESOLUTION, "3840", "WON'T PLAY (4K)"),
+            Triple(PlayabilityReason.VIDEO_RANGE, "DOVI", "WON'T PLAY (DOLBY VISION)"),
+            Triple(PlayabilityReason.VIDEO_BITRATE, "80000000", "WON'T PLAY (80.0 MBPS)"),
+            Triple(PlayabilityReason.AUDIO_CODEC, "eac3", "WON'T PLAY (EAC3)"),
+        )
+        for ((reason, value, expected) in labels) {
+            assertEquals(reason.name, expected, playabilityCell(Playability.WontPlay(reason, value), streams)?.value)
+        }
+    }
+
+    @Test
+    fun `playabilityField names the track Rust judged, not the page's default track`() {
+        // The server's DefaultAudioStreamIndex picked wmav2 while the page's flagged default is EAC3.
+        val cell = playabilityCell(Playability.WontPlay(PlayabilityReason.AUDIO_CODEC, "wmav2"), listOf(dolbyVisionVideo, eac3Audio))
+        assertEquals("WON'T PLAY (WMAV2)", cell?.value)
+    }
+
+    @Test
+    fun `playabilityField drops the brackets when the fact is missing`() {
+        assertEquals("WON'T PLAY", playabilityCell(Playability.WontPlay(PlayabilityReason.VIDEO_LEVEL, "186"), listOf(dolbyVisionVideo))?.value)
+        assertEquals("WILL TRANSCODE", playabilityCell(Playability.WillTranscode(PlayabilityReason.AUDIO_CODEC, null))?.value)
+    }
+
+    @Test
+    fun `the capsule ends with the playability cell after the extra fields`() {
+        val detail = testItemDetail(mediaStreams = listOf(dolbyVisionVideo), playability = Playability.DirectPlay)
+        val size = DetailFormatting.SpecField("2.0 GB", DetailFormatting.SpecWeight.BASELINE)
+
+        val fields = DetailFormatting.specCapsuleFields(strings, detail, extraFields = listOf(size))
+
+        assertEquals(listOf(size, DetailFormatting.SpecField("DIRECT PLAY", DetailFormatting.SpecWeight.NOTABLE)), fields.takeLast(2))
+        assertEquals(1, fields.count { it.value == "DIRECT PLAY" })
     }
 
     // -- specStripFields -----------------------------------------------------
@@ -856,6 +883,17 @@ class DetailFormattingTest {
         val episode = testCard(id = "ep-1", itemType = "Episode", seriesId = "series-1", seriesName = "The Show", overview = "An episode synopsis.")
         val seriesCard = DetailFormatting.seriesCardFrom(episode)
         assertNull(seriesCard?.overview)
+    }
+
+    @Test
+    fun `overview prefers the item record and falls back to the card`() {
+        val stripped = testCard(id = "movie-1", itemType = "Movie", overview = null)
+        val full = testCard(id = "movie-1", itemType = "Movie", overview = "Card synopsis.")
+
+        assertEquals("Record synopsis.", DetailFormatting.overview(stripped, testItemDetail(overview = "Record synopsis.")))
+        assertEquals("Card synopsis.", DetailFormatting.overview(full, null))
+        assertEquals("Card synopsis.", DetailFormatting.overview(full, testItemDetail(overview = null)))
+        assertNull(DetailFormatting.overview(stripped, null))
     }
 
     // -- shortDate / runtimeAndDateLine --------------------------------------
@@ -1354,57 +1392,32 @@ class DetailFormattingTest {
         assertEquals(1, DetailFormatting.wholeCardCount(contentWidthDp = 0f, startMarginDp = 40f, cardWidthDp = 172f, gapDp = 15f))
     }
 
-    // -- episodesOfSeason (in-memory season switch) ----
-
     @Test
-    fun `episodesOfSeason matches the season number, hides virtuals unless shown, orders by index`() {
-        val season2 = testCard(id = "s2", itemType = "Season", indexNumber = 2)
-        val e1 = testCard(id = "e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1)
-        val e22 = testCard(id = "e22", itemType = "Episode", parentIndexNumber = 2, indexNumber = 2)
-        val e21 = testCard(id = "e21", itemType = "Episode", parentIndexNumber = 2, indexNumber = 1)
-        val ghost = testCard(id = "ghost", itemType = "Episode", parentIndexNumber = 2, indexNumber = 3, isVirtual = true)
-        val all = listOf(e1, e22, ghost, e21)
-        assertEquals(listOf(e21, e22), DetailFormatting.episodesOfSeason(season2, all, showVirtualEpisodes = false))
-        assertEquals(listOf(e21, e22, ghost), DetailFormatting.episodesOfSeason(season2, all, showVirtualEpisodes = true))
+    fun `visibleEpisodes shows virtual episodes only while the flag is on, unknown hides them`() {
+        val real = testCard(id = "real", itemType = "Episode")
+        val ghost = testCard(id = "ghost", itemType = "Episode", isVirtual = true)
+        assertEquals(listOf(real, ghost), DetailFormatting.visibleEpisodes(listOf(real, ghost), showVirtualEpisodes = true))
+        assertEquals(listOf(real), DetailFormatting.visibleEpisodes(listOf(real, ghost), showVirtualEpisodes = false))
+        assertEquals(listOf(real), DetailFormatting.visibleEpisodes(listOf(real, ghost), showVirtualEpisodes = null))
     }
 
-    @Test
-    fun `episodesOfSeason defers to the core when memory cannot be faithful`() {
-        val numbered = testCard(id = "s2", itemType = "Season", indexNumber = 2)
-        val unnumbered = testCard(id = "sx", itemType = "Season")
-        val ep = testCard(id = "e", itemType = "Episode", parentIndexNumber = 2, indexNumber = 1)
-        val orphan = testCard(id = "o", itemType = "Episode", indexNumber = 1)
-        assertEquals(null, DetailFormatting.episodesOfSeason(unnumbered, listOf(ep), true))
-        assertEquals(null, DetailFormatting.episodesOfSeason(numbered, emptyList(), true))
-        assertEquals(null, DetailFormatting.episodesOfSeason(numbered, listOf(ep, orphan), true))
-    }
+    // -- seasonAvailability (docs/11 §12 season chip fill bar; the counts are the core's, pinned in next_episode.rs) ----
 
-    // -- seasonAvailability (docs/11 §12 season chip fill bar) ----
-
-    private val availabilityNow = Instant.parse("2026-01-01T00:00:00Z")
     private val availabilitySeason = testCard(id = "s2", itemType = "Season", indexNumber = 2)
 
-    private fun realEp(id: String) = testCard(id = id, itemType = "Episode", parentIndexNumber = 2, indexNumber = 1)
-
-    private fun virtualEp(id: String, premiereDate: String?) =
-        testCard(id = id, itemType = "Episode", parentIndexNumber = 2, indexNumber = 2, isVirtual = true, premiereDate = premiereDate)
-
-    private val pastAir = "2025-06-01T00:00:00Z"
-    private val futureAir = "2026-06-01T00:00:00Z"
-
-    private fun availability(season: Card, episodes: List<Card>) =
-        DetailFormatting.seasonAvailability(season, episodes, availabilityNow)
+    private fun stats(have: Int, missing: Int, seasonId: String = "s2") =
+        SeasonStats(seasonId = seasonId, have = have.toUInt(), watched = 0u, missing = missing.toUInt(), anyProgress = false)
 
     @Test
     fun `seasonAvailability is All when every episode is real`() {
-        val a = availability(availabilitySeason, listOf(realEp("a"), realEp("b")))
+        val a = DetailFormatting.seasonAvailability(availabilitySeason, stats(have = 2, missing = 0))
         assertEquals(SeasonAvailability(have = 2, total = 2), a)
         assertEquals(SeasonFill.All, a?.fill)
     }
 
     @Test
     fun `seasonAvailability is Some with real and missing episodes`() {
-        val a = availability(availabilitySeason, listOf(realEp("a"), virtualEp("m", pastAir)))
+        val a = DetailFormatting.seasonAvailability(availabilitySeason, stats(have = 1, missing = 1))
         assertEquals(SeasonAvailability(have = 1, total = 2), a)
         assertEquals(SeasonFill.Some, a?.fill)
         assertEquals(0.5f, a?.tankFraction)
@@ -1412,66 +1425,32 @@ class DetailFormattingTest {
 
     @Test
     fun `seasonAvailability is None when only missing episodes exist`() {
-        val a = availability(availabilitySeason, listOf(virtualEp("m1", pastAir), virtualEp("m2", pastAir)))
+        val a = DetailFormatting.seasonAvailability(availabilitySeason, stats(have = 0, missing = 2))
         assertEquals(SeasonAvailability(have = 0, total = 2), a)
         assertEquals(SeasonFill.None, a?.fill)
     }
 
     @Test
-    fun `seasonAvailability has no value when only unaired episodes exist`() {
-        assertNull(availability(availabilitySeason, listOf(virtualEp("u", futureAir))))
+    fun `seasonAvailability has no value with no real and no missing episode, or no stats`() {
+        assertNull(DetailFormatting.seasonAvailability(availabilitySeason, stats(have = 0, missing = 0)))
+        assertNull(DetailFormatting.seasonAvailability(availabilitySeason, null))
     }
 
     @Test
-    fun `seasonAvailability is None for missing plus unaired with no real episode`() {
-        val a = availability(availabilitySeason, listOf(virtualEp("m", pastAir), virtualEp("u", futureAir)))
-        assertEquals(SeasonAvailability(have = 0, total = 1), a)
-        assertEquals(SeasonFill.None, a?.fill)
-    }
-
-    @Test
-    fun `seasonAvailability is All for real plus unaired episodes`() {
-        val a = availability(availabilitySeason, listOf(realEp("a"), virtualEp("u", futureAir)))
-        assertEquals(SeasonAvailability(have = 1, total = 1), a)
-        assertEquals(SeasonFill.All, a?.fill)
-    }
-
-    @Test
-    fun `seasonAvailability tank fraction is have over total and counts only aired missing`() {
-        val eps = listOf(realEp("a"), realEp("b"), realEp("c"), virtualEp("m", pastAir), virtualEp("u", futureAir))
-        assertEquals(0.75f, availability(availabilitySeason, eps)?.tankFraction)
+    fun `seasonAvailability tank fraction is have over total`() {
+        assertEquals(0.75f, DetailFormatting.seasonAvailability(availabilitySeason, stats(have = 3, missing = 1))?.tankFraction)
     }
 
     @Test
     fun `seasonAvailability has no value for Specials by name or by index zero`() {
         val byName = testCard(id = "sp", itemType = "Season", name = "Specials", indexNumber = 2)
         val byIndex = testCard(id = "s0", itemType = "Season", name = "Extras", indexNumber = 0)
-        val eps = listOf(realEp("a"), testCard(id = "z", itemType = "Episode", parentIndexNumber = 0, indexNumber = 1))
-        assertNull(availability(byName, eps))
-        assertNull(availability(byIndex, eps))
+        assertNull(DetailFormatting.seasonAvailability(byName, stats(have = 1, missing = 1, seasonId = "sp")))
+        assertNull(DetailFormatting.seasonAvailability(byIndex, stats(have = 1, missing = 1, seasonId = "s0")))
     }
 
-    @Test
-    fun `seasonAvailability has no value without episodes or a season number`() {
-        val unnumbered = testCard(id = "sx", itemType = "Season")
-        assertNull(availability(availabilitySeason, emptyList()))
-        assertNull(availability(unnumbered, listOf(realEp("a"))))
-    }
-
-    @Test
-    fun `seasonAvailability has no value for a season none of the episodes belong to`() {
-        val other = testCard(id = "s3", itemType = "Season", indexNumber = 3)
-        assertNull(availability(other, listOf(realEp("a"))))
-    }
-
-    @Test
-    fun `seasonAvailability counts an undated or unparseable virtual episode as missing`() {
-        assertEquals(SeasonAvailability(have = 0, total = 1), availability(availabilitySeason, listOf(virtualEp("n", null))))
-        assertEquals(SeasonAvailability(have = 1, total = 2), availability(availabilitySeason, listOf(realEp("a"), virtualEp("g", "not-a-date"))))
-    }
-
-    private fun change(event: ChangeEvent, isSeries: Boolean = true, known: Set<String> = setOf("known")) =
-        DetailFormatting.collectionChange(event, "series-1", isSeries, known)
+    private fun change(event: ChangeEvent, isSeries: Boolean = true, known: Set<String> = setOf("known"), libraryId: String? = "lib-a") =
+        DetailFormatting.collectionChange(event, "series-1", isSeries, known, libraryId)
 
     @Test
     fun `collectionChange on a series probes unknown ids instead of refreshing`() {
@@ -1491,11 +1470,20 @@ class DetailFormattingTest {
     }
 
     @Test
-    fun `collectionChange ignores an empty upsert and unknown removals`() {
+    fun `collectionChange ignores an empty upsert and a known-or-own removal always affects`() {
         assertEquals(DetailFormatting.CollectionChange.Ignores, change(ChangeEvent.Upserted(emptyList(), null)))
-        assertEquals(DetailFormatting.CollectionChange.Ignores, change(ChangeEvent.Removed(listOf("x"), "lib-a")))
         assertEquals(DetailFormatting.CollectionChange.Affects, change(ChangeEvent.Removed(listOf("known"), null)))
         assertEquals(DetailFormatting.CollectionChange.Affects, change(ChangeEvent.Removed(listOf("series-1"), null)))
+    }
+
+    @Test
+    fun `collectionChange refreshes a series on an unknown removal in its library, never another library's`() {
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(ChangeEvent.Removed(listOf("x"), "lib-a")))
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(ChangeEvent.Removed(listOf("x"), null)))
+        assertEquals(DetailFormatting.CollectionChange.Affects, change(ChangeEvent.Removed(listOf("x"), "lib-b"), libraryId = null))
+        assertEquals(DetailFormatting.CollectionChange.Ignores, change(ChangeEvent.Removed(listOf("x"), "lib-b")))
+        assertEquals(DetailFormatting.CollectionChange.Ignores, change(ChangeEvent.Removed(emptyList(), "lib-a")))
+        assertEquals(DetailFormatting.CollectionChange.Ignores, change(ChangeEvent.Removed(listOf("x"), "lib-a"), isSeries = false))
     }
 
     @Test
@@ -1525,24 +1513,24 @@ class DetailFormattingTest {
     fun `reconcileSelectedSeason keeps a surviving or absent selection`() {
         val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
         val s2 = testCard(id = "s2", itemType = "Season", indexNumber = 2)
-        assertEquals("s2", DetailFormatting.reconcileSelectedSeason("s2", listOf(s1, s2), emptyList(), settled = true))
-        assertNull(DetailFormatting.reconcileSelectedSeason(null, listOf(s1, s2), emptyList(), settled = false))
+        assertEquals("s2", DetailFormatting.reconcileSelectedSeason("s2", listOf(s1, s2), null, settled = true))
+        assertNull(DetailFormatting.reconcileSelectedSeason(null, listOf(s1, s2), null, settled = false))
     }
 
     @Test
     fun `reconcileSelectedSeason moves a removed pick to the resume season`() {
         val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
         val s3 = testCard(id = "s3", itemType = "Season", indexNumber = 3)
-        val s1Ep = testCard(id = "e1", itemType = "Episode", parentIndexNumber = 1, indexNumber = 1, played = true)
         val s3Ep = testCard(id = "e3", itemType = "Episode", parentIndexNumber = 3, indexNumber = 1, played = false)
-        assertEquals("s3", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s3), listOf(s1Ep, s3Ep), settled = true))
+        val play = testSeriesPlay(s3Ep, seasonId = "s3", kind = SeriesPlayKind.NEXT_UP)
+        assertEquals("s3", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s3), play, settled = true))
     }
 
     @Test
     fun `reconcileSelectedSeason falls to the first season, and keeps a pick when no seasons came back`() {
         val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
-        assertEquals("s1", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1), emptyList(), settled = true))
-        assertEquals("gone", DetailFormatting.reconcileSelectedSeason("gone", emptyList(), emptyList(), settled = false))
+        assertEquals("s1", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1), null, settled = true))
+        assertEquals("gone", DetailFormatting.reconcileSelectedSeason("gone", emptyList(), null, settled = false))
     }
 
     @Test
@@ -1550,19 +1538,20 @@ class DetailFormattingTest {
         val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
         val s3 = testCard(id = "s3", itemType = "Season", indexNumber = 3)
         val s3Ep = testCard(id = "e3", itemType = "Episode", parentIndexNumber = 3, indexNumber = 1, played = false)
-        assertNull(DetailFormatting.reconcileSelectedSeason(null, listOf(s1, s3), listOf(s3Ep), settled = false))
-        assertEquals("s3", DetailFormatting.reconcileSelectedSeason(null, listOf(s1, s3), listOf(s3Ep), settled = true))
-        assertEquals("s1", DetailFormatting.reconcileSelectedSeason(null, listOf(s1), emptyList(), settled = true))
-        assertNull(DetailFormatting.reconcileSelectedSeason(null, emptyList(), emptyList(), settled = true))
+        val play = testSeriesPlay(s3Ep, seasonId = "s3", kind = SeriesPlayKind.NEXT_UP)
+        assertNull(DetailFormatting.reconcileSelectedSeason(null, listOf(s1, s3), play, settled = false))
+        assertEquals("s3", DetailFormatting.reconcileSelectedSeason(null, listOf(s1, s3), play, settled = true))
+        assertEquals("s1", DetailFormatting.reconcileSelectedSeason(null, listOf(s1), null, settled = true))
+        assertNull(DetailFormatting.reconcileSelectedSeason(null, emptyList(), null, settled = true))
     }
 
     @Test
     fun `reconcileSelectedSeason never falls back provisionally before the per-episode signal`() {
         val s1 = testCard(id = "s1", itemType = "Season", indexNumber = 1)
         val s2 = testCard(id = "s2", itemType = "Season", indexNumber = 2)
-        assertNull(DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s2), emptyList(), settled = false))
-        assertEquals("s1", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s2), emptyList(), settled = true))
-        assertEquals("gone", DetailFormatting.reconcileSelectedSeason("gone", emptyList(), emptyList(), settled = false))
+        assertNull(DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s2), null, settled = false))
+        assertEquals("s1", DetailFormatting.reconcileSelectedSeason("gone", listOf(s1, s2), null, settled = true))
+        assertEquals("gone", DetailFormatting.reconcileSelectedSeason("gone", emptyList(), null, settled = false))
     }
 
     @Test
@@ -1573,3 +1562,14 @@ class DetailFormattingTest {
         assertEquals(0.75f, SeasonAvailability(have = 18, total = 24).tankFraction)
     }
 }
+
+/** A core Play pick for tests (synthetic ids); [seasonId] defaults to `"season-<parentIndexNumber>"`. */
+internal fun testSeriesPlay(
+    episode: Card,
+    seasonId: String = "season-${episode.parentIndexNumber}",
+    kind: SeriesPlayKind = SeriesPlayKind.RESUME,
+): SeriesPlayTarget = SeriesPlayTarget(episode, seasonId, kind)
+
+/** A season's core counts for tests (docs/11 §12); the counting rules are pinned in next_episode.rs. */
+internal fun testStats(seasonId: String = "season-1", have: Int = 0, watched: Int = 0, missing: Int = 0, anyProgress: Boolean = false): SeasonStats =
+    SeasonStats(seasonId, have.toUInt(), watched.toUInt(), missing.toUInt(), anyProgress)

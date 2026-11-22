@@ -173,7 +173,6 @@ perf playback phase=exo.setMediaItem atMs=2066
 perf playback phase=exo.prepare atMs=2068
 perf playback phase=ui.install atMs=2070
 perf playback phase=surface.ready atMs=2085
-perf playback phase=resume.seek atMs=2240
 perf playback phase=exo.tracks atMs=2250
 perf playback phase=decoder.video initMs=18 atMs=2265
 perf playback phase=decoder.audio initMs=6 atMs=2268
@@ -200,10 +199,9 @@ visible-playback critical paths.
 non-zero size; `exo.tracks`/`exo.ready` are the first `onTracksChanged`/
 `STATE_READY` from the shared player, and `decoder.video`/`decoder.audio`
 carry `AnalyticsListener`'s own `initMs=` for that decoder, all from
-`PlayerHolder`. `resume.seek` is logged only for a resume (docs/18 §5.2):
-the one extra `seekTo` issued once `exo.tracks` fires, landing the resume on
-its preceding keyframe instead of decoding through every frame back to it.
-`firstFrame.resume` duplicates `firstFrame`'s timestamp but only appears on a
+`PlayerHolder`. A resume issues no seek of its own (docs/18 §5.2: its first
+track selection already starts at the preceding keyframe), so its only extra
+mark is `firstFrame.resume`: it duplicates `firstFrame`'s timestamp but appears only on a
 resume, so a filtered capture can isolate resume-specific first-frame timing
 without cross-referencing `player.load`'s start position. The `loads`
 line (`PerfLog.line`, not a `phase=` mark) totals this item's HTTP loads --
@@ -233,9 +231,11 @@ perf startup phase=detail.poster ms=210.75
 ```
 
 - `detail.push` -- the only `atMs=` line in this group, logged from
-  `MainActivity` at the moment `Screen.Detail` is pushed or sibling-replaced
-  (never from a Back pop revealing one already on the stack) and the
-  reference point every other line below measures its `ms=` against.
+  `MainActivity` when an open that lands `Screen.Detail` (push or sibling
+  replace) is asked for, before any card read, so that read's latency is
+  counted (never from a Back pop revealing one already on the stack); the
+  reference point every other line below measures its `ms=` against. An
+  open dropped by its landing rule (docs/07 §5) still logs one.
 - `detail.firstDraw` -- the first pre-draw of `DetailScreen`'s own content
   for this push.
 - `detail.focus` -- the moment initial focus lands (the seed/restore

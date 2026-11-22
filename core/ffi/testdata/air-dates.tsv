@@ -1,0 +1,18 @@
+# docs/24 air-date rule, one table for the core (next_episode::is_missing) and the app
+# (CardFormatting.virtualStatusLabel). now = 2026-01-15T12:00:00Z. Columns: input<TAB>missing.
+# <none> = no premiere date. A date is "airs later" only if RFC3339 and after now.
+<none>	true
+	true
+not a date	true
+2026-02-01	true
+2025-12-01T00:00:00Z	true
+2026-01-15T12:00:00Z	true
+2026-02-01T00:00:00Z	false
+2026-02-01T00:00:00.0000000Z	false
+2026-02-01T00:00:00.1234567891234Z	false
+2026-01-15T13:00:00+00:00	false
+2026-01-15T13:30:00+02:00	true
+2026-02-01 00:00:00Z	false
+2026-02-01t00:00:00z	false
+2026-02-01T00:00Z	true
+2026-02-01T00:00:00+0200	true

@@ -155,3 +155,23 @@ fun NavBackStack.toWatchTogether(screen: Screen.WatchTogether, open: NavBackStac
     if (lobby < 0) return open()
     return if (screen.itemId == null) backTo(lobby) else backTo(lobby, screen)
 }
+
+
+/** docs/07 §5: one open asked for by Select, stamped with what it must still match when its card read lands. */
+internal data class OpenTicket(val seq: Long, val origin: Any, val backPresses: Long)
+
+/**
+ * docs/07 §5: an open lands only while it is the newest one, its stack is still the live one (no
+ * navigation or reset since), and no Back was pressed since, because Back at the Home root moves no stack.
+ */
+internal fun asyncOpenLands(ticket: OpenTicket, newestSeq: Long, live: Any?, backPresses: Long): Boolean =
+    ticket.seq == newestSeq && live === ticket.origin && backPresses == ticket.backPresses
+
+/** Issues and checks [OpenTicket]s against the root's Back count; Main thread only. */
+internal class AsyncOpens(private val backPresses: () -> Long) {
+    private var newest = 0L
+
+    fun issue(origin: Any): OpenTicket = OpenTicket(++newest, origin, backPresses())
+
+    fun lands(ticket: OpenTicket, live: Any?): Boolean = asyncOpenLands(ticket, newest, live, backPresses())
+}

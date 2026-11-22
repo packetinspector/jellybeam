@@ -7,7 +7,7 @@ import tv.jellybeam.i18n.UiStrings
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
 
-/** docs/12 §16: what the server says about one subtitle track that Media3 cannot (SDH), plus its own flags and codec. */
+/** docs/12 §16: what the server says about one of a Direct Play file's subtitle tracks that Media3 cannot (SDH), plus its own flags and codec. */
 internal data class SubtitleFacts(val hearingImpaired: Boolean, val forced: Boolean, val codec: String?)
 
 /** Track picker row text (docs/12 "Track picker"): pure so the display rules stay JVM-testable. */
@@ -27,15 +27,14 @@ object TrackChoiceText {
         info: TrackInfo,
         external: Boolean,
         status: SidecarStatus? = null,
-        facts: SubtitleFacts? = null,
         locale: Locale = AppLocale.text,
     ): String? {
         val titled = !info.title.isNullOrBlank()
         val parts = listOfNotNull(
             languageName(info.lang, locale).takeIf { titled },
-            formatOf(info.kind, facts?.codec?.takeIf { it.isNotBlank() } ?: info.codec),
-            strings.get(R.string.player_track_forced).takeIf { info.isForced || facts?.forced == true },
-            strings.get(R.string.player_track_sdh).takeIf { facts?.hearingImpaired == true },
+            formatOf(info.kind, info.codec),
+            strings.get(R.string.player_track_forced).takeIf { info.isForced },
+            strings.get(R.string.player_track_sdh).takeIf { info.isHearingImpaired },
             strings.get(R.string.player_track_external).takeIf { external },
             when (status) {
                 null -> null
@@ -65,8 +64,8 @@ object TrackChoiceText {
         return (if (kind == TrackKindFfi.AUDIO) audioFormat(raw) else subtitleFormat(raw)) ?: raw
     }
 
-    /** docs/12 §16: the language's name in [locale]; an unresolvable code shows as written, `und` or blank as nothing. */
-    private fun languageName(lang: String?, locale: Locale): String? {
+    /** docs/12 §16: the language's name in [locale], first letter capitalised; an unresolvable code shows as written, `und` or blank as nothing. */
+    internal fun languageName(lang: String?, locale: Locale): String? {
         val code = lang?.trim()?.takeIf { it.isNotEmpty() && !it.equals("und", ignoreCase = true) } ?: return null
         // The JVM names some three-letter codes only by their two-letter form ("zho" -> "zh").
         val alpha2 by lazy {
@@ -74,13 +73,14 @@ object TrackChoiceText {
             Locale.getISOLanguages().firstOrNull { target != null && normalizedLanguage(it) == target }
         }
         val name = Locale.forLanguageTag(code).getDisplayLanguage(locale).takeIf { it.isNotBlank() && !it.equals(code, ignoreCase = true) }
-        return name ?: alpha2?.let { Locale.forLanguageTag(it).getDisplayLanguage(locale) }?.takeIf { it.isNotBlank() } ?: code
+        val resolved = name ?: alpha2?.let { Locale.forLanguageTag(it).getDisplayLanguage(locale) }?.takeIf { it.isNotBlank() } ?: return code
+        return resolved.replaceFirstChar { it.titlecase(locale) }
     }
 
     /** docs/12 §16: the delay control's track line: the picker's [label] and the subtitle format, `"English · SRT"`. */
-    internal fun delayTrack(strings: UiStrings, info: TrackInfo, indexInKind: Int, facts: SubtitleFacts? = null, locale: Locale = AppLocale.text): String {
+    internal fun delayTrack(strings: UiStrings, info: TrackInfo, indexInKind: Int, locale: Locale = AppLocale.text): String {
         val label = label(strings, info, indexInKind, locale)
-        return subtitleFormat(facts?.codec?.takeIf { it.isNotBlank() } ?: info.codec)?.let { strings.get(R.string.player_subtitle_delay_track, label, it) } ?: label
+        return subtitleFormat(info.codec)?.let { strings.get(R.string.player_subtitle_delay_track, label, it) } ?: label
     }
 
     private val SUBTITLE_FORMATS: Map<String, String> = formats(

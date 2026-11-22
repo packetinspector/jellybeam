@@ -20,7 +20,6 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.LoadEventInfo
@@ -142,6 +141,9 @@ interface PlaybackPlayer {
     /** Stops playback and clears the loaded item; must not release/tear down the player. */
     fun stopAndClear()
 
+    /** docs/18 §5.4: the loaded item played to its end, so its seek index is dropped; only resumes use one. */
+    fun forgetSeekIndex()
+
     val isPlaying: Boolean
     val playbackState: Int
 
@@ -196,6 +198,18 @@ interface PlaybackPlayer {
      * ViewModel must not stack a second reconnect budget on top. */
     fun hasExhaustedLoadRetryBudget(): Boolean = false
 
+    /** Media3's `isLoading`: a load in flight keeps a stall off docs/18 §7's safety net. */
+    val isLoading: Boolean get() = false
+
+    /** docs/18 §7: a seek issued and not yet landed or timed out; [SeekSerializer] is its one owner. */
+    val seekInFlight: Boolean get() = false
+
+    /** Whether everything up to the listed duration is buffered, so nothing more can arrive. */
+    fun bufferedToEnd(): Boolean = false
+
+    /** Each audio and video renderer's readiness as a diag tag, for the stalled-for-good line. */
+    fun rendererStates(): String = ""
+
     /**
      * Called with the Media3 decoder name every time the shared player initializes a *video*
      * decoder, forwarded verbatim -- docs/18 §1's third local-evidence signal: [PlaybackViewModel]
@@ -203,6 +217,10 @@ interface PlaybackPlayer {
      * `init` and clear it in `onCleared`; `null` is the valid "nobody is listening" state.
      */
     var onVideoDecoderInitialized: ((String) -> Unit)?
+
+    /** docs/18 §7: each load's end inputs on the main thread, tagged with that load's generation; wired like
+     * [onVideoDecoderInitialized]. */
+    var onEndInput: ((EndEvent) -> Unit)?
 
     /** docs/18 §3.2: where ASS sidecar [index] loads styled; null with full styling off, so it is read as plain cues. */
     fun assSidecarTarget(index: Int): AssSidecarTarget? = null
@@ -271,67 +289,35 @@ internal fun withTrackDecision(current: TrackSelectionParameters, decision: Trac
 }
 
 /**
- * docs/18-playback-quality.md §5.2: sequences the resume-seek [PlayerHolder.load] arms for a
- * `startPositionMs > 0` load. `setMediaItem(item, startPositionMs)` applies that position exactly
- * (decoding through every frame back to the last keyframe); one extra `seekTo` issued once the
- * period is prepared lands on the keyframe at/before it instead. Pure, single-threaded (main
- * thread only, same contract as [SeekSerializer]); [generation] is [PlayerHolder]'s own load
- * counter, so a callback from a load a newer one has already replaced finds nothing armed.
+ * docs/18 §5.2: holds a resume load's target from [PlayerHolder.load] to its media-item transition, where
+ * [reserveResumeSeek] takes it once. Main thread only; [generation] is the load counter, so a transition delivered
+ * for a replaced load reserves nothing.
  */
 internal class ResumeSeekGate {
     private var armedGeneration: Long? = null
     private var targetMs: Long = 0L
-    private var reserved = false
-    private var seekIssued = false
 
-    /** Arms the gate for [generation]'s resume to [targetMs]. */
     fun arm(generation: Long, targetMs: Long) {
         armedGeneration = generation
         this.targetMs = targetMs
-        reserved = false
-        seekIssued = false
     }
 
-    /** Disarms -- a play-from-start or transcode load, which never touches [SeekParameters]. */
     fun reset() {
         armedGeneration = null
-        reserved = false
-        seekIssued = false
     }
 
-    /** Returns the target to reserve in the serializer exactly once for the armed [generation],
-     * at the media-item transition, before any user input can be accepted. */
+    /** The armed target, exactly once and only for the armed [generation]. */
     fun reserve(generation: Long): Long? {
-        if (armedGeneration != generation || reserved) return null
-        reserved = true
-        return targetMs
-    }
-
-    /** Returns the target to seek to exactly once for the armed [generation] -- `null` for a
-     * stale/mismatched generation, an unarmed gate, or a repeat call. */
-    fun onTracksChanged(generation: Long): Long? {
-        if (armedGeneration != generation || seekIssued) return null
-        seekIssued = true
-        return targetMs
-    }
-
-    /** Returns `true` exactly once, on the first landing signal (firstFrame or STATE_READY, per
-     * [PlayerHolder]) for the armed [generation] -- the caller restores normal seek semantics
-     * then. Consumes the arm, so a later landing signal for the same load is a no-op. */
-    fun onLandingSignal(generation: Long): Boolean {
-        if (armedGeneration != generation) return false
+        if (armedGeneration != generation) return null
         armedGeneration = null
-        reserved = false
-        seekIssued = false
-        return true
+        return targetMs
     }
 }
 
 /**
- * docs/18 §5.2 ordering, pure so the interleaving with user skips is unit-tested: the resume
- * target takes [seeks]' in-flight slot at the media-item transition (before playback input can
- * be accepted), so a skip pressed while the player is still preparing is held behind it and
- * replayed on top once it lands -- never overwritten by a resume seek that arrives later.
+ * docs/18 §5.2 ordering, pure so the interleaving with user skips is unit-tested: the resume target takes [seeks]'
+ * in-flight slot at the media-item transition, so a skip pressed while the player prepares is held and replayed on
+ * the first landing signal. Nothing is issued: the source's first track selection already starts there.
  */
 internal fun reserveResumeSeek(gate: ResumeSeekGate, seeks: SeekSerializer, generation: Long, nowMs: Long): Long? {
     val target = gate.reserve(generation) ?: return null
@@ -365,31 +351,23 @@ internal fun externalStartTicks(requestedTicks: Long, runtimeTicks: Long?): Long
         (runtimeTicks - 100_000_000L).coerceAtLeast(0L)
     }
 
-/** [loadOpening]'s answer: the start position, whether the keyframe resume is armed, and the play intent. */
-internal data class LoadOpening(val startPositionMs: Long, val armResume: Boolean, val playWhenReady: Boolean)
+/** [loadOpening]'s answer: the start position, whether the keyframe resume is armed, the play intent, and how long
+ * a seek may take to land. */
+internal data class LoadOpening(val startPositionMs: Long, val armResume: Boolean, val playWhenReady: Boolean, val seekLandingTimeoutMs: Long)
 
-/** docs/18 §5.2, docs/28 §5: a Transcode (HLS) plan's segments already govern its landing, so it never arms. */
-internal fun loadOpening(planStartTicks: Long, transcode: Boolean, start: LoadStart): LoadOpening = when (start) {
-    LoadStart.Resume -> PlaybackTicks.ticksToMs(planStartTicks).coerceAtLeast(0L).let { ms ->
-        LoadOpening(ms, armResume = ms > 0L && !transcode, playWhenReady = true)
+/** docs/18 §5.2, docs/28 §5: a Transcode (HLS) plan's segments already govern its landing, so it never arms, and its
+ * seeks wait [SeekSerializer.TRANSCODE_LANDING_TIMEOUT_MS] (docs/18 §5). */
+internal fun loadOpening(planStartTicks: Long, transcode: Boolean, start: LoadStart): LoadOpening {
+    val landingMs = if (transcode) SeekSerializer.TRANSCODE_LANDING_TIMEOUT_MS else SeekSerializer.LANDING_TIMEOUT_MS
+    return when (start) {
+        LoadStart.Resume -> PlaybackTicks.ticksToMs(planStartTicks).coerceAtLeast(0L).let { ms ->
+            LoadOpening(ms, armResume = ms > 0L && !transcode, playWhenReady = true, landingMs)
+        }
+        is LoadStart.GroupExactPaused ->
+            LoadOpening(PlaybackTicks.ticksToMs(start.ticks).coerceAtLeast(0L), armResume = false, playWhenReady = false, landingMs)
+        is LoadStart.At ->
+            LoadOpening(PlaybackTicks.ticksToMs(start.ticks).coerceAtLeast(0L), armResume = false, playWhenReady = true, landingMs)
     }
-    is LoadStart.GroupExactPaused ->
-        LoadOpening(PlaybackTicks.ticksToMs(start.ticks).coerceAtLeast(0L), armResume = false, playWhenReady = false)
-    is LoadStart.At ->
-        LoadOpening(PlaybackTicks.ticksToMs(start.ticks).coerceAtLeast(0L), armResume = false, playWhenReady = true)
-}
-
-/** The resume target to hand to the player once tracks are known, or `null` when a user seek
- * already owns the slot: their exact position wins and the keyframe snap is dropped. An
- * unseekable file drops it and frees the slot, since that seekTo would only restart from 0:00
- * (docs/12 §9). */
-internal fun resumeSeekToIssue(gate: ResumeSeekGate, seeks: SeekSerializer, generation: Long, seekability: Seekability): Long? {
-    val target = gate.onTracksChanged(generation) ?: return null
-    if (seekability == Seekability.UNSEEKABLE) {
-        seeks.reset()
-        return null
-    }
-    return target.takeIf { seeks.inFlightTargetMs == it }
 }
 
 /**
@@ -436,19 +414,24 @@ class PlayerHolder(
 
     override var onVideoDecoderInitialized: ((String) -> Unit)? = null
 
+    override var onEndInput: ((EndEvent) -> Unit)? = null
+
+    /** docs/18 §7: the current transcode load's gate (null on Direct Play); each load's data sources hold their own,
+     * so a late segment of an earlier load or plan never counts toward this one. Main-thread writes only, in [load]. */
+    private var itemGate: OutOfMediaGate? = null
+
     /** Serializes [seekBy]'s `player.seekTo` calls; main-thread only like every field here that
      * Media3's callbacks touch without synchronization. */
     private val seeks = SeekSerializer()
 
     /** docs/18 §5.2: bumped once per [load] call; the one identity a stale listener callback from
-     * a replaced item can be checked against. Main-thread only, like every field here. */
+     * a replaced item can be checked against, and docs/18 §7's load tag. Main-thread only, like every field here. */
     private var loadGeneration = 0L
 
     private val resumeSeekGate = ResumeSeekGate()
 
-    /** Set by [load] when this generation is a resume with a real seek to sequence; independent
-     * of [resumeSeekGate]'s one-shot state so the `firstFrame.resume` perf mark still fires
-     * whichever of firstFrame/STATE_READY consumes the gate first. Cleared once logged. */
+    /** Set by [load] before `setMediaItem` for a keyframe resume (docs/18 §5.2): the media source factory reads it
+     * to wrap the item's source, and the `firstFrame.resume` mark clears it. */
     private var currentLoadIsResume = false
 
     // docs/10 "Playback-start timeline": one-shot per-load marks.
@@ -633,18 +616,17 @@ class PlayerHolder(
         // OkHttp (connection pooling/keep-alive) in place of Media3's default HttpURLConnection
         // source; [httpClient] owns the timeout tuning. [pendingCall] lets [CancelingDataSource]
         // find and cancel an abandoned read's Call on close instead of paying OkHttp's ~100ms
-        // drain -- every reopen (trailer seek, resume seek, out-of-buffer skip) paid it.
+        // drain -- every reopen (trailer seek, out-of-buffer skip) paid it.
         val pendingCall = ThreadLocal<Call?>()
         val httpDataSourceFactory = OkHttpDataSource.Factory(TrackingCallFactory(httpClient, pendingCall))
         assOverlay = runCatching { AssOverlay() }
             .onFailure { Log.w(SEEK_LOG_TAG, "ASS overlay unavailable", it) }
             .getOrNull()
-        val cancelingDataSourceFactory = CancelingDataSourceFactory(httpDataSourceFactory, pendingCall)
         // One factory per item, so each item's extractors bind its generation at setMediaItem (docs/13).
-        val mediaSourceFactory = ItemBoundMediaSourceFactory(assFonts) { sink ->
-            DefaultMediaSourceFactory(appContext, AssExtractorsFactory(sink))
+        val mediaSourceFactory = ItemBoundMediaSourceFactory(assFonts, snapFirstSelection = { currentLoadIsResume }) { sink ->
+            DefaultMediaSourceFactory(appContext, AssExtractorsFactory(sink, AppGraph.seekIndexStore))
                 .setSubtitleParserFactory(AssAwareSubtitleParserFactory())
-                .setDataSourceFactory(cancelingDataSourceFactory)
+                .setDataSourceFactory(CancelingDataSourceFactory(httpDataSourceFactory, pendingCall, itemGate))
                 // Media3's DefaultLoadErrorHandlingPolicy gives up after ~3 fast retries, not enough to
                 // ride out a 10-20s Wi-Fi stall; LoadRetryPolicy's longer runway replaces it
                 .setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
@@ -691,22 +673,13 @@ class PlayerHolder(
                             tracksMarked = true
                             PerfLog.markPlayback("exo.tracks")
                         }
-                        // docs/18 §5.2: the period is prepared once tracks are known -- issue the
-                        // resume seek reserved at the transition; a skip held behind it replays on
-                        // landing (see reserveResumeSeek).
-                        if (tracks.groups.isNotEmpty()) {
-                            resumeSeekToIssue(resumeSeekGate, seeks, loadGeneration, seekability)?.let { targetMs ->
-                                issue(targetMs)
-                                PerfLog.markPlayback("resume.seek")
-                            }
-                        }
                     }
 
                     // Seek-landing signals (docs/18 §5): the first of these two to fire is what
                     // "landed" means; both no-op via [SeekSerializer.landed] if nothing's in flight
                     override fun onRenderedFirstFrame() {
+                        onEndInput?.invoke(EndEvent.FirstFrame(loadGeneration))
                         onSeekLanded("firstFrame")
-                        maybeRestoreSeekParameters()
                         if (currentLoadIsResume) {
                             currentLoadIsResume = false
                             PerfLog.markPlayback("firstFrame.resume")
@@ -717,7 +690,6 @@ class PlayerHolder(
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         if (playbackState == Player.STATE_READY) {
                             onSeekLanded("ready")
-                            maybeRestoreSeekParameters()
                             if (!readyMarked) {
                                 readyMarked = true
                                 PerfLog.markPlayback("exo.ready")
@@ -821,7 +793,8 @@ class PlayerHolder(
         fullAssStyling: Boolean,
         start: LoadStart,
     ) {
-        loadErrorHandlingPolicy.resetForNewPlayback()
+        val transcode = plan.playMethod == PlayMethodFfi.TRANSCODE
+        loadErrorHandlingPolicy.resetForNewPlayback(transcode)
         this.fullAssStyling = fullAssStyling
         delayMemory.load(plan.itemId)
         // A new item starts with no styled track, fonts or overlay frame from the last one.
@@ -840,6 +813,9 @@ class PlayerHolder(
         droppedVideoFrames.set(0L)
         loadGeneration++
         val generation = loadGeneration
+        // docs/18 §7: opened before setMediaItem, whose callbacks belong to this load; the gate posts its reads tagged.
+        onEndInput?.invoke(EndEvent.LoadOpened(generation))
+        itemGate = if (transcode) OutOfMediaGate(generation) { e -> seekTimeoutHandler.post { onEndInput?.invoke(e) } } else null
         tracksMarked = false
         readyMarked = false
         surfaceReadyMarked = false
@@ -863,22 +839,16 @@ class PlayerHolder(
         // docs/18 §3: a Transcode plan's `url` is the server's HLS manifest, not a static file, and
         // Jellyfin's query-string-only URLs defeat Media3's extension-sniffing, so the mime type is
         // set explicitly. A DirectPlay plan is untouched.
-        if (plan.playMethod == PlayMethodFfi.TRANSCODE) {
+        if (transcode) {
             mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
         }
         val mediaItem = mediaItemBuilder.build()
-        val opening = loadOpening(plan.startPositionTicks, plan.playMethod == PlayMethodFfi.TRANSCODE, start)
+        val opening = loadOpening(plan.startPositionTicks, transcode, start)
+        seeks.landingTimeoutMs = opening.seekLandingTimeoutMs
         val startPositionMs = opening.startPositionMs
-        // docs/18 §5.2: a resume's saved position is applied exactly by setMediaItem, decoding
-        // through every frame back to the last keyframe; land there instead by biasing the one
-        // extra seekTo() this arms in onTracksChanged toward the preceding sync sample.
+        // docs/18 §5.2: read inside setMediaItem, so a resume's source starts at the keyframe before it, positioned once.
         currentLoadIsResume = opening.armResume
-        if (opening.armResume) {
-            player.setSeekParameters(SeekParameters.PREVIOUS_SYNC)
-            resumeSeekGate.arm(generation, startPositionMs)
-        } else {
-            disarmResumeSeek()
-        }
+        if (opening.armResume) resumeSeekGate.arm(generation, startPositionMs) else resumeSeekGate.reset()
         PerfLog.markPlayback("exo.setMediaItem")
         if (startPositionMs > 0L) {
             player.setMediaItem(mediaItem, startPositionMs)
@@ -890,22 +860,6 @@ class PlayerHolder(
         player.playWhenReady = opening.playWhenReady
     }
 
-    /** docs/18 §5.2: restores normal seek semantics once the resume seek has landed (or
-     * immediately, for a non-resume load); at most once per [loadGeneration]. */
-    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-    private fun maybeRestoreSeekParameters() {
-        if (resumeSeekGate.onLandingSignal(loadGeneration)) {
-            player.setSeekParameters(SeekParameters.DEFAULT)
-        }
-    }
-
-    /** docs/18 §5.2: every path that ends a resume load's special seek semantics goes through here. */
-    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-    private fun disarmResumeSeek() {
-        resumeSeekGate.reset()
-        player.setSeekParameters(SeekParameters.DEFAULT)
-    }
-
     /** docs/10: one summary line per item, logged once at first frame. */
     private fun maybeLogLoadCounts() {
         if (loadsMarked) return
@@ -914,6 +868,21 @@ class PlayerHolder(
     }
 
     override fun hasExhaustedLoadRetryBudget(): Boolean = loadErrorHandlingPolicy.hasExhaustedRetryBudget()
+
+    override val isLoading: Boolean get() = player.isLoading
+
+    override val seekInFlight: Boolean get() = seeks.inFlightTargetMs != null
+
+    override fun bufferedToEnd(): Boolean = player.duration != C.TIME_UNSET && player.bufferedPosition >= player.duration
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    override fun rendererStates(): String = (0 until player.rendererCount)
+        .filter { player.getRendererType(it) == C.TRACK_TYPE_AUDIO || player.getRendererType(it) == C.TRACK_TYPE_VIDEO }
+        .joinToString(".") { i ->
+            // A diag tag: track type, then R/r ready, E/e ended, S/s read to end of stream.
+            val r = player.getRenderer(i)
+            "${player.getRendererType(i)}${if (r.isReady) 'R' else 'r'}${if (r.isEnded) 'E' else 'e'}${if (r.hasReadStreamToEnd()) 'S' else 's'}"
+        }
 
     /** Attaches the shared player to [playerView] -- call from e.g. `AndroidView`'s `factory`. */
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -1307,7 +1276,7 @@ class PlayerHolder(
         }
     }
 
-    /** Seek parameters are already EXACT here: Media3's DEFAULT is EXACT and a group load never arms the resume. */
+    /** docs/28 §5: a group seek lands exactly; nothing in the app sets SeekParameters. */
     override fun seekGroup(targetMs: Long, onLanded: ((landedTicks: Long, latencyMs: Long) -> Unit)?) {
         val report = onLanded?.let { { ms: Long, latencyMs: Long -> it(PlaybackTicks.msToTicks(ms), latencyMs) } }
         val decision = seeks.request(targetMs.coerceAtLeast(0L), SystemClock.uptimeMillis(), report)
@@ -1357,7 +1326,7 @@ class PlayerHolder(
 
     private fun scheduleSeekTimeout() {
         seekTimeoutHandler.removeCallbacks(seekTimeoutRunnable)
-        seekTimeoutHandler.postDelayed(seekTimeoutRunnable, SeekSerializer.LANDING_TIMEOUT_MS)
+        seekTimeoutHandler.postDelayed(seekTimeoutRunnable, seeks.landingTimeoutMs)
     }
 
     private fun cancelSeekTimeout() {
@@ -1370,6 +1339,10 @@ class PlayerHolder(
         Log.i(SEEK_LOG_TAG, "reset reason=$reason")
     }
 
+    override fun forgetSeekIndex() {
+        assItemUrl?.let(AppGraph.seekIndexStore::forget)
+    }
+
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     override fun stopAndClear() {
         // A font fetch or wait still running must not land fonts or re-show the overlay after stop.
@@ -1377,18 +1350,16 @@ class PlayerHolder(
         // show it again mid-session, which leaves it without a surface; detach() removes it on exit.
         beginAssItem()
         resetSeeks("stop")
-        // docs/18 §5.2: an armed-but-never-landed resume must not seek/restore a future load.
-        disarmResumeSeek()
+        // docs/18 §5.2: clearMediaItems' transition must not reserve a resume this stop abandons.
+        resumeSeekGate.reset()
         player.stop()
         player.clearMediaItems()
     }
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     override fun retryAfterError(positionTicks: Long, playing: Boolean) {
+        onEndInput?.invoke(EndEvent.Reprepared(loadGeneration)) // docs/18 §7: decoders re-init, so the net waits for a frame
         resetSeeks("retry")
-        // docs/18 §5.2: this is its own recovery seek; an armed resume from before the error must
-        // not also fire once tracks change again.
-        disarmResumeSeek()
         // Direct, not routed through [seekBy]: this is itself the recovery path, not a dpad skip.
         val positionMs = PlaybackTicks.ticksToMs(positionTicks).coerceAtLeast(0L)
         player.seekTo(positionMs)

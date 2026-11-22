@@ -32,7 +32,7 @@ this document by section.
   written and the surface shows the still fallback (§7).
 - **Ring:** about two seconds of float mono, left and right, indexed by output
   frame since the output was created or flushed. The output's own position
-  (the guarded one, docs/18 §5.1) is the read cursor, so seeks, gapless joins
+  (as Media3 reports it; the clock guard only observes, docs/18 §5.1) is the read cursor, so seeks, gapless joins
   and speed changes need no timestamp mapping.
 - **Window:** the analysis window is centred on the output position,
   extrapolated from the last position report at the playback speed while the

@@ -195,6 +195,8 @@
     <string name="settings_quality_direct_play">Lecture directe</string>
     <string name="settings_quality_auto">Auto</string>
     <string name="settings_quality_mbps">%1$d Mbit/s</string>
+    <string name="settings_audio_language">Langue audio</string>
+    <string name="settings_desc_playback_audio_language">Langue audio de départ quand une série ou un film n\'a pas de choix mémorisé\u00A0; Indifférente garde la piste par défaut du serveur.</string>
     <string name="settings_skip_back">Saut arrière</string>
     <string name="settings_desc_playback_skip_back">Durée du saut en arrière du bouton Rembobiner pendant la lecture.</string>
     <string name="settings_skip_forward">Saut avant</string>
@@ -276,6 +278,15 @@
     <string name="settings_osd_detail_note">Complet ajoute une bande de codecs, l\'heure de fin, une barre de progression du tampon, ainsi que les commandes de vitesse de lecture et de statistiques.</string>
 
     <!-- Subtitles section. -->
+    <string name="settings_subtitle_mode">Mode des sous-titres</string>
+    <string name="settings_desc_subtitles_subtitle_mode">Par défaut garde le choix du serveur, Toujours utilise votre langue de sous-titres, Forcés seulement affiche les sous-titres forcés dans la langue audio, et Désactivé n\'en affiche aucun.</string>
+    <string name="settings_subtitle_mode_default">Par défaut</string>
+    <string name="settings_subtitle_mode_always">Toujours</string>
+    <string name="settings_subtitle_mode_only_forced">Forcés seulement</string>
+    <string name="settings_subtitle_mode_off">Désactivé</string>
+    <string name="settings_subtitle_language">Langue des sous-titres</string>
+    <string name="settings_desc_subtitles_subtitle_language">Langue de départ des sous-titres quand le mode des sous-titres est Toujours.</string>
+    <string name="settings_language_any">Indifférente</string>
     <string name="settings_subtitle_size">Taille</string>
     <string name="settings_desc_subtitles_subtitle_size">Taille du texte des sous-titres pendant la lecture.</string>
     <string name="settings_subtitle_position">Position verticale</string>

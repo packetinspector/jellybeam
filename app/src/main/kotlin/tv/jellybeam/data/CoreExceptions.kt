@@ -7,6 +7,8 @@ import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.SeerrAuthMethod
 import uniffi.jellybeam_core.SeerrRefusal
+import uniffi.jellybeam_core.SeriesSummary
+import uniffi.jellybeam_core.SeriesSummaryRead
 import uniffi.jellybeam_core.UnreachableReason
 
 /**
@@ -134,4 +136,11 @@ internal fun BrowseRead.rowsOrThrow(): List<Card> = when (this) {
     is BrowseRead.Items -> cards
     BrowseRead.NotReady -> throw BrowseNotReady()
     BrowseRead.Failed -> throw BrowseFailed()
+}
+
+/** A [SeriesSummaryRead.Resolved]'s summary; the other two outcomes throw as [rowsOrThrow]'s do (docs/07 §5). */
+internal fun SeriesSummaryRead.summaryOrThrow(): SeriesSummary = when (this) {
+    is SeriesSummaryRead.Resolved -> summary
+    SeriesSummaryRead.NotReady -> throw BrowseNotReady()
+    SeriesSummaryRead.Failed -> throw BrowseFailed()
 }

@@ -79,6 +79,9 @@ import uniffi.jellybeam_core.SeerrRequestStatus
 import uniffi.jellybeam_core.SeerrRequestOptions
 import uniffi.jellybeam_core.SeerrStatus
 import uniffi.jellybeam_core.SeerrTvDetail
+import uniffi.jellybeam_core.SeasonStats
+import uniffi.jellybeam_core.SeriesPlayTarget
+import uniffi.jellybeam_core.SeriesSummary
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.ServerDetails
 import uniffi.jellybeam_core.ServerInfoSnapshot
@@ -102,9 +105,12 @@ import uniffi.jellybeam_core.SyncPlaySnapshot
 import uniffi.jellybeam_core.SyncStatus
 import uniffi.jellybeam_core.TitleTmdbRef
 import uniffi.jellybeam_core.TrackDecisionFfi
+import uniffi.jellybeam_core.TrackIdentityFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
 import uniffi.jellybeam_core.TrackMemoryFfi
+import uniffi.jellybeam_core.TranscodeCauseFfi
+import uniffi.jellybeam_core.TranscodeStreamsFfi
 import uniffi.jellybeam_core.TrickplayMetaFfi
 import uniffi.jellybeam_core.TrickplayTileFfi
 import uniffi.jellybeam_core.ViewSnapshot
@@ -212,6 +218,10 @@ class FakeCoreGateway(
     /** When non-null, [nextEpisodeAfter] throws this instead of looking up [nextEpisodeByItemId]. */
     var nextEpisodeError: Throwable? = null,
     private val seriesEpisodesBySeriesId: Map<String, List<Card>> = emptyMap(),
+    /** [seriesSummary] Play picks keyed by series id (`replay` ignored); unmapped ids have none. */
+    private val seriesPlayBySeriesId: Map<String, SeriesPlayTarget> = emptyMap(),
+    /** [seriesSummary] season counts keyed by series id; unmapped ids have none. */
+    private val seasonStatsBySeriesId: Map<String, List<SeasonStats>> = emptyMap(),
     /** [episodeNeighbors] previous results keyed by item id; unmapped ids fall back to `null`. */
     private val previousEpisodeByItemId: Map<String, Card?> = emptyMap(),
     /** [serverDisplayName] result; defaults to `null` ("not signed in"/no parseable host). */
@@ -387,10 +397,20 @@ class FakeCoreGateway(
         val failed: FailedTrackFfi?,
         val subtitleStreamIndex: Int? = null,
         val audioStreamIndex: Int? = null,
+        val cause: TranscodeCauseFfi = TranscodeCauseFfi.FALLBACK,
+        val policy: Boolean = false,
     )
 
     private val _prepareTranscodeFallbackCalls = mutableListOf<PrepareTranscodeFallbackCall>()
     val prepareTranscodeFallbackCalls: List<PrepareTranscodeFallbackCall> get() = _prepareTranscodeFallbackCalls
+
+    private val _commitTranscodeCalls = mutableListOf<String>()
+
+    /** Session ids passed to [commitTranscode], in call order. */
+    val commitTranscodeCalls: List<String> get() = _commitTranscodeCalls
+
+    /** When non-null, [commitTranscode] records the call, then refuses with this. */
+    var commitTranscodeError: CoreException? = null
 
     /** When non-null, [prepareTranscodeFallback] awaits this after snapshotting, holding one
      * fallback negotiation open while a second session runs ahead (docs/18 §3). */
@@ -442,7 +462,7 @@ class FakeCoreGateway(
     private val _getMediaSegmentsCalls = mutableListOf<String>()
     val getMediaSegmentsCalls: List<String> get() = _getMediaSegmentsCalls
 
-    data class ResolveTracksCall(val seriesId: String?, val tracks: List<TrackInfo>)
+    data class ResolveTracksCall(val subjectId: String?, val tracks: List<TrackInfo>)
 
     private val _resolveTracksCalls = mutableListOf<ResolveTracksCall>()
     val resolveTracksCalls: List<ResolveTracksCall> get() = _resolveTracksCalls
@@ -451,7 +471,7 @@ class FakeCoreGateway(
      * one round trip open while a session change or manual pick runs ahead (docs/18 §3.1). */
     var resolveTracksGate: CompletableDeferred<Unit>? = null
 
-    data class RememberTrackMemoryCall(val seriesId: String, val kind: TrackKindFfi, val memory: TrackMemoryFfi)
+    data class RememberTrackMemoryCall(val subjectId: String, val kind: TrackKindFfi, val memory: TrackMemoryFfi)
 
     private val _rememberTrackMemoryCalls = mutableListOf<RememberTrackMemoryCall>()
     val rememberTrackMemoryCalls: List<RememberTrackMemoryCall> get() = _rememberTrackMemoryCalls
@@ -952,12 +972,15 @@ class FakeCoreGateway(
         reason: String,
         playSessionId: String,
         failed: FailedTrackFfi?,
-        subtitleStreamIndex: Int?,
-        audioStreamIndex: Int?,
+        streams: TranscodeStreamsFfi,
+        cause: TranscodeCauseFfi,
         request: PlaybackRequest,
     ): PlaybackPlan {
         playbackRequests.add(request)
-        _prepareTranscodeFallbackCalls.add(PrepareTranscodeFallbackCall(itemId, positionTicks, reason, playSessionId, failed, subtitleStreamIndex, audioStreamIndex))
+        val named = streams as? TranscodeStreamsFfi.Named
+        _prepareTranscodeFallbackCalls.add(
+            PrepareTranscodeFallbackCall(itemId, positionTicks, reason, playSessionId, failed, named?.subtitle, named?.audio, cause, policy = named == null),
+        )
         val result = prepareTranscodeFallbackResultsByCall[_prepareTranscodeFallbackCalls.size - 1]
             ?: prepareTranscodeFallbackResult
             ?: throw UnconfiguredFakeCall("FakeCoreGateway.prepareTranscodeFallback($itemId): no result configured")
@@ -965,6 +988,11 @@ class FakeCoreGateway(
         prepareTranscodeFallbackGate?.await()
         prepareTranscodeFallbackGatesByCall[_prepareTranscodeFallbackCalls.size - 1]?.await()
         return result.getOrElse { throw it }
+    }
+
+    override suspend fun commitTranscode(playSessionId: String, request: PlaybackRequest) {
+        _commitTranscodeCalls.add(playSessionId)
+        commitTranscodeError?.let { throw it }
     }
 
     override suspend fun preloadPlayback(itemId: String, accountEpoch: ULong?) {
@@ -981,6 +1009,17 @@ class FakeCoreGateway(
     override suspend fun seriesEpisodes(seriesId: String): List<Card> {
         _seriesEpisodesCalls.add(seriesId)
         return seriesEpisodesBySeriesId[seriesId].orEmpty()
+    }
+
+    /** Read through [children], so its call log and fixtures serve both reads; never filters virtual episodes. */
+    override suspend fun seasonEpisodes(seasonId: String): List<Card> = children(seasonId, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE)
+
+    private val _seriesSummaryCalls = mutableListOf<Pair<String, Boolean>>()
+    val seriesSummaryCalls: List<Pair<String, Boolean>> get() = _seriesSummaryCalls
+
+    override suspend fun seriesSummary(seriesId: String, replay: Boolean): SeriesSummary {
+        _seriesSummaryCalls.add(seriesId to replay)
+        return SeriesSummary(seriesPlayBySeriesId[seriesId], seasonStatsBySeriesId[seriesId].orEmpty())
     }
 
     /** One gate per [episodeNeighbors] call, popped in call order; its value is that call's
@@ -1279,18 +1318,23 @@ class FakeCoreGateway(
         _abandonPlaybackSessionIds.add(playSessionId)
     }
 
-    override suspend fun resolveTracks(seriesId: String?, tracks: List<TrackInfo>): TrackDecisionFfi {
-        _resolveTracksCalls.add(ResolveTracksCall(seriesId, tracks))
+    override suspend fun resolveTracks(subjectId: String?, tracks: List<TrackInfo>): TrackDecisionFfi {
+        _resolveTracksCalls.add(ResolveTracksCall(subjectId, tracks))
         resolveTracksGate?.await()
         return resolveTracksResult
     }
 
-    override suspend fun rememberTrackMemory(seriesId: String, kind: TrackKindFfi, memory: TrackMemoryFfi) {
-        _rememberTrackMemoryCalls.add(RememberTrackMemoryCall(seriesId, kind, memory))
+    override suspend fun rememberTrackMemory(subjectId: String, kind: TrackKindFfi, memory: TrackMemoryFfi) {
+        _rememberTrackMemoryCalls.add(RememberTrackMemoryCall(subjectId, kind, memory))
     }
 
-    /** Test-only reimplementation of `track_pref_key_of` (lang, else title). */
-    override fun trackPrefKeyOf(track: TrackInfo): String? = track.lang ?: track.title
+    /** Test-only reimplementation of `track_memory_of` (identity; `Unset` with no lang or title). */
+    override fun trackMemoryOf(track: TrackInfo): TrackMemoryFfi =
+        if (track.lang == null && track.title == null) {
+            TrackMemoryFfi.Unset
+        } else {
+            TrackMemoryFfi.Track(TrackIdentityFfi(track.lang, track.title, track.isForced, track.isHearingImpaired, track.codec))
+        }
 
     override suspend fun trickplayTileUrl(itemId: String, width: UInt, imageIndex: UInt, accountEpoch: ULong?): String? {
         accountBoundCalls.add("trickplayTileUrl" to accountEpoch)

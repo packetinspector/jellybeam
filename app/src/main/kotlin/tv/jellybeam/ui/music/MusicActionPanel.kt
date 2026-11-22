@@ -196,7 +196,6 @@ internal fun MusicActionPanel(
     }
 
     ActionPanelFrame(
-        offsetX = 0.dp,
         modifier = modifier.onFocusChanged { panelFocus.value = it.hasFocus },
         onPreviewKey = { event ->
             // docs/19 §1.5: Left closes, Right is consumed; the text field keeps both for its cursor.
@@ -391,7 +390,7 @@ internal fun NewPlaylistPanel(
         if (requestFocusWithRetry(focusGate) { field.requestFocus() }) keyboard?.show()
     }
     BackHandler(enabled = isTop) { if (!busy) onClose() }
-    ActionPanelFrame(offsetX = 0.dp, modifier = modifier, onPreviewKey = { false }) {
+    ActionPanelFrame(modifier = modifier, onPreviewKey = { false }) {
         NewPlaylistFields(
             nameKey = "",
             adds = if (failed) stringResource(R.string.music_couldnt_create) else null,

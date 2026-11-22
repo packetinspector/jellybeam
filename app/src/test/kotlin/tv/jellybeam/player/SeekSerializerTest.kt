@@ -81,7 +81,7 @@ class SeekSerializerTest {
 
     @Test
     fun `timeoutDue is false before the threshold and true at it`() {
-        val seeks = SeekSerializer(landingTimeoutMs = 2_500L)
+        val seeks = SeekSerializer().apply { landingTimeoutMs = 2_500L }
         seeks.request(targetMs = 10_000L, nowMs = 0L)
         assertFalse(seeks.timeoutDue(nowMs = 2_499L))
         assertTrue(seeks.timeoutDue(nowMs = 2_500L))
@@ -185,5 +185,34 @@ class SeekSerializerTest {
         seeks.landed(nowMs = 600L, positionMs = 96_000L)
 
         assertEquals(listOf(96_000L), reports)
+    }
+
+    /** Six presses 400 ms apart, the first seek landing at 3 s; the landing timeout is checked every 100 ms, as
+     * PlayerHolder's timer would. Returns each issued target with its time. */
+    private fun burst(seeks: SeekSerializer): List<Pair<Long, Long>> {
+        val issued = mutableListOf<Pair<Long, Long>>()
+        for (now in 0L..3_000L step 100L) {
+            if (now % 400L == 0L && now <= 2_000L) {
+                val target = 10_000L + now * 10L
+                if (seeks.request(target, now) is SeekSerializer.Decision.Issue) issued += now to target
+            }
+            if (now == 3_000L) {
+                seeks.landed(now, positionMs = 10_000L)?.let { issued += now to it }
+            } else {
+                seeks.stalled(now, positionMs = 0L)?.let { issued += now to it }
+            }
+        }
+        return issued
+    }
+
+    @Test
+    fun `a transcode timeout coalesces a burst into the first seek and the last target`() {
+        val seeks = SeekSerializer().apply { landingTimeoutMs = SeekSerializer.TRANSCODE_LANDING_TIMEOUT_MS }
+        assertEquals(listOf(0L to 10_000L, 3_000L to 30_000L), burst(seeks))
+    }
+
+    @Test
+    fun `the default timeout still fires the held target before a slow landing`() {
+        assertEquals(listOf(0L to 10_000L, 2_500L to 30_000L), burst(SeekSerializer()))
     }
 }

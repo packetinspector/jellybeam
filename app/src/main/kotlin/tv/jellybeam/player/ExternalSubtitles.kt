@@ -8,8 +8,6 @@ import androidx.media3.extractor.text.SubtitleParser
 import uniffi.jellybeam_core.ExternalSubtitleFfi
 import uniffi.jellybeam_core.SubtitleActionFfi
 import uniffi.jellybeam_core.TrackDecisionFfi
-import uniffi.jellybeam_core.TrackInfo
-import uniffi.jellybeam_core.TrackKindFfi
 import tv.jellybeam.player.ass.arrangePlainSsa
 
 /** A sidecar row's fetch state in the picker; absent once it has loaded. */
@@ -36,43 +34,8 @@ object ExternalSubtitles {
 
     fun idFor(index: Int): Long = ID_BASE + index
 
-    /** What a finished sidecar fetch does with its result (docs/18 §3.2). */
-    enum class FetchOutcome { LOADED, RETRY_UNDER_NEW_SESSION, AWAIT_NEW_SESSION, FAILED }
-
-    /**
-     * docs/18 §3.2: a refusal while a transcode fallback swaps sessions is the old session's, not
-     * the file's, so a still-chosen sidecar asks the new session, now or once it exists.
-     */
-    fun fetchOutcome(loaded: Boolean, stillChosen: Boolean, sessionReplaced: Boolean, swapPending: Boolean): FetchOutcome = when {
-        loaded -> FetchOutcome.LOADED
-        !stillChosen -> FetchOutcome.FAILED
-        sessionReplaced -> FetchOutcome.RETRY_UNDER_NEW_SESSION
-        swapPending -> FetchOutcome.AWAIT_NEW_SESSION
-        else -> FetchOutcome.FAILED
-    }
-
     /** The server index behind a synthetic id, or null for an embedded track's id. */
     fun indexOf(id: Long?): Int? = id?.takeIf { it >= ID_BASE }?.let { (it - ID_BASE).toInt() }
-
-    /**
-     * Picker and policy rows for [subtitles], [activeIndex] marked selected. The language is
-     * normalized as Media3 normalizes an embedded track's, so a series' remembered choice matches
-     * across episodes whichever way their subtitles ship.
-     */
-    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-    fun trackInfos(subtitles: List<ExternalSubtitleFfi>, activeIndex: Int?): List<TrackInfo> =
-        subtitles.filter { mimeFor(it.codec) != null }.map { sub ->
-            TrackInfo(
-                id = idFor(sub.index),
-                kind = TrackKindFfi.SUBTITLE,
-                title = sub.displayTitle,
-                lang = sub.language?.let(androidx.media3.common.util.Util::normalizeLanguageCode),
-                codec = sub.codec,
-                isDefault = sub.isDefault,
-                isSelected = sub.index == activeIndex,
-                isForced = sub.isForced,
-            )
-        }
 
     /**
      * docs/18 §3.2: the player's half of [decision] plus the sidecar to show; left to the file's

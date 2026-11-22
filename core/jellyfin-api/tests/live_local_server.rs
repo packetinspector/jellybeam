@@ -426,3 +426,121 @@ async fn quick_connect_initiate_returns_a_code_against_live_dev_server() {
     );
     println!("live Quick Connect code: {code}");
 }
+
+/// The subtitle index a transcode URL burns in: `SubtitleMethod=Encode` beside an index ≥ 0.
+fn burned_index(url: &str) -> Option<i32> {
+    let param = |name: &str| {
+        url.split_once('?')?.1.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            key.eq_ignore_ascii_case(name).then_some(value)
+        })
+    };
+    if !param("SubtitleMethod")?.eq_ignore_ascii_case("Encode") {
+        return None;
+    }
+    param("SubtitleStreamIndex")?
+        .parse()
+        .ok()
+        .filter(|i: &i32| *i >= 0)
+}
+
+/// A profile that transcodes video to HLS and can only burn ASS/SSA in.
+fn burn_in_ass_profile() -> DeviceProfile {
+    use jellyfin_api::models::{
+        MediaStreamProtocol, SubtitleDeliveryMethod, SubtitleProfile, TranscodingProfile,
+    };
+    DeviceProfile {
+        transcoding_profiles: vec![TranscodingProfile {
+            container: Some("ts".to_string()),
+            type_: Some(DlnaProfileType::Video),
+            protocol: Some(MediaStreamProtocol::Hls),
+            video_codec: Some("h264".to_string()),
+            audio_codec: Some("aac".to_string()),
+            ..Default::default()
+        }],
+        subtitle_profiles: ["ass", "ssa"]
+            .map(|format| SubtitleProfile {
+                format: Some(format.to_string()),
+                method: Some(SubtitleDeliveryMethod::Encode),
+                ..Default::default()
+            })
+            .to_vec(),
+        ..Default::default()
+    }
+}
+
+/// docs/18 §3.1 (C5): beside `MediaSourceId`, `SubtitleStreamIndex=-1` burns nothing in, even on a
+/// source whose default subtitle is ASS, and a named ASS index burns that stream. Skips when no
+/// item in the first libraries carries a default ASS stream.
+#[tokio::test]
+#[ignore]
+async fn a_named_subtitle_index_beside_the_source_decides_the_burn_in() {
+    let client = authenticated_client().await;
+    let profile = burn_in_ass_profile();
+    let negotiate = |item_id: String, source_id: Option<String>, subtitle: Option<i32>| {
+        let client = &client;
+        let profile = &profile;
+        async move {
+            let options = jellyfin_api::PlaybackInfoOptions {
+                force_transcode: true,
+                media_source_id: source_id,
+                subtitle_stream_index: subtitle,
+                ..Default::default()
+            };
+            client
+                .get_playback_info(&item_id, profile, Some(0), options)
+                .await
+                .expect("get_playback_info")
+        }
+    };
+    let views = client.get_user_views().await.expect("get_user_views");
+    for view in &views {
+        let Some(parent_id) = view.id.map(|id| id.to_string()) else {
+            continue;
+        };
+        let items = client
+            .get_items(&ItemQuery {
+                parent_id: Some(parent_id),
+                include_item_types: vec!["Movie".to_string(), "Episode".to_string()],
+                recursive: true,
+                limit: 50,
+                ..ItemQuery::new()
+            })
+            .await
+            .expect("get_items");
+        for item in items.items {
+            let Some(item_id) = item.id.map(|id| id.to_string()) else {
+                continue;
+            };
+            let info = negotiate(item_id.clone(), None, None).await;
+            let Some(source) = info.media_sources.first() else {
+                continue;
+            };
+            let default_ass = source.media_streams.iter().find(|s| {
+                s.is_default == Some(true)
+                    && s.codec
+                        .as_deref()
+                        .is_some_and(|c| c.eq_ignore_ascii_case("ass"))
+            });
+            let Some(ass_index) = default_ass.and_then(|s| s.index) else {
+                continue;
+            };
+            let source_id = source.id.clone();
+            for (subtitle, expected) in [(-1, None), (ass_index, Some(ass_index))] {
+                let info = negotiate(item_id.clone(), source_id.clone(), Some(subtitle)).await;
+                let url = info.media_sources[0]
+                    .transcoding_url
+                    .clone()
+                    .expect("a forced transcode has a TranscodingUrl");
+                assert_eq!(
+                    burned_index(&url),
+                    expected,
+                    "SubtitleStreamIndex={subtitle}: {}",
+                    redact_api_key(&url)
+                );
+            }
+            return;
+        }
+    }
+    eprintln!("no item with a default ASS subtitle found; skipping the burn-in assertion");
+}

@@ -304,9 +304,16 @@ restore code remains outside it.
 
 Season drift: the resume season is resolved **once**, when the per-episode
 signal arrives (or fails), never provisionally from season counts and then
-revised; until then the chip row shows no selection. The episode shelf's
-`LazyListState` is keyed by season id. Shown selection is final unless the
-viewer changes it.
+revised; it is the season of the core's Play pick (docs/11 item 11), and the
+pill comes from the same series-summary write, so they never disagree; until
+then the chip row shows no selection. A selection (that first pick or a later
+switch) lands with its season's episodes in one write: the shown chip and shelf
+stay until the new season's read lands, never a skeleton in between. While
+that read is in flight the shelf still shows the old season, so it cannot be
+entered: Down from the chip stays on the chip, and no Select can open an old
+season's episode (`episodeShelfEnterable`; the read is a local mirror read,
+usually milliseconds). The episode shelf's `LazyListState` is keyed by season
+id. Shown selection is final unless the viewer changes it.
 
 Ring overpaint: `focusRing` raises the focused element's `zIndex` so it
 paints after its siblings. Geometry is unchanged; every stacked use of the

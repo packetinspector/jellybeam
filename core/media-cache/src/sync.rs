@@ -211,6 +211,7 @@ pub(crate) fn spawn(
     state: Arc<MirrorState>,
     bus: broadcast::Receiver<BusEvent>,
     needs_initial_sync: bool,
+    presence: tokio::sync::watch::Receiver<crate::AppPresence>,
 ) {
     if needs_initial_sync {
         // Set before `bus_listener` is spawned, so a WS delta can't reach it and be applied
@@ -279,7 +280,7 @@ pub(crate) fn spawn(
         state.user_state_requested.clone(),
     ));
     tokio::spawn(bus_listener(Arc::downgrade(&state), bus));
-    tokio::spawn(reconcile_timer(Arc::downgrade(&state)));
+    tokio::spawn(reconcile_timer(Arc::downgrade(&state), presence));
 }
 
 /// docs/07 §1: after a Next Up fetch, further requests wait this long and collapse into one,
@@ -2293,11 +2294,14 @@ fn reconcile_interval() -> tokio::time::Interval {
 /// `spawn`'s `needs_initial_sync = false` branch already calls `reconcile_all` once before
 /// this timer's first tick fires; this timer is purely the backstop for whatever the
 /// startup call, WS `LibraryChanged`, and the reconnect `NeedsReconcile` signal all miss.
-async fn reconcile_timer(state: Weak<MirrorState>) {
+/// Dormant while `presence` reads `Background` (docs/07 Watch state).
+async fn reconcile_timer(
+    state: Weak<MirrorState>,
+    mut presence: tokio::sync::watch::Receiver<crate::AppPresence>,
+) {
     let mut interval = reconcile_interval();
     interval.tick().await; // first tick is immediate; startup already reconciles/syncs
-    loop {
-        interval.tick().await;
+    while crate::foreground_tick(&mut interval, &mut presence).await {
         let Some(state) = state.upgrade() else { break };
         // The backstop for a long-lived session that never restarts or drops its WS connection.
         state.request_user_state_refresh(UserStateReason::Timer);
@@ -4524,7 +4528,7 @@ mod tests {
         let (_bus_tx, bus_rx) = broadcast::channel(16);
         // needs_initial_sync = false: the branch Mirror::open takes for an already-populated
         // database.
-        spawn(mirror.state.clone(), bus_rx, false);
+        spawn(mirror.state.clone(), bus_rx, false, foreground());
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -4561,7 +4565,7 @@ mod tests {
         assert_eq!(mirror.item_count().await, 0);
 
         let (_bus_tx, bus_rx) = broadcast::channel(16);
-        spawn(mirror.state.clone(), bus_rx, false);
+        spawn(mirror.state.clone(), bus_rx, false, foreground());
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -4596,7 +4600,7 @@ mod tests {
 
         let mirror = TestMirror::new(client);
         let (_bus_tx, bus_rx) = broadcast::channel(16);
-        spawn(mirror.state.clone(), bus_rx, false);
+        spawn(mirror.state.clone(), bus_rx, false, foreground());
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -6664,7 +6668,7 @@ mod tests {
         );
         let (_bus_tx, bus_rx) = broadcast::channel(16);
         let started = Instant::now();
-        spawn(mirror.state.clone(), bus_rx, false);
+        spawn(mirror.state.clone(), bus_rx, false, foreground());
 
         wait_for("the startup pass to finish", || {
             !mirror.state.startup_pass_active.load(Ordering::Acquire)
@@ -6723,7 +6727,7 @@ mod tests {
 
     async fn run_warm_startup(mirror: &TestMirror) {
         let (_bus_tx, bus_rx) = broadcast::channel(16);
-        spawn(mirror.state.clone(), bus_rx, false);
+        spawn(mirror.state.clone(), bus_rx, false, foreground());
         wait_for("the startup pass to finish", || {
             !mirror.state.startup_pass_active.load(Ordering::Acquire)
         })
@@ -6785,7 +6789,7 @@ mod tests {
             std::time::Duration::from_millis(200),
         );
         let (_bus_tx, bus_rx) = broadcast::channel(16);
-        spawn(mirror.state.clone(), bus_rx, false);
+        spawn(mirror.state.clone(), bus_rx, false, foreground());
         wait_for("the resume fetch to start", || {
             server.request_count("/UserItems/Resume") == 1
         })
@@ -6810,5 +6814,46 @@ mod tests {
             reconcile_interval().missed_tick_behavior(),
             tokio::time::MissedTickBehavior::Delay
         );
+    }
+
+    /// A presence that stays `Foreground`, for tests not about backgrounding.
+    fn foreground() -> tokio::sync::watch::Receiver<crate::AppPresence> {
+        tokio::sync::watch::channel(crate::AppPresence::Foreground).1
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconcile_timer_sleeps_while_backgrounded_and_resumes_a_full_interval_after_foreground(
+    ) {
+        use std::time::Duration;
+        let mirror = TestMirror::new(JellyfinClient::from_token(
+            "http://127.0.0.1:9",
+            identity(),
+            "tok",
+        ));
+        let (presence, rx) = tokio::sync::watch::channel(crate::AppPresence::Background);
+        let timer = tokio::spawn(reconcile_timer(mirror.weak(), rx));
+
+        tokio::time::sleep(RECONCILE_INTERVAL * 3 + Duration::from_secs(1)).await;
+        assert_eq!(
+            mirror.state.take_user_state_reasons(),
+            None,
+            "three intervals in the background request nothing"
+        );
+
+        presence.send_replace(crate::AppPresence::Foreground);
+        tokio::time::sleep(RECONCILE_INTERVAL - Duration::from_secs(1)).await;
+        assert_eq!(
+            mirror.state.take_user_state_reasons(),
+            None,
+            "returning to the foreground owes no catch-up pass"
+        );
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            mirror.state.take_user_state_reasons(),
+            Some(UserStateReason::Timer),
+            "one full interval after the return, the timer runs again"
+        );
+        timer.abort();
     }
 }

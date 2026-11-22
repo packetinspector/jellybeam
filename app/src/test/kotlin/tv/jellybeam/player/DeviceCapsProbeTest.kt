@@ -201,6 +201,37 @@ class DeviceCapsProbeTest {
     }
 
     @Test
+    fun `software decoder whose independent uppers fail jointly reports the largest size it can do`() {
+        // tv28 c2.android.avc: uppers 4080x4080, no 3840x2160, 1920x1080 yes.
+        val supported = { w: Int, h: Int, _: Double -> w <= 1920 && h <= 1080 }
+
+        assertEquals(1920 to 1080, largestSupportedResolution(true, 4080 to 4080, supported))
+    }
+
+    @Test
+    fun `hardware decoder keeps its uppers even when every size check says no`() {
+        assertEquals(4096 to 2304, largestSupportedResolution(false, 4096 to 2304) { _, _, _ -> false })
+    }
+
+    @Test
+    fun `software decoder that supports its own uppers reports exactly the uppers`() {
+        assertEquals(3840 to 2160, largestSupportedResolution(true, 3840 to 2160) { _, _, _ -> true })
+    }
+
+    @Test
+    fun `size check runs at 24 fps not 30`() {
+        // Does 3840x2160 at 24 fps but not at 30.
+        val supported = { w: Int, h: Int, fps: Double -> if (fps <= 24.0) w <= 3840 && h <= 2160 else w <= 1920 && h <= 1080 }
+
+        assertEquals(3840 to 2160, largestSupportedResolution(true, 4080 to 4080, supported))
+    }
+
+    @Test
+    fun `software decoder with nothing supported falls back to its uppers`() {
+        assertEquals(4080 to 4080, largestSupportedResolution(true, 4080 to 4080) { _, _, _ -> false })
+    }
+
+    @Test
     fun `probe fails open to an empty DeviceCaps if enumeration throws`() {
         // No real MediaCodecList here; android.media stubs return defaults or throw, but
         // probe() must never propagate and always returns a usable (if empty) DeviceCaps.

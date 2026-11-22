@@ -115,6 +115,33 @@ With the patch active, cargo rewrites the substation entries of
 generated with the patch moved aside. Gradle reruns cargo when the
 checkout's sources change.
 
+## Patched Media3
+
+`androidx.media3:media3-exoplayer` ships as `1.11.1-jb1`: Google's 1.11.1
+with upstream commit 4c95cd9 (androidx/media#3407, released in 1.12) backported.
+Without it a passthrough AudioTrack's position can read 2^32 frames ahead
+after a seek, which stalls playback or steps the clock (docs/18 §5.1). 1.12
+itself needs minSdk 24 (its release notes) and compileSdk 37 (its AARs'
+`minCompileSdk`).
+
+- `tools/media3-patch/build.sh` recompiles only the two classes the patch
+  touches (`AudioTrackPositionTracker`, `DefaultAudioSink`) from the tag-1.11.1
+  sources and swaps them into the released AAR; every other entry is
+  byte-identical. It first proves the toolchain: the unpatched sources must
+  compile to the released class set with the same members and instructions,
+  or it stops. Inputs are pinned by sha256
+  in `inputs.sha256`; the output's sha256 is `output.sha256`.
+- `build.sh --check` rebuilds in a temp dir and compares with the committed
+  AAR. Run it after any change under `tools/media3-patch/`.
+- The AAR and its POM live in `third_party/maven`, a repository Gradle reads
+  for that one version only (`settings.gradle.kts`). The root
+  `build.gradle.kts` substitutes every request for `media3-exoplayer`
+  (ours, the `media3-common` constraint, the ffmpeg AAR's 1.9.0) with it; check
+  with `./gradlew :app:dependencyInsight --configuration releaseRuntimeClasspath
+  --dependency androidx.media3:media3-exoplayer`.
+- Moving to another Media3 version: drop the substitution, the repository
+  and the catalog entry together, once that version carries the fix.
+
 ## Running a debug build on an emulator or device
 
 `install` is release-only. A debug APK goes on with plain `adb` from the
@@ -190,6 +217,9 @@ Repeatable session tooling under `tools/`; each takes `--help`. Device serials c
   the installed version, dexopt status and whether the app is in front. Read-only, no input sent.
 - `tools/emu-signin.sh [showcase|dev12]` — clears the app's data on the emulator and signs in with a
   password (showcase defaults, or `JB_SERVER`/`JB_USER`/`JB_PASS`), succeeding when Home shows.
+- `tools/ffmpeg-launches.sh [--seconds N] [--runs N] [--seek-presses N] NAME...` — plays each
+  named item on the emulator, presses Back, and counts the server's ffmpeg launches for that file
+  from `docker logs` (docs/18 §7); set the app's Quality mode first.
 - `tools/sp-loop.sh [--server dev12|jswarrm] [--to N] [--skip L]` — the Watch Together device loop
   (docs/28 §9): two emulators (host and guest, D-pad only) plus a REST/socket bot as the third
   member, from snapshot load through create, join, start, pause, seeks, a 22-press seek burst, a

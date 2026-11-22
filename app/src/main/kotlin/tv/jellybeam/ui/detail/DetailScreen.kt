@@ -52,6 +52,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -61,6 +62,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -162,6 +164,8 @@ import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ImageKind
 import uniffi.jellybeam_core.ItemDetail
 import uniffi.jellybeam_core.PersonInfo
+import uniffi.jellybeam_core.SeasonStats
+import uniffi.jellybeam_core.SeriesPlayTarget
 
 // Episode/Series/Movie detail screens: each item type gets its own purpose-built layout (the
 // three per-type composables below) rather than one generic header+action-row+grid shape. What's
@@ -290,9 +294,18 @@ fun DetailScreen(
     ),
 ) {
     val focusGate = LocalFocusGate.current
-    val state by viewModel.state.collectAsState()
+    // Read only through [slice]s here and whole in [DetailPage], so a data arrival recomposes the
+    // per-type page that draws it rather than this scope and the panel.
+    val ui = viewModel.state.collectAsState()
+    val itemRemoved by ui.slice { it.itemRemoved }
+    val menu by ui.slice { it.menu }
+    val pendingPlayback by ui.slice { it.pendingPlayback }
+    val pendingSeriesNavigation by ui.slice { it.pendingSeriesNavigation }
+    val pendingTrailerUrl by ui.slice { it.pendingTrailerUrl }
+    val pendingWatchTogether by ui.slice { it.pendingWatchTogether }
+    val toast by ui.slice { it.toast }
     // docs/19 §3.4: one [FocusMemory] shared by whichever per-type screen is active, hoisted here
-    // so the panel (rendered once, above the `when`) and the door capture/restore focus by the
+    // so the panel (rendered once, beside [DetailPage]) and the door capture/restore focus by the
     // same key regardless of item type.
     val memory = rememberFocusMemory(card.id)
 
@@ -317,21 +330,21 @@ fun DetailScreen(
 
     // docs/07 §5: a title the mirror dropped has nothing left to show; leave once, when this page
     // is the one on screen (a retained page below leaves when it becomes top).
-    LaunchedEffect(state.itemRemoved, isTop) {
-        if (state.itemRemoved && isTop) onRemoved()
+    LaunchedEffect(itemRemoved, isTop) {
+        if (itemRemoved && isTop) onRemoved()
     }
 
     // §1.4: Play*/Go to series rows close the panel and hand back a one-shot target for this
     // screen to launch, since the ViewModel holds no Context.
     // docs/19 §1.5/§3.4: the panel slides rather than vanishing, so [composedMenu] lags one step
-    // behind [state.menu] going `null`, staying composed until [panelOffsetX]'s exit animation
+    // behind [menu] going `null`, staying composed until [panelOffsetX]'s exit animation
     // finishes and its `finishedListener` drops it.
     var composedMenu by remember(card.id) { mutableStateOf<MenuUiState?>(null) }
-    LaunchedEffect(state.menu) {
-        if (state.menu != null) composedMenu = state.menu
+    LaunchedEffect(menu) {
+        if (menu != null) composedMenu = menu
     }
     // docs/15 §4: the panel's close always returns focus to the door by key. Keyed on
-    // [composedMenu] (not [state.menu]) so this fires once the panel has actually left
+    // [composedMenu] (not [menu]) so this fires once the panel has actually left
     // composition, not the instant the ViewModel clears state while the exit animation slides.
     var menuWasOpen by remember(card.id) { mutableStateOf(false) }
     // A row that leaves this page (Go to series, any Playback row) drops the panel at once instead
@@ -341,16 +354,16 @@ fun DetailScreen(
         menuWasOpen = false
         composedMenu = null
     }
-    LaunchedEffect(state.pendingPlayback) {
-        state.pendingPlayback?.let { pending ->
+    LaunchedEffect(pendingPlayback) {
+        pendingPlayback?.let { pending ->
             dropPanelForNavigation()
             PerfLog.markStartup("playback.click")
             PlaybackActivity.launch(pending.targetId, startFromBeginning = pending.startFromBeginning)
             viewModel.consumePendingPlayback()
         }
     }
-    LaunchedEffect(state.pendingSeriesNavigation) {
-        state.pendingSeriesNavigation?.let { series ->
+    LaunchedEffect(pendingSeriesNavigation) {
+        pendingSeriesNavigation?.let { series ->
             dropPanelForNavigation()
             onOpenDetail(series)
             viewModel.consumePendingSeriesNavigation()
@@ -358,22 +371,22 @@ fun DetailScreen(
     }
     // docs/19 §1.3: a remote trailer opens in the system's player; the panel drops at once, as for any row that leaves the page.
     val context = LocalContext.current
-    LaunchedEffect(state.pendingTrailerUrl) {
-        state.pendingTrailerUrl?.let { url ->
+    LaunchedEffect(pendingTrailerUrl) {
+        pendingTrailerUrl?.let { url ->
             dropPanelForNavigation()
             if (!openTrailer(context, url)) Toast.makeText(context, R.string.trailer_unavailable, Toast.LENGTH_SHORT).show()
             viewModel.consumePendingTrailer()
         }
     }
-    LaunchedEffect(state.pendingWatchTogether) {
-        state.pendingWatchTogether?.let { pending ->
+    LaunchedEffect(pendingWatchTogether) {
+        pendingWatchTogether?.let { pending ->
             dropPanelForNavigation()
             onWatchTogether(pending.targetId, pending.resumeTicks)
             viewModel.consumePendingWatchTogether()
         }
     }
 
-    val menuOpen = state.menu != null
+    val menuOpen = menu != null
     val panelOffsetX by animateDpAsState(
         targetValue = if (menuOpen) 0.dp else PANEL_WIDTH,
         animationSpec = tween(PANEL_SLIDE_MS, easing = FastOutSlowInEasing),
@@ -415,33 +428,30 @@ fun DetailScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // [state.card] is the live mirror card, passed to every per-type screen so header UI
-        // tracks playback. The nav `card` is used only for [viewModel]'s key/factory and the
-        // `when` dispatch below, since `itemType` never changes.
         // The action panel is a sibling of the per-type body, not a descendant, so a body's root
         // `onFocusChanged` reports `hasFocus = false` while the panel holds focus even though
         // focus is legitimately still on this page. [panelOpen] spans the panel's whole composed
         // lifetime (not just [menuOpen]'s target state) so each body's refresh guard can gate on
         // it.
-        val panelOpen = state.menu != null || composedMenu != null
-        when (card.itemType) {
-            EPISODE_ITEM_TYPE -> EpisodeDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, memory, contentEndInset, contentWidth, panelOpen)
-            SERIES_ITEM_TYPE -> SeriesDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, memory, contentEndInset, contentWidth, panelOpen)
-            CollectionFormatting.BOXSET_ITEM_TYPE -> CollectionDetailScreen(state.card, state, viewModel, onOpenDetail, isTop, memory, contentEndInset, contentWidth, panelOpen)
-            else -> MovieDetailScreen(state.card, state, viewModel, onOpenDetail, onOpenPerson, isTop, memory, contentEndInset, contentWidth, panelOpen)
-        }
+        val panelOpen = menu != null || composedMenu != null
+        DetailPage(ui, card.itemType, viewModel, onOpenDetail, onOpenPerson, isTop, memory, contentEndInset, contentWidth, panelOpen)
 
         // The live model while open, the last-known one while the panel is still sliding out.
-        (state.menu ?: composedMenu)?.let { menu ->
+        (menu ?: composedMenu)?.let { shown ->
+            val itemName by ui.slice { it.card.name }
+            val collections by ui.slice { it.collections }
+            val memberOfCollections by ui.slice { it.memberOfCollections }
+            val extras by ui.slice { it.extras }
+            val confirm by ui.slice { it.confirm }
             DetailActionPanel(
-                menu = menu,
-                itemName = state.card.name,
-                collections = state.collections,
-                memberOfCollections = state.memberOfCollections,
-                extras = state.extras,
+                menu = shown,
+                itemName = itemName,
+                collections = collections,
+                memberOfCollections = memberOfCollections,
+                extras = extras,
                 strings = AppGraph.strings,
-                confirm = state.confirm,
-                offsetX = panelOffsetX,
+                confirm = confirm,
+                offsetX = { panelOffsetX },
                 isTop = isTop,
                 onRunAction = viewModel::runAction,
                 onEnterCollections = viewModel::enterCollections,
@@ -456,11 +466,120 @@ fun DetailScreen(
             )
         }
 
-        state.toast?.let { toast ->
+        toast?.let { text ->
             Box(modifier = Modifier.align(Alignment.BottomStart).padding(start = PAGE_MARGIN, bottom = 24.dp)) {
-                DetailMenuToast(text = toast)
+                DetailMenuToast(text = text)
             }
         }
+    }
+}
+
+/** One [DetailUiState] field as its own state: a reader recomposes when that field changes, not on every write. */
+@Composable
+private fun <T> State<DetailUiState>.slice(select: (DetailUiState) -> T): State<T> =
+    remember(this) { derivedStateOf(structuralEqualityPolicy()) { select(value) } }
+
+/**
+ * The only scope that reads every [DetailUiState] write: it hands each per-type page just the
+ * fields it draws, so a write none of them uses (menu, toast, a field of another type) skips the
+ * page. [card] is the live mirror card, so header UI tracks playback; [itemType] is the nav
+ * card's, which never changes.
+ */
+@Composable
+private fun DetailPage(
+    ui: State<DetailUiState>,
+    itemType: String,
+    viewModel: DetailViewModel,
+    onOpenDetail: (Card) -> Unit,
+    onOpenPerson: (PersonInfo) -> Unit,
+    isTop: Boolean,
+    memory: FocusMemory,
+    contentEndInset: Dp,
+    contentWidth: Dp,
+    panelOpen: Boolean,
+) {
+    val state = ui.value
+    when (itemType) {
+        EPISODE_ITEM_TYPE -> EpisodeDetailScreen(
+            card = state.card,
+            detail = state.itemDetail,
+            itemDetailLoaded = state.itemDetailLoaded,
+            nextEpisode = state.nextEpisode,
+            nextEpisodeLoaded = state.nextEpisodeLoaded,
+            viewModel = viewModel,
+            onOpenDetail = onOpenDetail,
+            onOpenPerson = onOpenPerson,
+            isTop = isTop,
+            memory = memory,
+            contentEndInset = contentEndInset,
+            contentWidth = contentWidth,
+            panelOpen = panelOpen,
+        )
+        SERIES_ITEM_TYPE -> {
+            // docs/09 `show_virtual_episodes`: the one display list, rebuilt only when its inputs change.
+            val episodes = remember(state.seasonEpisodes, state.showVirtualEpisodes) {
+                DetailFormatting.visibleEpisodes(state.seasonEpisodes, state.showVirtualEpisodes)
+            }
+            SeriesDetailScreen(
+                card = state.card,
+                detail = state.itemDetail,
+                itemDetailLoaded = state.itemDetailLoaded,
+                libraryName = state.libraryName,
+                libraryNameLoaded = state.libraryNameLoaded,
+                seasons = state.seasons,
+                seasonsSettled = state.seasonsSettled,
+                selectedSeasonId = state.selectedSeasonId,
+                shelfEnterable = episodeShelfEnterable(state.requestedSeasonId, state.selectedSeasonId),
+                episodes = episodes,
+                seasonStats = state.seasonStats,
+                showVirtualEpisodes = state.showVirtualEpisodes == true,
+                seriesPlay = state.seriesPlay,
+                summarySettled = state.summarySettled,
+                listError = state.listError,
+                similar = state.similar,
+                similarLoaded = state.similarLoaded,
+                viewModel = viewModel,
+                onOpenDetail = onOpenDetail,
+                onOpenPerson = onOpenPerson,
+                isTop = isTop,
+                memory = memory,
+                contentEndInset = contentEndInset,
+                contentWidth = contentWidth,
+                panelOpen = panelOpen,
+            )
+        }
+        CollectionFormatting.BOXSET_ITEM_TYPE -> CollectionDetailScreen(
+            card = state.card,
+            members = state.members,
+            membersSettled = state.membersSettled,
+            memberSeasonCounts = state.memberSeasonCounts,
+            play = state.collectionPlay,
+            viewModel = viewModel,
+            onOpenDetail = onOpenDetail,
+            isTop = isTop,
+            memory = memory,
+            contentEndInset = contentEndInset,
+            contentWidth = contentWidth,
+            panelOpen = panelOpen,
+        )
+        else -> MovieDetailScreen(
+            card = state.card,
+            detail = state.itemDetail,
+            itemDetailLoaded = state.itemDetailLoaded,
+            libraryName = state.libraryName,
+            libraryNameLoaded = state.libraryNameLoaded,
+            similar = state.similar,
+            similarLoaded = state.similarLoaded,
+            showTrailer = state.pillTrailer != null,
+            viewModel = viewModel,
+            onOpenDetail = onOpenDetail,
+            onOpenPerson = onOpenPerson,
+            isTop = isTop,
+            memory = memory,
+            contentEndInset = contentEndInset,
+            contentWidth = contentWidth,
+            panelOpen = panelOpen,
+        )
     }
 }
 
@@ -470,7 +589,10 @@ fun DetailScreen(
 @Composable
 private fun EpisodeDetailScreen(
     card: Card,
-    state: DetailUiState,
+    detail: ItemDetail?,
+    itemDetailLoaded: Boolean,
+    nextEpisode: Card?,
+    nextEpisodeLoaded: Boolean,
     viewModel: DetailViewModel,
     onOpenDetail: (Card) -> Unit,
     onOpenPerson: (PersonInfo) -> Unit,
@@ -483,11 +605,10 @@ private fun EpisodeDetailScreen(
     val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
-    val detail = state.itemDetail
     val strings = rememberUiStrings()
-    // Computed inline, not remembered: a refreshed Card with the same id must recompute rather
-    // than show the first composition's stale value (docs/07-home-browse-behavior.md §1).
-    val primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList())
+    // Keyed on the whole live [card], not its id: a refreshed Card must recompute rather than show
+    // a stale value (docs/07-home-browse-behavior.md §1).
+    val primaryAction = remember(strings, card) { DetailFormatting.resolvePrimaryAction(strings, card, null) }
     val hasResume = primaryAction is DetailFormatting.PrimaryAction.Playable && primaryAction.hasProgress
     val eyebrow = DetailFormatting.episodeEyebrow(strings, card.seriesName, card.parentIndexNumber, card.indexNumber)
     val metaItems = DetailFormatting.episodeHeaderItems(strings, card.productionYear, card.runtimeTicks, detail?.officialRating, detail?.genres.orEmpty())
@@ -519,9 +640,9 @@ private fun EpisodeDetailScreen(
     // has content, decided from region states (not raw data) so Up Next never shifts when the
     // spec strip arrives.
     val specFields = remember(strings, detail) { DetailFormatting.specCapsuleFields(strings, detail) }
-    val specShow = regionShow(state.itemDetailLoaded, specFields.isNotEmpty())
-    val upNextShow = regionShow(state.nextEpisodeLoaded, state.nextEpisode != null)
-    val castShow = regionShow(state.itemDetailLoaded, castMembers.isNotEmpty())
+    val specShow = regionShow(itemDetailLoaded, specFields.isNotEmpty())
+    val upNextShow = regionShow(nextEpisodeLoaded, nextEpisode != null)
+    val castShow = regionShow(itemDetailLoaded, castMembers.isNotEmpty())
 
     // Both of this screen's possible seed targets resolve straight from [card], no async fetch
     // gate, so [seedTarget] is stable from the first composition. The door renders unconditionally
@@ -548,7 +669,7 @@ private fun EpisodeDetailScreen(
     )
 
     // REFRESH-STEALS-FOCUS guard (docs/15 §3): a live mirror refresh can replace
-    // [card]/[state.itemDetail]/[state.nextEpisode] with fresh values that no longer contain the
+    // [card]/[detail]/[nextEpisode] with fresh values that no longer contain the
     // focused element's key (a cast member drops off, or the Up Next target disappears) -- both
     // are keyed lazy lists, so Compose disposes the focused node with nothing re-placing it. One
     // `withFrameNanos` lets Compose apply the new values (and clear focus, if it's going to)
@@ -595,7 +716,7 @@ private fun EpisodeDetailScreen(
     // [latestPanelOpen] is read (`rememberUpdatedState`) instead of the `panelOpen` param
     // directly, so a panel-open landing mid-`frame` can't be outrun by a stale eligibility read.
     val latestPanelOpen by rememberUpdatedState(panelOpen)
-    LaunchedEffect(card, state.itemDetail, state.nextEpisode) {
+    LaunchedEffect(card, detail, nextEpisode) {
         refreshOwner.onContentChanged(
             scope = synopsisScope,
             frame = { withFrameNanos {} },
@@ -681,7 +802,7 @@ private fun EpisodeDetailScreen(
                         style = DETAIL_TITLE_STYLE,
                     )
                     RegionReveal(
-                        show = regionShow(state.itemDetailLoaded, metaItems.isNotEmpty()),
+                        show = regionShow(itemDetailLoaded, metaItems.isNotEmpty()),
                         skeleton = { MetaLineSkeleton() },
                         content = {
                             // docs/19 §1.5 FIX B: drops whole trailing items as the panel reflow
@@ -714,13 +835,13 @@ private fun EpisodeDetailScreen(
                         )
                     }
                     OverviewBlock(
-                        text = card.overview,
+                        text = DetailFormatting.overview(card, detail),
                         color = JellybeamTheme.Panna2,
                         memory = memory,
                         moreKey = OVERVIEW_MORE_KEY,
                         onMore = { synopsisOpen = true },
                     )
-                    CreditsRegion(strings, state.itemDetailLoaded, detail?.directors, detail?.writers, emptyList())
+                    CreditsRegion(strings, itemDetailLoaded, detail?.directors, detail?.writers, emptyList())
                 }
 
                 if (showLowerBand) {
@@ -740,7 +861,7 @@ private fun EpisodeDetailScreen(
                             show = upNextShow,
                             skeleton = { UpNextSkeleton() },
                             content = {
-                                state.nextEpisode?.let { next ->
+                                nextEpisode?.let { next ->
                                     UpNextPanel(nextEpisode = next, onClick = { onOpenDetail(next) }, memory = memory)
                                 }
                             },
@@ -783,7 +904,7 @@ private fun EpisodeDetailScreen(
     if (synopsisOpen) {
         SynopsisPanel(
             title = card.name,
-            overview = card.overview.orEmpty(),
+            overview = DetailFormatting.overview(card, detail).orEmpty(),
             open = synopsisOpen,
             onClose = {
                 synopsisOpen = false
@@ -939,7 +1060,24 @@ private fun UpNextPanel(nextEpisode: Card, onClick: () -> Unit, memory: FocusMem
 @Composable
 private fun SeriesDetailScreen(
     card: Card,
-    state: DetailUiState,
+    detail: ItemDetail?,
+    itemDetailLoaded: Boolean,
+    libraryName: String?,
+    libraryNameLoaded: Boolean,
+    /** Already index-number sorted; Specials (index 0) sorts first, matching the chip row. */
+    seasons: List<Card>,
+    seasonsSettled: Boolean,
+    selectedSeasonId: String?,
+    /** docs/15 §5: false while a season switch reads, so focus stays on the chip. */
+    shelfEnterable: Boolean,
+    episodes: List<Card>,
+    seasonStats: List<SeasonStats>,
+    showVirtualEpisodes: Boolean,
+    seriesPlay: SeriesPlayTarget?,
+    summarySettled: Boolean,
+    listError: Boolean,
+    similar: List<Card>,
+    similarLoaded: Boolean,
     viewModel: DetailViewModel,
     onOpenDetail: (Card) -> Unit,
     onOpenPerson: (PersonInfo) -> Unit,
@@ -952,11 +1090,9 @@ private fun SeriesDetailScreen(
     val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
-    val detail = state.itemDetail
-    val seasons = state.seasons // already index-number sorted; Specials (index 0) sorts first, matching the chip row.
-    val selectedSeason = remember(seasons, state.selectedSeasonId) { seasons.firstOrNull { it.id == state.selectedSeasonId } }
+    val selectedSeason = remember(seasons, selectedSeasonId) { seasons.firstOrNull { it.id == selectedSeasonId } }
     val strings = rememberUiStrings()
-    val primaryAction = remember(card.id, state.allEpisodes) { DetailFormatting.resolvePrimaryAction(strings, card, state.allEpisodes) }
+    val primaryAction = remember(card.id, seriesPlay) { DetailFormatting.resolvePrimaryAction(strings, card, seriesPlay) }
     val hasPrimaryButton = DetailFormatting.primaryTakesFocus(primaryAction)
     val hasChips = seasons.size > 1
     val castMembers = remember(detail) { DetailFormatting.castMembers(detail?.people.orEmpty()) }
@@ -968,14 +1104,14 @@ private fun SeriesDetailScreen(
     // [BringIntoViewRequester.bringIntoView] only moves the page's [verticalScroll] container,
     // independent of the focus/seed machinery.
     val selectedChipBringIntoViewRequester = remember(card.id) { BringIntoViewRequester() }
-    LaunchedEffect(state.selectedSeasonId) {
-        if (state.selectedSeasonId != null) selectedChipBringIntoViewRequester.bringIntoView()
+    LaunchedEffect(selectedSeasonId) {
+        if (selectedSeasonId != null) selectedChipBringIntoViewRequester.bringIntoView()
     }
 
     // docs/15 §2 rule 3: the primary pill wins whenever the series has one; [seedDecision] is null
     // until that is knowable, so the separately-fetched season chips cannot win the race.
-    val seedDecision = remember(card.id, hasPrimaryButton, state.allEpisodesSettled, hasChips, state.seasonsSettled) {
-        DetailFormatting.resolveSeriesSeed(hasPrimaryButton, state.allEpisodesSettled, hasChips, state.seasonsSettled)
+    val seedDecision = remember(card.id, hasPrimaryButton, summarySettled, hasChips, seasonsSettled) {
+        DetailFormatting.resolveSeriesSeed(hasPrimaryButton, summarySettled, hasChips, seasonsSettled)
     }
     val seedTarget = seedDecision ?: DetailFormatting.FocusSeedTarget.NONE
     // docs/19-detail-action-menu.md's door renders unconditionally (position two, even with no
@@ -997,23 +1133,23 @@ private fun SeriesDetailScreen(
         ready = seedDecision != null,
         selectedKey = {
             if (seedDecision == DetailFormatting.FocusSeedTarget.PRIMARY) null
-            else state.selectedSeasonId?.let { "season:$it" }
+            else selectedSeasonId?.let { "season:$it" }
         },
         fallback = seriesFallback,
         tag = "detail-series",
     )
 
     // docs/15 §5: [FocusMemory.scrollTo] for this screen's three lazy lists. [episodeListState] is
-    // keyed on [state.selectedSeasonId] so a season switch starts fresh and a return restores the
+    // keyed on [selectedSeasonId] so a season switch starts fresh and a return restores the
     // right list.
-    val episodeListState = remember(state.selectedSeasonId) { LazyListState() }
+    val episodeListState = remember(selectedSeasonId) { LazyListState() }
     val castListState = remember(card.id) { LazyListState() }
     val similarListState = remember(card.id) { LazyListState() }
     SideEffect {
         memory.scrollTo = { key ->
             when {
                 key.startsWith("episode:") -> {
-                    val index = state.episodes.indexOfFirst { it.id == key.removePrefix("episode:") }
+                    val index = episodes.indexOfFirst { it.id == key.removePrefix("episode:") }
                     if (index >= 0) { episodeListState.scrollToItem(index); true } else false
                 }
                 key.startsWith("person:") -> {
@@ -1021,7 +1157,7 @@ private fun SeriesDetailScreen(
                     if (index >= 0) { castListState.scrollToItem(index); true } else false
                 }
                 key.startsWith("similar:") -> {
-                    val index = state.similar.indexOfFirst { it.id == key.removePrefix("similar:") }
+                    val index = similar.indexOfFirst { it.id == key.removePrefix("similar:") }
                     if (index >= 0) { similarListState.scrollToItem(index); true } else false
                 }
                 else -> false
@@ -1033,7 +1169,7 @@ private fun SeriesDetailScreen(
     val synopsisScope = rememberCoroutineScope()
 
     // Same REFRESH-STEALS-FOCUS guard as [EpisodeDetailScreen] (docs/15 §3): a live refresh can
-    // replace [card]/[seasons]/[state.episodes]/[castMembers]/[state.similar], all keyed rows,
+    // replace [card]/[seasons]/[episodes]/[castMembers]/[similar], all keyed rows,
     // dropping the focused key with nothing re-placing it. Unlike Episode/Movie, this screen has a
     // §2 rule 2 "selected item" (the season chip), passed to [FocusRestorer] as `selectedKey` so
     // `restoreNow` tries `[lastKey, selectedKey]` before `fallback`. [seriesRefreshFallback] runs
@@ -1069,9 +1205,9 @@ private fun SeriesDetailScreen(
         }
     }
     val latestPanelOpen by rememberUpdatedState(panelOpen)
-    // [state.listError]: a good Retry removes the focused Retry chip; the guard then lands on the
+    // [listError]: a good Retry removes the focused Retry chip; the guard then lands on the
     // selected season chip (docs/15 §3).
-    LaunchedEffect(card, seasons, state.episodes, castMembers, state.similar, state.listError) {
+    LaunchedEffect(card, seasons, episodes, castMembers, similar, listError) {
         refreshOwner.onContentChanged(
             scope = synopsisScope,
             frame = { withFrameNanos {} },
@@ -1089,8 +1225,8 @@ private fun SeriesDetailScreen(
             restore = {
                 memory.restoreNow(
                     focusGate,
-                    selectedKey = { state.selectedSeasonId?.let { "season:$it" } },
-                    fallback = { seriesRefreshFallback(memory, state.episodes, episodeListState, seriesFallback) },
+                    selectedKey = { selectedSeasonId?.let { "season:$it" } },
+                    fallback = { seriesRefreshFallback(memory, episodes, episodeListState, seriesFallback) },
                     tag = "detail-series-refresh",
                 )
             },
@@ -1155,9 +1291,9 @@ private fun SeriesDetailScreen(
                         verticalArrangement = Arrangement.spacedBy(11.dp),
                     ) {
                         RegionReveal(
-                            show = regionShow(state.libraryNameLoaded, state.libraryName != null),
+                            show = regionShow(libraryNameLoaded, libraryName != null),
                             skeleton = { EyebrowSkeleton() },
-                            content = { state.libraryName?.let { EyebrowText(it) } },
+                            content = { libraryName?.let { EyebrowText(it) } },
                         )
                         BasicText(
                             text = card.name,
@@ -1179,7 +1315,7 @@ private fun SeriesDetailScreen(
                             genres = detail?.genres.orEmpty(),
                         )
                         RegionReveal(
-                            show = regionShow(state.itemDetailLoaded, headerItems.isNotEmpty()),
+                            show = regionShow(itemDetailLoaded, headerItems.isNotEmpty()),
                             skeleton = { MetaLineSkeleton() },
                             content = {
                                 // docs/19 §1.5 FIX B: drops whole trailing items as the panel
@@ -1191,12 +1327,10 @@ private fun SeriesDetailScreen(
                                 )
                             },
                         )
-                        // [DetailFormatting.seriesCardFrom]'s synthesized card always sets
-                        // `overview = null`, so [detail] wins over `card.overview` here.
                         SeriesActionRow(
                             card = card,
                             action = primaryAction,
-                            primaryPending = !state.allEpisodesSettled,
+                            primaryPending = !summarySettled,
                             focusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.PRIMARY) initialFocusRequester else null,
                             doorFocusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.NONE) doorFocusRequester else null,
                             memory = memory,
@@ -1205,19 +1339,19 @@ private fun SeriesDetailScreen(
                         // Same order as Movie/Episode: actions then overview, so Down from the
                         // primary pill reaches the MORE stop.
                         OverviewBlock(
-                            text = detail?.overview ?: card.overview,
+                            text = DetailFormatting.overview(card, detail),
                             color = JellybeamTheme.Grigio,
                             memory = memory,
                             moreKey = OVERVIEW_MORE_KEY,
                             onMore = { synopsisOpen = true },
                         )
-                        CreditsRegion(strings, state.itemDetailLoaded, detail?.directors, detail?.writers, detail?.studios)
+                        CreditsRegion(strings, itemDetailLoaded, detail?.directors, detail?.writers, detail?.studios)
                     }
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
                 // docs/07 §5: a failed season/episode read is not an empty series.
-                if (state.listError) {
+                if (listError) {
                     DiscoverErrorMessage(
                         text = stringResource(R.string.detail_lists_error),
                         onRetry = viewModel::retryLists,
@@ -1228,16 +1362,16 @@ private fun SeriesDetailScreen(
                 // docs/11 §Loading state: the chip row and the shelf keep their final heights
                 // while seasons and the resume season's episodes load.
                 RegionReveal(
-                    show = seasonChipsShow(state.seasonsSettled, seasons.size, detail?.childCount),
+                    show = seasonChipsShow(seasonsSettled, seasons.size, detail?.childCount),
                     skeleton = { SeasonChipsSkeleton(Modifier.fillMaxWidth()) },
                     content = {
                         SeasonSelectorSection(
                             seasons = seasons,
-                            selectedSeasonId = state.selectedSeasonId,
+                            selectedSeasonId = selectedSeasonId,
                             selectedSeason = selectedSeason,
-                            episodes = state.episodes,
-                            allEpisodes = state.allEpisodes,
-                            showVirtualEpisodes = state.showVirtualEpisodes == true,
+                            episodes = episodes,
+                            seasonStats = seasonStats,
+                            showVirtualEpisodes = showVirtualEpisodes,
                             onSelect = viewModel::selectSeason,
                             memory = memory,
                             selectedChipFocusRequester = selectedChipFocusRequester,
@@ -1250,16 +1384,16 @@ private fun SeriesDetailScreen(
                 Spacer(modifier = Modifier.height(16.dp))
                 RegionReveal(
                     show = episodeShelfShow(
-                        seasonsSettled = state.seasonsSettled,
+                        seasonsSettled = seasonsSettled,
                         hasSeasons = seasons.isNotEmpty(),
-                        hasSelectedSeason = state.selectedSeasonId != null,
-                        isLoadingEpisodes = state.isLoadingEpisodes,
-                        hasEpisodes = state.episodes.isNotEmpty(),
+                        hasSelectedSeason = selectedSeasonId != null,
+                        hasEpisodes = episodes.isNotEmpty(),
                     ),
                     skeleton = { EpisodeShelfSkeleton(Modifier.fillMaxWidth()) },
                     content = {
                         SeasonEpisodeShelf(
-                            episodes = state.episodes,
+                            episodes = episodes,
+                            enterable = shelfEnterable,
                             onOpenDetail = onOpenDetail,
                             memory = memory,
                             listState = episodeListState,
@@ -1275,7 +1409,7 @@ private fun SeriesDetailScreen(
         // docs/19 §1.5: these rows are siblings of the flow column above, so they carry the panel
         // inset themselves.
         RegionReveal(
-            show = regionShow(state.itemDetailLoaded, castMembers.isNotEmpty()),
+            show = regionShow(itemDetailLoaded, castMembers.isNotEmpty()),
             skeleton = {
                 Box(modifier = Modifier.padding(top = SECTION_TOP_GAP, end = contentEndInset)) {
                     CastRowSkeleton(showHeader = true, showRole = true, contentWidth = contentWidth)
@@ -1297,10 +1431,10 @@ private fun SeriesDetailScreen(
             },
         )
 
-        if (state.similarLoaded && state.similar.isNotEmpty()) {
+        if (similarLoaded && similar.isNotEmpty()) {
             Box(modifier = Modifier.padding(top = SECTION_TOP_GAP, end = contentEndInset)) {
                 SimilarRow(
-                    items = state.similar,
+                    items = similar,
                     onOpenDetail = onOpenDetail,
                     memory = memory,
                     listState = similarListState,
@@ -1316,7 +1450,7 @@ private fun SeriesDetailScreen(
     if (synopsisOpen) {
         SynopsisPanel(
             title = card.name,
-            overview = (detail?.overview ?: card.overview).orEmpty(),
+            overview = DetailFormatting.overview(card, detail).orEmpty(),
             open = synopsisOpen,
             onClose = {
                 synopsisOpen = false
@@ -1421,7 +1555,7 @@ private fun SeasonSelectorSection(
     selectedSeasonId: String?,
     selectedSeason: Card?,
     episodes: List<Card>,
-    allEpisodes: List<Card>,
+    seasonStats: List<SeasonStats>,
     showVirtualEpisodes: Boolean,
     onSelect: (String) -> Unit,
     memory: FocusMemory,
@@ -1433,12 +1567,12 @@ private fun SeasonSelectorSection(
     val summaryItems = selectedSeason?.let { DetailFormatting.seasonSummaryItems(strings, it.name, episodes) }.orEmpty()
     val showLabel = DetailFormatting.showSeasonsLabel(seasons.size)
     // docs/11 §12: markers only while "Show missing episodes" is on; off, no chip changes.
-    val availabilities = remember(seasons, allEpisodes, showVirtualEpisodes) {
+    val availabilities = remember(seasons, seasonStats, showVirtualEpisodes) {
         if (!showVirtualEpisodes) {
             emptyMap()
         } else {
-            val now = Instant.now()
-            seasons.associate { it.id to DetailFormatting.seasonAvailability(it, allEpisodes, now) }
+            val byId = seasonStats.associateBy { it.seasonId }
+            seasons.associate { it.id to DetailFormatting.seasonAvailability(it, byId[it.id]) }
         }
     }
 
@@ -1643,6 +1777,8 @@ internal fun <T> rememberCardWindow(
 @Composable
 private fun SeasonEpisodeShelf(
     episodes: List<Card>,
+    /** docs/15 §5: false while a season switch reads; entry is cancelled, so focus stays where it was. */
+    enterable: Boolean,
     onOpenDetail: (Card) -> Unit,
     memory: FocusMemory,
     listState: LazyListState,
@@ -1667,7 +1803,7 @@ private fun SeasonEpisodeShelf(
                     horizontalArrangement = Arrangement.spacedBy(EPISODE_SHELF_GAP),
                     contentPadding = PaddingValues(horizontal = PAGE_MARGIN),
                     modifier = Modifier
-                        .focusProperties { enter = { shelfEntry.target(memory, listState, window.items.size) } }
+                        .focusProperties { enter = { if (enterable) shelfEntry.target(memory, listState, window.items.size) else FocusRequester.Cancel } }
                         .focusGroup(),
                 ) {
                     itemsIndexed(window.items, key = { _, episode -> episode.id }) { index, episode ->
@@ -1703,7 +1839,14 @@ private fun SeasonEpisodeShelf(
 @Composable
 private fun MovieDetailScreen(
     card: Card,
-    state: DetailUiState,
+    detail: ItemDetail?,
+    itemDetailLoaded: Boolean,
+    libraryName: String?,
+    libraryNameLoaded: Boolean,
+    similar: List<Card>,
+    similarLoaded: Boolean,
+    /** docs/19 §1.3: whether the Trailer pill shows. */
+    showTrailer: Boolean,
     viewModel: DetailViewModel,
     onOpenDetail: (Card) -> Unit,
     onOpenPerson: (PersonInfo) -> Unit,
@@ -1716,15 +1859,14 @@ private fun MovieDetailScreen(
     val focusGate = LocalFocusGate.current
     // docs/19 §1.5 FIX D: whole-cards-only windowing is only active while the panel is open.
     val cardWindowActive = contentEndInset > 0.dp
-    val detail = state.itemDetail
     val strings = rememberUiStrings()
-    // Computed inline, not remembered, so a refreshed Card recomputes instead of staying stale.
-    val primaryAction = DetailFormatting.resolvePrimaryAction(strings, card, emptyList())
+    // Keyed on the whole live [card], so a refreshed Card recomputes instead of staying stale.
+    val primaryAction = remember(strings, card) { DetailFormatting.resolvePrimaryAction(strings, card, null) }
     val hasPrimaryButton = DetailFormatting.primaryTakesFocus(primaryAction)
     val castMembers = remember(detail) { DetailFormatting.castMembers(detail?.people.orEmpty()) }
     // docs/10 `detail.content`: the frame the live record's regions first paint.
-    LaunchedEffect(state.itemDetailLoaded) {
-        if (state.itemDetailLoaded) {
+    LaunchedEffect(itemDetailLoaded) {
+        if (itemDetailLoaded) {
             withFrameNanos { }
             PerfLog.markDetailPhase("detail.content")
         }
@@ -1771,7 +1913,7 @@ private fun MovieDetailScreen(
                     if (index >= 0) { castListState.scrollToItem(index); true } else false
                 }
                 key.startsWith("similar:") -> {
-                    val index = state.similar.indexOfFirst { it.id == key.removePrefix("similar:") }
+                    val index = similar.indexOfFirst { it.id == key.removePrefix("similar:") }
                     if (index >= 0) { similarListState.scrollToItem(index); true } else false
                 }
                 else -> false
@@ -1783,7 +1925,7 @@ private fun MovieDetailScreen(
     val synopsisScope = rememberCoroutineScope()
 
     // Same REFRESH-STEALS-FOCUS guard as [EpisodeDetailScreen] (docs/15 §3): a live refresh can
-    // replace [card]/[castMembers]/[state.similar], both keyed rows, dropping the focused key with
+    // replace [card]/[castMembers]/[similar], both keyed rows, dropping the focused key with
     // nothing re-placing it. No selected item on this screen, so `restoreNow` tries
     // [FocusMemory.lastKey] then falls straight to [movieFallback].
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -1816,7 +1958,7 @@ private fun MovieDetailScreen(
         }
     }
     val latestPanelOpen by rememberUpdatedState(panelOpen)
-    LaunchedEffect(card, castMembers, state.similar) {
+    LaunchedEffect(card, castMembers, similar) {
         refreshOwner.onContentChanged(
             scope = synopsisScope,
             frame = { withFrameNanos {} },
@@ -1899,10 +2041,10 @@ private fun MovieDetailScreen(
                             ) {
                                 MovieEyebrowRegion(
                                     card = card,
-                                    libraryName = state.libraryName,
-                                    libraryNameLoaded = state.libraryNameLoaded,
+                                    libraryName = libraryName,
+                                    libraryNameLoaded = libraryNameLoaded,
                                     dateCreated = detail?.dateCreated,
-                                    itemDetailLoaded = state.itemDetailLoaded,
+                                    itemDetailLoaded = itemDetailLoaded,
                                 )
                                 BasicText(
                                     text = card.name,
@@ -1910,7 +2052,7 @@ private fun MovieDetailScreen(
                                     overflow = TextOverflow.Ellipsis,
                                     style = DETAIL_TITLE_STYLE,
                                 )
-                                MovieMetadataRow(card = card, detail = detail, detailLoaded = state.itemDetailLoaded)
+                                MovieMetadataRow(card = card, detail = detail, detailLoaded = itemDetailLoaded)
                                 // Same resume row as the Episode page: a bar and "{n} left" once a position is saved.
                                 val resumeFraction = CardFormatting.watchProgress(card)
                                 if (primaryAction is DetailFormatting.PrimaryAction.Playable && primaryAction.hasProgress && resumeFraction != null) {
@@ -1926,18 +2068,18 @@ private fun MovieDetailScreen(
                                     doorFocusRequester = if (seedTarget == DetailFormatting.FocusSeedTarget.SECONDARY) doorFocusRequester else null,
                                     memory = memory,
                                     onOpenMenu = { memory.captureInvoker(); viewModel.openMenu() },
-                                    showTrailer = state.pillTrailer != null,
+                                    showTrailer = showTrailer,
                                     onTrailer = viewModel::playPillTrailer,
                                     onPlayStarted = viewModel::cancelTrailerLookup,
                                 )
                                 OverviewBlock(
-                                    text = card.overview,
+                                    text = DetailFormatting.overview(card, detail),
                                     color = JellybeamTheme.Panna2,
                                     memory = memory,
                                     moreKey = OVERVIEW_MORE_KEY,
                                     onMore = { synopsisOpen = true },
                                 )
-                                CreditsRegion(strings, state.itemDetailLoaded, detail?.directors, detail?.writers, detail?.studios)
+                                CreditsRegion(strings, itemDetailLoaded, detail?.directors, detail?.writers, detail?.studios)
                             }
                         }
                     }
@@ -1948,7 +2090,7 @@ private fun MovieDetailScreen(
                     val bandGap = 22.dp
                     val specModifier = Modifier.padding(start = PAGE_MARGIN, top = 8.dp)
                     RegionReveal(
-                        show = regionShow(state.itemDetailLoaded, specFields.isNotEmpty()),
+                        show = regionShow(itemDetailLoaded, specFields.isNotEmpty()),
                         skeleton = { SpecStripSkeleton(specModifier) },
                         content = { SpecStripRow(fields = specFields, modifier = specModifier) },
                     )
@@ -1959,7 +2101,7 @@ private fun MovieDetailScreen(
                     // [CastRow]'s own LazyRow already carries a PAGE_MARGIN `contentPadding`, so
                     // adding padding here too would double the left margin.
                     RegionReveal(
-                        show = regionShow(state.itemDetailLoaded, castMembers.isNotEmpty()),
+                        show = regionShow(itemDetailLoaded, castMembers.isNotEmpty()),
                         skeleton = {
                             Column {
                                 Spacer(modifier = Modifier.height(bandGap))
@@ -1988,10 +2130,10 @@ private fun MovieDetailScreen(
 
             // docs/19 §1.5: a sibling of the inset frame above, so it carries the panel inset
             // itself.
-            if (state.similarLoaded && state.similar.isNotEmpty()) {
+            if (similarLoaded && similar.isNotEmpty()) {
                 Box(modifier = Modifier.padding(top = SECTION_TOP_GAP, end = contentEndInset)) {
                     SimilarRow(
-                        items = state.similar,
+                        items = similar,
                         onOpenDetail = onOpenDetail,
                         memory = memory,
                         listState = similarListState,
@@ -2007,7 +2149,7 @@ private fun MovieDetailScreen(
         if (synopsisOpen) {
             SynopsisPanel(
                 title = card.name,
-                overview = card.overview.orEmpty(),
+                overview = DetailFormatting.overview(card, detail).orEmpty(),
                 open = synopsisOpen,
                 onClose = {
                     synopsisOpen = false
@@ -2627,16 +2769,17 @@ private fun PrimaryPillButton(
     }
 }
 
-/** [DetailFormatting.SpecWeight]'s three tier colors -- one place, so a call site never picks. */
+/** [DetailFormatting.SpecWeight]'s tier colors -- one place, so a call site never picks. */
 private fun specWeightColor(weight: DetailFormatting.SpecWeight, bestInClass: Color): Color = when (weight) {
     DetailFormatting.SpecWeight.BASELINE -> JellybeamTheme.Grigio
     DetailFormatting.SpecWeight.NOTABLE -> JellybeamTheme.Panna
     DetailFormatting.SpecWeight.BEST_IN_CLASS -> bestInClass
+    DetailFormatting.SpecWeight.WARNING -> JellybeamTheme.Ambra
 }
 
 /**
- * §2 item 4 / §4 item 7's spec strip: one non-wrapping pill of Martian Mono values, individually
- * colored by [DetailFormatting.classify]. [fields] is [DetailFormatting.specCapsuleFields]'s
+ * §2 item 4 / §4 item 7's spec strip: one non-wrapping pill of Martian Mono values, each
+ * colored by its [DetailFormatting.SpecWeight]. [fields] is [DetailFormatting.specCapsuleFields]'s
  * answer; callers compose this only when it is non-empty. docs/23-detail-layout-rules.md Rule 4:
  * an outlined capsule, not filled.
  */

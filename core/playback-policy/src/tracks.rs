@@ -3,7 +3,7 @@
 //! Fully pure: tracks in, prefs in, chosen ids out,
 //! unit-testable without a live player session.
 
-use crate::prefs::{LanguagePrefs, SeriesTrackPref, SubtitleMode, TrackMemory};
+use crate::prefs::{LanguagePrefs, SeriesTrackPref, SubtitleMode, TrackIdentity, TrackMemory};
 
 /// A single audio/video/subtitle track, as reported by the playback backend.
 #[derive(Debug, Clone)]
@@ -17,6 +17,8 @@ pub struct Track {
     pub selected: bool,
     /// The container's own "forced" flag (foreign-dialogue burned-in subs); `false` elsewhere.
     pub forced: bool,
+    /// The server's hearing-impaired (SDH) flag; `false` where the source doesn't carry it.
+    pub hearing_impaired: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,31 +28,164 @@ pub enum TrackKind {
     Subtitle,
 }
 
-/// The persistence key for one [`Track`]: its normalized language code if present, else its title
-/// -- backend track ids aren't stable across items/relaunches, but lang/title usually is within a
-/// series.
-pub fn track_pref_key(track: &Track) -> Option<String> {
-    track
-        .lang
-        .as_deref()
-        .map(normalize_lang)
-        .or_else(|| track.title.clone())
+/// The identity a [`Track`] is remembered under, or `None` for a track with neither language nor
+/// title (nothing durable to match it by).
+pub fn track_identity(track: &Track) -> Option<TrackIdentity> {
+    if track.lang.is_none() && track.title.is_none() {
+        return None;
+    }
+    Some(TrackIdentity {
+        lang: track.lang.as_deref().map(normalize_lang),
+        title: track.title.clone(),
+        forced: track.forced,
+        sdh: track.hearing_impaired,
+        codec: track.codec.clone(),
+    })
 }
 
-/// Finds the first track of `kind` matching a persisted per-series `key`, to re-apply it once real
-/// track ids are known. Languages compare normalized, so a key saved from a sidecar (`en`) matches
-/// a burn-in stream (`eng`) and keys saved before normalization still match.
-pub fn find_track_by_key(tracks: &[Track], kind: TrackKind, key: &str) -> Option<i64> {
+/// The first track of `kind` that passes `matches`: the one plain lookup (ranked picks go through
+/// [`best_ranked`]).
+fn first_where(
+    tracks: &[Track],
+    kind: TrackKind,
+    matches: impl Fn(&Track) -> bool,
+) -> Option<&Track> {
+    tracks.iter().find(|t| t.kind == kind && matches(t))
+}
+
+/// The highest-`score` track of `kind` that passes `candidate`; the earliest wins a tie
+/// (`max_by_key` keeps the last maximum, so the scan runs in reverse).
+fn best_ranked<K: Ord>(
+    tracks: &[Track],
+    kind: TrackKind,
+    candidate: impl Fn(&Track) -> bool,
+    score: impl Fn(&Track) -> K,
+) -> Option<&Track> {
     tracks
         .iter()
-        .find(|t| {
-            t.kind == kind
-                && match &t.lang {
-                    Some(lang) => lang_matches(lang, key),
-                    None => t.title.as_deref() == Some(key),
-                }
-        })
-        .map(|t| t.id)
+        .rev()
+        .filter(|t| t.kind == kind && candidate(t))
+        .max_by_key(|t| score(t))
+}
+
+/// The track carries a language that [`lang_matches`] `lang`.
+fn in_language(track: &Track, lang: &str) -> bool {
+    track.lang.as_deref().is_some_and(|l| lang_matches(l, lang))
+}
+
+/// Ranking for a pick that has no identity to follow: the plain track before Forced, then before
+/// SDH.
+fn plain_first(track: &Track) -> (bool, bool) {
+    (!track.forced, !track.hearing_impaired)
+}
+
+/// Trimmed, case-insensitive equality of two optional labels (title, codec); two absent labels agree.
+fn same_label(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.trim().eq_ignore_ascii_case(b.trim()),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// `(spelling, name)`: Media3's codec/mime forms and the server's names for one audio or subtitle
+/// format, so a codec remembered from either delivery matches the other; an unlisted codec is its
+/// own name.
+const CODEC_NAMES: [(&str, &str); 28] = [
+    ("application/x-subrip", "srt"),
+    ("subrip", "srt"),
+    ("text/x-ssa", "ass"),
+    ("ssa", "ass"),
+    ("text/vtt", "vtt"),
+    ("webvtt", "vtt"),
+    ("application/pgs", "pgs"),
+    ("hdmv_pgs_subtitle", "pgs"),
+    ("pgssub", "pgs"),
+    ("application/vobsub", "vobsub"),
+    ("dvd_subtitle", "vobsub"),
+    ("dvdsub", "vobsub"),
+    ("ac-3", "ac3"),
+    ("audio/ac3", "ac3"),
+    ("ec-3", "eac3"),
+    ("audio/eac3", "eac3"),
+    ("audio/eac3-joc", "eac3"),
+    ("audio/true-hd", "truehd"),
+    ("audio/vnd.dts", "dts"),
+    ("audio/vnd.dts.hd", "dts"),
+    ("dtsc", "dts"),
+    ("dtsh", "dts"),
+    ("dtsl", "dts"),
+    ("audio/mp4a-latm", "aac"),
+    ("audio/flac", "flac"),
+    ("audio/opus", "opus"),
+    ("audio/mpeg", "mp3"),
+    ("audio/vorbis", "vorbis"),
+];
+
+/// A codec's [`CODEC_NAMES`] name, trimmed; Media3's `mp4a.40.*` codec strings are all AAC.
+fn codec_name(codec: &str) -> &str {
+    let codec = codec.trim();
+    if codec
+        .get(..5)
+        .is_some_and(|p| p.eq_ignore_ascii_case("mp4a."))
+    {
+        return "aac";
+    }
+    CODEC_NAMES
+        .iter()
+        .find(|(spelling, _)| spelling.eq_ignore_ascii_case(codec))
+        .map_or(codec, |&(_, name)| name)
+}
+
+/// Two optional codecs agree once each is folded to its [`codec_name`].
+fn same_codec(a: Option<&str>, b: Option<&str>) -> bool {
+    same_label(a.map(codec_name), b.map(codec_name))
+}
+
+/// Re-finds a remembered choice among the real tracks of `kind` (docs/12 "Choices are remembered
+/// per series"); `Unset`/`Off` name no track.
+/// - `Track(identity)`: same language (or, with none, same title on a track with no language); a
+///   remembered Forced admits only forced tracks, then the closest on forced, SDH, title, codec,
+///   in that order.
+/// - `Key(lang_or_title)` (legacy, language only): same language -- or same title on a track with
+///   no language -- preferring the plain track so a series stuck on Forced recovers.
+///
+/// Languages compare normalized, so a memory saved from a sidecar (`en`) matches a burn-in stream
+/// (`eng`).
+pub fn find_remembered(tracks: &[Track], kind: TrackKind, memory: &TrackMemory) -> Option<i64> {
+    let found = match memory {
+        TrackMemory::Unset | TrackMemory::Off => None,
+        TrackMemory::Key(key) => best_ranked(
+            tracks,
+            kind,
+            |t| in_language(t, key) || (t.lang.is_none() && t.title.as_deref() == Some(key)),
+            plain_first,
+        ),
+        TrackMemory::Track(id) => best_ranked(
+            tracks,
+            kind,
+            |t| {
+                (t.forced || !id.forced)
+                    && match &id.lang {
+                        Some(lang) => in_language(t, lang),
+                        None => {
+                            id.title.is_some()
+                                && t.lang.is_none()
+                                && same_label(t.title.as_deref(), id.title.as_deref())
+                        }
+                    }
+            },
+            |t| {
+                (
+                    t.forced == id.forced,
+                    t.hearing_impaired == id.sdh,
+                    same_label(t.title.as_deref(), id.title.as_deref()),
+                    same_codec(t.codec.as_deref(), id.codec.as_deref()),
+                )
+            },
+        ),
+    };
+    found.map(|t| t.id)
 }
 
 /// Canonicalizes an ISO 639-2 code to its "B" (bibliographic) form so e.g. `"deu"`/`"ger"` compare
@@ -133,11 +268,12 @@ pub struct TrackDecision {
 /// flag if set, else `default`, else the first track of that kind. Shared by the audio branch and
 /// (via `effective_audio_lang`) `OnlyForced` subtitle matching.
 fn current_or_default_track(tracks: &[Track], kind: TrackKind) -> Option<&Track> {
-    tracks
-        .iter()
-        .find(|t| t.kind == kind && t.selected)
-        .or_else(|| tracks.iter().find(|t| t.kind == kind && t.default))
-        .or_else(|| tracks.iter().find(|t| t.kind == kind))
+    first_where(tracks, kind, |t| t.selected).or_else(|| default_or_first(tracks, kind))
+}
+
+/// The default-flagged track of `kind`, else the first.
+fn default_or_first(tracks: &[Track], kind: TrackKind) -> Option<&Track> {
+    first_where(tracks, kind, |t| t.default).or_else(|| first_where(tracks, kind, |_| true))
 }
 
 /// Core decision table: pure (tracks in, prefs in, chosen ids out), called once per playback
@@ -151,8 +287,8 @@ fn current_or_default_track(tracks: &[Track], kind: TrackKind) -> Option<&Track>
 ///
 /// Subtitles, by `global.subtitle_mode`:
 /// - `Default`: leave alone.
-/// - `Always`: `global.subtitle` match if present, else the default-flagged track, else the first,
-///   else `Leave`.
+/// - `Always`: `global.subtitle` match if present (the plain track before Forced, then SDH), else
+///   the default-flagged track, else the first, else `Leave`.
 /// - `OnlyForced`: a `forced` track matching the *actually-playing* audio language (ignores
 ///   `global.subtitle`); otherwise `Off`.
 /// - `None`: always `Off`.
@@ -161,17 +297,11 @@ pub fn resolve_track_selection(
     series_pref: Option<&SeriesTrackPref>,
     global: &LanguagePrefs,
 ) -> TrackDecision {
-    let audio = if let Some(key) = series_pref.and_then(|p| p.audio.key()) {
-        find_track_by_key(tracks, TrackKind::Audio, key)
+    let audio = if let Some(memory) = series_pref.map(|p| &p.audio).filter(|m| m.names_track()) {
+        find_remembered(tracks, TrackKind::Audio, memory)
     } else {
         global.audio.as_deref().and_then(|lang| {
-            tracks
-                .iter()
-                .find(|t| {
-                    t.kind == TrackKind::Audio
-                        && t.lang.as_deref().is_some_and(|l| lang_matches(l, lang))
-                })
-                .map(|t| t.id)
+            first_where(tracks, TrackKind::Audio, |t| in_language(t, lang)).map(|t| t.id)
         })
     };
 
@@ -188,8 +318,8 @@ pub fn resolve_track_selection(
     let subtitle = if let Some(TrackMemory::Off) = remembered_subtitle {
         // docs/18 §3.1: a remembered "subtitles off" decides before the global mode.
         SubtitleDecision::Off
-    } else if let Some(key) = remembered_subtitle.and_then(TrackMemory::key) {
-        find_track_by_key(tracks, TrackKind::Subtitle, key)
+    } else if let Some(memory) = remembered_subtitle.filter(|m| m.names_track()) {
+        find_remembered(tracks, TrackKind::Subtitle, memory)
             .map(SubtitleDecision::Track)
             .unwrap_or(SubtitleDecision::Leave)
     } else {
@@ -197,19 +327,18 @@ pub fn resolve_track_selection(
             SubtitleMode::Default => SubtitleDecision::Leave,
             SubtitleMode::None => SubtitleDecision::Off,
             SubtitleMode::Always => {
-                let matched = global.subtitle.as_deref().and_then(|lang| {
-                    tracks.iter().find(|t| {
-                        t.kind == TrackKind::Subtitle
-                            && t.lang.as_deref().is_some_and(|l| lang_matches(l, lang))
+                let chosen = global
+                    .subtitle
+                    .as_deref()
+                    .and_then(|lang| {
+                        best_ranked(
+                            tracks,
+                            TrackKind::Subtitle,
+                            |t| in_language(t, lang),
+                            plain_first,
+                        )
                     })
-                });
-                let chosen = matched
-                    .or_else(|| {
-                        tracks
-                            .iter()
-                            .find(|t| t.kind == TrackKind::Subtitle && t.default)
-                    })
-                    .or_else(|| tracks.iter().find(|t| t.kind == TrackKind::Subtitle));
+                    .or_else(|| default_or_first(tracks, TrackKind::Subtitle));
                 chosen
                     .map(|t| SubtitleDecision::Track(t.id))
                     .unwrap_or(SubtitleDecision::Leave)
@@ -217,9 +346,8 @@ pub fn resolve_track_selection(
             SubtitleMode::OnlyForced => {
                 // A transcode's audio track carries no language; the forced track already showing
                 // (a server burn-in) is then the best evidence, never a guess at another.
-                let forced = tracks.iter().find(|t| {
-                    t.kind == TrackKind::Subtitle
-                        && t.forced
+                let forced = first_where(tracks, TrackKind::Subtitle, |t| {
+                    t.forced
                         && match effective_audio_lang.as_deref() {
                             Some(al) => t.lang.as_deref().is_some_and(|sl| lang_matches(sl, al)),
                             None => t.selected,
@@ -289,6 +417,7 @@ mod tests {
             default: false,
             selected: false,
             forced: false,
+            hearing_impaired: false,
         }
     }
 
@@ -304,6 +433,21 @@ mod tests {
 
     fn forced_flag(mut t: Track) -> Track {
         t.forced = true;
+        t
+    }
+
+    fn sdh_flag(mut t: Track) -> Track {
+        t.hearing_impaired = true;
+        t
+    }
+
+    fn titled(mut t: Track, title: &str) -> Track {
+        t.title = Some(title.to_string());
+        t
+    }
+
+    fn coded(mut t: Track, codec: &str) -> Track {
+        t.codec = Some(codec.to_string());
         t
     }
 
@@ -496,10 +640,10 @@ mod tests {
     fn a_series_subtitle_pref_matches_across_language_code_forms() {
         let global = LanguagePrefs::default();
         for (saved_from, offered) in [("en", "eng"), ("eng", "en"), ("de", "ger"), ("deu", "ger")] {
-            let saved = track_pref_key(&track(TrackKind::Subtitle, 9, Some(saved_from)));
+            let saved = track_identity(&track(TrackKind::Subtitle, 9, Some(saved_from)));
             let series_pref = SeriesTrackPref {
                 audio: TrackMemory::Unset,
-                subtitle: saved.clone().map_or(TrackMemory::Unset, TrackMemory::Key),
+                subtitle: saved.map_or(TrackMemory::Unset, TrackMemory::Track),
             };
             let tracks = vec![
                 track(TrackKind::Audio, 1, Some("jpn")),
@@ -528,14 +672,12 @@ mod tests {
         titled.title = Some("Signs".to_string());
         let mut english = track(TrackKind::Subtitle, 3, Some("eng"));
         english.title = Some("Signs".to_string());
+        let key = TrackMemory::Key("Signs".to_string());
         assert_eq!(
-            find_track_by_key(&[english.clone(), titled], TrackKind::Subtitle, "Signs"),
+            find_remembered(&[english.clone(), titled], TrackKind::Subtitle, &key),
             Some(2)
         );
-        assert_eq!(
-            find_track_by_key(&[english], TrackKind::Subtitle, "Signs"),
-            None
-        );
+        assert_eq!(find_remembered(&[english], TrackKind::Subtitle, &key), None);
     }
 
     #[test]
@@ -684,5 +826,350 @@ mod tests {
             resolve_track_selection(&tracks, Some(&pref), &global_mode(SubtitleMode::Always));
         assert_eq!(decision.audio, Some(2));
         assert_eq!(decision.subtitle, SubtitleDecision::Off);
+    }
+
+    fn remembered(track: &Track) -> TrackMemory {
+        TrackMemory::Track(track_identity(track).expect("identity"))
+    }
+
+    fn pick(tracks: &[Track], memory: &TrackMemory) -> Option<i64> {
+        find_remembered(tracks, TrackKind::Subtitle, memory)
+    }
+
+    /// Runs `(label, tracks, expected)` rows through `got` and reports every mismatch together.
+    fn assert_rows<T: PartialEq + std::fmt::Debug>(
+        rows: Vec<(&str, Vec<Track>, T)>,
+        got: impl Fn(&[Track]) -> T,
+    ) {
+        let misses: Vec<String> = rows
+            .iter()
+            .filter_map(|(label, tracks, want)| {
+                let actual = got(tracks);
+                (actual != *want).then(|| format!("{label}: expected {want:?}, got {actual:?}"))
+            })
+            .collect();
+        assert!(misses.is_empty(), "{}", misses.join("\n"));
+    }
+
+    /// The reporter's case: the series remembered plain English, and the next episode lists Forced
+    /// and SDH English first.
+    #[test]
+    fn a_remembered_full_english_beats_forced_and_sdh_listed_before_it() {
+        let eng = |id| coded(track(TrackKind::Subtitle, id, Some("eng")), "subrip");
+        let memory = remembered(&titled(eng(1), "English"));
+        let next = [
+            forced_flag(titled(eng(10), "English Forced")),
+            sdh_flag(titled(eng(11), "English SDH")),
+            titled(eng(12), "English"),
+        ];
+        assert_eq!(pick(&next, &memory), Some(12));
+    }
+
+    #[test]
+    fn a_remembered_sdh_or_forced_track_is_picked_over_the_full_one() {
+        let eng = |id| coded(track(TrackKind::Subtitle, id, Some("eng")), "subrip");
+        let next = [
+            titled(eng(10), "English"),
+            sdh_flag(titled(eng(11), "English SDH")),
+            forced_flag(titled(eng(12), "English Forced")),
+        ];
+        assert_eq!(pick(&next, &remembered(&next[1])), Some(11));
+        assert_eq!(pick(&next, &remembered(&next[2])), Some(12));
+    }
+
+    /// Forced outranks SDH, which outranks title, which outranks codec; the earliest track wins a
+    /// full tie.
+    #[test]
+    fn remembered_identity_ranks_forced_then_sdh_then_title_then_codec() {
+        let memory = TrackMemory::Track(TrackIdentity {
+            lang: Some("eng".into()),
+            title: Some("Director".into()),
+            forced: true,
+            sdh: false,
+            codec: Some("ass".into()),
+        });
+        let eng = |id, title, codec| {
+            coded(
+                titled(track(TrackKind::Subtitle, id, Some("eng")), title),
+                codec,
+            )
+        };
+        assert_rows(
+            vec![
+                (
+                    "forced beats sdh",
+                    vec![
+                        eng(1, "Director", "ass"),
+                        sdh_flag(forced_flag(eng(2, "x", "srt"))),
+                    ],
+                    Some(2),
+                ),
+                (
+                    "sdh beats title",
+                    vec![
+                        sdh_flag(forced_flag(eng(1, "Director", "ass"))),
+                        forced_flag(eng(2, "x", "srt")),
+                    ],
+                    Some(2),
+                ),
+                (
+                    "title beats codec, trimmed and case-insensitive",
+                    vec![
+                        forced_flag(eng(1, "Other", "ass")),
+                        forced_flag(eng(2, "  director ", "srt")),
+                    ],
+                    Some(2),
+                ),
+                (
+                    "codec breaks a title tie, case-insensitive",
+                    vec![
+                        forced_flag(eng(1, "Director", "srt")),
+                        forced_flag(eng(2, "Director", "ASS")),
+                    ],
+                    Some(2),
+                ),
+                (
+                    "earliest wins a full tie",
+                    vec![
+                        forced_flag(eng(1, "Director", "ass")),
+                        forced_flag(eng(2, "Director", "ass")),
+                    ],
+                    Some(1),
+                ),
+            ],
+            |tracks| pick(tracks, &memory),
+        );
+    }
+
+    #[test]
+    fn a_remembered_identity_needs_a_same_language_track_of_the_same_kind() {
+        let memory = remembered(&titled(
+            track(TrackKind::Subtitle, 1, Some("eng")),
+            "English",
+        ));
+        let spanish = [track(TrackKind::Subtitle, 10, Some("spa"))];
+        assert_eq!(pick(&spanish, &memory), None);
+        let audio_only = [track(TrackKind::Audio, 2, Some("eng"))];
+        assert_eq!(pick(&audio_only, &memory), None);
+        // Language compares through the normalized forms.
+        let two_letter = [track(TrackKind::Subtitle, 11, Some("en"))];
+        assert_eq!(pick(&two_letter, &memory), Some(11));
+    }
+
+    #[test]
+    fn a_title_only_memory_matches_the_track_with_that_title_and_no_language() {
+        let signs = titled(track(TrackKind::Subtitle, 3, None), "Signs");
+        let memory = remembered(&signs);
+        let tracks = [
+            titled(track(TrackKind::Subtitle, 1, Some("eng")), "Other"),
+            titled(track(TrackKind::Subtitle, 2, None), "Other"),
+            signs,
+        ];
+        assert_eq!(pick(&tracks, &memory), Some(3));
+    }
+
+    /// A title-only memory is a track with no language: a same-titled track that carries one is a
+    /// different track, and titles compare trimmed and case-insensitive like the ranking's.
+    #[test]
+    fn a_title_only_memory_ignores_a_same_titled_track_that_has_a_language() {
+        let memory = remembered(&titled(track(TrackKind::Subtitle, 1, None), "Signs"));
+        assert_rows(
+            vec![
+                (
+                    "only a language-bearing namesake",
+                    vec![titled(track(TrackKind::Subtitle, 2, Some("eng")), "Signs")],
+                    None,
+                ),
+                (
+                    "the language-less one wins, trimmed and case-insensitive",
+                    vec![
+                        titled(track(TrackKind::Subtitle, 2, Some("eng")), "Signs"),
+                        titled(track(TrackKind::Subtitle, 3, None), "  signs "),
+                    ],
+                    Some(3),
+                ),
+            ],
+            |tracks| pick(tracks, &memory),
+        );
+    }
+
+    /// A remembered Forced is a filter: a forced-only viewer never gets full dialogue; plain and
+    /// SDH memories only rank Forced.
+    #[test]
+    fn a_remembered_forced_track_is_a_filter_and_plain_or_sdh_memories_only_rank_it() {
+        let eng = |id| titled(track(TrackKind::Subtitle, id, Some("eng")), "English");
+        let forced_memory = remembered(&forced_flag(eng(1)));
+        let plain_memory = remembered(&eng(1));
+        let sdh_memory = remembered(&sdh_flag(eng(1)));
+        assert_rows(
+            vec![
+                (
+                    "forced memory, no forced track",
+                    vec![eng(10), sdh_flag(eng(11))],
+                    None,
+                ),
+                (
+                    "forced memory takes the forced track",
+                    vec![eng(10), forced_flag(eng(11))],
+                    Some(11),
+                ),
+            ],
+            |tracks| pick(tracks, &forced_memory),
+        );
+        assert_rows(
+            vec![
+                (
+                    "plain memory, only forced offered",
+                    vec![forced_flag(eng(10))],
+                    Some(10),
+                ),
+                (
+                    "plain memory prefers plain",
+                    vec![forced_flag(eng(10)), eng(11)],
+                    Some(11),
+                ),
+            ],
+            |tracks| pick(tracks, &plain_memory),
+        );
+        assert_eq!(pick(&[forced_flag(eng(10))], &sdh_memory), Some(10));
+        let pref = SeriesTrackPref {
+            audio: TrackMemory::Unset,
+            subtitle: forced_memory,
+        };
+        let tracks = [track(TrackKind::Audio, 1, Some("eng")), eng(10)];
+        assert_eq!(
+            resolve_track_selection(&tracks, Some(&pref), &no_global_prefs()).subtitle,
+            SubtitleDecision::Leave
+        );
+    }
+
+    /// Media3's mime forms and the server's names are one codec: the codec rank prefers the
+    /// same-format track whichever spelling each side carries.
+    #[test]
+    fn remembered_audio_and_subtitle_codecs_match_across_media3_and_server_spellings() {
+        let formats: [(&[&str], &str); 10] = [
+            (&["application/x-subrip", "subrip", "srt", "SubRip"], "srt"),
+            (&["ac-3", "audio/ac3", "ac3"], "ac3"),
+            (&["ec-3", "audio/eac3", "audio/eac3-joc", "eac3"], "eac3"),
+            (&["audio/true-hd", "truehd"], "truehd"),
+            (
+                &["audio/vnd.dts", "audio/vnd.dts.hd", "dtsc", "dtsh", "dts"],
+                "dts",
+            ),
+            (&["mp4a.40.2", "mp4a.40.5", "audio/mp4a-latm", "aac"], "aac"),
+            (&["text/x-ssa", "ssa", "ass"], "ass"),
+            (&["text/vtt", "webvtt", "vtt"], "vtt"),
+            (&["application/pgs", "hdmv_pgs_subtitle", "pgssub"], "pgs"),
+            (&["application/vobsub", "dvd_subtitle", "dvdsub"], "vobsub"),
+        ];
+        let eng = |id, codec| coded(track(TrackKind::Subtitle, id, Some("eng")), codec);
+        let mut misses = Vec::new();
+        for (spellings, canonical) in formats {
+            for remembered_as in spellings {
+                for offered_as in spellings {
+                    let memory = remembered(&eng(1, remembered_as));
+                    // The decoy is listed first, so only the codec rank can pick the second.
+                    let tracks = [eng(10, "other"), eng(11, offered_as)];
+                    if pick(&tracks, &memory) != Some(11) {
+                        misses.push(format!("{canonical}: {remembered_as} vs {offered_as}"));
+                    }
+                }
+            }
+        }
+        // Different formats stay different.
+        let memory = remembered(&eng(1, "application/x-subrip"));
+        if pick(&[eng(10, "ass"), eng(11, "pgssub")], &memory) != Some(10) {
+            misses.push("unrelated formats ranked apart".to_string());
+        }
+        assert!(misses.is_empty(), "{}", misses.join("\n"));
+    }
+
+    #[test]
+    fn track_identity_normalizes_the_language_and_is_none_without_lang_or_title() {
+        let mut t = coded(
+            sdh_flag(forced_flag(titled(
+                track(TrackKind::Subtitle, 1, Some("EN")),
+                "English",
+            ))),
+            "subrip",
+        );
+        assert_eq!(
+            track_identity(&t),
+            Some(TrackIdentity {
+                lang: Some("eng".into()),
+                title: Some("English".into()),
+                forced: true,
+                sdh: true,
+                codec: Some("subrip".into()),
+            })
+        );
+        t.lang = None;
+        t.title = None;
+        assert_eq!(track_identity(&t), None);
+    }
+
+    /// A legacy bare-language key (saved before identity) repairs a series stuck on Forced: it
+    /// prefers non-forced, then non-SDH, and the earliest track when nothing else separates them.
+    #[test]
+    fn a_legacy_language_key_prefers_the_plain_track_over_forced_and_sdh() {
+        let key = TrackMemory::Key("eng".into());
+        let eng = |id| track(TrackKind::Subtitle, id, Some("eng"));
+        assert_rows(
+            vec![
+                ("forced first", vec![forced_flag(eng(1)), eng(2)], Some(2)),
+                ("sdh first", vec![sdh_flag(eng(1)), eng(2)], Some(2)),
+                (
+                    "all forced -> earliest",
+                    vec![forced_flag(eng(1)), forced_flag(eng(2))],
+                    Some(1),
+                ),
+            ],
+            |tracks| pick(tracks, &key),
+        );
+    }
+
+    /// docs/12: global Always + language no longer lets a Forced or SDH track listed first win.
+    #[test]
+    fn always_with_a_language_prefers_the_plain_track_over_forced_and_sdh() {
+        use SubtitleDecision::Track as Pick;
+        let global = LanguagePrefs {
+            subtitle: Some("eng".into()),
+            subtitle_mode: SubtitleMode::Always,
+            ..no_global_prefs()
+        };
+        let eng = |id| track(TrackKind::Subtitle, id, Some("eng"));
+        assert_rows(
+            vec![
+                ("forced first", vec![forced_flag(eng(1)), eng(2)], Pick(2)),
+                ("sdh before plain", vec![sdh_flag(eng(1)), eng(2)], Pick(2)),
+                (
+                    "forced, sdh, plain",
+                    vec![forced_flag(eng(1)), sdh_flag(eng(2)), eng(3)],
+                    Pick(3),
+                ),
+                (
+                    "only forced and sdh: sdh beats forced",
+                    vec![forced_flag(eng(1)), sdh_flag(eng(2))],
+                    Pick(2),
+                ),
+            ],
+            |tracks| resolve_track_selection(tracks, None, &global).subtitle,
+        );
+    }
+
+    #[test]
+    fn a_remembered_audio_identity_picks_the_matching_audio_track() {
+        let main = titled(track(TrackKind::Audio, 3, Some("eng")), "Surround");
+        let pref = SeriesTrackPref {
+            audio: remembered(&main),
+            subtitle: TrackMemory::Unset,
+        };
+        let tracks = vec![
+            track(TrackKind::Audio, 1, Some("jpn")),
+            titled(track(TrackKind::Audio, 2, Some("eng")), "Commentary"),
+            main,
+        ];
+        let decision = resolve_track_selection(&tracks, Some(&pref), &no_global_prefs());
+        assert_eq!(decision.audio, Some(3));
     }
 }

@@ -1,0 +1,53 @@
+Backport of androidx/media commit 4c95cd96b53e83969c269e197a16cd059cec90ee
+("Do not treat unexpected AudioTrack position decrease as overflow",
+androidx/media#3407, released in 1.12.0-alpha02) onto the 1.11.1 tag.
+Main-source hunks only; the upstream test hunks and release notes are not
+part of the artifact. Copyright The Android Open Source Project,
+Apache License 2.0. Applied by tools/media3-patch/build.sh.
+
+diff --git a/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/AudioTrackPositionTracker.java b/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/AudioTrackPositionTracker.java
+index 6f5c1c24f82..cd2f603024a 100644
+--- a/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/AudioTrackPositionTracker.java
++++ b/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/AudioTrackPositionTracker.java
+@@ -119,6 +119,13 @@ void onSystemTimeUsMismatch(
+ 
+   private static final long FORCE_RESET_WORKAROUND_TIMEOUT_MS = 200;
+ 
++  /**
++   * The minimum distance between the previous and current raw playback head position to treat a
++   * decrease in position as a 32-bit unsigned integer wrap-around rather than an unexpected
++   * position decrease or reset.
++   */
++  private static final long MIN_RAW_PLAYBACK_HEAD_POSITION_WRAP_DISTANCE = 1L << 31;
++
+   private static final int MAX_PLAYHEAD_OFFSET_COUNT = 10;
+   private static final int MIN_PLAYHEAD_OFFSET_SAMPLE_INTERVAL_US = 30_000;
+   private static final int MIN_LATENCY_SAMPLE_INTERVAL_US = 50_0000;
+@@ -551,9 +558,13 @@ private void updateRawPlaybackHeadPosition(long currentTimeMs) {
+       if (expectRawPlaybackHeadReset) {
+         sumRawPlaybackHeadPosition += this.rawPlaybackHeadPosition;
+         expectRawPlaybackHeadReset = false;
+-      } else {
++      } else if (this.rawPlaybackHeadPosition - rawPlaybackHeadPosition
++          >= MIN_RAW_PLAYBACK_HEAD_POSITION_WRAP_DISTANCE) {
+         // The value must have wrapped around.
+         rawPlaybackHeadWrapCount++;
++      } else {
++        resetSyncParams();
++        audioTimestampPoller.reset();
+       }
+     }
+     this.rawPlaybackHeadPosition = rawPlaybackHeadPosition;
+diff --git a/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/DefaultAudioSink.java b/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/DefaultAudioSink.java
+index 5800f9d5981..1d3afeaddea 100644
+--- a/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/DefaultAudioSink.java
++++ b/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/DefaultAudioSink.java
+@@ -1374,7 +1374,7 @@ public boolean hasPendingData() {
+         && (SDK_INT < 29
+             || !audioOutput.isOffloadedPlayback()
+             || !handledOffloadOnPresentationEnded)
+-        && hasAudioOutputPendingData(getWrittenFrames());
++        && (outputBuffer != null || hasAudioOutputPendingData(getWrittenFrames()));
+   }
+ 
+   @Override

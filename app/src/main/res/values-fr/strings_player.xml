@@ -106,11 +106,20 @@
     <string name="player_track_loading">Chargement…</string>
     <string name="player_track_unavailable">Indisponible</string>
     <string name="player_subtitle_unavailable">Impossible de charger ces sous-titres</string>
+    <string name="player_track_change_failed">Impossible de changer de piste. La lecture continue avec la piste actuelle.</string>
 
     <!-- Fatal playback errors. -->
     <string name="player_error_generic">Erreur de lecture\u00A0: %1$s</string>
     <string name="player_error_lost_connection">Erreur de lecture\u00A0: connexion au serveur perdue</string>
     <string name="player_error_direct_play_blocked">Ce fichier ne peut pas être lu en lecture directe sur ce téléviseur (%1$s). Serveur\u00A0: %2$s. Réglez Qualité sur Auto dans Paramètres › Lecture pour laisser le serveur le transcoder.</string>
+    <string name="player_error_transcode_no_media">La conversion du serveur ne produit plus de vidéo. Le fichier est peut-être plus court que sa durée indiquée.</string>
+    <string name="player_error_stuck_at_end">Lecture arrêtée : la suite de cette vidéo n\'a pas pu être lue.</string>
+    <string name="player_error_stalled_mid">Lecture arrêtée : cette vidéo n\'a pas pu continuer au-delà de ce point.</string>
+    <string name="player_error_transcode_failed">Le serveur n\'a pas pu convertir cette vidéo pour ce téléviseur.</string>
+    <string name="player_error_unplayable_track">Ce téléviseur ne peut pas décoder cette %1$s (%2$s).</string>
+    <string name="player_error_unplayable_track_unconverted">Ce téléviseur ne peut pas décoder la %1$s envoyée par le serveur (%2$s). Si le transcodage vidéo est désactivé pour ce compte, le serveur ne peut pas la convertir.</string>
+    <string name="player_error_track_video">piste vidéo</string>
+    <string name="player_error_track_audio">piste audio</string>
 
     <!-- Watch together. -->
     <string name="wt_eyebrow">REGARDER ENSEMBLE</string>

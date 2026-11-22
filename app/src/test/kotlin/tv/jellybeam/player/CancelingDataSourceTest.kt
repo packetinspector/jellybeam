@@ -10,6 +10,8 @@ import okhttp3.Callback
 import okhttp3.Request
 import okhttp3.Response
 import okio.Timeout
+import tv.jellybeam.player.ass.uninitialized
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -48,6 +50,50 @@ private class FakeDataSource : DataSource {
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int = readResult
     override fun close() {
         closeCallCount++
+    }
+}
+
+/** [DataSource] fake serving [bytes] from the opened position, at most [chunk] per read, counting reads. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private class ByteSource(private val bytes: ByteArray, private val chunk: Int = Int.MAX_VALUE) : DataSource {
+    var reads = 0
+        private set
+    var lastLength = 0
+        private set
+    private var pos = 0
+
+    override fun addTransferListener(transferListener: TransferListener) {}
+    override fun open(dataSpec: DataSpec): Long {
+        pos = dataSpec.position.toInt()
+        return (bytes.size - pos).toLong()
+    }
+    override fun getUri(): Uri? = null
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        reads++
+        lastLength = length
+        if (pos >= bytes.size) return C.RESULT_END_OF_INPUT
+        val n = minOf(length, chunk, bytes.size - pos)
+        System.arraycopy(bytes, pos, buffer, offset, n)
+        pos += n
+        return n
+    }
+    override fun close() {}
+}
+
+/** android.jar stubs build no Uri, so a bare DataSpec with only [position] set, as [OutOfMediaGateTest] does. */
+private fun spec(position: Long): DataSpec = uninitialized(DataSpec::class.java).also {
+    DataSpec::class.java.getDeclaredField("position").apply { isAccessible = true }.setLong(it, position)
+}
+
+/** Reads [source] to end of input [size] bytes at a time. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private fun drain(source: DataSource, size: Int): ByteArray {
+    val out = java.io.ByteArrayOutputStream()
+    val buf = ByteArray(size)
+    while (true) {
+        val n = source.read(buf, 0, size)
+        if (n == C.RESULT_END_OF_INPUT) return out.toByteArray()
+        out.write(buf, 0, n)
     }
 }
 
@@ -97,5 +143,60 @@ class CancelingDataSourceTest {
         source.close()
 
         assertEquals(1, delegate.closeCallCount)
+    }
+
+    @Test
+    fun `field-sized reads come from one upstream read per buffer, byte for byte`() {
+        val bytes = ByteArray(40_000) { (it * 31).toByte() }
+        val upstream = ByteSource(bytes)
+        val source = CancelingDataSource(upstream, ThreadLocal())
+        source.open(spec(0))
+
+        val read = drain(source, 3)
+
+        assertArrayEquals(bytes, read)
+        // 40 000 bytes / 16 KiB buffers = 3 fills, plus the end-of-input read.
+        assertEquals(4, upstream.reads)
+    }
+
+    @Test
+    fun `a read as large as the buffer goes straight upstream`() {
+        val upstream = ByteSource(ByteArray(100_000))
+        val source = CancelingDataSource(upstream, ThreadLocal())
+        source.open(spec(0))
+
+        source.read(ByteArray(64 * 1024), 0, 64 * 1024)
+
+        assertEquals(64 * 1024, upstream.lastLength)
+    }
+
+    @Test
+    fun `a reopen drops bytes buffered for the old position`() {
+        val bytes = ByteArray(1_000) { it.toByte() }
+        val upstream = ByteSource(bytes)
+        val source = CancelingDataSource(upstream, ThreadLocal())
+        source.open(spec(0))
+        source.read(ByteArray(1), 0, 1)
+        source.close()
+
+        source.open(spec(500))
+        val one = ByteArray(1)
+        source.read(one, 0, 1)
+
+        assertEquals(bytes[500], one[0])
+    }
+
+    @Test
+    fun `end of input comes only after every buffered byte, and a clean end never cancels`() {
+        val call = FakeCall()
+        val threadLocal = ThreadLocal<Call?>().apply { set(call) }
+        val upstream = ByteSource(ByteArray(10) { it.toByte() }, chunk = 4)
+        val source = CancelingDataSource(upstream, threadLocal)
+        source.open(spec(0))
+
+        assertEquals(10, drain(source, 1).size)
+        source.close()
+
+        assertEquals(0, call.cancelCallCount)
     }
 }

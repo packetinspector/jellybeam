@@ -39,6 +39,9 @@ import uniffi.jellybeam_core.ChangeEvent
 import uniffi.jellybeam_core.CollectionInfo
 import uniffi.jellybeam_core.ExtraItem
 import uniffi.jellybeam_core.ItemDetail
+import uniffi.jellybeam_core.SeasonStats
+import uniffi.jellybeam_core.SeriesPlayTarget
+import uniffi.jellybeam_core.SeriesSummary
 import uniffi.jellybeam_core.SortOrder
 
 private const val SERIES_ITEM_TYPE = "Series"
@@ -87,23 +90,32 @@ data class DetailUiState(
     val seasonsSettled: Boolean = false,
     val seasons: List<Card> = emptyList(),
     val selectedSeasonId: String? = null,
-    val isLoadingEpisodes: Boolean = false,
-    val episodes: List<Card> = emptyList(),
     /**
-     * docs/11 item 11: all of the series' episodes across every season, fetched via
-     * [CoreGateway.seriesEpisodes] so [DetailFormatting.resolvePrimaryAction] finds the
-     * in-progress/next-unplayed episode regardless of the selected season tab. Series-only.
+     * The season the newest selection asked for; [selectedSeasonId] stays on the shown one until
+     * that read lands, and the shelf takes no focus in between ([episodeShelfEnterable]).
      */
-    val allEpisodes: List<Card> = emptyList(),
+    val requestedSeasonId: String? = null,
     /**
-     * True once the first [allEpisodes] fetch has settled (success or failure), so "no primary
-     * pill" can be told apart from "primary pill not resolved yet" (docs/15 §2 rule 3).
+     * [selectedSeasonId]'s episodes as read, virtual ones included (`season_episodes_read`); both
+     * land in one write, so the chip and the shelf never disagree. [DetailFormatting.visibleEpisodes] is what is shown.
      */
-    val allEpisodesSettled: Boolean = false,
+    val seasonEpisodes: List<Card> = emptyList(),
     /**
-     * docs/09 `Settings::show_virtual_episodes`, derived from [SettingsStore.settings], so a season
-     * switch can apply the core's `children()` virtual filter in memory and the season chips can show
-     * availability markers (docs/11 §12); `null` means not loaded yet -> fall back to [CoreGateway.children].
+     * docs/11 item 11: the core's Play pick ([CoreGateway.seriesSummary]), the source of the primary
+     * pill and the resume season. Series-only, published with [seasonStats] in one write.
+     */
+    val seriesPlay: SeriesPlayTarget? = null,
+    /** docs/11 §12 / docs/19: the core's per-season counts for the chip markers and the series-scope menu. */
+    val seasonStats: List<SeasonStats> = emptyList(),
+    /**
+     * True once the first [CoreGateway.seriesSummary] read has settled (success or failure), so "no
+     * primary pill" can be told apart from "primary pill not resolved yet" (docs/15 §2 rule 3).
+     */
+    val summarySettled: Boolean = false,
+    /**
+     * docs/09 `Settings::show_virtual_episodes`, derived from [SettingsStore.settings]: the season
+     * chips show availability markers only while it is on (docs/11 §12), and a flip re-serves the
+     * selected season; `null` means not loaded yet.
      */
     val showVirtualEpisodes: Boolean? = null,
     /**
@@ -185,7 +197,7 @@ data class DetailUiState(
     /** True once the mirror dropped this Movie/Episode; [DetailScreen] then pops (docs/07 §5). */
     val itemRemoved: Boolean = false,
     /**
-     * Series only: a season, episode or all-episodes read failed (docs/07 §5), as opposed to
+     * Series only: the seasons, summary or selected-season read failed (docs/07 §5), as opposed to
      * returning nothing; [DetailScreen] shows an error with Retry ([DetailViewModel.retryLists]).
      */
     val listError: Boolean = false,
@@ -218,8 +230,8 @@ class DetailViewModel(
      */
     private var viewerPickId: String? = null
 
-    /** Newest [allEpisodesSeq] / [seasonsSeq] whose result was published: an older read never lands over it. */
-    private var publishedAllSeq = 0
+    /** Newest [summarySeq] / [seasonsSeq] whose result was published: an older read never lands over it. */
+    private var publishedSummarySeq = 0
     private var seasonsSeq = 0
     private var publishedSeasonsSeq = 0
 
@@ -238,35 +250,26 @@ class DetailViewModel(
     private fun canOpen(url: String): Boolean = openableLinks.getOrPut(url) { canOpenTrailer(url) }
 
     /**
-     * True once the first [publishAllEpisodes] has landed (success or failure), the per-episode
-     * signal the resume pick waits for (docs/15 §0.2/§5).
+     * True once the first [publishSummary] has landed (success or failure), the per-episode signal
+     * the resume pick waits for (docs/15 §0.2/§5).
      */
-    private var allEpisodesResolved = false
+    private var summaryResolved = false
 
-    /** Bumped by each [DetailUiState.allEpisodes] read, so an older read never lands over a newer one. */
-    private var allEpisodesSeq = 0
+    /** Bumped by each [CoreGateway.seriesSummary] read, so an older read never lands over a newer one. */
+    private var summarySeq = 0
 
     /** The newest recorded outcome of each series list; [DetailUiState.listError] is "any failed". Main-thread only. */
     private val listOutcomes = ListOutcomes()
-
-    /**
-     * The season's episodes derived from [DetailUiState.allEpisodes] ([DetailFormatting.episodesOfSeason]),
-     * or `null` when memory can't answer faithfully and the caller must query [CoreGateway.children].
-     */
-    private fun episodesFromMemory(seasonId: String): List<Card>? {
-        val state = _state.value
-        if (!state.allEpisodesSettled) return null
-        val season = state.seasons.firstOrNull { it.id == seasonId } ?: return null
-        val showVirtual = state.showVirtualEpisodes ?: return null
-        return DetailFormatting.episodesOfSeason(season, state.allEpisodes, showVirtual)
-    }
 
     /** Whether the screen is top of its stack ([setActive]); [changeRefreshScheduler] refreshes only while true. */
     private val _active = MutableStateFlow(true)
 
     fun setActive(active: Boolean) {
         _active.value = active
-        if (!active) pillJob?.cancel()
+        if (!active) {
+            pillJob?.cancel()
+            randomJob?.cancel()
+        }
     }
 
     /**
@@ -302,19 +305,19 @@ class DetailViewModel(
         }
         if (card.itemType == BOXSET_ITEM_TYPE) loadCollection()
         if (card.itemType == SERIES_ITEM_TYPE) {
-            // docs/09: the flag follows its owner, so a page on the stack re-serves its season when Settings flips it;
-            // a later flip also re-reads the lists on return, since the core's season list filters all-missing seasons.
+            // docs/09: the flag follows its owner, so a page on the stack re-filters its season in place when Settings
+            // flips it (no read racing the settings write); a later flip also re-reads the lists on return, since the
+            // core's season list filters all-missing seasons.
             viewModelScope.launch {
                 settingsStore.settings.filterNotNull().map { it.showVirtualEpisodes }.distinctUntilChanged().collect { shown ->
                     val previous = _state.value.showVirtualEpisodes
                     _state.update { it.copy(showVirtualEpisodes = shown) }
-                    syncSelection(resyncEpisodes = true)
                     if (previous != null) changeRefreshScheduler.markDirty()
                 }
             }
             viewModelScope.launch { loadSeasons(card.id) }
             // docs/11 item 11's cross-season fix, independent of loadSeasons/selectSeason.
-            viewModelScope.launch { loadAllEpisodes(card.id) }
+            viewModelScope.launch { loadSummary(card.id) }
         }
         // docs/19 §3.3: cached in the core after first page; menu rows read state, not re-fetch.
         viewModelScope.launch {
@@ -381,8 +384,8 @@ class DetailViewModel(
                     }
                 }.awaitAll().filterNotNull().toMap()
             }
-            val play = CollectionFormatting.resolvePlay(strings, members, previous = _state.value.collectionPlay) { series ->
-                runCatchingCancellable { gateway.seriesEpisodes(series.id) }.getOrNull()
+            val play = CollectionFormatting.resolvePlay(members, previous = _state.value.collectionPlay) { series, replay ->
+                runCatchingCancellable { gateway.seriesSummary(series.id, replay) }.getOrNull()
             }
             _state.update { it.copy(members = members, membersSettled = true, memberSeasonCounts = seasonCounts, collectionPlay = play) }
         }.also { collectionJob = it }
@@ -432,13 +435,13 @@ class DetailViewModel(
     }
 
     /**
-     * Fails open to empty so the page always settles; the result goes through [publishAllEpisodes]
-     * like every other read, so an older one never lands over a newer.
+     * Fails open to an empty summary so the page always settles; the result goes through
+     * [publishSummary] like every other read, so an older one never lands over a newer.
      */
-    private suspend fun loadAllEpisodes(seriesId: String) {
-        val seq = ++allEpisodesSeq
-        val allEpisodes = browse { gateway.seriesEpisodes(seriesId) }
-        publishAllEpisodes(seq, allEpisodes.orEmpty(), failed = allEpisodes == null)
+    private suspend fun loadSummary(seriesId: String) {
+        val seq = ++summarySeq
+        val summary = browse { gateway.seriesSummary(seriesId, replay = false) }
+        publishSummary(seq, summary, failed = summary == null)
     }
 
     /**
@@ -475,16 +478,16 @@ class DetailViewModel(
     }
 
     /**
-     * The only writer of [DetailUiState.allEpisodes], [DetailUiState.allEpisodesSettled] and
-     * [allEpisodesResolved]: a [seq] older than the newest published is dropped whole (no settle, no resume pick, no outcome), the winner
-     * then re-derives the selection. Deduped: a repeated id is a mirror data error. [failed] records the read as failed.
+     * The only writer of [DetailUiState.seriesPlay], [DetailUiState.seasonStats], [DetailUiState.summarySettled]
+     * and [summaryResolved]: a [seq] older than the newest published is dropped whole (no settle, no resume pick,
+     * no outcome), the winner then re-derives the selection. [failed] records the read as failed.
      */
-    private fun publishAllEpisodes(seq: Int, list: List<Card>, failed: Boolean = false) {
-        if (seq <= publishedAllSeq) return
-        publishedAllSeq = seq
-        recordRead(ReadSource.ALL_EPISODES, seq, ok = !failed)
-        _state.update { it.copy(allEpisodes = DetailFormatting.dedupeById(list) { e -> e.id }, allEpisodesSettled = true) }
-        allEpisodesResolved = true
+    private fun publishSummary(seq: Int, summary: SeriesSummary?, failed: Boolean = false) {
+        if (seq <= publishedSummarySeq) return
+        publishedSummarySeq = seq
+        recordRead(ReadSource.SUMMARY, seq, ok = !failed)
+        _state.update { it.copy(seriesPlay = summary?.target, seasonStats = summary?.seasons.orEmpty(), summarySettled = true) }
+        summaryResolved = true
         syncSelection(resyncEpisodes = true)
     }
 
@@ -518,7 +521,7 @@ class DetailViewModel(
         }
         // Hoisted out of the `any {}` lambdas so a burst of N ids doesn't rebuild this set N times.
         val knownIds = knownIds()
-        return when (val change = DetailFormatting.collectionChange(event, card.id, card.itemType == SERIES_ITEM_TYPE, knownIds)) {
+        return when (val change = DetailFormatting.collectionChange(event, card.id, card.itemType == SERIES_ITEM_TYPE, knownIds, card.libraryId)) {
             DetailFormatting.CollectionChange.Affects -> true
             DetailFormatting.CollectionChange.Ignores -> false
             is DetailFormatting.CollectionChange.AffectsIfChildOf -> DetailFormatting.isChildOfSeries(
@@ -532,8 +535,8 @@ class DetailViewModel(
         val state = _state.value
         val ids = mutableSetOf<String>()
         state.seasons.mapTo(ids) { it.id }
-        state.episodes.mapTo(ids) { it.id }
-        state.allEpisodes.mapTo(ids) { it.id }
+        DetailFormatting.visibleEpisodes(state.seasonEpisodes, state.showVirtualEpisodes).mapTo(ids) { it.id }
+        state.seriesPlay?.let { ids += it.episode.id }
         state.members.mapTo(ids) { it.id }
         // A Series member's target episode: watched elsewhere, it must move the pill on.
         state.collectionPlay?.episode?.let { ids += it.id }
@@ -543,36 +546,39 @@ class DetailViewModel(
     private suspend fun refreshQuietly(seriesId: String) {
         val seasonsSeqNow = ++seasonsSeq
         // A failed read keeps the current seasons; the scheduler's loop must not see the throw.
-        val seasons = runCatchingCancellable {
-            gateway.children(seriesId, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE)
-                .let { DetailFormatting.dedupeById(it) { season -> season.id } }
-                .sortedWith(compareBy(nullsLast()) { it.indexNumber })
-        }.getOrNull()
+        val seasons = runCatchingCancellable { readSeasons(seriesId) }.getOrNull()
         // Seasons and the selection move in one synchronous section: no state has seasons without the selected chip.
         publishSeasons(seasonsSeqNow, seasons, initial = false)
         // docs/11 item 11: re-fetched unconditionally -- a watched-state flip anywhere in the
-        // series can change [resolvePrimaryAction].
-        val seq = ++allEpisodesSeq
-        val allEpisodes = try {
-            gateway.seriesEpisodes(seriesId)
+        // series can move the Play pick and the counts.
+        val seq = ++summarySeq
+        val summary = try {
+            gateway.seriesSummary(seriesId, replay = false)
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
             // Keep what is on screen; an unsettled page still has its initial read in flight, which fails open itself.
             return
         }
-        publishAllEpisodes(seq, allEpisodes)
+        publishSummary(seq, summary)
     }
+
+    /** The series' seasons as the chip row shows them ([inIndexOrder]). */
+    private suspend fun readSeasons(seriesId: String): List<Card> =
+        inIndexOrder(gateway.children(seriesId, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE))
+
+    /**
+     * Deduped (a repeated id can't survive a row's keys) and by index with unnumbered rows last; the
+     * core's `IndexNumber` order puts them first (SQLite NULLs sort low), so this is not a duplicate.
+     */
+    private fun inIndexOrder(cards: List<Card>): List<Card> =
+        DetailFormatting.dedupeById(cards) { it.id }.sortedWith(compareBy(nullsLast()) { it.indexNumber })
 
     private suspend fun loadSeasons(seriesId: String) {
         val seq = ++seasonsSeq
         _state.update { it.copy(isLoadingSeasons = true) }
         // A failed read settles the page (so its focus seed can fall back to the door) and says so.
-        val seasons = browse {
-            gateway.children(seriesId, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE)
-                .let { DetailFormatting.dedupeById(it) { season -> season.id } }
-                .sortedWith(compareBy(nullsLast()) { it.indexNumber })
-        }
+        val seasons = browse { readSeasons(seriesId) }
         // Chips paint their markers from first paint (docs/11 §12): the store publishes before it releases load().
         runCatchingCancellable { settingsStore.load() }
         publishSeasons(seq, seasons, initial = true)
@@ -581,7 +587,7 @@ class DetailViewModel(
     /** Retry on the lists' error block: re-reads what a failed series read left empty; the error stays until a read lands. */
     fun retryLists() {
         viewModelScope.launch { loadSeasons(card.id) }
-        viewModelScope.launch { loadAllEpisodes(card.id) }
+        viewModelScope.launch { loadSummary(card.id) }
     }
 
     /**
@@ -599,23 +605,23 @@ class DetailViewModel(
             recordRead(ReadSource.SEASONS, seq, ok = false)
         }
         _state.update {
-            val next = if (take) it.copy(seasons = seasons!!) else it
+            val next = if (take) it.copy(seasons = seasons!!).withoutGoneShownSeason() else it
             if (initial) next.copy(isLoadingSeasons = false, seasonsSettled = true) else next
         }
         syncSelection(resyncEpisodes = false)
     }
 
     /**
-     * Re-derives the selection after seasons or allEpisodes changed (docs/15 §0.2/§5): the first
+     * Re-derives the selection after seasons or the summary changed (docs/15 §0.2/§5): the first
      * pick waits for both signals and never repeats; a removed pick falls over
-     * ([DetailFormatting.reconcileSelectedSeason]). [resyncEpisodes] re-serves the kept selection
-     * from the fresh [DetailUiState.allEpisodes] without a skeleton.
+     * ([DetailFormatting.reconcileSelectedSeason]). [resyncEpisodes] re-reads the kept selection
+     * without a skeleton.
      */
     private fun syncSelection(resyncEpisodes: Boolean) {
         val state = _state.value
         if (state.isLoadingSeasons || !state.seasonsSettled) return
-        val current = state.selectedSeasonId
-        val target = DetailFormatting.reconcileSelectedSeason(current, state.seasons, state.allEpisodes, settled = allEpisodesResolved)
+        val current = state.requestedSeasonId ?: state.selectedSeasonId
+        val target = DetailFormatting.reconcileSelectedSeason(current, state.seasons, state.seriesPlay, settled = summaryResolved)
         when {
             target == null -> Unit
             target != current -> {
@@ -635,42 +641,39 @@ class DetailViewModel(
     }
 
     /**
-     * The only writer of [DetailUiState.selectedSeasonId]: bumps [selectionGen], serves the season
-     * from memory in the same frame, else queries [CoreGateway.children]; episodes land only via
-     * [publishEpisodes]. [quiet] re-serves the current season without a skeleton.
-     * [DetailFormatting.dedupeById] guards a repeated id, which can't survive `LazyVerticalGrid`'s key.
+     * Reads [seasonId] from [CoreGateway.seasonEpisodes] (only the shown season crosses FFI, docs/11
+     * §12); the shown chip and shelf stay until [publishEpisodes] swaps both ([publishSeasons]
+     * clears a shown season the list dropped). [quiet] re-reads the requested season.
      */
     private fun applySelection(seasonId: String, quiet: Boolean = false) {
-        if (!quiet && _state.value.selectedSeasonId == seasonId) return
+        if (!quiet && _state.value.requestedSeasonId == seasonId) return
         val gen = ++selectionGen
-        val local = episodesFromMemory(seasonId)
-        // A season memory can answer is a good read of the episodes list.
-        if (local != null) recordRead(ReadSource.EPISODES, gen, ok = true)
-        _state.update {
-            when {
-                local != null -> it.copy(selectedSeasonId = seasonId, isLoadingEpisodes = false, episodes = local)
-                quiet -> it.copy(selectedSeasonId = seasonId)
-                else -> it.copy(selectedSeasonId = seasonId, isLoadingEpisodes = true, episodes = emptyList())
-            }
-        }
+        _state.update { it.copy(requestedSeasonId = seasonId) }
         viewModelScope.launch {
-            if (local != null) return@launch
-            val fetched = browse {
-                gateway.children(seasonId, SortOrder.INDEX_NUMBER, 0u, UInt.MAX_VALUE)
-                    .let { DetailFormatting.dedupeById(it) { episode -> episode.id } }
-                    .sortedWith(compareBy(nullsLast()) { it.indexNumber })
-            }
-            // A failed read clears the loading flag (docs/11 §Loading state) and says so; a quiet
-            // re-serve keeps what is on screen instead.
-            if (fetched == null && quiet && !_state.value.isLoadingEpisodes) return@launch
-            publishEpisodes(gen, fetched ?: emptyList(), failed = fetched == null)
+            val fetched = browse { inIndexOrder(gateway.seasonEpisodes(seasonId)) }
+            // A failed re-read of the shown season keeps it; a failed switch lands the season empty and says so.
+            if (fetched == null && quiet && _state.value.selectedSeasonId == seasonId) return@launch
+            publishEpisodes(gen, seasonId, fetched ?: emptyList(), failed = fetched == null)
         }
     }
 
-    /** The only writer of a network-served [DetailUiState.episodes]; a stale [gen] is dropped whole. */
-    private fun publishEpisodes(gen: Int, episodes: List<Card>, failed: Boolean = false) {
+    /**
+     * docs/15 §5: a shown season the season list dropped clears with its episodes in the same write,
+     * so no state shows episodes whose chip is gone. An empty list is a read gap, not a removal.
+     */
+    private fun DetailUiState.withoutGoneShownSeason(): DetailUiState {
+        val shown = selectedSeasonId ?: return this
+        val gone = seasons.isNotEmpty() && seasons.none { it.id == shown }
+        return if (gone) copy(selectedSeasonId = null, seasonEpisodes = emptyList()) else this
+    }
+
+    /**
+     * The only writer of a landed [DetailUiState.selectedSeasonId] and [DetailUiState.seasonEpisodes],
+     * in one update; a stale [gen] is dropped whole.
+     */
+    private fun publishEpisodes(gen: Int, seasonId: String, episodes: List<Card>, failed: Boolean = false) {
         if (gen != selectionGen) return
-        _state.update { it.copy(isLoadingEpisodes = false, episodes = episodes) }
+        _state.update { it.copy(selectedSeasonId = seasonId, seasonEpisodes = episodes) }
         recordRead(ReadSource.EPISODES, gen, ok = !failed)
     }
 
@@ -679,8 +682,11 @@ class DetailViewModel(
     /** Cancels a pending auto-dismiss so a newer toast isn't cut short by an older timer. */
     private var toastJob: Job? = null
 
-    /** Scope [MenuAction.PlayRandom] picks from, captured at [openMenu] (menu traps focus). */
-    private var randomPool: List<Card> = emptyList()
+    /**
+     * Season-scope pool [MenuAction.PlayRandom] picks from, captured at [openMenu] (menu traps
+     * focus); `null` at series scope, which reads the series' episodes when the row runs (docs/19 §3.3).
+     */
+    private var randomPool: List<Card>? = null
 
     /**
      * docs/19: scope is the series until a season chip is tapped -- keyed off [viewerPickId] while
@@ -696,15 +702,16 @@ class DetailViewModel(
     fun openMenu() {
         val state = _state.value
         val scopeSeason = currentScopeSeason()
-        val scopeEpisodes = if (scopeSeason != null) state.episodes else emptyList()
+        val scopeEpisodes = if (scopeSeason != null) DetailFormatting.visibleEpisodes(state.seasonEpisodes, state.showVirtualEpisodes) else emptyList()
         val seriesCard = if (card.itemType == EPISODE_ITEM_TYPE) DetailFormatting.seriesCardFrom(state.card) else null
         val input = MenuInput(
             card = state.card,
             itemType = card.itemType,
             scopeSeason = scopeSeason,
             scopeEpisodes = scopeEpisodes,
-            allEpisodes = state.allEpisodes,
-            primaryAction = DetailFormatting.resolvePrimaryAction(strings, state.card, state.allEpisodes),
+            seasonStats = state.seasonStats,
+            seriesTarget = state.seriesPlay?.episode,
+            primaryAction = DetailFormatting.resolvePrimaryAction(strings, state.card, state.seriesPlay),
             isFavorite = state.card.isFavorite,
             hasCollections = state.collections.isNotEmpty(),
             isAdministrator = state.isAdministrator,
@@ -713,7 +720,7 @@ class DetailViewModel(
             extrasAvailable = state.extrasAvailable,
         )
         val model = buildMenu(strings, input)
-        randomPool = scopeSeason?.let { scopeEpisodes } ?: state.allEpisodes
+        randomPool = scopeSeason?.let { scopeEpisodes }
         _state.update { it.copy(menu = MenuUiState(model = model, level = MenuLevel.FIRST, scopeSeasonNumber = scopeSeason?.indexNumber)) }
         if (state.extrasAvailable) fetchExtrasIfNeeded()
     }
@@ -740,8 +747,15 @@ class DetailViewModel(
     }
 
     /** Back/Left/Select on a row, or an action completing -- closes the panel and confirm block. */
-    fun closeMenu() {
-        _state.update { it.copy(menu = null, confirm = null) }
+    fun closeMenu() = dismissMenu { it.copy(confirm = null) }
+
+    /**
+     * docs/19 §1.4: the one way the panel closes, applying [change] in the same write; the menu's own
+     * work ([randomJob]) is cancelled here so nothing a closed menu started still plays.
+     */
+    private fun dismissMenu(change: (DetailUiState) -> DetailUiState = { it }) {
+        randomJob?.cancel()
+        _state.update { change(it).copy(menu = null) }
     }
 
     /** "Add to collection" select -- swaps panel content for the collections list (§1.3). */
@@ -768,7 +782,7 @@ class DetailViewModel(
             is ExtraEntry.Local -> startPlayback(entry.item.id, startFromBeginning = true)
             is ExtraEntry.Remote -> {
                 pillJob?.cancel()
-                _state.update { it.copy(menu = null, pendingTrailerUrl = entry.url) }
+                dismissMenu { it.copy(pendingTrailerUrl = entry.url) }
             }
         }
     }
@@ -780,7 +794,7 @@ class DetailViewModel(
     fun playPillTrailer() {
         when (val pill = _state.value.pillTrailer) {
             null -> Unit
-            is PillTrailer.Remote -> _state.update { it.copy(menu = null, pendingTrailerUrl = pill.url) }
+            is PillTrailer.Remote -> dismissMenu { it.copy(pendingTrailerUrl = pill.url) }
             PillTrailer.Local -> {
                 if (pillJob?.isActive == true) return
                 pillJob = viewModelScope.launch {
@@ -814,7 +828,7 @@ class DetailViewModel(
         val state = _state.value
         if (collection.id in state.memberOfCollections) return
         val itemId = state.card.id
-        _state.update { it.copy(menu = null) }
+        dismissMenu()
         viewModelScope.launch {
             val result = runCatchingCancellable { gateway.addToCollection(collection.id, itemId) }
             if (result.isSuccess) {
@@ -843,15 +857,11 @@ class DetailViewModel(
             MenuAction.RemoveFavorite -> setFavorite(favorite = false)
             is MenuAction.PlayNextUnwatched -> startPlayback(action.targetId, startFromBeginning = false)
             is MenuAction.PlayFromBeginning -> startPlayback(action.targetId, startFromBeginning = true)
-            is MenuAction.PlayRandom -> {
-                // docs/19 §3.3: reads only the pool captured at menu-open time, no gateway state.
-                val target = pickRandom(randomPool, random)
-                if (target != null) startPlayback(target.id, startFromBeginning = false) else closeMenu()
-            }
-            is MenuAction.GoToSeries -> _state.update { it.copy(menu = null, pendingSeriesNavigation = action.series) }
+            is MenuAction.PlayRandom -> playRandom()
+            is MenuAction.GoToSeries -> dismissMenu { it.copy(pendingSeriesNavigation = action.series) }
             is MenuAction.WatchTogether -> {
                 pillJob?.cancel()
-                _state.update { it.copy(menu = null, pendingWatchTogether = action) }
+                dismissMenu { it.copy(pendingWatchTogether = action) }
             }
             MenuAction.AddToCollection -> enterCollections()
             MenuAction.Extras -> {
@@ -862,10 +872,28 @@ class DetailViewModel(
         }
     }
 
+    /** The one in-flight [playRandom]; closing the menu or leaving the page cancels it, so nothing plays after. */
+    private var randomJob: Job? = null
+
+    /**
+     * docs/19 §3.3: a season scope picks from the pool captured at menu open; the series scope reads
+     * its episodes only now, so a page open never marshals the whole series. A Select while one runs
+     * is ignored; nothing to pick closes the menu.
+     */
+    private fun playRandom() {
+        if (randomJob?.isActive == true) return
+        val pool = randomPool
+        randomJob = viewModelScope.launch {
+            val candidates = pool ?: runCatchingCancellable { gateway.seriesEpisodes(card.id) }.getOrNull().orEmpty()
+            val target = pickRandom(candidates, random)
+            if (target != null) startPlayback(target.id, startFromBeginning = false) else closeMenu()
+        }
+    }
+
     /** Single-item mark: never confirms (docs/19 §1.3); header follows the mirror change event. */
     private fun markSingle(played: Boolean) {
         val itemId = _state.value.card.id
-        _state.update { it.copy(menu = null) }
+        dismissMenu()
         viewModelScope.launch {
             val result = runCatchingCancellable { gateway.setPlayed(itemId, played) }
             showToast(if (result.isSuccess) (if (played) markedWatched() else markedUnwatched()) else serverUnreachable())
@@ -884,7 +912,7 @@ class DetailViewModel(
     /** Confirm: closes confirm+panel, calls the recursive mark, toasts (docs/19 §1.3/§1.4). */
     fun confirmBulkMark() {
         val confirm = _state.value.confirm ?: return
-        _state.update { it.copy(confirm = null, menu = null) }
+        dismissMenu { it.copy(confirm = null) }
         viewModelScope.launch {
             val result = runCatchingCancellable { gateway.setPlayedRecursive(confirm.scopeId, confirm.played) }
             showToast(if (result.isSuccess) (if (confirm.played) markedWatched() else markedUnwatched()) else serverUnreachable())
@@ -898,7 +926,7 @@ class DetailViewModel(
 
     private fun setFavorite(favorite: Boolean) {
         val itemId = _state.value.card.id
-        _state.update { it.copy(menu = null) }
+        dismissMenu()
         viewModelScope.launch {
             val result = runCatchingCancellable { gateway.setFavorite(itemId, favorite) }
             showToast(if (result.isSuccess) strings.get(if (favorite) R.string.detail_toast_added_favorite else R.string.detail_toast_removed_favorite) else serverUnreachable())
@@ -907,7 +935,7 @@ class DetailViewModel(
 
     private fun refreshMetadata() {
         val itemId = _state.value.card.id
-        _state.update { it.copy(menu = null) }
+        dismissMenu()
         viewModelScope.launch {
             val result = runCatchingCancellable { gateway.refreshMetadata(itemId) }
             showToast(if (result.isSuccess) strings.get(R.string.detail_toast_refreshing_metadata) else serverUnreachable())
@@ -922,7 +950,7 @@ class DetailViewModel(
 
     /** [startPlayback] without cancelling [pillJob], for the pill's own success path. */
     private fun handOffPlayback(targetId: String, startFromBeginning: Boolean) {
-        _state.update { it.copy(menu = null, pendingPlayback = PendingPlayback(targetId, startFromBeginning)) }
+        dismissMenu { it.copy(pendingPlayback = PendingPlayback(targetId, startFromBeginning)) }
     }
 
     /** [DetailScreen] calls this once PlaybackActivity has started for [pendingPlayback]. */
@@ -977,7 +1005,7 @@ class DetailViewModelFactory(
 }
 
 /** The series lists whose read outcome [DetailUiState.listError] follows (docs/07 §5). */
-internal enum class ReadSource { SEASONS, ALL_EPISODES, EPISODES }
+internal enum class ReadSource { SEASONS, SUMMARY, EPISODES }
 
 /**
  * The newest recorded outcome of each [ReadSource], ordered by the read's own sequence: a result

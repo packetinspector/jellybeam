@@ -2,10 +2,28 @@ package tv.jellybeam.ui.library
 
 import androidx.compose.ui.input.key.Key
 
-/** Pure Page Up/Down (Channel Up/Down on the remote) decision for [LibraryScreen]'s poster grid,
- * kept apart from Compose state so the paging math is plain-JVM-testable.
+/** The poster grid's column count, shared by [LibraryScreen] and [LibraryViewModel]'s read sizes. */
+internal const val GRID_COLUMNS = 8
+
+/** docs/16 §4.6: rows the first read covers, about three screens of the grid's ~2.5 visible rows. */
+private const val FIRST_PAGE_ROWS = 8
+
+/** Pure Page Up/Down (Channel Up/Down on the remote) decision and read sizes for [LibraryScreen]'s
+ * poster grid, kept apart from Compose state so the paging math is plain-JVM-testable.
  */
 object GridPaging {
+
+    /** docs/16 §4.6: every read after the first stays large, so a long scroll costs few FFI calls. */
+    const val PAGE_SIZE = 200
+
+    /** docs/16 §4.6: the first read is a few screens of rows, so first paint stays cheap. */
+    fun firstPageSize(columns: Int): Int = columns * FIRST_PAGE_ROWS
+
+    /** docs/16 §4.6: a refresh re-reads the whole loaded prefix, never less than a first page. */
+    fun refreshSize(loaded: Int, columns: Int): Int = maxOf(firstPageSize(columns), loaded)
+
+    /** docs/16 §4.6: a rail jump to [offset] reads from [loaded] through one page past [offset]. */
+    fun tailSize(loaded: Int, offset: Int): Int = maxOf(offset + PAGE_SIZE - loaded, PAGE_SIZE)
 
     /** Keys that page the grid toward the top: Page Up and the remote's Channel Up rocker. */
     val PAGE_UP_KEYS: Set<Key> = setOf(Key.PageUp, Key.ChannelUp)

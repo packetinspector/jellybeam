@@ -1081,6 +1081,15 @@ fun PlaybackScreen(
         }
     }
 
+    // docs/18 §3.1: a track change the server refused while the stream plays on shows as a notice.
+    LaunchedEffect(state.trackChangeFailed) {
+        if (state.trackChangeFailed) {
+            noticeText = R.string.player_track_change_failed
+            noticeToken++
+            viewModel.trackChangeFailedShown()
+        }
+    }
+
     LaunchedEffect(noticeToken) {
         if (noticeToken > 0) {
             noticeShown = true
@@ -3228,7 +3237,7 @@ private fun ColumnScope.TrackPickerRows(picker: TrackPickerState, focusedIndex: 
     if (picker.delayRowShown) {
         val delayLabel = stringResource(R.string.player_subtitle_delay_row)
         val delayRow = remember(delayLabel, picker.delayText) {
-            TrackChoice(id = TRACK_PICKER_DELAY_ROW_ID, label = delayLabel, selected = false, meta = picker.delayText)
+            TrackPickerRow(id = TRACK_PICKER_DELAY_ROW_ID, label = delayLabel, selected = false, meta = picker.delayText)
         }
         TrackChoiceRow(choice = delayRow, isFocused = audioCount + picker.subtitleTracks.size == focusedIndex)
     }
@@ -3275,7 +3284,7 @@ private fun Modifier.revealWhenFocused(isFocused: Boolean, revealAbove: Dp = 0.d
 private val TRACK_SECTION_HEAD_REVEAL = 48.dp
 
 @Composable
-private fun TrackChoiceRow(choice: TrackChoice, isFocused: Boolean, modifier: Modifier = Modifier, revealAbove: Dp = 0.dp) {
+private fun TrackChoiceRow(choice: TrackPickerRow, isFocused: Boolean, modifier: Modifier = Modifier, revealAbove: Dp = 0.dp) {
     // Same focus treatment as [OsdMenuRow]: accent fill, on-accent text and markers.
     val accent = LocalAccent.current
     val textColor = if (isFocused) accent.onAccent else JellybeamTheme.Panna

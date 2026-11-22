@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
@@ -16,12 +17,15 @@ import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.SettingsStore
 import tv.jellybeam.data.displayMessage
 import tv.jellybeam.perf.PerfLog
+import tv.jellybeam.player.ass.isSeekIndexMiss
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -39,12 +43,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.jellybeam_core.SyncPlayRole
 import uniffi.jellybeam_core.AccountIdentity
-import uniffi.jellybeam_core.AudioStreamFfi
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.ChapterInfoFfi
 import uniffi.jellybeam_core.CoreException
 import uniffi.jellybeam_core.EmbeddedSubtitleFfi
-import uniffi.jellybeam_core.ExternalSubtitleFfi
 import uniffi.jellybeam_core.FailedTrackFfi
 import uniffi.jellybeam_core.MediaSegment
 import uniffi.jellybeam_core.MediaSegmentKind
@@ -60,9 +62,12 @@ import uniffi.jellybeam_core.SubtitleDeliveryFfi
 import uniffi.jellybeam_core.SyncPlayInput
 import uniffi.jellybeam_core.SyncPlaySeverity
 import uniffi.jellybeam_core.TrackDecisionFfi
+import uniffi.jellybeam_core.TrackDeliveryFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
 import uniffi.jellybeam_core.TrackMemoryFfi
+import uniffi.jellybeam_core.TranscodeCauseFfi
+import uniffi.jellybeam_core.TranscodeStreamsFfi
 import uniffi.jellybeam_core.GlideDirection
 import uniffi.jellybeam_core.SeekPreviewSize
 import uniffi.jellybeam_core.TrickplayMetaFfi
@@ -94,7 +99,7 @@ private const val ENRICHMENT_GATE_FALLBACK_MS = 1_500L
 private const val ITEM_TYPE_EPISODE = "Episode"
 
 /**
- * Sentinel [TrackChoice.id] for the track picker's synthetic subtitle "Off"
+ * Sentinel [TrackPickerRow.id] for the track picker's synthetic subtitle "Off"
  * row (docs/09 slice 3b) -- never a real [TrackMapping] id (always `>= 0`),
  * so it resolves to `null` rather than a wrong track if mistakenly threaded
  * into [TrackMapping.resolve].
@@ -110,41 +115,6 @@ internal fun streamRowId(index: Int): Long = STREAM_ROW_ID_BASE - index
 
 private fun streamRowIndexOf(id: Long): Int? = id.takeIf { it <= STREAM_ROW_ID_BASE }?.let { (STREAM_ROW_ID_BASE - it).toInt() }
 
-/** docs/18 §3.1: the policy takes the first match, so rows that need no renegotiation come first:
- * delivered tracks, the one burned in, sidecars, then streams only a renegotiation can show.
- */
-internal fun policyTracks(embedded: List<TrackInfo>, sidecars: List<TrackInfo>, rows: List<TrackInfo>): List<TrackInfo> {
-    val (burned, unburned) = rows.partition { it.isSelected }
-    return embedded + burned + sidecars + unburned
-}
-
-/** docs/18 §3.1: a decision naming a stream [rows] entry keeps player text off and returns that
- * stream for the renegotiation to show; any other decision passes through.
- */
-internal fun routeStreamRow(decision: TrackDecisionFfi, rows: List<TrackInfo>): Pair<TrackDecisionFfi, TrackInfo?> {
-    val pick = decision.subtitleTrackId?.let { id -> rows.firstOrNull { it.id == id } } ?: return decision to null
-    return decision.copy(subtitleAction = SubtitleActionFfi.OFF, subtitleTrackId = null) to pick
-}
-
-/** docs/18 §3.1: a transcode's manifest renditions, named by display title, take their stream's
- * identity and flags so they match Direct Play's; copies of streams burned in instead are dropped.
- */
-internal fun manifestTrackInfos(infos: List<TrackInfo>, streams: List<EmbeddedSubtitleFfi>): List<TrackInfo> {
-    val manifest = manifestStreams(streams)
-    if (manifest.isEmpty()) return infos
-    return infos.mapNotNull { info ->
-        if (info.kind != TrackKindFfi.SUBTITLE) return@mapNotNull info
-        manifest.streamOf(info)?.let { info.copy(title = it.title, codec = it.codec, isDefault = it.default, isForced = it.forced) }
-    }
-}
-
-private fun manifestStreams(streams: List<EmbeddedSubtitleFfi>) =
-    streams.filter { it.delivery == SubtitleDeliveryFfi.HLS && it.displayTitle != null }
-
-// Same-named renditions are one group in Media3; the first stream of that name stands for it.
-private fun List<EmbeddedSubtitleFfi>.streamOf(info: TrackInfo) =
-    firstOrNull { it.displayTitle == info.title && normalizedLanguage(it.language) == normalizedLanguage(info.lang) }
-
 // Two tracks of one language can only be told apart by title, so a title on both sides must agree.
 private fun sameSubtitleTrack(stream: EmbeddedSubtitleFfi, info: TrackInfo): Boolean {
     val titles = listOf(stream.title, info.title).map { it?.trim().orEmpty() }
@@ -155,59 +125,44 @@ private fun sameSubtitleTrack(stream: EmbeddedSubtitleFfi, info: TrackInfo): Boo
 private fun EmbeddedSubtitleFfi.facts() = SubtitleFacts(hearingImpaired = hearingImpaired, forced = forced, codec = codec)
 
 /**
- * docs/12 §16: the server's SDH and codec facts per picker id. Media3 has no SDH flag and calls ASS
- * and SSA alike, so a file's text tracks take the server's by position, only when the counts and
- * every language agree: a wrong SDH is worse than none. A transcode names its streams instead.
+ * docs/12 §16: [infos] with the server's [facts] copied onto the subtitle rows they name. Media3 has
+ * no SDH flag and names a format by mime ("application/x-subrip") where the server says "subrip".
  */
-internal fun serverSubtitleFacts(
-    infos: List<TrackInfo>,
-    streams: List<EmbeddedSubtitleFfi>,
-    transcoding: Boolean,
-    sidecars: List<ExternalSubtitleFfi>,
-): Map<Long, SubtitleFacts> {
-    val text = infos.filter { it.kind == TrackKindFfi.SUBTITLE }
-    val streamFacts = if (transcoding) {
-        val manifest = manifestStreams(streams)
-        text.mapNotNull { info -> manifest.streamOf(info)?.let { info.id to it.facts() } }.toMap() +
-            streams.associate { streamRowId(it.index) to it.facts() }
-    } else {
-        // A manifest sidecar copy is not a track of the file Media3 reads.
-        val inFile = streams.filter { it.delivery != SubtitleDeliveryFfi.HLS }
-        val paired = inFile.size == text.size && inFile.zip(text).all { (stream, info) -> sameSubtitleTrack(stream, info) }
-        if (paired) text.zip(inFile).associate { (info, stream) -> info.id to stream.facts() } else emptyMap()
-    }
-    return streamFacts + sidecars.associate { ExternalSubtitles.idFor(it.index) to SubtitleFacts(it.hearingImpaired, it.isForced, it.codec) }
-}
-
-/** docs/18 §3.1: a transcode's streams only a renegotiation shows: manifest text while the
- * manifest has none (it carries all or none), never burned in; burn-in streams always. [shown] reads selected.
- */
-internal fun transcodeStreamRows(streams: List<EmbeddedSubtitleFfi>, delivered: List<TrackInfo>, shown: Int?): List<TrackInfo> {
-    val manifestDelivered = delivered.any { it.kind == TrackKindFfi.SUBTITLE }
-    return streams.filter {
-        when (it.delivery) {
-            SubtitleDeliveryFfi.HLS -> !manifestDelivered
-            SubtitleDeliveryFfi.ENCODE -> true
-            else -> false
-        }
-    }.map { stream ->
-        TrackInfo(
-            id = streamRowId(stream.index),
-            kind = TrackKindFfi.SUBTITLE,
-            title = stream.title,
-            lang = stream.language,
-            codec = stream.codec,
-            isDefault = stream.default,
-            isSelected = stream.index == shown,
-            isForced = stream.forced,
+internal fun withServerFacts(infos: List<TrackInfo>, facts: Map<Long, SubtitleFacts>): List<TrackInfo> =
+    infos.map { info ->
+        val fact = facts[info.id]?.takeIf { info.kind == TrackKindFfi.SUBTITLE } ?: return@map info
+        info.copy(
+            codec = fact.codec?.takeIf { it.isNotBlank() } ?: info.codec,
+            isForced = info.isForced || fact.forced,
+            isHearingImpaired = fact.hearingImpaired,
         )
     }
+
+/**
+ * docs/12 §16: the server's facts per picker id for a Direct Play file. Media3 calls ASS and SSA
+ * alike, so its text tracks take the server's by position, only when the counts and every language
+ * agree: a wrong SDH is worse than none. A transcode's and a sidecar's rows carry their own.
+ */
+internal fun serverSubtitleFacts(infos: List<TrackInfo>, streams: List<EmbeddedSubtitleFfi>): Map<Long, SubtitleFacts> {
+    val text = infos.filter { it.kind == TrackKindFfi.SUBTITLE }
+    // A manifest sidecar copy is not a track of the file Media3 reads.
+    val inFile = streams.filter { it.delivery != SubtitleDeliveryFfi.HLS }
+    val paired = inFile.size == text.size && inFile.zip(text).all { (stream, info) -> sameSubtitleTrack(stream, info) }
+    return if (paired) text.zip(inFile).associate { (info, stream) -> info.id to stream.facts() } else emptyMap()
+}
+
+/** docs/18 §3.2: loaded cues are positions in the same file, so a same-source [landed] plan keeps listing the [loaded] sidecars it no longer serves. */
+internal fun keepLoadedSidecars(previous: PlaybackPlan, landed: PlaybackPlan, loaded: Set<Int>): PlaybackPlan {
+    if (landed.mediaSourceId != previous.mediaSourceId) return landed
+    val kept = previous.externalSubtitles.filter { old -> old.index in loaded && landed.externalSubtitles.none { it.index == old.index } }
+    if (kept.isEmpty()) return landed
+    val keptRows = previous.trackRows.filter { row -> row.delivery == TrackDeliveryFfi.SIDECAR && kept.any { it.index == row.streamIndex } }
+    return landed.copy(externalSubtitles = landed.externalSubtitles + kept, trackRows = landed.trackRows + keptRows)
 }
 
 /** docs/21 §2.1: what started a transcode negotiation; [tag] is its diag value. */
 internal enum class Renegotiation(val tag: String) {
     FALLBACK("fallback"),
-    AUTO("auto"),
     PICK("pick"),
     AUDIO_PICK("audio_pick"),
     /** The choice changed while a negotiation ran. */
@@ -217,23 +172,31 @@ internal enum class Renegotiation(val tag: String) {
 /** Embedded subtitles off, nothing else touched. */
 private val SUBTITLES_OFF = TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.OFF, subtitleTrackId = null)
 
-/** A pick with no stable key forgets the series' choice rather than remembering a blank one. */
-private fun keyedMemory(key: String?): TrackMemoryFfi = key?.let { TrackMemoryFfi.Key(it) } ?: TrackMemoryFfi.Unset
-
 /**
  * docs/18 §1/§3: message shown once [PlaybackViewModel.maybeFallBackToTranscode]
  * has declined to take over. A DirectPlay [plan] carrying a [PlaybackPlan.serverVerdict]
  * means the server would have transcoded and only Direct Played because CLAUDE.md's
  * Direct Play rule forced it -- names that verdict and the Quality setting that
- * would unlock a transcode; every other case falls back to `"Playback error: <code>"`.
+ * would unlock a transcode; a Transcode plan's 5xx [httpStatus] is the server's conversion failing (docs/18 §7);
+ * every other case falls back to `"Playback error: <code>"`.
  */
-internal fun fatalPlaybackMessage(strings: UiStrings, errorCodeName: String, plan: PlaybackPlan?): String {
+internal fun fatalPlaybackMessage(strings: UiStrings, errorCodeName: String, plan: PlaybackPlan?, httpStatus: Int? = null): String {
     val serverVerdict = plan?.takeIf { it.playMethod == PlayMethodFfi.DIRECT_PLAY }?.serverVerdict
-    return if (serverVerdict != null) {
-        strings.get(R.string.player_error_direct_play_blocked, errorCodeName, serverVerdict)
-    } else {
-        strings.get(R.string.player_error_generic, errorCodeName)
+    return when {
+        serverVerdict != null -> strings.get(R.string.player_error_direct_play_blocked, errorCodeName, serverVerdict)
+        plan?.playMethod == PlayMethodFfi.TRANSCODE && httpStatus in 500..599 ->
+            strings.get(R.string.player_error_transcode_failed)
+        else -> strings.get(R.string.player_error_generic, errorCodeName)
     }
+}
+
+/** docs/18 §7: a track type no fallback will rescue; for video on a Transcode [plan] the likely cause is an account
+ * without video transcoding, so name it as a condition. */
+internal fun unplayableTrackMessage(strings: UiStrings, failed: FailedTrackFfi, mime: String, plan: PlaybackPlan?): String {
+    val audio = failed == FailedTrackFfi.AUDIO
+    val track = strings.get(if (audio) R.string.player_error_track_audio else R.string.player_error_track_video)
+    val unconverted = !audio && plan?.playMethod == PlayMethodFfi.TRANSCODE
+    return strings.get(if (unconverted) R.string.player_error_unplayable_track_unconverted else R.string.player_error_unplayable_track, track, mime)
 }
 
 /** docs/12 §14: what the Undo toast needs to seek back and to label the skipped segment. */
@@ -404,14 +367,7 @@ data class PlaybackUiState internal constructor(
      */
     val hasPreviousEpisode: Boolean = false,
     val hasNextEpisode: Boolean = false,
-    /**
-     * Feeds the audio & subtitles OSD button's "active-but-not-default"
-     * accent dot (docs/12 §8): non-default audio selected (only when some
-     * audio track actually is flagged default -- see
-     * [PlaybackViewModel.computeNonDefaultTrackActive]), OR non-default
-     * subtitle selected, OR the default subtitle was turned off. Recomputed
-     * wherever track selection is resolved or changed.
-     */
+    /** docs/12 §8: the audio & subtitles button's accent dot, derived from the track choice by [selection]. */
     val nonDefaultTrackActive: Boolean = false,
     /** docs/18 §3.2: the showing sidecar's cues, drawn by the screen's own feed; null when none is. */
     val sidecarCues: SidecarCues? = null,
@@ -437,6 +393,8 @@ data class PlaybackUiState internal constructor(
     internal val syncPlay: SyncPlayExecutor? = null,
     /** docs/28 §1: a subtitle or audio pick the group refused, shown once as a notice ([PlaybackViewModel.trackPickRefusedShown]). */
     val trackPickRefused: Boolean = false,
+    /** docs/18 §3.1: a subtitle or audio change the server refused while the stream plays on, shown once ([PlaybackViewModel.trackChangeFailedShown]). */
+    val trackChangeFailed: Boolean = false,
 ) {
     enum class Phase { LOADING, READY }
 
@@ -502,7 +460,7 @@ data class ReconnectingInfo(val attempt: Int)
  * [label] follows the display rule: title, else language code, else
  * "Track N" (N = 1-based position within its kind's list).
  */
-data class TrackChoice(
+data class TrackPickerRow(
     val id: Long,
     val label: String,
     val selected: Boolean,
@@ -525,8 +483,8 @@ data class TrackChoice(
  * renders it whenever non-null, same as the next-up card's own pinning.
  */
 data class TrackPickerState(
-    val audioTracks: List<TrackChoice>,
-    val subtitleTracks: List<TrackChoice>,
+    val audioTracks: List<TrackPickerRow>,
+    val subtitleTracks: List<TrackPickerRow>,
     /** docs/12 §16: the delay, already worded, trailing the final "Delay" row. */
     val delayText: String = "",
 ) {
@@ -642,6 +600,8 @@ class PlaybackViewModel(
      * Defaults to real wall-clock time in production.
      */
     private val clock: Clock = Clock.SYSTEM,
+    /** docs/18 §7: the playback end's clock, monotonic so a wall-clock jump never stretches or cuts its window. */
+    private val monotonicClock: Clock = Clock { android.os.SystemClock.elapsedRealtime() },
     /** docs/18 §3.2: sidecar parsing, off the main thread; tests inject a fake. */
     private val parseSidecar: suspend (codec: String, text: String) -> SidecarCues? = { codec, text ->
         withContext(Dispatchers.Default) { ExternalSubtitles.parse(codec, text) }
@@ -754,6 +714,9 @@ class PlaybackViewModel(
      */
     private var reconnectPositionTicks: Long? = null
 
+    /** docs/18 §7: how the current load ends; main thread, written only by [sendEnd]. */
+    private var playbackEnd: PlaybackEnd = PlaybackEnd.NoLoad
+
     /**
      * docs/18 §1/§3: this session's current plan, needed by
      * [maybeFallBackToTranscode]'s gate and [fatalPlaybackMessage]'s
@@ -763,6 +726,9 @@ class PlaybackViewModel(
      * mid-session.
      */
     private var currentPlan: PlaybackPlan? = null
+
+    /** docs/18 §5.4: the play session that spent its one cold retry after a seek-index miss. */
+    private var coldRetriedSession: String? = null
 
     /** docs/21 §2.1's `playback.prepare` `type` tag -- the previous session's [PlaybackPlan
      * .itemType], best-effort only: the constructor's very first [start] call has no prior plan
@@ -775,10 +741,10 @@ class PlaybackViewModel(
      */
     private var transcodeFallbackAttempted: Boolean = false
 
-    /** docs/18 §2: the track type this session's fallback blamed, resent on every renegotiation so
-     * a subtitle change never lets the failed stream be copied back. Reset by every [start].
+    /** docs/18 §2: this session's fallback reason and the track type it blamed, resent on every
+     * renegotiation so a subtitle change never lets the failed stream be copied back. Reset by every [start].
      */
-    private var sessionFailedTrack: FailedTrackFfi? = null
+    private var sessionFallback: Pair<String, FailedTrackFfi>? = null
 
     /** docs/18 §2.1: the newest playback request this view model minted, the only one whose plan,
      * error or Finish may publish; `null` once stopped, abandoned or closed for an account change.
@@ -874,10 +840,6 @@ class PlaybackViewModel(
      * (docs/18 preload); reset by [start]. */
     private var preloadedNextUpItemId: String? = null
 
-    /** The current session's `PlaybackPlan.seriesId`, captured in [start] -- fed to
-     * [CoreGateway.resolveTracks] by [resolveTrackSelectionOnce]. */
-    private var currentSeriesId: String? = null
-
     /**
      * The current session's trickplay manifest, carried by [fetchPlaybackOsdDetail]'s fetch (not
      * read off the plan directly, since `prepare_playback` must not await it). `null`
@@ -935,76 +897,20 @@ class PlaybackViewModel(
     /** The one in-flight, explicitly requested library-info fetch. */
     private var libraryInfoJob: Job? = null
 
-    /**
-     * Automatic track selection (docs/09 step 3): `true` once
-     * [resolveTrackSelectionOnce] has resolved and applied a decision this
-     * session, so a later `onTracksChanged` (ExoPlayer can announce twice
-     * per load) doesn't re-resolve. Reset by [start]. Deliberately NOT
-     * cleared when [trackSelectionJob] is cancelled -- cancellation must
-     * not reopen the "resolve once" window.
-     */
-    private var trackSelectionApplied = false
+    /** docs/18 §3.1: the one track choice; [sendTrack] is its only writer. */
+    private var trackChoice: TrackChoice = TrackChoice.Idle
+    private val trackInbox = ArrayDeque<TrackEvent>()
+    private var trackDispatching = false
 
-    /** docs/18 §3.1: [resolveTrackSelectionOnce]'s round trip; every session change and manual pick
-     * cancels it via [cancelTrackSelection], so a result landing past the await is still current.
-     */
-    private var trackSelectionJob: Job? = null
+    /** docs/18 §3.1: the plan's resolve and sidecar fetches, cancelled when its plan or session ends. */
+    private var planScope: CoroutineScope? = null
 
-    /** docs/18 §3.1: an automatic resolution is in flight; cleared by its own completion or by [cancelTrackSelection]. */
-    private var resolutionPending = false
-
-    /** Drops any in-flight automatic resolution, so a cancelled one finishing late can't clear a newer one's flag. */
-    private fun cancelTrackSelection() {
-        trackSelectionJob?.cancel()
-        trackSelectionJob = null
-        resolutionPending = false
-    }
-
-    /** docs/18 §3.1: what a same-item reload still has to restore on its first usable tracks;
-     * cleared once restored, by a manual pick, and by [start].
-     */
-    private var pendingReapply: PendingReapply? = null
-
-    private data class PendingReapply(val text: TrackIdentity?, val audio: TrackIdentity?)
-
-    /** A manual pick replaces only its own kind's restoration; the other kind's still applies. */
-    private fun dropPendingReapply(kind: TrackKindFfi) {
-        pendingReapply = pendingReapply
-            ?.let { if (kind == TrackKindFfi.AUDIO) it.copy(audio = null) else it.copy(text = null) }
-            ?.takeIf { it.text != null || it.audio != null }
-    }
-
-    /** docs/18 §3.1: the subtitle and audio choice last applied this item, manual or automatic. */
-    private var recordedText: TextChoice = TextChoice.Leave
-    private var recordedAudio: AudioChoice? = null
-
-    /** `true` once [chooseAudio]/[chooseSubtitle] has applied a manual pick this session, so a reload
-     * keeps it (a pick also cancels any pending automatic resolution). Reset by every [start].
-     */
-    private var manualTrackChoiceMade = false
-
-    /** docs/18 §3.2: this session's sidecar subtitles, from the plan. */
-    private var sidecars: List<ExternalSubtitleFfi> = emptyList()
-
-    /** The sidecar showing or loading to show, by server index; embedded text is off meanwhile. */
-    private var activeSidecar: Int? = null
+    /** docs/18 §3.2: picker status and parsed cues per sidecar index, for the plan's media source. */
     private val sidecarStatus = mutableMapOf<Int, SidecarStatus>()
     private val sidecarCache = mutableMapOf<Int, SidecarCues>()
+
+    /** The one sidecar fetch in flight; hiding the sidecar cancels it, so an abandoned file is never parsed. */
     private var sidecarJob: Job? = null
-    /** A pick whose fetch the old session refused mid-fallback, asked again once the new one exists;
-     * owned like [sidecarJob], so every pick change clears it. */
-    private var sidecarAwaitingSession: Pair<Int, () -> Unit>? = null
-    /** docs/18 §2.1: the transcode negotiation in flight, if any, and the session it retires in the
-     * core -- what a stop or abandon must name meanwhile, since that session was already taken.
-     */
-    private var negotiation: Negotiation? = null
-
-    private data class Negotiation(val request: PlaybackRequest, val retires: String, val subtitleIndex: Int?, val audioIndex: Int?)
-
-    /** The old stream failed while a negotiation was in flight; if that negotiation then loads
-     * nothing, the session has nothing left playing.
-     */
-    private var errorDuringNegotiation = false
 
     /** docs/28 §5: read once per entry point; only [executePort] enters a group and [leaveGroupMode] leaves it. */
     internal var mode: PlayerMode = PlayerMode.Solo
@@ -1024,6 +930,9 @@ class PlaybackViewModel(
     /** docs/28 §1: the screen showed the refused-pick notice. */
     fun trackPickRefusedShown() = _state.update { it.copy(trackPickRefused = false) }
 
+    /** docs/18 §3.1: the screen showed the failed-change notice. */
+    fun trackChangeFailedShown() = _state.update { it.copy(trackChangeFailed = false) }
+
     /** docs/28 §1: the player read the oldest live notice, so the executor drops it. */
     fun syncPlayNoticesShown() {
         (mode as? PlayerMode.Group)?.exec?.send(GroupEvent.NoticesShown(NoticeSurface.Player))
@@ -1034,34 +943,34 @@ class PlaybackViewModel(
         override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = refreshSeekable()
         override fun onPlaybackStateChanged(playbackState: Int) {
             updatePlayState()
-            when (val group = mode) {
-                is PlayerMode.Group -> group.reportState(playbackState, playerHolder)
-                PlayerMode.Solo -> if (playbackState == Player.STATE_ENDED && playerHolder.playbackState == Player.STATE_ENDED) handlePlaybackEnded()
-            }
+            // The group hears this state before any end it decides (docs/28 §5).
+            (mode as? PlayerMode.Group)?.reportState(playbackState, playerHolder)
+            observeEnd()
         }
 
         // playWhenReady has its own callback, independent of onPlaybackStateChanged
         // (e.g. pausing mid-stall never changes playbackState) -- see
         // updateBufferingTicker's gate. `reason` is never inspected.
-        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = updatePlayState()
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            updatePlayState()
+            observeEnd()
+        }
+
+        override fun onIsLoadingChanged(isLoading: Boolean) = observeEnd()
 
         override fun onTracksChanged(tracks: Tracks) {
-            val reapplied = reapplyChoice(tracks)
-            resolveTrackSelectionOnce(tracks)
-            // The dot follows what plays once nothing is deciding (a landed burn-in included); a
-            // decision applied just now already set it from its effect, which these tracks predate,
-            // and a retry's empty announcement says nothing.
-            if (!reapplied && !resolutionPending && negotiation == null && !tracks.isEmpty) {
-                _state.update { it.copy(nonDefaultTrackActive = computeNonDefaultTrackActive(allTrackInfos(tracks))) }
+            // Stamped with the plan on screen at receipt, so a later plan never reads them as its own; a prepared stream lists its video or text.
+            val announced = tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO || it.type == C.TRACK_TYPE_TEXT }
+            currentPlan?.let { sendTrack(TrackEvent.Tracks(it.playSessionId, rowsOnScreen(tracks), announced)) }
+            // docs/18 §1's second local-evidence signal (the other is onPlayerError below): every track of a
+            // present type rejected by this device's decoders. Declined with nothing negotiating, the live owner
+            // ends rather than play black or silent.
+            LocalPlayability.unplayable(tracks)?.let { (failed, reason, mime) ->
+                if (!maybeFallBackToTranscode(reason, failed) && trackChoice.asked == null && liveScope != null) {
+                    finishAfterFatalPlaybackError("UNPLAYABLE_TRACK")
+                    _events.tryEmit(PlaybackEvent.FinishWithMessage(unplayableTrackMessage(strings, failed, mime, currentPlan)))
+                }
             }
-            // An open picker follows the player's real tracks, never a stale snapshot.
-            _state.update { it.withTrackPicker { _ -> buildTrackPickerState(tracks) } }
-            closeDelayWithoutSubtitle(tracks)
-            // docs/18 §1's second local-evidence signal (the other is onPlayerError
-            // below): every track of a present type rejected by this device's
-            // decoders. maybeFallBackToTranscode's own gate gets it right
-            // regardless of playMethod, so this stays unconditional.
-            LocalPlayability.unplayable(tracks)?.let { (failed, reason) -> maybeFallBackToTranscode(reason, failed) }
         }
 
         // Initial-load/mid-play-stall disambiguator -- see
@@ -1084,10 +993,14 @@ class PlaybackViewModel(
         override fun onPlayerError(error: PlaybackException) {
             // docs/18 §2: the old stream may die while its replacement negotiates; the landing
             // reloads the player, so its errors are no longer this session's.
-            if (negotiation != null) {
-                errorDuringNegotiation = true
-                return
+            if (trackChoice.asked != null) return sendTrack(TrackEvent.PlayerDied(error.errorCodeName))
+            val session = currentPlan?.playSessionId
+            if (ReconnectPolicy.retriesCold(isSeekIndexMiss(error), session, coldRetriedSession)) {
+                coldRetriedSession = session
+                return playerHolder.retryAfterError(_positionTicks.value, playerHolder.playWhenReady)
             }
+            // docs/18 §7: a failure where the recovery seek left playback stuck ends as that stall, not as this error.
+            if (sendEnd(EndEvent.Failed(endFacts()))) return
             // The source-level policy already spent a real recovery window before
             // surfacing this; starting ReconnectPolicy too would stack two
             // independent budgets and could hold a dead stream for minutes.
@@ -1106,8 +1019,7 @@ class PlaybackViewModel(
                 // docs/18 §1's first local-evidence signal (the other is
                 // onTracksChanged above) -- ordinary fatal path once the fallback
                 // gate declines.
-                finishAfterFatalPlaybackError(error.errorCodeName)
-                _events.tryEmit(PlaybackEvent.FinishWithMessage(fatalPlaybackMessage(strings, error.errorCodeName, currentPlan)))
+                failPlayback(error.errorCodeName, httpResponseCode(error))
             }
         }
     }
@@ -1179,17 +1091,22 @@ class PlaybackViewModel(
         return plan.playMethod == PlayMethodFfi.DIRECT_PLAY && plan.transcodeFallbackAllowed && !transcodeFallbackAttempted
     }
 
-    /**
-     * docs/21 §2.1: one line per negotiated plan, the fallback's included. `transcodeReason` is free
-     * text (docs/18's own doc on PlaybackPlan), so a reason with a space maps to the fixed tag "text".
-     */
     /** docs/21 §2.1: why a transcode restarts and what it names, so a slow start shows whether the viewer or the policy asked. */
-    private fun logRenegotiation(itemId: String, cause: Renegotiation, subtitle: Int?, audio: Int?) {
+    private fun logRenegotiation(itemId: String, cause: Renegotiation, sent: TranscodeStreamsFfi) {
+        val named = sent as? TranscodeStreamsFfi.Named
         AppGraph.diag.event("playback.renegotiate") {
             item("item", itemId)
             tag("cause", cause.tag)
-            tag("sub", subtitle?.toString() ?: "none")
-            tag("audio", audio?.toString() ?: "none")
+            tag("sub", named?.let { it.subtitle?.toString() ?: "none" } ?: "policy")
+            tag("audio", named?.let { it.audio?.toString() ?: "none" } ?: "policy")
+        }
+    }
+
+    private fun logIgnoredBurn(itemId: String, effect: TrackEffect.BurnIgnored) {
+        AppGraph.diag.event("playback.burn_ignored") {
+            item("item", itemId)
+            tag("sub", effect.asked?.toString() ?: "none")
+            tag("burned", effect.burned.toString())
         }
     }
 
@@ -1224,114 +1141,156 @@ class PlaybackViewModel(
         val request = currentRequest
         if (request == null || liveScope == null) return true
         if (!ownershipOpen(request)) return false
-        val plan = currentPlan!! // fallbackPossible() just confirmed this is non-null
         leaveGroup() // docs/28 §1: a transcode needs a stream of its own
         transcodeFallbackAttempted = true
-        sessionFailedTrack = failed
+        sessionFallback = reason to failed
         clearReconnectState()
-        negotiateTranscode(reason, from = plan, cause = Renegotiation.FALLBACK)
+        sendTrack(TrackEvent.Fallback)
         return true
     }
 
-    /** docs/18 §3.1: a transcode renegotiates when the choice needs a stream only a renegotiation
-     * shows (burned in, text a manifest without any lacks, or an [Renegotiation.AUDIO_PICK]: audio it doesn't carry),
-     * or moves off the one burned in; no Media3 selection can do any of these. A no-op unless this
-     * owner is live.
+    /**
+     * docs/18 §3.1: the one writer of [trackChoice]: each event is reduced and its effects run in
+     * order; an event an effect raises waits its turn, and the picker and dot publish once at the end.
      */
-    private fun renegotiateForChoice(cause: Renegotiation) {
-        if (mode is PlayerMode.Group) return // docs/28 §5: the reload would land as a solo resume, not exactly
-        val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return
-        val request = currentRequest ?: return
-        if (liveScope == null || !ownershipOpen(request)) return
-        // One in flight already re-checks the choice when it lands.
-        if (negotiation != null) return
-        if (cause != Renegotiation.AUDIO_PICK && !subtitleNeedsRenegotiation(plan)) return
-        negotiateTranscode(plan.transcodeReason.orEmpty(), from = plan, cause = cause)
+    private fun sendTrack(event: TrackEvent) {
+        trackInbox.addLast(event)
+        if (trackDispatching) return
+        trackDispatching = true
+        try {
+            while (true) {
+                val next = trackInbox.removeFirstOrNull() ?: break
+                val step = reduceTracks(trackChoice, next)
+                trackChoice = step.state
+                step.effects.forEach(::runTrackEffect)
+            }
+        } finally {
+            // An effect that threw leaves no queued event to run against a state it never reached.
+            trackInbox.clear()
+            trackDispatching = false
+        }
+        publishTracks()
     }
 
-    private fun subtitleNeedsRenegotiation(plan: PlaybackPlan): Boolean {
-        // An undecided or default choice accepts whatever the server chose.
-        val wanted = subtitleStreamIndexFor(choiceBeforeReload().text, plan.embeddedSubtitles) ?: return false
-        val burned = plan.burnedSubtitleIndex
-        if (wanted == burned) return false
-        val tracks = playerHolder.currentTracks ?: Tracks.EMPTY
-        return burned != null || streamRows(tracks).any { it.id == streamRowId(wanted) }
+    private fun runTrackEffect(effect: TrackEffect) {
+        when (effect) {
+            is TrackEffect.Apply -> playerHolder.applyTrackDecision(effect.decision, playerHolder.currentTracks ?: Tracks.EMPTY)
+            // OFF carries no track id, so no snapshot is needed to apply it.
+            TrackEffect.TextOff -> playerHolder.applyTrackDecision(SUBTITLES_OFF, Tracks.EMPTY)
+            is TrackEffect.Resolve -> resolveTracks(effect)
+            is TrackEffect.Negotiate -> negotiateTranscode(effect)
+            is TrackEffect.Commit -> commitTranscode(effect)
+            is TrackEffect.Load -> loadCommitted(effect.plan)
+            is TrackEffect.FetchSidecar -> fetchSidecar(effect.session, effect.index)
+            is TrackEffect.ShowSidecar -> showSidecar(effect.index)
+            TrackEffect.HideSidecar -> {
+                sidecarJob?.cancel()
+                playerHolder.showAssSidecar(null)
+                // A load no longer chosen stops reading Loading; a refusal mid-swap keeps it.
+                sidecarStatus.entries.removeAll { it.value == SidecarStatus.LOADING }
+            }
+            is TrackEffect.SidecarUnavailable -> {
+                sidecarStatus[effect.index] = SidecarStatus.UNAVAILABLE
+                _events.tryEmit(PlaybackEvent.SubtitleUnavailable)
+            }
+            TrackEffect.ResetSidecarCache -> {
+                sidecarStatus.clear()
+                sidecarCache.clear()
+            }
+            TrackEffect.ClosePicker -> replaceSurface { if (it is OpenSurface.Tracks) OpenSurface.None else it }
+            is TrackEffect.BurnIgnored -> currentPlan?.let { logIgnoredBurn(it.itemId, effect) }
+            is TrackEffect.Remember -> rememberTrackMemory(effect.kind, effect.row?.let(gateway::trackMemoryOf) ?: TrackMemoryFfi.Off)
+            TrackEffect.ResetDelay -> if (playerHolder.subtitleDelayMs != 0L) playerHolder.setSubtitleDelayMs(0L)
+            TrackEffect.Refused -> _state.update { it.copy(trackPickRefused = true) }
+            TrackEffect.Notice -> _state.update { it.copy(trackChangeFailed = true) }
+            is TrackEffect.Fatal -> finishFor(effect.outcome, effect.error)
+            is TrackEffect.PlayerLost -> failPlayback(effect.code)
+            TrackEffect.NewPlanScope -> {
+                planScope?.cancel()
+                planScope = CoroutineScope(viewModelScope.coroutineContext + SupervisorJob(viewModelScope.coroutineContext[Job]))
+            }
+            TrackEffect.CancelPlanScope -> {
+                planScope?.cancel()
+                planScope = null
+            }
+        }
+    }
+
+    /** docs/18 §3.1: the plan's one Direct Play resolve, in its scope so an ended plan hears nothing. */
+    private fun resolveTracks(effect: TrackEffect.Resolve) {
+        val subject = currentPlan?.trackMemorySubject
+        planScope?.launch {
+            val decision = runCatchingCancellable { gateway.resolveTracks(subject, effect.rows) }.getOrNull()
+            sendTrack(decision?.let { TrackEvent.Resolved(effect.session, it, effect.rows) } ?: TrackEvent.ResolveFailed(effect.session))
+        }
     }
 
     /**
-     * docs/18 §2/§3.1: the one transcode negotiation, shared by the fallback and a subtitle or audio
-     * renegotiation. It keeps the session's copy policy ([sessionFailedTrack]) and sends the
-     * subtitle and audio streams the viewer's choice names. A choice changed while it negotiated is
-     * renegotiated from the landed session before anything loads, so what loads never contradicts
-     * the choice (burned-in pixels can't be turned off); it ends once the viewer stops changing it.
-     * Callers negotiate only for the live session.
+     * docs/18 §2/§3.1: the one transcode negotiation, for a fallback or a changed choice. It keeps the
+     * session's copy policy ([sessionFallback]) and asks for [effect]'s streams; its result is tagged
+     * with what it asked, so [trackChoice] judges it. Only the live owner's choice emits one.
      */
-    private fun negotiateTranscode(reason: String, from: PlaybackPlan, cause: Renegotiation) {
-        val itemId = from.itemId
+    private fun negotiateTranscode(effect: TrackEffect.Negotiate) {
+        val plan = currentPlan ?: return sendTrack(TrackEvent.Gone(effect.from, effect.sent))
+        val fallback = sessionFallback
+        val reason = if (effect.cause == TranscodeCauseFfi.FALLBACK) fallback?.first.orEmpty() else plan.transcodeReason.orEmpty()
         val ticks = _positionTicks.value
-        val failed = sessionFailedTrack
-        val asked = choiceBeforeReload()
-        val sent = subtitleStreamIndexFor(asked.text, from.embeddedSubtitles)
-        val sentAudio = audioStreamIndexFor(asked.audio, from.audioStreams)
         val request = claimRequest()
-        negotiation = Negotiation(request, retires = from.playSessionId, subtitleIndex = sent, audioIndex = sentAudio)
-        logRenegotiation(itemId, cause, sent, sentAudio)
+        logRenegotiation(plan.itemId, effect.why, effect.sent)
         clearReconnectState()
         viewModelScope.launch {
-            try {
-                // The native call can't be cancelled, so its result is always seen and disposed of.
-                val negotiated = try {
-                    withContext(NonCancellable) {
-                        gateway.prepareTranscodeFallback(itemId, ticks, reason, from.playSessionId, failed, sent, sentAudio, request)
-                    }
-                } catch (e: CoreException) {
-                    publishFailure(request, e)
-                    return@launch
+            // The native call can't be cancelled, so its result is always seen and disposed of.
+            val negotiated = try {
+                withContext(NonCancellable) {
+                    gateway.prepareTranscodeFallback(plan.itemId, ticks, reason, effect.from, fallback?.second, effect.sent, effect.cause, request)
                 }
-                if (!adoptPlan(request, negotiated, retires = from.playSessionId)) return@launch
-                val now = choiceBeforeReload()
-                val wanted = subtitleStreamIndexFor(now.text, negotiated.embeddedSubtitles)
-                val wantedAudio = audioStreamIndexFor(now.audio, negotiated.audioStreams)
-                if ((wanted != null && wanted != sent) || (wantedAudio != null && wantedAudio != sentAudio)) {
-                    negotiateTranscode(reason, from = negotiated, cause = Renegotiation.CHANGED)
-                    return@launch
-                }
-                val previous = currentPlan ?: return@launch
-                val choice = choiceBeforeReload() // read before load() clears the tracks
-                val paused = !playerHolder.playWhenReady // load() resumes; a paused viewer stays paused
-                playerHolder.load(
-                    negotiated,
-                    tolerateMislabeledLevels = sessionTolerateMislabeledLevels,
-                    audioDecoderPreferences = sessionAudioDecoderPreferences,
-                    fullAssStyling = sessionFullAssStyling,
-                )
-                if (paused) playerHolder.pause()
-                playerHolder.setPlaybackRate(1f)
-                currentPlan = negotiated
-                logPlan(itemId, negotiated)
-                lastReportedPaused = null // the new session starts unpaused; it hears the real state
-                negotiation = null // before the sidecar adoption, which may ask again under this session
-                errorDuringNegotiation = false
-                clearReconnectState()
-                adoptFallbackSidecars(previous, negotiated)
-                armReapply(choice)
-                _positionTicks.value = negotiated.startPositionTicks
-                _state.update {
-                    it.copy(
-                        playMethod = negotiated.playMethod,
-                        transcodeReason = negotiated.transcodeReason,
-                        playbackRate = 1f,
-                    )
-                }
-            } finally {
-                // A chained attempt owns its own; only this attempt's is cleared, and an open picker
-                // stops showing what it asked for.
-                if (negotiation?.request == request) {
-                    negotiation = null
-                    refreshTrackChoices()
-                }
+            } catch (e: CoreException) {
+                val outcome = requestFailure(request, e, liveSession = owner is SessionOwner.Playing && !trackChoice.oldDied)
+                return@launch sendTrack(TrackEvent.Failed(effect.from, effect.sent, outcome, e))
             }
+            val adopted = adoptPlan(request, negotiated, retires = effect.from)
+            val landed = keepLoadedSidecars(plan, negotiated, sidecarCache.keys)
+            sendTrack(if (adopted) TrackEvent.Landed(effect.from, effect.sent, landed) else TrackEvent.Gone(effect.from, effect.sent))
         }
+    }
+
+    /** docs/18 §2.1: starts the landed plan in the core; any refusal (a stop or newer claim took it) leaves the stream on screen playing. */
+    private fun commitTranscode(effect: TrackEffect.Commit) {
+        val gone = TrackEvent.Gone(effect.from, effect.sent)
+        val request = currentRequest ?: return sendTrack(gone)
+        val session = effect.plan.playSessionId
+        viewModelScope.launch {
+            val event = try {
+                // The native commit can't be cancelled, so its answer is always heard.
+                withContext(NonCancellable) { gateway.commitTranscode(session, request) }
+                TrackEvent.Committed(session)
+            } catch (_: CoreException) {
+                gone
+            }
+            sendTrack(event)
+        }
+    }
+
+    /**
+     * docs/18 §2.1: loads a committed plan in place of the one on screen; a paused viewer stays paused.
+     * Only a live session commits: its end idles [trackChoice], so a later Committed is stale.
+     */
+    private fun loadCommitted(plan: PlaybackPlan) {
+        val paused = !playerHolder.playWhenReady // load() resumes
+        playerHolder.load(
+            plan,
+            tolerateMislabeledLevels = sessionTolerateMislabeledLevels,
+            audioDecoderPreferences = sessionAudioDecoderPreferences,
+            fullAssStyling = sessionFullAssStyling,
+        )
+        if (paused) playerHolder.pause()
+        playerHolder.setPlaybackRate(1f)
+        currentPlan = plan
+        logPlan(plan.itemId, plan)
+        lastReportedPaused = null // the new session starts unpaused; it hears the real state
+        clearReconnectState()
+        _positionTicks.value = plan.startPositionTicks
+        _state.update { it.copy(playMethod = plan.playMethod, transcodeReason = plan.transcodeReason, playbackRate = 1f) }
     }
 
     // Declared above `init`, which mints the first request: initializers run in source order.
@@ -1346,6 +1305,67 @@ class PlaybackViewModel(
 
     /** Whether [playerListener] and [decoderHook] are on [playerHolder]; the first call builds its lazy ExoPlayer. */
     private var playerWired = false
+
+    /** docs/18 §7: the holder's and gate's end inputs, kept so [onCleared] removes only its own hook from the shared holder. */
+    private val endInput: (EndEvent) -> Unit = { sendEnd(it) }
+
+    /** docs/18 §7: the one writer of [playbackEnd]; the state lands before its effect runs, since a stop re-enters the listeners; true when it ran an effect. */
+    private fun sendEnd(event: EndEvent): Boolean {
+        val step = reducePlaybackEnd(playbackEnd, event)
+        playbackEnd = step.state
+        step.effect?.let(::applyEnd)
+        return step.effect != null
+    }
+
+    private fun observeEnd() {
+        sendEnd(EndEvent.Observed(endFacts(), monotonicClock.nowMs()))
+    }
+
+    /** docs/18 §7: one live read of the player; a seek in flight is read live because `seekTo` reports BUFFERING inside the call. */
+    private fun endFacts() = EndFacts(
+        phase = playerHolder.playbackState,
+        playWhenReady = playerHolder.playWhenReady,
+        loading = playerHolder.isLoading,
+        seekInFlight = playerHolder.seekInFlight,
+        positionMs = PlaybackTicks.ticksToMs(playerHolder.currentPositionTicks()),
+        bufferedMs = PlaybackTicks.ticksToMs(playerHolder.bufferedPositionTicks()),
+        bufferedToListedEnd = playerHolder.bufferedToEnd(),
+        audience = when {
+            trackChoice.asked != null || liveScope == null -> Audience.HELD
+            mode is PlayerMode.Group -> Audience.GROUP
+            else -> Audience.SOLO
+        },
+    )
+
+    private fun applyEnd(effect: EndEffect) {
+        when (effect) {
+            EndEffect.PlayedThrough -> {
+                playerHolder.forgetSeekIndex()
+                val group = mode as? PlayerMode.Group
+                if (group != null) group.send(GroupEvent::PlayerEnded) else handlePlaybackEnded()
+            }
+            EndEffect.PastEnd -> finishAfterStop(reason = "past_end")
+            EndEffect.NoMedia -> {
+                finishAfterFatalPlaybackError("SERVER_NO_MEDIA")
+                _events.tryEmit(PlaybackEvent.FinishWithMessage(strings.get(R.string.player_error_transcode_no_media)))
+            }
+            is EndEffect.RecoverSeek -> {
+                AppGraph.diag.event("player.stallRecover") { ms("posMs", effect.positionMs) }
+                // Media3 ignores a seek to the very position it holds; a millisecond on makes it reset the renderers.
+                playerHolder.seekGroup(effect.positionMs + 1, null)
+            }
+            is EndEffect.StopStuck -> {
+                AppGraph.diag.event("player.stalledForGood") {
+                    ms("posMs", effect.positionMs)
+                    ms("aheadMs", effect.aheadMs)
+                    tag("renderers", playerHolder.rendererStates())
+                }
+                finishAfterFatalPlaybackError("STALLED_FOR_GOOD")
+                val message = if (effect.toListedEnd) R.string.player_error_stuck_at_end else R.string.player_error_stalled_mid
+                _events.tryEmit(PlaybackEvent.FinishWithMessage(strings.get(message)))
+            }
+        }
+    }
 
     /** docs/18 §1's third local-evidence signal, kept so [onCleared] removes only its own hook from the shared holder. */
     private val decoderHook: (String) -> Unit = { decoderName ->
@@ -1364,6 +1384,7 @@ class PlaybackViewModel(
         playerWired = true
         playerHolder.addListener(playerListener)
         playerHolder.onVideoDecoderInitialized = decoderHook
+        playerHolder.onEndInput = endInput
     }
 
     init {
@@ -1410,10 +1431,10 @@ class PlaybackViewModel(
         currentRequest = currentRequest?.takeIf { it == keep }
     }
 
-    /** docs/18 §2.1: the session whose stream is on screen, which reports, stops and abandons name:
-     * while a negotiation runs it is the one that negotiation took over, not yet the plan it lands.
+    /** docs/18 §2.1: the session whose stream is on screen, which reports, stops and abandons name;
+     * a negotiation's plan replaces it only once committed and loaded.
      */
-    private fun sessionOnScreen(): String? = negotiation?.retires ?: currentPlan?.playSessionId
+    private fun sessionOnScreen(): String? = currentPlan?.playSessionId
 
     /** docs/18 §2.1: whether [request]'s [plan] may load; otherwise it is abandoned by its own id, and
      * the player closes if the account changed under it. */
@@ -1430,17 +1451,16 @@ class PlaybackViewModel(
         return false
     }
 
+    /** docs/18 §2.1: what [request]'s failure means for this owner; [liveSession] plays on if it is stale. */
+    private suspend fun requestFailure(request: PlaybackRequest, error: CoreException, liveSession: Boolean): FailureOutcome {
+        val open = withContext(NonCancellable) { gateway.playbackOwnershipOpenNow(request.accountEpoch) }
+        return failureOutcome(latest = request == currentRequest, open = open, liveSession = liveSession, error = error)
+    }
+
     /** docs/18 §2.1: the one place a request's failure reaches the viewer, and only from its owner.
      * A live session (a failed fallback) ends first; a failed prepare has none.
      */
-    private suspend fun publishFailure(request: PlaybackRequest, error: CoreException) {
-        val open = withContext(NonCancellable) { gateway.playbackOwnershipOpenNow(request.accountEpoch) }
-        val outcome = failureOutcome(
-            latest = request == currentRequest,
-            open = open,
-            liveSession = owner is SessionOwner.Playing && !errorDuringNegotiation,
-            error = error,
-        )
+    private fun finishFor(outcome: FailureOutcome, error: CoreException) {
         val event = when (outcome) {
             FailureOutcome.IGNORE -> return
             FailureOutcome.CLOSE -> return closeForAccountChange()
@@ -1505,7 +1525,7 @@ class PlaybackViewModel(
                 },
             )
             // A failed prepare never installs a reporting session, so there is nothing to end.
-            publishFailure(request, e)
+            finishFor(requestFailure(request, e, liveSession = owner is SessionOwner.Playing), e)
             return
         }
         val (plan, settings) = startup
@@ -1522,9 +1542,7 @@ class PlaybackViewModel(
         lastKnownItemType = plan.itemType
         logPlan(itemId, plan)
         transcodeFallbackAttempted = false // docs/18 §1: one fallback per item
-        sessionFailedTrack = null
-        negotiation = null // a previous item's, whose stop already revoked it
-        errorDuringNegotiation = false
+        sessionFallback = null
         owner = SessionOwner.Playing(scope)
         lastReportedPaused = null
         playbackWasActive = false
@@ -1533,15 +1551,6 @@ class PlaybackViewModel(
         nextUpDismissed = false
         preloadedNextUpItemId = null
         lastAutoSkipSegmentKey = null
-        currentSeriesId = plan.seriesId
-        cancelTrackSelection() // docs/18 §3.1: leftover-job hygiene
-        trackSelectionApplied = false
-        manualTrackChoiceMade = false
-        pendingReapply = null
-        recordedText = TextChoice.Leave
-        recordedAudio = null
-        resetSidecars()
-        sidecars = plan.externalSubtitles
         trickplayMeta = null
         enrichmentGate = CompletableDeferred() // fresh gate per session -- see its own doc comment
         previewer?.endSession()
@@ -1598,6 +1607,8 @@ class PlaybackViewModel(
         // The shared PlayerHolder singleton outlives any one session --
         // a previous session's rate must never leak into a freshly loaded item.
         playerHolder.setPlaybackRate(1f)
+        // docs/18 §3.1: after the load, so its text-off lands on this plan; the last session's end hid its sidecar.
+        sendTrack(TrackEvent.PlanAdopted(plan))
         // docs/28 §5: from here a READY is this group load's landing, not the replaced item's.
         if (opening is LoadStart.GroupExactPaused) (mode as? PlayerMode.Group)?.let { mode = it.copy(loadIssued = true) }
         // docs/28 §5: a group load opens on the group's position and never resumes a saved one.
@@ -1619,7 +1630,6 @@ class PlaybackViewModel(
                 durationTicks = plan.runtimeTicks,
                 nextUp = null,
                 seekability = Seekability.UNKNOWN,
-                sidecarCues = null,
                 skipBackMs = skipBackMs,
                 skipForwardMs = skipForwardMs,
                 subtitleStyle = subtitleStyle,
@@ -1954,7 +1964,7 @@ class PlaybackViewModel(
      */
     private fun retryFailedNeighbors(scope: SessionScope, lookup: NeighborLookup.Failed) {
         if (lookup.retried) return
-        val seriesId = currentSeriesId ?: return
+        val seriesId = currentPlan?.seriesId ?: return
         neighbors = NeighborLookup.Failed(retried = true)
         fetchEpisodeNeighbors(scope, seriesId, retried = true)
     }
@@ -2167,304 +2177,77 @@ class PlaybackViewModel(
         _state.update { it.copy(nextUp = null) }
     }
 
-    /**
-     * Automatic track selection (docs/09 step 3): the first time this session's player announces
-     * [tracks], maps them via [TrackMapping.toTrackInfos], resolves a decision via
-     * [CoreGateway.resolveTracks], and applies it (see [trackSelectionApplied]'s doc for the
-     * once-per-session rule). A no-op when [tracks] carries nothing to decide on, without setting
-     * [trackSelectionApplied] so a later, more complete announcement still gets a chance.
-     */
-    private fun resolveTrackSelectionOnce(tracks: Tracks) {
-        if (trackSelectionApplied) return
-        val embedded = deliveredTrackInfos(tracks)
-        if (embedded.isEmpty()) return
-        trackSelectionApplied = true
-        val sidecarInfos = ExternalSubtitles.trackInfos(sidecars, activeSidecar)
-        val trackInfos = embedded + sidecarInfos
-        // docs/18 §3.1: streams only a renegotiation shows are choices too, and one burned in shows.
-        val rows = streamRows(tracks)
-        val embeddedTextSelected = (embedded + rows).any { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }
-        val seriesId = currentSeriesId
-        if (liveScope == null) return
-        resolutionPending = true
-        trackSelectionJob = viewModelScope.launch {
-            try {
-                resolveAndApply(seriesId, trackInfos, policyTracks(embedded, sidecarInfos, rows), embedded, rows, embeddedTextSelected, tracks)
-            } finally {
-                if (isActive) resolutionPending = false // a cancelled job's canceller already cleared it
-            }
+    /** docs/18 §3.1: [trackRows] over the tracks [tracks] announce, for the plan on screen. */
+    private fun rowsOnScreen(tracks: Tracks): List<TrackInfo> = currentPlan?.let { trackRows(it, TrackMapping.toTrackInfos(tracks)) }.orEmpty()
+
+    /** docs/12 §16: subtitle rows the player or a sidecar shows, never a stream only a renegotiation shows. */
+    private fun shownTextRows(rows: List<TrackInfo>) = rows.filter { it.kind == TrackKindFfi.SUBTITLE && streamRowIndexOf(it.id) == null }
+
+    /** docs/12 §16: the picker and the dot, derived from the choice over the rows on screen. */
+    private fun publishTracks() {
+        // A plan just loaded has announced nothing yet; its own rows still show in an open picker.
+        val tracks = playerHolder.currentTracks ?: Tracks.EMPTY
+        val rows = rowsOnScreen(tracks)
+        val selected = selection(trackChoice, rows)
+        _state.update { state ->
+            // A retry's empty announcement says nothing about what plays.
+            val dot = if (tracks.isEmpty) state.nonDefaultTrackActive else selected.nonDefault
+            // docs/18 §3.2: derived once per dispatch, so a load's clear and the cached file's return publish as one frame.
+            val cues = trackChoice.shownSidecar?.let(sidecarCache::get)
+            state.copy(nonDefaultTrackActive = dot, sidecarCues = cues).withTrackPicker { pickerState(rows, selected) }
         }
-    }
-
-    private suspend fun resolveAndApply(
-        seriesId: String?,
-        trackInfos: List<TrackInfo>,
-        policyInput: List<TrackInfo>,
-        embedded: List<TrackInfo>,
-        rows: List<TrackInfo>,
-        embeddedTextSelected: Boolean,
-        tracks: Tracks,
-    ) {
-        val resolved = runCatchingCancellable { gateway.resolveTracks(seriesId, policyInput) }.getOrNull() ?: return
-        val (decision, rowPick) = routeStreamRow(resolved, rows)
-        val audio = decision.audioTrackId?.let { id -> embedded.firstOrNull { it.id == id } }
-            ?: embedded.firstOrNull { it.kind == TrackKindFfi.AUDIO && it.isSelected }
-        val (playerDecision, sidecar) = ExternalSubtitles.route(decision, sidecars, embeddedTextSelected, audio?.lang)
-        playerHolder.applyTrackDecision(playerDecision, tracks)
-        recordDecision(playerDecision, embedded)
-        rowPick?.let { recordedText = TextChoice.Embedded(it.identity(), streamRowIndexOf(it.id)) }
-        resolutionPending = false // decided from here on, though this job is still running
-        renegotiateForChoice(Renegotiation.AUTO)
-        sidecar?.let { showSidecar(it) }
-        // A routed sidecar is read back live: it may already have failed back to Off.
-        val effective = if (sidecar != null) allTrackInfos(tracks) else applyDecisionToTrackInfos(trackInfos, decision)
-        _state.update { it.copy(nonDefaultTrackActive = computeNonDefaultTrackActive(effective)) }
-    }
-
-    /** docs/18 §3.1: the semantic choice a same-item reload must restore, as last recorded. A
-     * resolution still in flight counts as undecided, so the new load resolves afresh.
-     */
-    private fun choiceBeforeReload(): ReloadChoice {
-        val decided = manualTrackChoiceMade || (trackSelectionApplied && !resolutionPending)
-        val sidecar = activeSidecar != null || sidecarAwaitingSession != null
-        return ReloadChoice(textChoiceBeforeReload(decided, sidecar, recordedText), recordedAudio.takeIf { decided })
-    }
-
-    /** Records what [decision] chose among [infos], for [choiceBeforeReload]. */
-    private fun recordDecision(decision: TrackDecisionFfi, infos: List<TrackInfo>) {
-        decision.audioTrackId?.let { id -> recordedAudio = infos.firstOrNull { it.id == id }?.let { audioChoiceOf(it, deliveredAudioStream()) } }
-        val subtitle = decision.subtitleTrackId?.let { id -> infos.firstOrNull { it.id == id } }
-        recordedText = when {
-            subtitle != null -> TextChoice.Embedded(subtitle.identity())
-            decision.subtitleAction == SubtitleActionFfi.OFF -> TextChoice.Off
-            else -> recordedText
-        }
-    }
-
-    /** docs/18 §3.1: arms [choice] for the load just made. Text stays off until an embedded choice
-     * is matched (Off and sidecars need no track); Auto resolves again on the new tracks.
-     */
-    private fun armReapply(choice: ReloadChoice) {
-        cancelTrackSelection()
-        if (choice.text == TextChoice.Auto) {
-            trackSelectionApplied = false
-            pendingReapply = null
-            return
-        }
-        trackSelectionApplied = true
-        if (choice.text != TextChoice.Leave) playerHolder.applyTrackDecision(SUBTITLES_OFF, Tracks.EMPTY)
-        val text = (choice.text as? TextChoice.Embedded)?.identity
-        val audio = choice.audio?.identity
-        pendingReapply = PendingReapply(text, audio).takeIf { text != null || audio != null }
-    }
-
-    /** docs/18 §3.1: restores the armed choice on the first announcement carrying each kind; a kind
-     * not announced yet stays pending, and once announced a missing match is final (text stays
-     * off, audio keeps the player's default). Idempotent under its own selection callback. Returns
-     * whether it decided anything.
-     */
-    private fun reapplyChoice(tracks: Tracks): Boolean {
-        val pending = pendingReapply ?: return false
-        val infos = deliveredTrackInfos(tracks)
-        val textAnnounced = pending.text != null && infos.any { it.kind == TrackKindFfi.SUBTITLE }
-        val audioAnnounced = pending.audio != null && infos.any { it.kind == TrackKindFfi.AUDIO }
-        if (!textAnnounced && !audioAnnounced) return false
-        val decision = TrackDecisionFfi(
-            audioTrackId = pending.audio?.takeIf { audioAnnounced }?.let { matchTrack(it, TrackKindFfi.AUDIO, infos)?.id },
-            // Text is touched only by the announcement that resolves it; it is already off till then.
-            subtitleAction = if (textAnnounced) SubtitleActionFfi.OFF else SubtitleActionFfi.LEAVE,
-            subtitleTrackId = pending.text?.takeIf { textAnnounced }?.let { matchTrack(it, TrackKindFfi.SUBTITLE, infos)?.id },
-        )
-        val remaining = PendingReapply(
-            text = pending.text.takeUnless { textAnnounced },
-            audio = pending.audio.takeUnless { audioAnnounced },
-        )
-        pendingReapply = remaining.takeIf { it.text != null || it.audio != null }
-        if (decision.audioTrackId != null || decision.subtitleTrackId != null) playerHolder.applyTrackDecision(decision, tracks)
-        // A no-match leaves text off but keeps the viewer's choice for any later renegotiation.
-        recordDecision(decision.copy(subtitleAction = SubtitleActionFfi.LEAVE), infos)
-        _state.update { it.copy(nonDefaultTrackActive = computeNonDefaultTrackActive(applyDecisionToTrackInfos(allTrackInfos(tracks), decision))) }
-        return true
-    }
-
-    /** Applies [decision] onto [tracks]' `isSelected` flags without touching the player -- an
-     * "effective" snapshot feeding [computeNonDefaultTrackActive] the result of a decision rather
-     * than Media3's pre-decision snapshot. Shared by
-     * [resolveTrackSelectionOnce]/[chooseAudio]/[chooseSubtitle].
-     */
-    private fun applyDecisionToTrackInfos(tracks: List<TrackInfo>, decision: TrackDecisionFfi): List<TrackInfo> =
-        tracks.map { info ->
-            when (info.kind) {
-                TrackKindFfi.AUDIO -> if (decision.audioTrackId != null) info.copy(isSelected = info.id == decision.audioTrackId) else info
-                TrackKindFfi.SUBTITLE -> when {
-                    decision.subtitleTrackId != null -> info.copy(isSelected = info.id == decision.subtitleTrackId)
-                    decision.subtitleAction == SubtitleActionFfi.OFF -> info.copy(isSelected = false)
-                    else -> info
-                }
-                else -> info
-            }
-        }
-
-    /**
-     * [PlaybackUiState.nonDefaultTrackActive]'s definition: `true` iff a selected audio track
-     * isn't the default AND some audio track is actually flagged default (many files flag none,
-     * so without this guard ordinary Direct Play would light the dot spuriously), OR a selected
-     * subtitle isn't the default, OR no subtitle is selected despite one being marked default.
-     * Subtitles need no guard: they start OFF by default, so any selection is a real deviation.
-     * A transcode's stream rows count as subtitles (docs/18 §3.1) and come first: what is burned
-     * in is what shows.
-     */
-    private fun computeNonDefaultTrackActive(tracks: List<TrackInfo>): Boolean {
-        val audioTracks = audioStreamRows().ifEmpty { tracks.filter { it.kind == TrackKindFfi.AUDIO } }
-        val subtitles = streamRows(playerHolder.currentTracks ?: Tracks.EMPTY) + tracks.filter { it.kind == TrackKindFfi.SUBTITLE }
-        val selectedAudio = audioTracks.firstOrNull { it.isSelected }
-        val selectedSubtitle = subtitles.firstOrNull { it.isSelected }
-        val audioNonDefault = selectedAudio != null && !selectedAudio.isDefault && audioTracks.any { it.isDefault }
-        val subtitleNonDefault = selectedSubtitle != null && !selectedSubtitle.isDefault
-        val subtitleDefaultTurnedOff = selectedSubtitle == null && subtitles.any { it.isDefault }
-        return audioNonDefault || subtitleNonDefault || subtitleDefaultTurnedOff
+        // docs/12 §16: a delay means something only while a real subtitle (embedded or sidecar, never burn-in) is selected.
+        if (!tracks.isEmpty && selected.text < 0) closeSubtitleDelay()
     }
 
     // -- In-player track picker (docs/09 slice 3b) ------------------------
 
-    /** Opens the track picker via [buildTrackPickerState] -- a no-op if no [Tracks] announced yet.
-     * Safe to call again while open: rebuilds fresh each time, which is also how a stale optimistic
-     * flip from [chooseAudio]/[chooseSubtitle] self-corrects.
-     */
+    /** Opens the track picker over the rows on screen -- a no-op if no [Tracks] announced yet. */
     fun openTrackPicker() {
         val tracks = playerHolder.currentTracks ?: return
-        open(OpenSurface.Tracks(buildTrackPickerState(tracks)))
+        val rows = rowsOnScreen(tracks)
+        open(OpenSurface.Tracks(pickerState(rows, selection(trackChoice, rows))))
     }
 
-    private fun closeTrackPicker() {
-        replaceSurface { if (it is OpenSurface.Tracks) OpenSurface.None else it }
-    }
-
-    private fun buildTrackPickerState(tracks: Tracks): TrackPickerState {
+    private fun pickerState(rows: List<TrackInfo>, selected: TrackSelection): TrackPickerState {
+        fun row(info: TrackInfo, index: Int, selectedId: Long?): TrackPickerRow {
+            val sidecar = ExternalSubtitles.indexOf(info.id)
+            return TrackPickerRow(
+                id = info.id,
+                label = TrackChoiceText.label(strings, info, index),
+                selected = info.id == selectedId,
+                meta = TrackChoiceText.meta(strings, info, external = sidecar != null, status = sidecar?.let(sidecarStatus::get)),
+                isDefault = info.isDefault,
+            )
+        }
+        // docs/18 §3.2: "Off" first, then streams only a renegotiation shows, then the player's text and the sidecars.
+        val off = TrackPickerRow(id = TRACK_PICKER_SUBTITLE_OFF_ID, label = strings.get(R.string.player_track_off), selected = selected.text == TRACK_PICKER_SUBTITLE_OFF_ID)
+        val streams = rows.filter { it.kind == TrackKindFfi.SUBTITLE && streamRowIndexOf(it.id) != null }
         return TrackPickerState(
-            audioTracks = audioChoices(tracks),
-            subtitleTracks = subtitleChoices(tracks),
+            audioTracks = rows.filter { it.kind == TrackKindFfi.AUDIO }.mapIndexed { index, info -> row(info, index, selected.audio) },
+            subtitleTracks = listOf(off) + streams.mapIndexed { index, info -> row(info, index, selected.text) } +
+                shownTextRows(rows).mapIndexed { index, info -> row(info, index, selected.text) },
             delayText = SubtitleDelay.format(strings, playerHolder.subtitleDelayMs),
         )
     }
 
-    /** docs/18 §3.1: a transcode's audio rows are its source's streams ([audioStreamRows]); Direct Play's are the player's tracks. */
-    private fun audioChoices(tracks: Tracks): List<TrackChoice> {
-        val rows = audioStreamRows()
-        return rows.ifEmpty { allTrackInfos(tracks).filter { it.kind == TrackKindFfi.AUDIO } }.mapIndexed { index, info ->
-            TrackChoice(
-                id = info.id,
-                label = TrackChoiceText.label(strings, info, index),
-                selected = info.isSelected,
-                meta = TrackChoiceText.meta(strings, info, external = false),
-                isDefault = info.isDefault,
-            )
-        }
-    }
-
-    /** docs/18 §3.1: [transcodeAudioRows] for the live transcode; while a renegotiation runs, the stream it asked for reads selected. */
-    private fun audioStreamRows(): List<TrackInfo> {
-        val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return emptyList()
-        return transcodeAudioRows(plan.audioStreams, negotiation?.audioIndex ?: plan.deliveredAudioIndex)
-    }
-
-    /** docs/18 §3.1: the one stream a transcode's HLS carries, which its player audio track is; null on Direct Play. */
-    private fun deliveredAudioStream(): AudioStreamFfi? {
-        val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return null
-        return plan.audioStreams.firstOrNull { it.index == plan.deliveredAudioIndex }
-    }
-
-    /** docs/18 §3.2: subtitle rows, "Off" first and selected exactly when no real subtitle is. */
-    private fun subtitleChoices(tracks: Tracks): List<TrackChoice> {
-        val subtitle = allTrackInfos(tracks).filter { it.kind == TrackKindFfi.SUBTITLE }
-        return buildList {
-            val rows = streamRows(tracks)
-            val facts = subtitleFacts(tracks)
-            add(TrackChoice(id = TRACK_PICKER_SUBTITLE_OFF_ID, label = strings.get(R.string.player_track_off), selected = (subtitle + rows).none { it.isSelected }))
-            rows.forEachIndexed { index, info ->
-                add(TrackChoice(id = info.id, label = TrackChoiceText.label(strings, info, index), selected = info.isSelected, meta = TrackChoiceText.meta(strings, info, external = false, facts = facts[info.id]), isDefault = info.isDefault))
-            }
-            subtitle.forEachIndexed { index, info ->
-                val sidecar = ExternalSubtitles.indexOf(info.id)
-                add(
-                    TrackChoice(
-                        id = info.id,
-                        label = TrackChoiceText.label(strings, info, index),
-                        selected = info.isSelected,
-                        meta = TrackChoiceText.meta(strings, info, external = sidecar != null, status = sidecar?.let(sidecarStatus::get), facts = facts[info.id]),
-                        isDefault = info.isDefault,
-                    ),
-                )
-            }
-        }
-    }
-
-    /** docs/12 §16: [serverSubtitleFacts] for the live plan and its sidecars. */
-    private fun subtitleFacts(tracks: Tracks): Map<Long, SubtitleFacts> {
-        val plan = currentPlan
-        return serverSubtitleFacts(TrackMapping.toTrackInfos(tracks), plan?.embeddedSubtitles.orEmpty(), plan?.playMethod == PlayMethodFfi.TRANSCODE, sidecars)
-    }
-
-    /** docs/18 §3.1: [transcodeStreamRows] for the live plan; the one burned in reads selected. */
-    private fun streamRows(tracks: Tracks): List<TrackInfo> {
-        val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return emptyList()
-        // While a renegotiation runs, the stream it asked for reads selected, not the outgoing one.
-        val shown = negotiation?.let { it.subtitleIndex ?: plan.burnedSubtitleIndex } ?: plan.burnedSubtitleIndex
-        return transcodeStreamRows(plan.embeddedSubtitles, deliveredTrackInfos(tracks), shown)
-    }
-
-    /** docs/18 §3.1: [tracks] as the picker and the policy see them: a transcode's text is its
-     * manifest's ([manifestTrackInfos]).
-     */
-    private fun deliveredTrackInfos(tracks: Tracks): List<TrackInfo> {
-        val infos = TrackMapping.toTrackInfos(tracks)
-        val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return infos
-        return manifestTrackInfos(infos, plan.embeddedSubtitles)
-    }
-
-    /** docs/18 §3.2: [tracks]' rows plus the sidecars; a showing sidecar is the only selected subtitle. */
-    private fun allTrackInfos(tracks: Tracks): List<TrackInfo> {
-        val active = activeSidecar
-        val embedded = deliveredTrackInfos(tracks).map {
-            if (active != null && it.kind == TrackKindFfi.SUBTITLE) it.copy(isSelected = false) else it
-        }
-        return embedded + ExternalSubtitles.trackInfos(sidecars, active)
-    }
-
-    /** docs/18 §3.2: shows sidecar [index] instead of embedded text, never touching the video;
-     * [onShown] runs only once its cues are in. */
-    private fun showSidecar(index: Int, onShown: () -> Unit = {}) {
-        // OFF carries no track id, so no snapshot is needed to apply it.
-        playerHolder.applyTrackDecision(SUBTITLES_OFF, Tracks.EMPTY)
-        dropPendingSidecar()
-        playerHolder.showAssSidecar(null)
-        activeSidecar = index
-        val cached = sidecarCache[index]
-        if (cached != null) {
-            _state.update { it.copy(sidecarCues = cached) }
-            onShown()
-            return
-        }
-        _state.update { it.copy(sidecarCues = null) }
-        val sub = sidecars.firstOrNull { it.index == index }
-        val plan = currentPlan
-        if (sub == null || plan == null) {
-            sidecarFailed(index)
-            return
-        }
+    /** docs/18 §3.2: fetches sidecar [index] under [session] in the plan's scope; any failure, a core panic included, costs this track only. */
+    private fun fetchSidecar(session: String, index: Int) {
+        if (index in sidecarCache) return sendTrack(TrackEvent.SidecarFetched(session, index, ok = true))
+        val sub = currentPlan?.externalSubtitles?.firstOrNull { it.index == index }
+        val scope = planScope
+        if (sub == null || scope == null) return sendTrack(TrackEvent.SidecarFetched(session, index, ok = false))
         // With full styling on, an ASS sidecar loads whole into the overlay rather than as cues.
         val styled = if (ExternalSubtitles.isSsa(sub.codec)) playerHolder.assSidecarTarget(index) else null
         sidecarStatus[index] = SidecarStatus.LOADING
-        // start() and a fallback to another media source cancel this job, so a result never lands
-        // in another session or on another source's video.
-        sidecarJob = viewModelScope.launch {
-            var cues: SidecarCues? = null
-            // Any failure, a core panic included, costs this track only, never playback.
+        sidecarJob?.cancel()
+        sidecarJob = scope.launch {
             val loaded = try {
                 if (styled != null) {
-                    gateway.loadAssSidecar(plan.playSessionId, index, styled.overlay, styled.key, styled.item)
+                    gateway.loadAssSidecar(session, index, styled.overlay, styled.key, styled.item)
                 } else {
-                    cues = gateway.fetchExternalSubtitle(plan.playSessionId, index)?.let { parseSidecar(sub.codec, it) }
+                    val cues = gateway.fetchExternalSubtitle(session, index)?.let { parseSidecar(sub.codec, it) }
+                    if (cues != null) sidecarCache[index] = cues
                     cues != null
                 }
             } catch (e: CancellationException) {
@@ -2472,120 +2255,23 @@ class PlaybackViewModel(
             } catch (_: Exception) {
                 false
             }
-            sidecarJob = null
-            val outcome = ExternalSubtitles.fetchOutcome(
-                loaded = loaded,
-                stillChosen = activeSidecar == index,
-                sessionReplaced = plan !== currentPlan,
-                swapPending = negotiation != null,
-            )
-            when (outcome) {
-                ExternalSubtitles.FetchOutcome.LOADED -> {
-                    sidecarStatus.remove(index)
-                    cues?.let { sidecarCache[index] = it }
-                    if (activeSidecar == index) {
-                        playerHolder.showAssSidecar(styled)
-                        _state.update { it.copy(sidecarCues = cues) }
-                        onShown()
-                    }
-                }
-                ExternalSubtitles.FetchOutcome.RETRY_UNDER_NEW_SESSION -> showSidecar(index, onShown)
-                // Stays chosen and Loading; adoptFallbackSidecars asks the new session.
-                ExternalSubtitles.FetchOutcome.AWAIT_NEW_SESSION -> sidecarAwaitingSession = index to onShown
-                ExternalSubtitles.FetchOutcome.FAILED -> sidecarFailed(index)
-            }
-            refreshTrackChoices()
+            if (loaded) sidecarStatus.remove(index)
+            sendTrack(TrackEvent.SidecarFetched(session, index, loaded))
         }
     }
 
-    private fun sidecarFailed(index: Int) {
-        sidecarStatus[index] = SidecarStatus.UNAVAILABLE
-        if (activeSidecar != index) return
-        activeSidecar = null
-        _state.update { it.copy(sidecarCues = null) }
-        playerHolder.currentTracks?.let { tracks ->
-            _state.update { it.copy(nonDefaultTrackActive = computeNonDefaultTrackActive(allTrackInfos(tracks))) }
-        }
-        _events.tryEmit(PlaybackEvent.SubtitleUnavailable)
-    }
-
-    /** Forgets every sidecar result; indices only mean something within one media source. */
-    private fun resetSidecars() {
-        hideSidecar()
-        sidecarStatus.clear()
-        sidecarCache.clear()
-    }
-
-    /**
-     * docs/18 §3.2: a fallback that kept the media source keeps the showing sidecar; one that moved
-     * to another source drops every result and re-picks the same language and title there, if any.
-     */
-    private fun adoptFallbackSidecars(previous: PlaybackPlan, fallback: PlaybackPlan) {
-        val showing = sidecars.firstOrNull { it.index == activeSidecar }
-        sidecars = fallback.externalSubtitles
-        if (fallback.mediaSourceId == previous.mediaSourceId) {
-            // A new session may serve what the old one refused mid-swap.
-            sidecarStatus.entries.removeAll { it.value == SidecarStatus.UNAVAILABLE }
-            // Loaded cues are positions in the same file, so they outlive a session that no longer lists them.
-            if (showing != null && sidecars.none { it.index == showing.index }) {
-                if (showing.index in sidecarCache) sidecars = sidecars + showing else hideSidecar()
-            }
-            // Any pick change since the refusal cleared this (dropPendingSidecar), so it is current.
-            sidecarAwaitingSession?.let { (index, onShown) -> showSidecar(index, onShown) }
-            return
-        }
-        val awaitingOnShown = sidecarAwaitingSession?.second
-        resetSidecars()
-        // Its rows name the old source's files; the same index may now be another language.
-        closeTrackPicker()
-        showing?.let { old ->
-            sidecars.firstOrNull { it.language == old.language && it.displayTitle == old.displayTitle }
-                ?.let { showSidecar(it.index, awaitingOnShown ?: {}) }
-        }
-    }
-
-    /** Stops showing any sidecar; embedded text stays as the caller's decision leaves it. */
-    private fun hideSidecar() {
-        dropPendingSidecar()
-        playerHolder.showAssSidecar(null)
-        activeSidecar = null
-        _state.update { it.copy(sidecarCues = null) }
-    }
-
-    /** Cancels an in-flight load so its row stops reading Loading. */
-    private fun dropPendingSidecar() {
-        sidecarJob?.cancel()
-        sidecarJob = null
-        sidecarAwaitingSession = null
-        sidecarStatus.entries.removeAll { it.value == SidecarStatus.LOADING }
-    }
-
-    private fun refreshTrackChoices() {
-        val tracks = playerHolder.currentTracks ?: return
-        _state.update { state ->
-            state.copy(
-                nonDefaultTrackActive = computeNonDefaultTrackActive(allTrackInfos(tracks)),
-            ).withTrackPicker { it.copy(audioTracks = audioChoices(tracks), subtitleTracks = subtitleChoices(tracks)) }
-        }
-        closeDelayWithoutSubtitle(tracks)
-    }
-
-    /** docs/12 §16: a delay means something only while a real subtitle (embedded or sidecar, never burn-in) is selected. */
-    private fun subtitleDelayApplies(tracks: Tracks): Boolean =
-        allTrackInfos(tracks).any { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }
-
-    /** docs/12 §16: the control ends when its subtitle does; an empty announcement is a retry's and says nothing. */
-    private fun closeDelayWithoutSubtitle(tracks: Tracks) {
-        if (!tracks.isEmpty && !subtitleDelayApplies(tracks)) closeSubtitleDelay()
-    }
+    /** docs/18 §3.2: a styled sidecar [index] loads whole into the overlay; plain cues publish with the choice. */
+    private fun showSidecar(index: Int) = playerHolder.showAssSidecar(if (index in sidecarCache) null else playerHolder.assSidecarTarget(index))
 
     /** docs/12 §16: the Delay row's Select -- replaces the picker with the delay strip; refused without a selected subtitle. */
     fun openSubtitleDelay() {
         val tracks = playerHolder.currentTracks ?: return
-        val subtitles = allTrackInfos(tracks).filter { it.kind == TrackKindFfi.SUBTITLE }
-        val shown = subtitles.indexOfFirst { it.isSelected }
+        val rows = rowsOnScreen(tracks)
+        val subtitles = shownTextRows(rows)
+        val shownId = selection(trackChoice, rows).text
+        val shown = subtitles.indexOfFirst { it.id == shownId }
         if (shown < 0) return
-        val track = TrackChoiceText.delayTrack(strings, subtitles[shown], shown, subtitleFacts(tracks)[subtitles[shown].id])
+        val track = TrackChoiceText.delayTrack(strings, subtitles[shown], shown)
         open(OpenSurface.DelayControl(DelayState(playerHolder.subtitleDelayMs, track = track)))
     }
 
@@ -2597,150 +2283,51 @@ class PlaybackViewModel(
         replaceSurface { if (it is OpenSurface.DelayControl) (if (step.open) OpenSurface.DelayControl(step.state) else OpenSurface.None) else it }
     }
 
-    /** docs/12 §16: a different subtitle track starts its own sync, so the item's stored delay returns to 0. */
-    private fun resetDelayForNewSubtitle(tracks: Tracks, chosenId: Long) {
-        val shownId = (allTrackInfos(tracks) + streamRows(tracks)).firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.isSelected }?.id ?: TRACK_PICKER_SUBTITLE_OFF_ID
-        if (chosenId == shownId || playerHolder.subtitleDelayMs == 0L) return
-        playerHolder.setSubtitleDelayMs(0L)
-        // An open picker's Delay row shows the reset at once, not after the next tracks change.
-        _state.update { it.withTrackPicker { picker -> picker.copy(delayText = SubtitleDelay.format(strings, 0L)) } }
-    }
-
     /** Closes the delay control only; any other open surface stays (a card or PiP ends it, docs/12 §16). */
     fun closeSubtitleDelay() = replaceSurface { if (it is OpenSurface.DelayControl) OpenSurface.None else it }
 
     /** The live subtitle delay for the stats sheet's SUBTITLES row (docs/12 §17). */
     val subtitleDelayMs: Long get() = playerHolder.subtitleDelayMs
 
-    /**
-     * Chooses [id] as the audio track (docs/09 slice 3b): applies it via
-     * [PlaybackPlayer.applyTrackDecision] (subtitles untouched) and, only when this session has a
-     * series, remembers the choice via [CoreGateway.rememberTrackMemory]. A Movie applies the
-     * override but skips remembering (nothing to key on). A no-op if [id] doesn't resolve to a
-     * currently-known audio track. Flips [TrackChoice.selected] optimistically in the held
-     * [TrackPickerState] rather than waiting for a real `onTracksChanged`.
-     */
+    /** docs/28 §5, docs/18 §2.1: who a pick answers to: the group, this live player, or no playback of this player's. */
+    private fun pickGate(): TrackEvent.Gate = when {
+        mode is PlayerMode.Group -> TrackEvent.Gate.GROUP
+        liveScope == null || currentRequest?.let(::ownershipOpen) != true -> TrackEvent.Gate.NOT_LIVE
+        else -> TrackEvent.Gate.SOLO
+    }
+
+    /** Chooses [id] as the audio track (docs/09 slice 3b); a no-op for an id no row on screen carries. */
     fun chooseAudio(id: Long) {
         val tracks = playerHolder.currentTracks ?: return
-        streamRowIndexOf(id)?.let { return chooseAudioStream(it, tracks) }
-        val trackInfos = allTrackInfos(tracks)
-        val info = trackInfos.firstOrNull { it.kind == TrackKindFfi.AUDIO && it.id == id } ?: return
-
-        // A manual pick always wins -- cancel any pending automatic resolution
-        // outright rather than relying solely on its own after-the-fact recheck.
-        cancelTrackSelection()
-        dropPendingReapply(TrackKindFfi.AUDIO)
-        manualTrackChoiceMade = true
-        val decision = TrackDecisionFfi(audioTrackId = id, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = null)
-        playerHolder.applyTrackDecision(decision, tracks)
-        recordDecision(decision, trackInfos)
-        rememberTrackMemoryIfSeries(TrackKindFfi.AUDIO, keyedMemory(gateway.trackPrefKeyOf(info)))
-        _state.update { state ->
-            state.copy(
-                nonDefaultTrackActive = computeNonDefaultTrackActive(applyDecisionToTrackInfos(trackInfos, decision)),
-            ).withTrackPicker { picker -> picker.copy(audioTracks = picker.audioTracks.map { it.copy(selected = it.id == id) }) }
-        }
+        val input = streamRowIndexOf(id)?.let { TrackEvent.AudioInput.Stream(it) }
+            ?: rowsOnScreen(tracks).firstOrNull { it.kind == TrackKindFfi.AUDIO && it.id == id }?.let { TrackEvent.AudioInput.Player(it) }
+            ?: return
+        sendTrack(TrackEvent.PickAudio(input, pickGate()))
     }
 
-    /** docs/18 §3.1: picks a source audio stream a transcode doesn't carry by renegotiating with it;
-     * docs/28 §1: a group refuses, since that reload can't land on the group's exact position.
-     */
-    private fun chooseAudioStream(index: Int, tracks: Tracks) {
-        val plan = currentPlan?.takeIf { it.playMethod == PlayMethodFfi.TRANSCODE } ?: return
-        val info = audioStreamRows().firstOrNull { it.id == streamRowId(index) } ?: return
-        when (audioStreamPick(index, plan.deliveredAudioIndex, negotiating = negotiation != null, inGroup = mode is PlayerMode.Group)) {
-            AudioStreamPick.UNCHANGED -> return
-            AudioStreamPick.REFUSED -> return _state.update { it.copy(trackPickRefused = true) }
-            AudioStreamPick.RENEGOTIATE -> Unit
-        }
-        cancelTrackSelection()
-        dropPendingReapply(TrackKindFfi.AUDIO)
-        manualTrackChoiceMade = true
-        recordedAudio = plan.audioStreams.firstOrNull { it.index == index }?.let(::streamAudioChoice) ?: AudioChoice(info.identity(), index)
-        rememberTrackMemoryIfSeries(TrackKindFfi.AUDIO, keyedMemory(gateway.trackPrefKeyOf(info)))
-        renegotiateForChoice(Renegotiation.AUDIO_PICK)
-        _state.update { state ->
-            state.copy(
-                nonDefaultTrackActive = computeNonDefaultTrackActive(allTrackInfos(tracks)),
-            ).withTrackPicker { picker -> picker.copy(audioTracks = audioChoices(tracks).map { it.copy(selected = it.id == streamRowId(index)) }) }
-        }
-    }
-
-    /** Chooses [id] as the subtitle track, or [TRACK_PICKER_SUBTITLE_OFF_ID] to disable subtitles
-     * -- see [chooseAudio]'s doc comment for the shared design. "Off" is itself a real remembered
-     * choice (docs/18 §3.1), so it remembers [TrackMemoryFfi.Off].
+    /** Chooses [id] as the subtitle track, or [TRACK_PICKER_SUBTITLE_OFF_ID] to disable subtitles;
+     * "Off" is itself a real remembered choice (docs/18 §3.1).
      */
     fun chooseSubtitle(id: Long) {
         val tracks = playerHolder.currentTracks ?: return
-        val streamRow = streamRowIndexOf(id) != null
-        if (groupRefusesSubtitlePick(mode, currentPlan, streamRow)) return _state.update { it.copy(trackPickRefused = true) }
-        if (streamRow) return chooseStreamRow(id, tracks)
-        val trackInfos = allTrackInfos(tracks)
-        val info = trackInfos.firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.id == id }
-        if (id != TRACK_PICKER_SUBTITLE_OFF_ID && info == null) return
-        resetDelayForNewSubtitle(tracks, id)
-
-        // See chooseAudio's comment on why this cancels the pending resolution outright.
-        cancelTrackSelection()
-        dropPendingReapply(TrackKindFfi.SUBTITLE)
-        manualTrackChoiceMade = true
-        val sidecar = ExternalSubtitles.indexOf(id)
-        val memory = if (info == null) TrackMemoryFfi.Off else keyedMemory(gateway.trackPrefKeyOf(info))
-        var decision: TrackDecisionFfi? = null
-        if (sidecar != null) {
-            // Embedded text is off under a sidecar, and stays off if the file fails.
-            recordedText = TextChoice.Off
-            // Remembered only once it loads, so a broken file never follows the series.
-            showSidecar(sidecar) { rememberTrackMemoryIfSeries(TrackKindFfi.SUBTITLE, memory) }
+        val input = if (id == TRACK_PICKER_SUBTITLE_OFF_ID) {
+            TrackEvent.TextInput.Off
         } else {
-            hideSidecar()
-            decision = if (info == null) SUBTITLES_OFF else TrackDecisionFfi(audioTrackId = null, subtitleAction = SubtitleActionFfi.LEAVE, subtitleTrackId = id)
-            playerHolder.applyTrackDecision(decision, tracks)
-            recordDecision(decision, trackInfos)
-            rememberTrackMemoryIfSeries(TrackKindFfi.SUBTITLE, memory)
+            streamRowIndexOf(id)?.let { TrackEvent.TextInput.StreamRow(it) }
+                ?: ExternalSubtitles.indexOf(id)?.let { TrackEvent.TextInput.Sidecar(it) }
+                ?: rowsOnScreen(tracks).firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.id == id }?.let { TrackEvent.TextInput.Player(it) }
+                ?: return
         }
-
-        renegotiateForChoice(Renegotiation.PICK) // first, so the stream rows below read what it asked for
-        // A sidecar pick reads live state (it may already have failed); an embedded one flips optimistically.
-        val choices = subtitleChoices(tracks)
-        val effective = decision?.let { applyDecisionToTrackInfos(trackInfos, it) } ?: allTrackInfos(tracks)
-        _state.update { state ->
-            state.copy(
-                nonDefaultTrackActive = computeNonDefaultTrackActive(effective),
-            ).withTrackPicker { it.copy(subtitleTracks = if (sidecar != null) choices else choices.map { choice -> choice.copy(selected = choice.id == id) }) }
-        }
+        sendTrack(TrackEvent.PickText(input, pickGate()))
     }
 
-    /** docs/18 §3.1: picks a stream only a renegotiation can show: text stays off on the player and
-     * the transcode is renegotiated naming it. Picking the one already burned in changes nothing.
-     */
-    private fun chooseStreamRow(id: Long, tracks: Tracks) {
-        val info = streamRows(tracks).firstOrNull { it.id == id } ?: return
-        // Already burned in and nothing negotiating; mid-negotiation the landing re-checks the choice.
-        if (info.isSelected && negotiation == null) return
-        resetDelayForNewSubtitle(tracks, id)
-        cancelTrackSelection()
-        dropPendingReapply(TrackKindFfi.SUBTITLE)
-        manualTrackChoiceMade = true
-        hideSidecar()
-        playerHolder.applyTrackDecision(SUBTITLES_OFF, tracks)
-        recordedText = TextChoice.Embedded(info.identity(), streamRowIndexOf(info.id))
-        rememberTrackMemoryIfSeries(TrackKindFfi.SUBTITLE, keyedMemory(gateway.trackPrefKeyOf(info)))
-        renegotiateForChoice(Renegotiation.PICK)
-        _state.update { state ->
-            state.copy(
-                nonDefaultTrackActive = computeNonDefaultTrackActive(applyDecisionToTrackInfos(allTrackInfos(tracks), SUBTITLES_OFF)),
-            ).withTrackPicker { picker -> picker.copy(subtitleTracks = subtitleChoices(tracks).map { it.copy(selected = it.id == id) }) }
-        }
+    /** Shared by every pick: remembers [memory] under [memorySubject] (docs/12 §16). */
+    private fun rememberTrackMemory(kind: TrackKindFfi, memory: TrackMemoryFfi) {
+        val subject = memorySubject() ?: return
+        viewModelScope.launch { runCatchingCancellable { gateway.rememberTrackMemory(subject, kind, memory) } }
     }
 
-    /** Shared by [chooseAudio]/[chooseSubtitle] -- see [chooseAudio]'s own doc comment for the
-     * Movie skip-remember rule.
-     */
-    private fun rememberTrackMemoryIfSeries(kind: TrackKindFfi, memory: TrackMemoryFfi) {
-        val seriesId = currentSeriesId ?: return
-        viewModelScope.launch { runCatchingCancellable { gateway.rememberTrackMemory(seriesId, kind, memory) } }
-    }
+    private fun memorySubject() = currentPlan?.trackMemorySubject
 
     /** A saved position this session asked to resume from; an unseekable file can't honor it. */
     private var resumeNoticePending = false
@@ -2828,7 +2415,7 @@ class PlaybackViewModel(
     }
 
     /**
-     * Resolves Media3's terminal state -- the progress ticker normally starts autoplay before
+     * Solo [EndEffect.PlayedThrough], its only caller (docs/18 §7) -- the progress ticker normally starts autoplay before
      * EOF, but ENDED can beat its next tick. Preserves autoplay when its card is eligible;
      * otherwise closes the reporting session and tells the Activity to leave playback.
      * A [transitionTo] ends the session synchronously, making natural EOF and a simultaneous
@@ -2870,6 +2457,7 @@ class PlaybackViewModel(
                 while (isActive) {
                     delay(BUFFERING_TICK_MS)
                     _state.update { it.copy(bufferingInfo = currentBufferingInfo()) }
+                    observeEnd() // docs/18 §7: decides a stall the loader never asks past, and times the safety net
                 }
             }
         } else {
@@ -3262,13 +2850,14 @@ class PlaybackViewModel(
     }
 
     /** The stats sheet's SUBTITLES row (docs/12 §17): selected subtitle's title (`null` for Off)
-     * plus track count, derived from the same [PlaybackPlayer.currentTracks] snapshot
-     * [buildTrackPickerState] reads. `null to 0` before any [Tracks] announced.
+     * plus track count, from the rows the picker reads. `null to 0` before any [Tracks] announced.
      */
     fun currentSubtitleSelection(): Pair<String?, Int> {
         val tracks = playerHolder.currentTracks ?: return null to 0
-        val subtitles = allTrackInfos(tracks).filter { it.kind == TrackKindFfi.SUBTITLE }
-        val selected = subtitles.firstOrNull { it.isSelected }
+        val rows = rowsOnScreen(tracks)
+        val subtitles = shownTextRows(rows)
+        val shownId = selection(trackChoice, rows).text
+        val selected = subtitles.firstOrNull { it.id == shownId }
         val title = selected?.let { TrackChoiceText.label(strings, it, subtitles.indexOf(it)) }
         return title to subtitles.size
     }
@@ -3365,8 +2954,8 @@ class PlaybackViewModel(
      * Shared job-cancellation/menu-closing half of exit cleanup, run by [endSessionOnce] right after
      * its exactly-once guard. Cancels
      * [reportTickerJob], [bufferingTickerJob], the seek grace, [reconnectJob] (a Back press during
-     * Reconnecting must cancel any pending retry, not race it), [libraryInfoJob], and
-     * [trackSelectionJob], and the still-watching card with its timeout (which must not fire a stop for
+     * Reconnecting must cancel any pending retry, not race it), [libraryInfoJob], the track choice's
+     * plan scope, and the still-watching card with its timeout (which must not fire a stop for
      * a session that has ended). Also closes whichever surface is open, which must not survive it.
      */
     private fun cancelSessionJobsAndCloseMenus() {
@@ -3375,9 +2964,8 @@ class PlaybackViewModel(
         clearSeekBufferingGrace()
         reconnectJob?.cancel()
         libraryInfoJob?.cancel()
-        cancelTrackSelection()
-        // A stopped player reads 0:00, so a still-fed sidecar would flash its first cue.
-        hideSidecar()
+        // A stopped player reads 0:00, so a still-fed sidecar would flash its first cue; the end hides it.
+        sendTrack(TrackEvent.SessionEnded)
         clearStillWatching()
         closeSurface()
     }
@@ -3393,7 +2981,10 @@ class PlaybackViewModel(
         val playSessionId = sessionOnScreen()
         owner = SessionOwner.Ended(ending.generation, playSessionId)
         cancelSessionJobsAndCloseMenus()
-        return report(playSessionId).also { playerHolder.stopAndClear() }
+        return report(playSessionId).also {
+            playerHolder.stopAndClear()
+            sendEnd(EndEvent.Released)
+        }
     }
 
     /** Player-side, exactly-once half shared by normal exits and play-next transitions. */
@@ -3404,7 +2995,9 @@ class PlaybackViewModel(
             ?: playerHolder.currentPositionTicks().takeIf { it > 0L || lastKnownTicks <= 0L }
             ?: lastKnownTicks
         // docs/12 §9: exiting an active end-clamp hold reports where the viewer reached, never the clamp point.
-        playSessionId?.let { StopSnapshot(it, if (endClampHold) endHoldReportTicks ?: currentTicks else currentTicks) }
+        // docs/18 §7: whichever position wins, it never lands in the server's stubs.
+        val reachedTicks = if (endClampHold) endHoldReportTicks ?: currentTicks else currentTicks
+        playSessionId?.let { StopSnapshot(it, endStopTicks(playbackEnd, reachedTicks, currentPlan?.runtimeTicks)) }
     }
 
     /** Error path: discards the session without a final report; a session prepare never opened has nothing to abandon. */
@@ -3416,6 +3009,12 @@ class PlaybackViewModel(
      * once active, the position is real and a final Stopped report preserves it like Back/HOME
      * does.
      */
+    /** docs/18 §1: the player's own fatal error, [code] being Media3's name for it. */
+    private fun failPlayback(code: String, httpStatus: Int? = null) {
+        finishAfterFatalPlaybackError(code)
+        _events.tryEmit(PlaybackEvent.FinishWithMessage(fatalPlaybackMessage(strings, code, currentPlan, httpStatus)))
+    }
+
     private fun finishAfterFatalPlaybackError(errorCode: String) {
         // docs/21 §2.1: one line per fatal error, before deciding stop vs. abandon.
         AppGraph.diag.event("player.error") {
@@ -3437,6 +3036,7 @@ class PlaybackViewModel(
         if (playerWired) {
             playerHolder.removeListener(playerListener)
             if (playerHolder.onVideoDecoderInitialized === decoderHook) playerHolder.onVideoDecoderInitialized = null
+            if (playerHolder.onEndInput === endInput) playerHolder.onEndInput = null
         }
         stopPlaybackOnce()
     }

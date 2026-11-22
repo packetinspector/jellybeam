@@ -119,14 +119,14 @@ Fixed event names, `key=value` fields, no free text from the server.
 | Session | `auth.restore`, `auth.reauth`, `auth.signin`, `auth.signout` | server alias, ms, result, reason (fixed enum, e.g. `401`) |
 | Sync | `sync.pass` | server alias, kind (home/library/nextup/…), items, ms, result |
 | Websocket | `ws.connect`, `ws.drop`, `ws.reconnect` | server alias, ms, attempt |
-| Playback | `playback.prepare`, `playback.plan`, `playback.renegotiate`, `playback.stop` | item alias, item type, mode (DirectPlay/Transcode), container, video/audio codec, subtitle source, reasons enum, renegotiation cause (fallback/auto/pick/audio_pick/changed) with the subtitle and audio stream it names, posMs |
+| Playback | `playback.prepare`, `playback.plan`, `playback.renegotiate`, `playback.burn_ignored`, `playback.stop` | item alias, item type, mode (DirectPlay/Transcode), container, video/audio codec, subtitle source, reasons enum, renegotiation cause (fallback/pick/audio_pick/changed) with the subtitle and audio stream it names, posMs; `burn_ignored` = a landing burned a stream the choice didn't ask for (logged once, never retried) |
 | Player | `player.state`, `player.decoder`, `player.track`, `player.error` | state, decoder name, track index and codec, error code, posMs, ms since previous state |
 | Segments | `segment.skip` | kind, action |
 | UI | `focus.restore.miss`, `nav.screen` | screen name, reason |
 | Settings | `settings.change` | field name, old, new (never server addresses or API keys) |
 | Errors | `error` | where, code, posMs |
 | Core calls | `ffi.error` | section (the fixed `ffi.<method>` name), kind (the error variant as a fixed word, never its text) -- recorded for every failed core call, since most callers fail open |
-| Audio clock | `audio.clock` | kind (`clamp`, `drift`, `summary`, `lag`), rule (`start`, `jump`, `ceiling`; clamp only), numbers only: output number, ppm, span s, lag ms, clamps, maxExcess ms, reported/bound ms. One `clamp` per fault (first 20 per output), one `drift` a minute and at release, one `summary` or `lag` at release; never per position read. A 2 h film is about 120 lines (about 11 KB, 6% of the line budget); a seek-heavy evening adds one `lag` line per output. Same facts as the always-on `JellybeamSeek clock ...` lines (docs/18 §5.1) |
+| Audio clock | `audio.clock` | kind (`clamp`, `drift`, `summary`, `lag`), rule (`start`, `jump`, `ceiling`; clamp only), numbers only: output number, ppm, span s, lag ms, clamps, maxExcess ms, reported/bound ms. One `clamp` per fault (first 20 per output), one `drift` a minute and at release, one `summary` or `lag` at release; never per position read. A 2 h film is about 120 lines (about 11 KB, 6% of the line budget); a seek-heavy evening adds one `lag` line per output. Same facts as the always-on `JellybeamSeek clock ...` lines (docs/18 §5.1); the guard is observe-only, so `clamp` events and `clamps` counts are what it would have clamped |
 
 Rust `tracing` WARN and ERROR records reach the same ring through a
 uniffi callback interface registered once at core construction, formatted

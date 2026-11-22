@@ -121,9 +121,9 @@ class LocalPlayabilityTest {
     @Test
     fun `an unplayable type is reported with its kind, video first`() {
         val audioOnly = Tracks(listOf(group(C.FORMAT_HANDLED), group(C.FORMAT_UNSUPPORTED_TYPE, sampleMimeType = "audio/eac3")))
-        assertEquals(FailedTrackFfi.AUDIO, LocalPlayability.unplayable(audioOnly)?.first)
+        assertEquals(FailedTrackFfi.AUDIO, LocalPlayability.unplayable(audioOnly)?.failed)
         val both = Tracks(listOf(group(C.FORMAT_UNSUPPORTED_TYPE), group(C.FORMAT_UNSUPPORTED_TYPE, sampleMimeType = "audio/eac3")))
-        assertEquals(FailedTrackFfi.VIDEO, LocalPlayability.unplayable(both)?.first)
+        assertEquals(FailedTrackFfi.VIDEO, LocalPlayability.unplayable(both)?.failed)
     }
 
     @Test

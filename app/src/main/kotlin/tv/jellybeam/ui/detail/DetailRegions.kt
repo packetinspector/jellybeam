@@ -32,24 +32,22 @@ fun lowerBandPresent(spec: RegionShow, upNext: RegionShow): Boolean =
     spec != RegionShow.GONE || upNext != RegionShow.GONE
 
 /**
- * The Series episode shelf. Seasons settling is not enough: the resume season is selected only
- * after the per-episode answer lands (docs/15 §0.2), and until then there are no episodes and no
- * loading flag, so the shelf must keep its skeleton through that gap instead of collapsing and
- * re-opening. A season switch served by the network is the same state ([isLoadingEpisodes]).
- * Settled with no seasons is GONE first: episodes only ever come from a selected season, so any
- * left over are an orphan with no chip.
+ * The Series episode shelf. Seasons settling is not enough: a season is selected only once the
+ * per-episode answer and that season's read land together (docs/15 §0.2), so the shelf keeps its
+ * skeleton through that gap instead of collapsing and re-opening; a later switch keeps the shown
+ * season until the new one lands. Settled with no seasons is GONE first: episodes only ever come
+ * from a selected season, so any left over are an orphan with no chip.
  */
 fun episodeShelfShow(
     seasonsSettled: Boolean,
     hasSeasons: Boolean,
     hasSelectedSeason: Boolean,
-    isLoadingEpisodes: Boolean,
     hasEpisodes: Boolean,
 ): RegionShow = when {
     seasonsSettled && !hasSeasons -> RegionShow.GONE
     hasEpisodes -> RegionShow.CONTENT
     !seasonsSettled -> RegionShow.SKELETON
-    !hasSelectedSeason || isLoadingEpisodes -> RegionShow.SKELETON
+    !hasSelectedSeason -> RegionShow.SKELETON
     else -> RegionShow.GONE
 }
 
@@ -66,3 +64,10 @@ fun seasonChipsShow(seasonsSettled: Boolean, seasonCount: Int, reportedChildCoun
 /** Movie chip group (rating badge + genre chips) settles with the item detail. */
 fun movieChipsShow(itemDetailLoaded: Boolean, hasRating: Boolean, genreCount: Int): RegionShow =
     regionShow(settled = itemDetailLoaded, hasContent = hasRating || genreCount > 0)
+
+/**
+ * docs/15 §5: while a season switch is still reading, the shelf still shows the old season, so it
+ * takes no focus and Down/Select stay on the chip until the new episodes land.
+ */
+fun episodeShelfEnterable(requestedSeasonId: String?, shownSeasonId: String?): Boolean =
+    requestedSeasonId == shownSeasonId

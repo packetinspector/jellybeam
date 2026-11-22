@@ -9,7 +9,6 @@ import org.junit.Test
 import uniffi.jellybeam_core.ExternalSubtitleFfi
 import uniffi.jellybeam_core.SubtitleActionFfi
 import uniffi.jellybeam_core.TrackDecisionFfi
-import uniffi.jellybeam_core.TrackKindFfi
 
 class ExternalSubtitlesTest {
     private fun sub(index: Int, codec: String = "srt", isDefault: Boolean = false, isForced: Boolean = false, language: String = "eng") =
@@ -51,7 +50,13 @@ class ExternalSubtitlesTest {
 
     @Test
     fun `sidecar rows carry the language as Media3 normalizes an embedded track's`() {
-        assertEquals("en", ExternalSubtitles.trackInfos(listOf(sub(2, language = "eng")), activeIndex = null).single().lang)
+        assertEquals("en", sidecarRows(coreSidecarRows(listOf(sub(2, language = "eng")))).single().lang)
+    }
+
+    @Test
+    fun `sidecar rows carry the server's SDH flag`() {
+        val rows = sidecarRows(coreSidecarRows(listOf(sub(2).copy(hearingImpaired = true), sub(3))))
+        assertEquals(listOf(true, false), rows.map { it.isHearingImpaired })
     }
 
     @Test
@@ -60,14 +65,6 @@ class ExternalSubtitlesTest {
         assertNull(ExternalSubtitles.indexOf(TrackMapping.toId(groupIndex = 999, trackIndex = 999)))
         assertNull(ExternalSubtitles.indexOf(null))
         assertNull(ExternalSubtitles.indexOf(TRACK_PICKER_SUBTITLE_OFF_ID))
-    }
-
-    @Test
-    fun `track infos skip unparseable codecs and mark only the active sidecar`() {
-        val infos = ExternalSubtitles.trackInfos(listOf(sub(2), sub(3, codec = "pgssub"), sub(4, codec = "vtt")), activeIndex = 4)
-        assertEquals(listOf(ExternalSubtitles.idFor(2), ExternalSubtitles.idFor(4)), infos.map { it.id })
-        assertEquals(listOf(false, true), infos.map { it.isSelected })
-        assertEquals(setOf(TrackKindFfi.SUBTITLE), infos.map { it.kind }.toSet())
     }
 
     @Test
@@ -123,17 +120,5 @@ class ExternalSubtitlesTest {
     fun `a forced sidecar tagged eng shows under en-US audio`() {
         val subs = listOf(sub(4, isForced = true))
         assertEquals(decision() to 4, ExternalSubtitles.route(decision(), subs, embeddedTextSelected = false, audioLanguage = "en-US"))
-    }
-
-
-    @Test
-    fun `a refusal mid-swap waits for the new session, and only a real failure fails`() {
-        fun outcome(loaded: Boolean = false, chosen: Boolean = true, replaced: Boolean = false, pending: Boolean = false) =
-            ExternalSubtitles.fetchOutcome(loaded, chosen, replaced, pending)
-        assertEquals(ExternalSubtitles.FetchOutcome.LOADED, outcome(loaded = true, pending = true))
-        assertEquals(ExternalSubtitles.FetchOutcome.RETRY_UNDER_NEW_SESSION, outcome(replaced = true))
-        assertEquals(ExternalSubtitles.FetchOutcome.AWAIT_NEW_SESSION, outcome(pending = true))
-        assertEquals(ExternalSubtitles.FetchOutcome.FAILED, outcome())
-        assertEquals("an abandoned pick never waits", ExternalSubtitles.FetchOutcome.FAILED, outcome(chosen = false, pending = true))
     }
 }

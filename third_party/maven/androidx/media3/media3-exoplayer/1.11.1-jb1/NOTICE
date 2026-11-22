@@ -1,0 +1,11 @@
+media3-exoplayer 1.11.1-jb1
+
+Derived from AndroidX Media (androidx.media3:media3-exoplayer 1.11.1),
+Copyright The Android Open Source Project, licensed under the Apache
+License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+
+Modification: upstream commit 4c95cd96b53e83969c269e197a16cd059cec90ee
+("Do not treat unexpected AudioTrack position decrease as overflow")
+applied to AudioTrackPositionTracker and DefaultAudioSink; the patch and
+the build script are in tools/media3-patch of the Jellybeam TV repository.
+The modified classes remain under the Apache License, Version 2.0.

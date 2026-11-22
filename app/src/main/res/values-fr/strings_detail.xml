@@ -122,4 +122,11 @@
     <string name="detail_extra_type_clip">EXTRAIT</string>
     <string name="detail_extra_type_sample">ÉCHANTILLON</string>
     <string name="detail_extra_type_other">BONUS</string>
+
+    <string name="detail_playability_direct_play">LECTURE DIRECTE</string>
+    <string name="detail_playability_will_transcode">TRANSCODAGE</string>
+    <string name="detail_playability_will_transcode_reason">TRANSCODAGE (%1$s)</string>
+    <string name="detail_playability_wont_play">LECTURE IMPOSSIBLE</string>
+    <string name="detail_playability_wont_play_reason">LECTURE IMPOSSIBLE (%1$s)</string>
+    <string name="detail_playability_no_server_transcoding">SANS TRANSCODAGE</string>
 </resources>

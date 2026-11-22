@@ -10,7 +10,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import java.io.File
 import java.io.IOException
-import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CancellationException
@@ -356,30 +355,18 @@ private class LruMap<K, V>(private val maxEntries: Int, private val weigh: (V) -
  * file cache under [dir], keyed by a hash of the URL so the access token in the query never
  * lands on disk in the clear. Cancelling the coroutine cancels the OkHttp call.
  */
-class OkHttpSheetFetcher(client: OkHttpClient, private val dir: File) : SheetFetcher {
+class OkHttpSheetFetcher(client: OkHttpClient, dir: File) : SheetFetcher {
     private val client = client.newBuilder()
         .callTimeout(TrickplayTransport.SHEET_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
         .build()
 
+    private val cache = LruFileDir({ dir }, ".jpg", TrickplayTransport.SHEET_DISK_BYTES, stalePartMs = TrickplayTransport.STALE_PART_MS)
+
     override suspend fun fetch(url: String): ByteArray? {
-        val file = File(dir, hash(url) + ".jpg")
-        if (file.isFile) {
-            file.setLastModified(System.currentTimeMillis())
-            return runCatchingCancellable { file.readBytes() }.getOrNull()
-        }
+        val name = LruFileDir.nameFor(url)
+        if (cache.file(name).isFile) return cache.read(name)
         val bytes = client.newCall(Request.Builder().url(url).build()).awaitBytes() ?: return null
-        runCatchingCancellable {
-            dir.mkdirs()
-            val tmp = File.createTempFile("sheet-", ".part", dir)
-            try {
-                tmp.writeBytes(bytes)
-                if (!tmp.renameTo(file)) tmp.delete()
-            } catch (e: IOException) {
-                tmp.delete()
-                throw e
-            }
-            trim()
-        }
+        runCatchingCancellable { cache.write(name, bytes) }
         return bytes
     }
 
@@ -405,24 +392,6 @@ class OkHttpSheetFetcher(client: OkHttpClient, private val dir: File) : SheetFet
             },
         )
     }
-
-    private fun trim() {
-        val now = System.currentTimeMillis()
-        val all = dir.listFiles { f -> f.isFile } ?: return
-        all.filter { it.name.endsWith(".part") && now - it.lastModified() > TrickplayTransport.STALE_PART_MS }
-            .forEach { it.delete() }
-        val sheets = all.filter { it.name.endsWith(".jpg") }
-        var total = sheets.sumOf { it.length() }
-        if (total <= TrickplayTransport.SHEET_DISK_BYTES) return
-        for (f in sheets.sortedBy { it.lastModified() }) {
-            total -= f.length()
-            f.delete()
-            if (total <= TrickplayTransport.SHEET_DISK_BYTES) break
-        }
-    }
-
-    private fun hash(s: String): String =
-        MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
 
     private fun java.io.InputStream.readNBytesCapped(cap: Int): ByteArray? {
         val out = java.io.ByteArrayOutputStream()

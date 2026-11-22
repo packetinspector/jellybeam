@@ -70,8 +70,17 @@ internal class RootFocus {
     var seat: FocusSeat? = null
     private var swallowingUp: Int? = null
 
+    /** docs/07 §5: Back presses seen at the root, so an open still reading its card drops on any Back. */
+    var backPresses: Long = 0L
+        private set
+
     /** True when the root took [event]; the caller then skips the framework dispatch. */
-    fun dispatch(event: KeyEvent): Boolean = when (rootKeyAction(event.action, event.keyCode, hasFocus, seat != null, swallowingUp)) {
+    fun dispatch(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_BACK && event.repeatCount == 0) backPresses++
+        return route(event)
+    }
+
+    private fun route(event: KeyEvent): Boolean = when (rootKeyAction(event.action, event.keyCode, hasFocus, seat != null, swallowingUp)) {
         RootKeyAction.Pass -> false
         RootKeyAction.Swallow -> {
             swallowingUp = null

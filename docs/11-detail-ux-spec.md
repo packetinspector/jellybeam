@@ -91,6 +91,8 @@ it, ranked by contribution to "feels like Jellybeam".
     (Specials index 0 sort LAST), skip virtuals; first episode with
     position>0 wins (→ button `Resume S2 E6`), else first unplayed (→ plain
     `Play`). Missing S/E numbers degrade to plain `Resume`, never `S? E?`.
+    The core owns the pick (`series_summary_read`, never the episode list);
+    the app only labels it.
     ~~Secondary "Start from beginning" pill only when progress exists — same
     44px box as primary (transparent, 1px HAIRLINE border, PANNA-2 label),
     same row, wraps.~~ Superseded by docs/19: the `···` menu at
@@ -114,6 +116,11 @@ it, ranked by contribution to "feels like Jellybeam".
     PANNA label). Markers are drawn, never laid out, so chip size never
     changes. Unaired placeholders count for nothing (docs/24); Specials and
     seasons with nothing aired get no marker. Off, the chips are unchanged.
+    The counts come from the core's series summary (`series_summary_read`:
+    the Play pick plus per-season have/watched/missing), so a series page
+    never marshals its whole episode list; the episode shelf reads only the
+    shown season (`season_episodes_read`, virtual episodes included) and
+    applies Show missing episodes itself, so a flip re-filters in place.
 13. **Similar Titles row** — 2:3 posters at 160px, from a live GetSimilar
     (limit 16) alongside the instant mirror paint. Empty and not-yet-loaded
     both render NOTHING. Skipped on episode pages.
@@ -186,9 +193,9 @@ movie layout. Members come from the mirror in the server's display order
   fully watched (Movie/Episode: not played or resuming; Series: unplayed
   episodes left). Only real (non-virtual) movies, episodes, videos, music videos
   and series qualify; a nested collection, album or book never does. A Series
-  with no episode yields to the next candidate, and one whose episodes fail to
-  load keeps the pill's previous target only if that was the same series. A Series target plays
-  the series page's own next episode (first with progress, else first unplayed)
+  with no episode yields to the next candidate, and one whose target read fails
+  keeps the pill's previous target only if that was the same series. A Series target plays
+  the series page's own next episode (item 11's core pick: first with progress, else first unplayed)
   and reads `<series> · S2 E6`; a movie reads `<name> · <runtime>`. A target with a
   saved position reads `Resume` (a movie's line shows `<name> · 53m left`). Everything
   watched: the pill reads `Play again` and starts member 0 from the beginning.

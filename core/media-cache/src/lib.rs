@@ -144,6 +144,37 @@ impl UserStateReason {
     }
 }
 
+/// docs/07 Watch state: whether the app is on screen, written only by the core's
+/// `on_foreground`/`on_background`; periodic backstops run only in `Foreground`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppPresence {
+    Foreground,
+    Background,
+}
+
+/// docs/07 Watch state: the next tick of `interval` that lands in the foreground. A tick in the
+/// background parks until the app returns, then restarts the period, so a return costs no
+/// catch-up pass; `false` once the presence sender (the core) is gone while backgrounded.
+pub async fn foreground_tick(
+    interval: &mut tokio::time::Interval,
+    presence: &mut tokio::sync::watch::Receiver<AppPresence>,
+) -> bool {
+    loop {
+        interval.tick().await;
+        if *presence.borrow_and_update() == AppPresence::Foreground {
+            return true;
+        }
+        if presence
+            .wait_for(|p| *p == AppPresence::Foreground)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        interval.reset();
+    }
+}
+
 /// Raw ids of local watch-state writes the server hasn't seen yet; called only from background
 /// sync tasks (the refresher and the warm startup pass), never under the core state lock.
 pub type LocalPendingProvider =
@@ -462,12 +493,14 @@ impl Mirror {
     ///
     /// `dir` is a directory, not a filename; per-server scoping is assumed already baked
     /// into it by the caller (one directory per server), and this just creates `mirror.db`
-    /// inside it. While `playback_active` is set, its bulk sync yields to playback.
+    /// inside it. While `playback_active` is set, its bulk sync yields to playback; while
+    /// `presence` reads `Background`, its reconcile timer is dormant.
     pub async fn open(
         dir: std::path::PathBuf,
         client: jellyfin_api::JellyfinClient,
         bus: tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>,
         playback_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        presence: tokio::sync::watch::Receiver<AppPresence>,
         local_pending: LocalPendingProvider,
     ) -> Result<Self, CacheError> {
         tokio::fs::create_dir_all(&dir)
@@ -512,7 +545,7 @@ impl Mirror {
         state
             .ready_index_groups
             .store(built_index_groups, std::sync::atomic::Ordering::Release);
-        sync::spawn(state.clone(), bus, is_empty);
+        sync::spawn(state.clone(), bus, is_empty, presence);
 
         Ok(Self { inner: state })
     }

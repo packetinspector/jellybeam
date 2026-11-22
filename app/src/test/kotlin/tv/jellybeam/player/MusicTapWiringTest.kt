@@ -95,6 +95,46 @@ class MusicTapWiringTest {
     }
 
     @Test
+    fun aLyingPositionIsOnlyObserved() {
+        // docs/18 §5.1: the patched Media3 (docs/06) fixed the false wrap; the guard logs, the raw position is returned.
+        val logged = mutableListOf<String>()
+        val out = PlausibleClockAudioOutput(
+            delegate = fakeOutput { 44_739_000_000L },
+            clock = Clock.DEFAULT,
+            reporter = ClockDiagReporter(outputId = 1, startMs = 0L, log = { logged += it }, enabled = { false }, emit = {}),
+        )
+        out.play()
+        assertEquals(44_739_000_000L, out.positionUs)
+        assertTrue(logged.any { it.startsWith("clock would-clamp rule=start") })
+    }
+
+    @Test
+    fun passthroughSupportIsLoggedOnlyWhenItChanges() {
+        // docs/18 §5.1: a mid-day loss of passthrough must be visible in logcat, once, when it happens.
+        var level = AudioOutputProvider.FORMAT_SUPPORTED_DIRECTLY
+        val delegate = Proxy.newProxyInstance(AudioOutputProvider::class.java.classLoader, arrayOf(AudioOutputProvider::class.java)) { _, method, _ ->
+            when (method.name) {
+                "getFormatSupport" -> AudioOutputProvider.FormatSupport.Builder().setFormatSupportLevel(level).build()
+                "getAudioOutput" -> fakeOutput()
+                else -> null
+            }
+        } as AudioOutputProvider
+        val logged = mutableListOf<String>()
+        val provider = PlausibleClockAudioOutputProvider(delegate, tap = null, log = { logged += it })
+        fun ask(mime: String) = provider.getFormatSupport(
+            AudioOutputProvider.FormatConfig.Builder(androidx.media3.common.Format.Builder().setSampleMimeType(mime).build()).build(),
+        )
+        repeat(3) { ask("audio/eac3") }
+        ask("audio/raw")
+        level = AudioOutputProvider.FORMAT_UNSUPPORTED
+        repeat(2) { ask("audio/eac3") }
+        assertEquals(
+            listOf("audio support mime=audio/eac3 level=2 offload=false", "audio support mime=audio/eac3 level=0 offload=false"),
+            logged,
+        )
+    }
+
+    @Test
     fun providerConfiguresTheTapFromTheOutputConfig() {
         val tap = PcmTap()
         val delegate = Proxy.newProxyInstance(AudioOutputProvider::class.java.classLoader, arrayOf(AudioOutputProvider::class.java)) { _, method, _ ->

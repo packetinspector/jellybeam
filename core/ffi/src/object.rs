@@ -22,9 +22,10 @@ use crate::types::{
     AccountIdentity, AccountInfo, BrowseRead, Card, ChangeEvent, CollectionInfo, DeviceCaps,
     EpisodeNeighbors, ExtraItem, FailedTrackFfi, GridCounts, GridFilters, GridGroup, GridSort,
     ImageKind, ImageUrlPrefix, ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment,
-    MirrorItemCounts, MirrorLibrary, MirrorStats, PlayMethodFfi, PlaybackOsdDetail, PlaybackPlan,
-    PlaybackRequest, QuickConnectSession, ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus,
-    TrackDecisionFfi, TrackInfo, TrackKindFfi, TrackMemoryFfi, ViewSnapshot,
+    MirrorItemCounts, MirrorLibrary, MirrorStats, NamedStreams, PlayMethodFfi, PlaybackOsdDetail,
+    PlaybackPlan, PlaybackRequest, QuickConnectSession, SecondNegotiation, SeriesSummaryRead,
+    ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus, TrackDecisionFfi, TrackInfo,
+    TrackKindFfi, TrackMemoryFfi, TranscodeCauseFfi, TranscodeStreamsFfi, ViewSnapshot,
 };
 use crate::{device_id, library_prefs, session, settings, signin, track_prefs};
 use playback_policy::syncplay::Event as SyncPlayIn;
@@ -98,7 +99,7 @@ struct PlaybackOwner {
     /// Highest admitted [`PlaybackRequest::seq`]; an equal or lower one is refused.
     highest_seq: u64,
     /// The admitted request still allowed to install, cleared by install, revocation and reset.
-    claim: Option<PlaybackClaim>,
+    claim: Option<ClaimSlot>,
     /// The session a pending fallback took over. It keeps reporting (and its stream keeps
     /// playing) until the claim resolves, so it is stopped where the viewer actually left it.
     retiring: Option<Retiring>,
@@ -147,6 +148,29 @@ impl ParkedAccount {
             self.account.clone()
         }
     }
+}
+
+impl PlaybackOwner {
+    fn current_claim(&self) -> Option<&PlaybackClaim> {
+        self.claim.as_ref().map(|slot| &slot.claim)
+    }
+}
+
+/// [`PlaybackOwner::claim`]: the admitted request and, once its renegotiation returned, the
+/// session it prepared; that one starts only at [`JellybeamCore::commit_transcode`], so every
+/// path that clears the claim drops it unstarted.
+struct ClaimSlot {
+    claim: PlaybackClaim,
+    prepared: Option<Prepared>,
+}
+
+/// docs/18 §2.1: a renegotiated transcode session not yet started: the client of the account
+/// it reports to, its report context and sidecars, and the position it takes over at.
+struct Prepared {
+    client: jellyfin_api::JellyfinClient,
+    ctx: jellyfin_core::ReportContext,
+    sidecars: Option<crate::types::SessionSidecars>,
+    ticks: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -226,6 +250,9 @@ pub(crate) struct AccountCaches {
     collections: Option<(Instant, Vec<CollectionInfo>)>,
     /// [`JellybeamCore::is_administrator`]'s answer, cached only when the server stated it.
     is_admin: Option<bool>,
+    /// docs/18 §6: the account policy's `EnableVideoPlaybackTranscoding`, cached only when
+    /// `/Users/Me` stated it.
+    video_transcoding: Option<bool>,
 }
 
 /// docs/18 §2.1: the installed account and its epoch; [`JellybeamCore::reset_account_state_locked`]
@@ -431,11 +458,8 @@ struct AccountReset {
     sync_play: Option<(u64, jellyfin_api::JellyfinClient, SyncPlayOwner)>,
 }
 
-/// One-slot cache of a focus-dwell preload's negotiation result. Only ever
-/// holds a [`ResolvedPlan::DirectPlay`] outcome (docs/18-playback-quality.md
-/// §2: "preload_playback caches DirectPlay plans only") -- a `Transcode`
-/// result's `url` embeds the negotiation's start position, so it isn't safe
-/// to reuse the way a Direct Play url is.
+/// docs/18 §2: one-slot cache of a focus-dwell preload's first negotiation, for one Play of its
+/// item within [`PRELOAD_CACHE_TTL`].
 #[derive(Clone)]
 struct PreloadCache {
     /// The request that produced it: [`State::preload_publish`] gates on it, and
@@ -443,15 +467,64 @@ struct PreloadCache {
     generation: u64,
     item_id: String,
     source: jellyfin_api::models::MediaSourceInfo,
-    url: String,
-    /// `PlaybackInfoResponse::play_session_id`, already unwrapped to the
-    /// same empty-string convention the uncached path uses.
-    play_session_id: String,
-    /// Carried from the [`ResolvedPlan::DirectPlay`] this entry was built
-    /// from, so a cache-hit [`PlaybackPlan`] shows the same `server_verdict`
-    /// a fresh negotiation would have.
-    server_verdict: Option<String>,
+    plan: PreloadPlan,
     created_at: Instant,
+}
+
+/// What the first negotiation resolved `source` to.
+#[derive(Clone)]
+enum PreloadPlan {
+    /// The whole plan, Play negotiates nothing; `play_session_id` uses the uncached path's
+    /// empty-string convention, `server_verdict` is the attempt-anyway verdict.
+    DirectPlay {
+        url: String,
+        play_session_id: String,
+        server_verdict: Option<String>,
+    },
+    /// docs/18 §3.2: Auto's transcode, whose position-dependent URL and session are never
+    /// reused: Play runs only the second negotiation, over `source`.
+    Transcode,
+}
+
+/// docs/18 §2: where a Play's negotiation starts, given the preload it took.
+enum NegotiationStart {
+    /// A cached Direct Play plan: no `PlaybackInfo`.
+    Cached {
+        source: jellyfin_api::models::MediaSourceInfo,
+        url: String,
+        play_session_id: String,
+        server_verdict: Option<String>,
+    },
+    /// Auto's cached transcode of `source`: only the second negotiation runs.
+    SecondOnly {
+        source: jellyfin_api::models::MediaSourceInfo,
+    },
+    /// Every negotiation the mode asks for.
+    Full,
+}
+
+/// docs/18 §2: a Direct Play cache serves every mode, as before; a transcode one only Auto,
+/// the one mode whose transcode runs the second negotiation it skips to.
+fn negotiation_start(quality: PlaybackQuality, cached: Option<PreloadCache>) -> NegotiationStart {
+    let Some(PreloadCache { source, plan, .. }) = cached else {
+        return NegotiationStart::Full;
+    };
+    match plan {
+        PreloadPlan::DirectPlay {
+            url,
+            play_session_id,
+            server_verdict,
+        } => NegotiationStart::Cached {
+            source,
+            url,
+            play_session_id,
+            server_verdict,
+        },
+        PreloadPlan::Transcode if quality == PlaybackQuality::Auto => {
+            NegotiationStart::SecondOnly { source }
+        }
+        PreloadPlan::Transcode => NegotiationStart::Full,
+    }
 }
 
 /// Complete immutable input for one speculative negotiation. Keeping the
@@ -862,6 +935,10 @@ pub struct JellybeamCore {
     /// probes) so the poll loop reuses its connection; per-core, never process-global, because
     /// its pool is tied to this core's runtime.
     pre_auth_http: std::sync::OnceLock<jellyfin_api::HttpClient>,
+    /// docs/07 Watch state: written only by [`Self::on_foreground`] / [`Self::on_background`];
+    /// every mirror and the server-version poll hold a receiver, so their timers sleep while
+    /// backgrounded. Starts `Foreground`: the process launches on screen.
+    presence: tokio::sync::watch::Sender<media_cache::AppPresence>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -904,12 +981,14 @@ impl JellybeamCore {
             ..State::default()
         })));
         let session_lock = Arc::new(Mutex::new(()));
+        let (presence, _) = tokio::sync::watch::channel(media_cache::AppPresence::Foreground);
 
         // docs/13 Server compatibility: one poll for the process, following whichever client is installed.
         Self::spawn_server_version_poll(
             Arc::downgrade(&state),
             data_dir.clone(),
             session_lock.clone(),
+            presence.subscribe(),
             &runtime,
         );
 
@@ -927,6 +1006,7 @@ impl JellybeamCore {
             #[cfg(test)]
             mirror_opens: std::sync::atomic::AtomicUsize::new(0),
             pre_auth_http: std::sync::OnceLock::new(),
+            presence,
             runtime,
         })
     }
@@ -1509,7 +1589,7 @@ impl JellybeamCore {
         let mirror = self.require_mirror().ok()?;
         let cards =
             mirror.library_grid_checked(&view_id, sort.into(), &filters.into(), offset, limit)?;
-        Some(cards.into_iter().map(Card::from).collect())
+        Some(cards.into_iter().map(Card::list_cell).collect())
     }
 
     /// docs/16-library-sort-filter.md §3/§2.3/§4.6: filtered/total row
@@ -1557,7 +1637,7 @@ impl JellybeamCore {
         mirror
             .search(&query, limit)
             .into_iter()
-            .map(Card::from)
+            .map(Card::list_cell)
             .collect()
     }
 
@@ -1715,10 +1795,21 @@ impl JellybeamCore {
         item_id: String,
         account_epoch: Option<u64>,
     ) -> Result<ItemDetail, CoreError> {
-        let client = self
-            .read_account(account_epoch)?
-            .client
-            .ok_or(CoreError::NotSignedIn)?;
+        let (epoch, client, caps, tolerate_mislabeled_levels, quality) = {
+            let state = self.lock_state();
+            let epoch = account_epoch.unwrap_or(state.account.epoch);
+            let client = Self::account_for_epoch_locked(&state, epoch)?
+                .client
+                .ok_or(CoreError::NotSignedIn)?;
+            let settings = &state.settings;
+            (
+                epoch,
+                client,
+                state.caps.clone(),
+                settings.tolerate_mislabeled_levels,
+                settings.playback_quality,
+            )
+        };
 
         let dto = self.runtime.block_on(async {
             let result = client
@@ -1759,7 +1850,30 @@ impl JellybeamCore {
                 })
         })?;
 
-        Ok(ItemDetail::from(&dto))
+        // docs/18 §6: the permission is fetched only when the verdict depends on it and no
+        // `/Users/Me` reply has stated it yet; unknown (a failed fetch too) never forbids.
+        let profile = jellyfin_core::android_tv_profile(&caps, tolerate_mislabeled_levels);
+        let judge = |transcoding| {
+            crate::types::playability(
+                &profile,
+                &dto.media_sources,
+                &quality,
+                transcoding,
+                tolerate_mislabeled_levels,
+            )
+        };
+        let mut transcoding = self
+            .read_if_epoch(epoch, |caches| caches.video_transcoding)
+            .flatten();
+        if transcoding.is_none() && judge(Some(true)) != judge(Some(false)) {
+            if let Ok(user) = self.runtime.block_on(client.current_user()) {
+                transcoding = self.cache_user_policy(epoch, &user);
+            }
+        }
+        Ok(ItemDetail {
+            playability: judge(transcoding),
+            ..ItemDetail::from(&dto)
+        })
     }
 
     /// docs/11 item 1: the Detail page's first paint from the mirror's stored DTO, before
@@ -2050,8 +2164,8 @@ impl JellybeamCore {
     /// `start_from_beginning` (docs/11 item 11) forces tick 0 over the
     /// server's saved resume position; recomputed every call so a preload
     /// cache hit never mis-resumes. A fresh
-    /// [`Self::preload_playback`] `DirectPlay` result for this `item_id` is
-    /// consumed here (single-use) in place of a fresh negotiation round
+    /// [`Self::preload_playback`] result for this `item_id` is
+    /// consumed here (single-use) in place of the first negotiation round
     /// trip; a preload still negotiating this same item is joined instead of
     /// aborted (§2), so Play reuses it rather than starting over. A preload
     /// for any other item is stale the moment a real Play arrives: it is
@@ -2097,8 +2211,8 @@ impl JellybeamCore {
     /// best-effort playback-handshake prefetch for a long-focused card.
     /// Metadata/negotiation only, never media bytes: runs the same
     /// negotiation [`Self::prepare_playback`] does but never starts a
-    /// `ReportingSession` or surfaces an error. A `DirectPlay` result is
-    /// stashed in the one-slot [`PreloadCache`]; anything else caches nothing.
+    /// `ReportingSession` or surfaces an error. Its first negotiation's
+    /// resolved plan is stashed in the one-slot [`PreloadCache`]; an error caches nothing.
     ///
     /// No-ops before touching the network when the setting is off, nobody is
     /// signed in, the mirror isn't open, quality is `Cap { .. }` (its plan's
@@ -2261,15 +2375,19 @@ impl JellybeamCore {
     ///
     /// Otherwise: parks the session in `retiring` (ended once: at install,
     /// stop, abandon, a failed negotiation or an account reset), re-negotiates with
-    /// `force_transcode: true` and `StartTimeTicks = position_ticks`,
+    /// `force_transcode: true`, `StartTimeTicks = position_ticks` and `streams` (docs/18 §3.1:
+    /// the policy's, run once like a start's, or the viewer's choice),
     /// accepted via [`transcode_url_from_decision`] (`None` ->
     /// `NoPlayableSource`). One fallback per item; a transcode that then
     /// fails is a plain fatal error.
     ///
-    /// docs/18 §2.1: `play_session_id` must still name the active session (else
-    /// [`CoreError::StalePlaybackSession`], untouched), and `request` claims ownership while the
-    /// lock is released; a newer request, a stop/abandon of `play_session_id`, or an account reset
-    /// revokes it, and the negotiated session is then never started.
+    /// docs/18 §2.1: `play_session_id` must name the active session, or the one a fallback still
+    /// waiting for its commit retired (else [`CoreError::StalePlaybackSession`], untouched), and
+    /// `request` claims ownership. `cause` decides whether the active session retires now
+    /// (`Fallback`) or plays on (`Renegotiate`). The negotiated session is only prepared: it
+    /// starts at [`Self::commit_transcode`], and a newer request, a stop/abandon of
+    /// `play_session_id` or an account reset before then drops it unstarted. A failure stops a
+    /// session the fallback retired and leaves a playing one alone.
     // Exported flat: uniffi records would add a type per call for no reader's benefit.
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub fn prepare_transcode_fallback(
@@ -2279,8 +2397,8 @@ impl JellybeamCore {
         reason: String,
         play_session_id: String,
         failed: Option<FailedTrackFfi>,
-        subtitle_stream_index: Option<i32>,
-        audio_stream_index: Option<i32>,
+        streams: TranscodeStreamsFfi,
+        cause: TranscodeCauseFfi,
         request: PlaybackRequest,
     ) -> Result<PlaybackPlan, CoreError> {
         let (client, mirror, caps, tolerate_mislabeled_levels, quality, media_source_id, claim) = {
@@ -2293,31 +2411,54 @@ impl JellybeamCore {
             let caps = state.caps.clone();
             let tolerate_mislabeled_levels = state.settings.tolerate_mislabeled_levels;
             let quality = state.settings.playback_quality;
-            let is_still_current = state
+            let active = state
                 .reporting
                 .as_ref()
-                .is_some_and(|active| active.context().play_session_id == play_session_id);
-            if !is_still_current {
-                return Err(CoreError::StalePlaybackSession);
-            }
-            let claim = Self::admit_playback_request(&mut state, request, Some(play_session_id))?;
-            state.local_progress_checkpoint.reset();
-            let session = state
-                .reporting
-                .take()
-                .expect("is_still_current just proved this is Some");
-            // Its sidecars go now: the replacement brings its own, and a session that is only
-            // retiring must not be fetched from.
-            state.sidecars = None;
-            let media_source_id = session.context().media_source_id.clone();
-            // docs/18 §2.1: it keeps reporting until the claim resolves, so it ends where the
-            // viewer left it -- at install, at a stop that revokes the claim, or when superseded.
-            state.playback_owner.retiring = Some(Retiring {
-                seq: claim.seq,
-                session,
-                ticks: position_ticks,
-                reported: None,
+                .filter(|active| active.context().play_session_id == play_session_id);
+            let retired = state.playback_owner.retiring.as_ref().filter(|retiring| {
+                retiring.session.context().play_session_id == play_session_id
+                    && state
+                        .playback_owner
+                        .current_claim()
+                        .is_some_and(|claim| claim.seq == retiring.seq)
             });
+            let is_active = active.is_some();
+            let Some(media_source_id) = active
+                .or(retired.map(|retiring| &retiring.session))
+                .map(|session| session.context().media_source_id.clone())
+            else {
+                return Err(CoreError::StalePlaybackSession);
+            };
+            let claim = Self::admit_playback_request(&mut state, request, Some(play_session_id))?;
+            match (is_active, cause) {
+                (true, TranscodeCauseFfi::Fallback) => {
+                    state.local_progress_checkpoint.reset();
+                    // Its sidecars go now: the replacement brings its own, and a session that is
+                    // only retiring must not be fetched from.
+                    state.sidecars = None;
+                    // docs/18 §2.1: it keeps reporting until the claim resolves, so it ends where
+                    // the viewer left it -- at the commit, at a stop that revokes the claim, or
+                    // when superseded.
+                    if let Some(session) = state.reporting.take() {
+                        state.playback_owner.retiring = Some(Retiring {
+                            seq: claim.seq,
+                            session,
+                            ticks: position_ticks,
+                            reported: None,
+                        });
+                    }
+                }
+                // It plays and reports on until the commit retires it.
+                (true, TranscodeCauseFfi::Renegotiate) => {}
+                // A chain onto a pending fallback: the retired session now ends where this
+                // negotiation's session takes over.
+                (false, _) => {
+                    if let Some(retiring) = state.playback_owner.retiring.as_mut() {
+                        retiring.seq = claim.seq;
+                        retiring.ticks = position_ticks;
+                    }
+                }
+            }
             (
                 client,
                 mirror,
@@ -2347,23 +2488,47 @@ impl JellybeamCore {
                 false,
             );
 
-            let (play_session_id, decision) = self.negotiate_playback_info(
-                &client,
-                &item_id,
-                &profile,
-                Some(position_ticks),
-                fallback_options(
-                    media_source_id,
-                    failed,
-                    subtitle_stream_index,
-                    audio_stream_index,
-                ),
-            )?;
-            // See [`transcode_url_from_decision`]'s own doc comment for exactly
-            // which two decision shapes this accepts (a codec-blind source's
-            // `DirectPlay` decision included).
-            let (source, url) = transcode_url_from_decision(&client, &item_id, decision)
-                .ok_or(jellyfin_core::CoreError::NoPlayableSource)?;
+            let track_memory_subject =
+                playback_policy::prefs::track_memory_subject(series_id.as_deref(), &item_id);
+            let negotiate = |subtitle: Option<i32>, audio: Option<i32>| -> Result<_, CoreError> {
+                let (play_session_id, decision) = self.negotiate_playback_info(
+                    &client,
+                    &item_id,
+                    &profile,
+                    Some(position_ticks),
+                    fallback_options(media_source_id.clone(), failed, subtitle, audio),
+                )?;
+                // See [`transcode_url_from_decision`]'s own doc comment for exactly
+                // which two decision shapes this accepts (a codec-blind source's
+                // `DirectPlay` decision included).
+                let (source, url) = transcode_url_from_decision(&client, &item_id, decision)
+                    .ok_or(jellyfin_core::CoreError::NoPlayableSource)?;
+                Ok((play_session_id, source, url))
+            };
+            let (play_session_id, source, url, requested_audio, policy_decision) = match streams {
+                TranscodeStreamsFfi::Named { subtitle, audio } => {
+                    let (play_session_id, source, url) = negotiate(subtitle, audio)?;
+                    (play_session_id, source, url, audio, None)
+                }
+                TranscodeStreamsFfi::Policy => {
+                    let (mut play_session_id, mut source, mut url) = negotiate(None, None)?;
+                    let run = self.negotiate_with_policy(
+                        &client,
+                        &track_memory_subject,
+                        &source,
+                        &url,
+                        SecondNegotiation::IfNamed,
+                        |named: Option<NamedStreams>| match named {
+                            Some(n) => negotiate(n.subtitle, n.audio),
+                            None => negotiate(None, None),
+                        },
+                    )?;
+                    if let Some(renegotiated) = run.renegotiated {
+                        (play_session_id, source, url) = renegotiated;
+                    }
+                    (play_session_id, source, url, run.audio, Some(run.decision))
+                }
+            };
 
             let media_source_id = source.id.clone().unwrap_or_default();
             let ctx = jellyfin_core::ReportContext {
@@ -2375,15 +2540,31 @@ impl JellybeamCore {
             };
             let (sidecars, sidecar_tracks) =
                 Self::session_sidecars(&client, &source, &play_session_id);
-            self.install_claimed_session(&claim, &client, ctx, sidecars)?;
+            {
+                let mut state = self.lock_state();
+                let slot = state
+                    .playback_owner
+                    .claim
+                    .as_mut()
+                    .filter(|slot| slot.claim == claim)
+                    .ok_or(CoreError::StalePlaybackSession)?;
+                slot.prepared = Some(Prepared {
+                    client: client.clone(),
+                    ctx,
+                    sidecars,
+                    ticks: position_ticks,
+                });
+            }
 
             let burned_subtitle_index = crate::types::burned_subtitle_index(&url);
             let delivered_audio_index = crate::types::delivered_audio_index(
                 PlayMethodFfi::Transcode,
                 &url,
-                audio_stream_index,
+                requested_audio,
                 &source,
             );
+            let track_rows =
+                crate::types::transcode_track_rows(&source, &url, requested_audio, &sidecar_tracks);
             let plan = PlaybackPlan {
                 item_id: item_id.clone(),
                 item_name,
@@ -2404,18 +2585,22 @@ impl JellybeamCore {
                 parent_index_number,
                 index_number,
                 series_id,
+                track_memory_subject,
                 external_subtitles: sidecar_tracks,
                 embedded_subtitles: crate::types::embedded_subtitles_of(&source),
                 burned_subtitle_index,
                 audio_streams: crate::types::audio_streams_of(&source),
                 delivered_audio_index,
+                policy_decision,
+                track_rows,
             };
 
             Ok(plan)
         })();
         if result.is_err() {
             self.release_claim(&claim);
-            // A fallback that never installs releases what it took, if it still holds it.
+            // A fallback that never prepares stops the session it retired, if it still holds it;
+            // a renegotiation of the active session retired nothing, so it plays on.
             let released = {
                 let mut state = self.lock_state();
                 let account = Self::playback_account_locked(&state);
@@ -2439,6 +2624,67 @@ impl JellybeamCore {
             }
         }
         result
+    }
+
+    /// docs/18 §2.1: starts the transcode session `request`'s negotiation prepared as
+    /// `play_session_id`, if that claim is still the owner. The session it replaces ends where
+    /// the new one takes over: a renegotiated one stops reporting only now. Anything else is
+    /// [`CoreError::StalePlaybackSession`] and changes nothing.
+    pub fn commit_transcode(
+        &self,
+        play_session_id: String,
+        request: PlaybackRequest,
+    ) -> Result<(), CoreError> {
+        let (replaced, claim) = {
+            let mut state = self.lock_state();
+            let slot = state
+                .playback_owner
+                .claim
+                .as_mut()
+                .filter(|slot| {
+                    slot.claim.seq == request.seq && slot.claim.epoch == request.account_epoch
+                })
+                .ok_or(CoreError::StalePlaybackSession)?;
+            let claim = slot.claim.clone();
+            let prepared = slot
+                .prepared
+                .take_if(|prepared| prepared.ctx.play_session_id == play_session_id)
+                .ok_or(CoreError::StalePlaybackSession)?;
+            let retires = claim.retires.as_deref();
+            if let Some(session) = state
+                .reporting
+                .take_if(|session| Some(session.context().play_session_id.as_str()) == retires)
+            {
+                // A reporting session never coexists with a retiring one: retiring only ever
+                // takes the reporting session, and every install clears it.
+                debug_assert!(state.playback_owner.retiring.is_none());
+                state.playback_owner.retiring = Some(Retiring {
+                    seq: claim.seq,
+                    session,
+                    ticks: prepared.ticks,
+                    reported: None,
+                });
+            }
+            let Prepared {
+                client,
+                ctx,
+                sidecars,
+                ..
+            } = prepared;
+            let replaced = Self::install_claimed_session_locked(
+                &mut state,
+                &claim,
+                || {
+                    // `ReportingSession::start` spawns its actor and needs a runtime context.
+                    let _runtime_guard = self.runtime.enter();
+                    jellyfin_core::ReportingSession::start(client, ctx)
+                },
+                sidecars,
+            )?;
+            (replaced, claim)
+        };
+        self.end_replaced(replaced, &claim);
+        Ok(())
     }
 
     /// Discards the active reporting session, *if it is still the one named
@@ -2475,9 +2721,18 @@ impl JellybeamCore {
     /// for a played-state refresh. Parked mirrors are not notified; never blocks or touches the
     /// network inline (docs/01 §4).
     pub fn on_foreground(&self) {
+        self.presence
+            .send_replace(media_cache::AppPresence::Foreground);
         if let Ok(mirror) = self.require_mirror() {
             mirror.request_user_state_refresh(media_cache::UserStateReason::Foreground);
         }
+    }
+
+    /// docs/07 Watch state: the app left the screen; every reconcile timer and the server-version
+    /// poll stay dormant until the next [`Self::on_foreground`]. Never blocks or touches the network.
+    pub fn on_background(&self) {
+        self.presence
+            .send_replace(media_cache::AppPresence::Background);
     }
 
     /// docs/18 §2.1: both epochs read under one lock, so Kotlin never pairs the current epoch
@@ -2603,22 +2858,19 @@ impl JellybeamCore {
         Some(EpisodeNeighbors { previous, next })
     }
 
-    /// docs/11 item 11, Series Play/Resume: ALL of `series_id`'s episodes
-    /// across EVERY season (Specials first), not just the Detail page's
-    /// selected season tab. Backs Kotlin's
-    /// `DetailFormatting.resolvePrimaryAction`/`resolveSeriesAction` so the
-    /// button finds an in-progress/next-unplayed episode in any season.
-    ///
-    /// One local-mirror-only round trip per Detail page open (never per
-    /// season-tab switch). docs/07 §5: "mirror not open yet", "query failed" and "series has no
-    /// episodes" stay apart.
+    /// docs/11 item 11: ALL of `series_id`'s episodes across EVERY season
+    /// (Specials first), for consumers that need every id (the series menu's
+    /// random pick, read on demand; Watch Together's queue). Neither draws a synopsis, so the
+    /// cards are list cells without the overview (docs/07 §5). The series page itself reads
+    /// [`Self::series_summary_read`]. Mirror-only; "mirror not open yet", "query failed" and
+    /// "series has no episodes" stay apart.
     pub fn series_episodes_read(&self, series_id: String) -> BrowseRead {
         let Ok(mirror) = self.require_mirror() else {
             return BrowseRead::NotReady;
         };
         match crate::next_episode::all_episodes_of_series(&mirror, &series_id) {
             Some(rows) => BrowseRead::Items {
-                cards: rows.into_iter().map(Card::from).collect(),
+                cards: rows.into_iter().map(Card::list_cell).collect(),
             },
             None => {
                 tracing::warn!("series episodes query failed");
@@ -2627,15 +2879,50 @@ impl JellybeamCore {
         }
     }
 
+    /// docs/11 §12: one season's episodes in `IndexNumber` order, virtual ones included whatever
+    /// `show_virtual_episodes` says, so the series page applies the flag itself and a flip needs
+    /// no re-read racing the settings write (docs/09). Outcomes as [`Self::children_read`].
+    pub fn season_episodes_read(&self, season_id: String) -> BrowseRead {
+        let Ok(mirror) = self.require_mirror() else {
+            return BrowseRead::NotReady;
+        };
+        match mirror.children_checked(&season_id, media_cache::Sort::IndexNumber, 0, u32::MAX) {
+            Some(rows) => BrowseRead::Items {
+                cards: rows.into_iter().map(Card::from).collect(),
+            },
+            None => {
+                tracing::warn!("season episodes query failed");
+                BrowseRead::Failed
+            }
+        }
+    }
+
+    /// docs/11 item 11 / §12: the series page's Play pick and per-season counts from one mirror
+    /// walk ([`crate::next_episode::series_summary`]), so no episode list crosses FFI. `replay`
+    /// asks for the first episode from the beginning (docs/11 §Collection "Play again").
+    pub fn series_summary_read(&self, series_id: String, replay: bool) -> SeriesSummaryRead {
+        let Ok(mirror) = self.require_mirror() else {
+            return SeriesSummaryRead::NotReady;
+        };
+        match crate::next_episode::series_summary(&mirror, &series_id, replay, chrono::Utc::now()) {
+            Some(summary) => SeriesSummaryRead::Resolved { summary },
+            None => {
+                tracing::warn!("series summary query failed");
+                SeriesSummaryRead::Failed
+            }
+        }
+    }
+
     /// Automatic track selection (docs/09 step 3): converts `tracks` to
-    /// `playback_policy`'s own shape, looks up `series_id`'s remembered pref
-    /// (if any), and delegates to
+    /// `playback_policy`'s own shape, looks up `subject_id`'s remembered pref
+    /// (the series id, or the item id for an item with no series: a movie keeps its own choice),
+    /// and delegates to
     /// [`playback_policy::tracks::resolve_track_selection`] against
     /// `Settings::language`. Called once per loaded item, right after
     /// Media3 announces its tracks.
     pub fn resolve_tracks(
         &self,
-        series_id: Option<String>,
+        subject_id: Option<String>,
         tracks: Vec<TrackInfo>,
     ) -> TrackDecisionFfi {
         let policy_tracks: Vec<playback_policy::tracks::Track> =
@@ -2643,7 +2930,7 @@ impl JellybeamCore {
 
         let state = self.lock_state();
         let global = playback_policy::prefs::LanguagePrefs::from(state.settings.language.clone());
-        let series_pref = series_id.and_then(|id| state.track_prefs.get(&id).cloned());
+        let series_pref = subject_id.and_then(|id| state.track_prefs.get(&id).cloned());
         drop(state);
 
         playback_policy::tracks::resolve_track_selection(
@@ -2655,20 +2942,21 @@ impl JellybeamCore {
     }
 
     /// Persists one half (audio or subtitle; `Video` is a no-op)
-    /// of `series_id`'s remembered track choice, immediately updating the in-memory copy
+    /// of `subject_id`'s remembered track choice (series id, or the item id for an item with no
+    /// series), immediately updating the in-memory copy
     /// [`Self::resolve_tracks`] reads. `Unset` clears that half, `Off` remembers "no subtitles"
-    /// (docs/18 §3.1; audio has no Off, so an audio `Off` is refused, as is `Video`). A `Key` must already be the result of
-    /// [`crate::track_pref_key_of`]. A disk write failure is logged and swallowed, same contract
+    /// (docs/18 §3.1; audio has no Off, so an audio `Off` is refused, as is `Video`). A `Track` must
+    /// already be the result of [`crate::track_memory_of`]. A disk write failure is logged and swallowed, same contract
     /// as [`Self::set_settings`].
     pub fn remember_track_memory(
         &self,
-        series_id: String,
+        subject_id: String,
         kind: TrackKindFfi,
         memory: TrackMemoryFfi,
     ) {
         let (revision, snapshot) = {
             let mut state = self.lock_state();
-            if !track_prefs::remember(&mut state.track_prefs, series_id, kind, memory.into()) {
+            if !track_prefs::remember(&mut state.track_prefs, subject_id, kind, memory.into()) {
                 return;
             }
             state.track_prefs_revision += 1;
@@ -2893,6 +3181,7 @@ impl JellybeamCore {
             .current_client()
             .ok_or(CoreError::NotSignedIn)?;
         let user = self.runtime.block_on(client.current_user())?;
+        self.cache_user_policy(epoch, &user);
         Ok(user
             .name
             .filter(|name| !name.is_empty())
@@ -2912,12 +3201,11 @@ impl JellybeamCore {
             (state.account.epoch, installed.client.clone())
         };
         let user = self.runtime.block_on(client.current_user())?;
-        // docs/19 §2.3: a reply without a policy proves nothing about the role, so it is not cached.
-        let Some(is_admin) = user.policy.and_then(|policy| policy.is_administrator) else {
-            return Ok(false);
-        };
-        self.store_if_epoch(epoch, |caches| caches.is_admin = Some(is_admin));
-        Ok(is_admin)
+        self.cache_user_policy(epoch, &user);
+        Ok(user
+            .policy
+            .and_then(|policy| policy.is_administrator)
+            .unwrap_or(false))
     }
 }
 
@@ -2929,16 +3217,28 @@ pub(crate) struct Replaced {
     account: SessionAccount,
 }
 
-/// [`JellybeamCore::negotiate_playback_source`]'s return shape: source, url,
-/// `play_session_id`, play method, transcode reason, server verdict.
-type NegotiatedSource = (
-    jellyfin_api::models::MediaSourceInfo,
-    String,
-    String,
-    PlayMethodFfi,
-    Option<String>,
-    Option<String>,
-);
+/// [`JellybeamCore::negotiate_playback_source`]'s result: the negotiated source and how the
+/// plan built from it was chosen.
+struct NegotiatedSource {
+    source: jellyfin_api::models::MediaSourceInfo,
+    url: String,
+    play_session_id: String,
+    play_method: PlayMethodFfi,
+    transcode_reason: Option<String>,
+    server_verdict: Option<String>,
+    /// The audio stream the negotiation named (docs/18 §3.1).
+    requested_audio: Option<i32>,
+    /// The policy run whose streams it named, if one ran.
+    policy_decision: Option<TrackDecisionFfi>,
+}
+
+/// [`JellybeamCore::negotiate_with_policy`]'s result: the renegotiation (`None` when the first
+/// negotiation stands), the decision and the audio stream it named.
+struct PolicyRun<T> {
+    renegotiated: Option<T>,
+    decision: TrackDecisionFfi,
+    audio: Option<i32>,
+}
 
 impl JellybeamCore {
     /// docs/18 §2.1: the current account's epoch; Kotlin reads it through [`Self::account_epochs`].
@@ -3059,6 +3359,20 @@ impl JellybeamCore {
             .account
             .installed_mut(epoch)
             .map(|installed| read(&installed.caches))
+    }
+
+    /// docs/18 §6, docs/19 §2.3: keeps what a `/Users/Me` reply states of the role and the video
+    /// transcoding permission; a field the reply omits keeps its cached value. Returns the
+    /// permission the reply stated.
+    fn cache_user_policy(&self, epoch: u64, user: &jellyfin_api::models::UserDto) -> Option<bool> {
+        let policy = user.policy.as_ref();
+        let is_admin = policy.and_then(|policy| policy.is_administrator);
+        let allowed = policy.and_then(|policy| policy.enable_video_playback_transcoding);
+        self.store_if_epoch(epoch, |caches| {
+            caches.is_admin = is_admin.or(caches.is_admin);
+            caches.video_transcoding = allowed.or(caches.video_transcoding);
+        });
+        allowed
     }
 
     /// docs/18 §2.1: the installed account's epoch, server and user, read under one lock so the
@@ -3204,7 +3518,7 @@ impl JellybeamCore {
     /// stream's (the parked account's while one is parked) -- so a stopped playback owns nothing.
     pub(crate) fn playing_epoch_locked(state: &State) -> Option<u64> {
         let owner = &state.playback_owner;
-        owner.claim.as_ref().map(|claim| claim.epoch).or_else(|| {
+        owner.current_claim().map(|claim| claim.epoch).or_else(|| {
             Self::playback_live_locked(state).then(|| {
                 owner
                     .parked
@@ -3230,7 +3544,7 @@ impl JellybeamCore {
     fn release_claim(&self, claim: &PlaybackClaim) {
         let mut state = self.lock_state();
         let owner = &mut state.playback_owner;
-        if owner.claim.as_ref() == Some(claim) {
+        if owner.current_claim() == Some(claim) {
             owner.claim = None;
         }
     }
@@ -3264,9 +3578,9 @@ impl JellybeamCore {
         // Same-item join: wait for the negotiation already talking to the
         // server, then consume whatever it published -- the same single-use
         // read a fresh cache hit would do, just delayed instead of skipped.
-        // A miss (the slot was invalidated underneath it, or it resolved to a
-        // Transcode plan, which is never cached) falls through to a normal
-        // negotiation below exactly like an expired cache entry would.
+        // A miss (the slot was invalidated underneath it, or the negotiation
+        // failed) falls through to a normal negotiation below exactly like an
+        // expired cache entry would.
         let cached = if let Some(mut join) = join {
             self.runtime.block_on(async {
                 let _ = join.settled.changed().await;
@@ -3286,6 +3600,8 @@ impl JellybeamCore {
             .map(|t| t.to_string())
             .unwrap_or_else(|| "Unknown".to_string());
         let series_id = dto.series_id.map(|id| id.to_string());
+        let track_memory_subject =
+            playback_policy::prefs::track_memory_subject(series_id.as_deref(), &item_id);
         let series_name = dto.series_name.clone();
         let parent_index_number = dto.parent_index_number;
         let index_number = dto.index_number;
@@ -3300,18 +3616,26 @@ impl JellybeamCore {
         // [`Self::get_playback_osd_detail`]. `get_playback_info` + `decide_playback`
         // (skipped on a preload cache hit) are the only network-needing
         // steps left here.
-        let (source, url, play_session_id, play_method, transcode_reason, server_verdict) = self
-            .negotiate_playback_source(
-                &client,
-                &item_id,
-                &caps,
-                tolerate_mislabeled_levels,
-                quality,
-                &profile,
-                start_ticks,
-                cached,
-                series_id.as_deref(),
-            )?;
+        let NegotiatedSource {
+            source,
+            url,
+            play_session_id,
+            play_method,
+            transcode_reason,
+            server_verdict,
+            requested_audio,
+            policy_decision,
+        } = self.negotiate_playback_source(
+            &client,
+            &item_id,
+            &caps,
+            tolerate_mislabeled_levels,
+            quality,
+            &profile,
+            start_ticks,
+            cached,
+            &track_memory_subject,
+        )?;
 
         let media_source_id = source.id.clone().unwrap_or_default();
         let report_play_method = match play_method {
@@ -3329,9 +3653,16 @@ impl JellybeamCore {
         let (sidecars, sidecar_tracks) = Self::session_sidecars(&client, &source, &play_session_id);
         self.install_claimed_session(claim, &client, ctx, sidecars)?;
         let burned_subtitle_index = crate::types::burned_subtitle_index(&url);
-        // The first negotiation names no audio stream.
         let delivered_audio_index =
-            crate::types::delivered_audio_index(play_method, &url, None, &source);
+            crate::types::delivered_audio_index(play_method, &url, requested_audio, &source);
+        let track_rows = match play_method {
+            PlayMethodFfi::Transcode => {
+                crate::types::transcode_track_rows(&source, &url, requested_audio, &sidecar_tracks)
+            }
+            PlayMethodFfi::DirectPlay => {
+                crate::types::sidecar_track_rows(&sidecar_tracks).collect()
+            }
+        };
         let plan = PlaybackPlan {
             item_id: item_id.clone(),
             item_name,
@@ -3350,11 +3681,14 @@ impl JellybeamCore {
             parent_index_number,
             index_number,
             series_id,
+            track_memory_subject,
             external_subtitles: sidecar_tracks,
             embedded_subtitles: crate::types::embedded_subtitles_of(&source),
             burned_subtitle_index,
             audio_streams: crate::types::audio_streams_of(&source),
             delivered_audio_index,
+            policy_decision,
+            track_rows,
         };
 
         Ok(plan)
@@ -3511,8 +3845,8 @@ impl JellybeamCore {
     /// worker's `JoinHandle::abort`. `request.quality` is always
     /// `DirectPlay`/`Auto` here -- `preload_playback` never spawns a request
     /// in `Cap` mode. Resolves through the same [`resolve_plan`] matrix
-    /// [`JellybeamCore::prepare_playback`] uses, but only ever caches an
-    /// `Ok(DirectPlay)` result; anything else discards.
+    /// [`JellybeamCore::prepare_playback`] uses and caches what it resolves to; an error
+    /// (`DirectPlay` mode's refused transcode) discards.
     async fn build_preload_cache(request: &PreloadRequest) -> Option<PreloadCache> {
         let dto = Self::fetch_item_dto_async(&request.client, &request.mirror, &request.item_id)
             .await
@@ -3535,31 +3869,39 @@ impl JellybeamCore {
         )
         .await
         .ok()?;
-        let video_codec = video_stream_codec(decision_source(&decision));
-        let supported_codecs = jellyfin_core::android_direct_play_video_codecs(&request.caps);
-        let ResolvedPlan::DirectPlay {
-            source,
-            url,
-            server_verdict,
-        } = resolve_plan(
+        let miss = jellyfin_core::profile_miss(
+            &jellyfin_core::android_tv_profile(&request.caps, request.tolerate_mislabeled_levels),
+            decision_source(&decision),
+        )
+        .miss();
+        let resolved = resolve_plan(
             &request.quality,
             decision,
-            video_codec.as_deref(),
-            &supported_codecs,
+            miss.as_ref(),
             request.tolerate_mislabeled_levels,
         )
-        .ok()?
-        else {
-            return None;
+        .ok()?;
+        let (source, plan) = match resolved {
+            ResolvedPlan::DirectPlay {
+                source,
+                url,
+                server_verdict,
+            } => (
+                source,
+                PreloadPlan::DirectPlay {
+                    url,
+                    play_session_id,
+                    server_verdict,
+                },
+            ),
+            ResolvedPlan::Transcode { source, .. } => (source, PreloadPlan::Transcode),
         };
 
         Some(PreloadCache {
             generation: request.generation,
             item_id: request.item_id.clone(),
             source,
-            url,
-            play_session_id,
-            server_verdict,
+            plan,
             created_at: Instant::now(),
         })
     }
@@ -3651,7 +3993,10 @@ impl JellybeamCore {
             epoch: request.account_epoch,
             retires,
         };
-        owner.claim = Some(claim.clone());
+        owner.claim = Some(ClaimSlot {
+            claim: claim.clone(),
+            prepared: None,
+        });
         Ok(claim)
     }
 
@@ -3702,7 +4047,7 @@ impl JellybeamCore {
         start: impl FnOnce() -> jellyfin_core::ReportingSession,
         sidecars: Option<crate::types::SessionSidecars>,
     ) -> Result<Replaced, CoreError> {
-        if state.playback_owner.claim.as_ref() != Some(claim) {
+        if state.playback_owner.current_claim() != Some(claim) {
             return Err(CoreError::StalePlaybackSession);
         }
         state.playback_owner.claim = None;
@@ -3770,8 +4115,7 @@ impl JellybeamCore {
         if !is_current {
             let owner = &mut state.playback_owner;
             if owner
-                .claim
-                .as_ref()
+                .current_claim()
                 .is_some_and(|claim| claim.retires.as_deref() == Some(play_session_id))
             {
                 owner.claim = None;
@@ -3790,7 +4134,17 @@ impl JellybeamCore {
         }
         state.local_progress_checkpoint.reset();
         state.sidecars = None;
-        state.reporting.take().map(Taken::Active)
+        let session = state.reporting.take()?;
+        // A renegotiation of the taken session can no longer take over from it.
+        let owner = &mut state.playback_owner;
+        let taken_id = session.context().play_session_id.as_str();
+        if owner
+            .current_claim()
+            .is_some_and(|claim| claim.retires.as_deref() == Some(taken_id))
+        {
+            owner.claim = None;
+        }
+        Some(Taken::Active(session))
     }
 
     /// docs/18 §2.1: the one stop path of `stop_playback`, `abandon_playback`, a transcode
@@ -3929,7 +4283,8 @@ impl JellybeamCore {
     }
 
     /// [`Self::prepare_playback`]'s quality negotiation, split out so that
-    /// caller only orchestrates: a preload cache hit is `DirectPlay` as-is;
+    /// caller only orchestrates: a preload cache hit is `DirectPlay` as-is, an Auto transcode
+    /// one skips to the second negotiation ([`negotiation_start`]);
     /// otherwise Cap mode always forces a transcode negotiation, and
     /// Auto/`DirectPlay` negotiate once and hand the decision to
     /// [`resolve_plan`] (Auto twice when it transcodes, docs/18 §3.2).
@@ -3944,24 +4299,35 @@ impl JellybeamCore {
         profile: &jellyfin_api::models::DeviceProfile,
         start_ticks: Option<i64>,
         cached: Option<PreloadCache>,
-        series_id: Option<&str>,
+        subject_id: &str,
     ) -> Result<NegotiatedSource, CoreError> {
-        if let Some(cache) = cached {
-            return Ok((
-                cache.source,
-                cache.url,
-                cache.play_session_id,
-                PlayMethodFfi::DirectPlay,
-                None,
-                cache.server_verdict,
-            ));
-        }
+        let cached_transcode = match negotiation_start(quality, cached) {
+            NegotiationStart::Cached {
+                source,
+                url,
+                play_session_id,
+                server_verdict,
+            } => {
+                return Ok(NegotiatedSource {
+                    source,
+                    url,
+                    play_session_id,
+                    play_method: PlayMethodFfi::DirectPlay,
+                    transcode_reason: None,
+                    server_verdict,
+                    requested_audio: None,
+                    policy_decision: None,
+                })
+            }
+            NegotiationStart::SecondOnly { source } => Some(source),
+            NegotiationStart::Full => None,
+        };
         // docs/18-playback-quality.md §2: Cap mode is not a row of
         // `resolve_plan`'s matrix -- it always forces the negotiation
         // itself, nothing for `resolve_plan` to resolve.
         match quality {
             PlaybackQuality::Cap { max_bps } => {
-                let negotiate = |subtitle: Option<NamedSubtitle>| -> Result<_, CoreError> {
+                let negotiate = |named: Option<NamedStreams>| -> Result<_, CoreError> {
                     let (play_session_id, decision) = self.negotiate_playback_info(
                         client,
                         item_id,
@@ -3969,7 +4335,7 @@ impl JellybeamCore {
                         start_ticks,
                         jellyfin_api::PlaybackInfoOptions {
                             force_transcode: true,
-                            ..subtitle_options(subtitle)
+                            ..stream_options(named)
                         },
                     )?;
                     let (source, url) = transcode_url_from_decision(client, item_id, decision)
@@ -3977,112 +4343,163 @@ impl JellybeamCore {
                     Ok((play_session_id, source, url))
                 };
                 let (mut play_session_id, mut source, mut url) = negotiate(None)?;
-                // docs/18 §3.1: a second PlaybackInfo is far cheaper than the server restarting ffmpeg.
-                if let Some(subtitle) = self.policy_subtitle(series_id, &source, &url) {
-                    (play_session_id, source, url) = negotiate(Some(subtitle))?;
+                let run = self.negotiate_with_policy(
+                    client,
+                    subject_id,
+                    &source,
+                    &url,
+                    SecondNegotiation::IfNamed,
+                    negotiate,
+                )?;
+                if let Some(renegotiated) = run.renegotiated {
+                    (play_session_id, source, url) = renegotiated;
                 }
-                Ok((
+                Ok(NegotiatedSource {
                     source,
                     url,
                     play_session_id,
-                    PlayMethodFfi::Transcode,
-                    Some(cap_transcode_reason(max_bps)),
-                    None,
-                ))
+                    play_method: PlayMethodFfi::Transcode,
+                    transcode_reason: Some(cap_transcode_reason(max_bps)),
+                    server_verdict: None,
+                    requested_audio: run.audio,
+                    policy_decision: Some(run.decision),
+                })
             }
             PlaybackQuality::DirectPlay | PlaybackQuality::Auto => {
-                let supported_codecs = jellyfin_core::android_direct_play_video_codecs(caps);
-                let negotiate = |profile, subtitle| -> Result<_, CoreError> {
+                let raw = jellyfin_core::android_tv_profile(caps, tolerate_mislabeled_levels);
+                let negotiate = |profile: &jellyfin_api::models::DeviceProfile,
+                                 named|
+                 -> Result<_, CoreError> {
                     let (play_session_id, decision) = self.negotiate_playback_info(
                         client,
                         item_id,
                         profile,
                         start_ticks,
-                        subtitle_options(subtitle),
+                        stream_options(named),
                     )?;
-                    let video_codec = video_stream_codec(decision_source(&decision));
+                    let miss = jellyfin_core::profile_miss(&raw, decision_source(&decision)).miss();
                     let plan = resolve_plan(
                         &quality,
                         decision,
-                        video_codec.as_deref(),
-                        &supported_codecs,
+                        miss.as_ref(),
                         tolerate_mislabeled_levels,
                     );
                     Ok((play_session_id, plan))
                 };
-                let (mut play_session_id, mut plan) = negotiate(profile, None)?;
                 // docs/18 §3.2: offered ASS sidecars, the transcode Auto takes anyway would hand
                 // out embedded ASS instead of burning it in, so it is asked for without them, and
-                // with the policy's subtitle (§3.1) so it never restarts to add it.
-                if let Ok(ResolvedPlan::Transcode { source, url, .. }) = &plan {
-                    let subtitle = self.policy_subtitle(series_id, source, url);
-                    (play_session_id, plan) = negotiate(
-                        &build_android_profile_for_quality(
-                            caps,
-                            tolerate_mislabeled_levels,
-                            &quality,
-                            false,
-                        ),
-                        subtitle,
+                // with the policy's streams (§3.1) so it never restarts to add them.
+                let second = |source: &jellyfin_api::models::MediaSourceInfo, url: &str| {
+                    let profile = build_android_profile_for_quality(
+                        caps,
+                        tolerate_mislabeled_levels,
+                        &quality,
+                        false,
+                    );
+                    let run = self.negotiate_with_policy(
+                        client,
+                        subject_id,
+                        source,
+                        url,
+                        SecondNegotiation::Always,
+                        |named| negotiate(&profile, named),
                     )?;
-                }
+                    // `Always` renegotiates, so the first answer never stands.
+                    let (play_session_id, plan) = run
+                        .renegotiated
+                        .ok_or(jellyfin_core::CoreError::NoPlayableSource)?;
+                    Ok::<_, CoreError>((play_session_id, plan, Some((run.decision, run.audio))))
+                };
+                let (play_session_id, plan, policy) = match cached_transcode {
+                    // The cached answer's URL, rebuilt as `decide_playback` built it.
+                    Some(source) => second(&source, &client.stream_url(item_id, &source))?,
+                    None => match negotiate(profile, None)? {
+                        (_, Ok(ResolvedPlan::Transcode { source, url, .. })) => {
+                            second(&source, &url)?
+                        }
+                        (play_session_id, plan) => (play_session_id, plan, None),
+                    },
+                };
                 match plan {
                     Ok(ResolvedPlan::DirectPlay {
                         source,
                         url,
                         server_verdict,
-                    }) => Ok((
+                    }) => Ok(NegotiatedSource {
                         source,
                         url,
                         play_session_id,
-                        PlayMethodFfi::DirectPlay,
-                        None,
+                        play_method: PlayMethodFfi::DirectPlay,
+                        transcode_reason: None,
                         server_verdict,
-                    )),
+                        requested_audio: None,
+                        policy_decision: None,
+                    }),
                     Ok(ResolvedPlan::Transcode {
                         source,
                         url,
                         reason,
-                    }) => Ok((
+                    }) => Ok(NegotiatedSource {
                         source,
                         url,
                         play_session_id,
-                        PlayMethodFfi::Transcode,
-                        Some(reason),
-                        None,
-                    )),
+                        play_method: PlayMethodFfi::Transcode,
+                        transcode_reason: Some(reason),
+                        server_verdict: None,
+                        requested_audio: policy.and_then(|(_, audio)| audio),
+                        policy_decision: policy.map(|(decision, _)| decision),
+                    }),
                     Err(reasons) => Err(CoreError::WouldTranscode { reasons }),
                 }
             }
         }
     }
 
-    /// docs/18 §3.1: the subtitle stream [`crate::types::policy_subtitle_for_transcode`] names
-    /// for this transcode under the viewer's current language settings and series memory.
-    fn policy_subtitle(
+    /// docs/18 §3.1: the one policy run of a transcode start (Cap, Auto's transcode, a Policy
+    /// fallback) over `source`/`url`'s canonical rows, under the viewer's language settings and
+    /// `subject_id`'s memory; renegotiates with the streams it names (always, under
+    /// [`SecondNegotiation::Always`]), since a second `PlaybackInfo` is far cheaper than an
+    /// ffmpeg restart.
+    fn negotiate_with_policy<T>(
         &self,
-        series_id: Option<&str>,
+        client: &jellyfin_api::JellyfinClient,
+        subject_id: &str,
         source: &jellyfin_api::models::MediaSourceInfo,
         url: &str,
-    ) -> Option<NamedSubtitle> {
+        second: SecondNegotiation,
+        renegotiate: impl FnOnce(Option<NamedStreams>) -> Result<T, CoreError>,
+    ) -> Result<PolicyRun<T>, CoreError> {
         let (global, series_pref) = {
             let state = self.lock_state();
             let global =
                 playback_policy::prefs::LanguagePrefs::from(state.settings.language.clone());
-            (
-                global,
-                series_id.and_then(|id| state.track_prefs.get(id).cloned()),
-            )
+            (global, state.track_prefs.get(subject_id).cloned())
         };
-        let index = crate::types::policy_subtitle_for_transcode(
-            source,
+        // The plan's own sidecars ([`Self::session_sidecars`]): only those the client can fetch.
+        let sidecars: Vec<_> =
+            crate::types::external_subtitles_of(source, |u| client.delivery_url(u))
+                .into_iter()
+                .map(|s| s.track)
+                .collect();
+        let rows = crate::types::transcode_track_rows(source, url, None, &sidecars);
+        let (decision, named) = crate::types::policy_streams_for_transcode(
+            &rows,
             url,
+            source.id.clone(),
             series_pref.as_ref(),
             &global,
-        )?;
-        Some(NamedSubtitle {
-            media_source_id: source.id.clone(),
-            index,
+            second,
+        );
+        let audio = named.as_ref().and_then(|n| n.audio);
+        let renegotiated = if named.is_some() || second == SecondNegotiation::Always {
+            Some(renegotiate(named)?)
+        } else {
+            None
+        };
+        Ok(PolicyRun {
+            renegotiated,
+            decision,
+            audio,
         })
     }
 
@@ -4407,6 +4824,7 @@ impl JellybeamCore {
             client.clone(),
             bundle_rx,
             playback_active,
+            self.presence.subscribe(),
             // docs/07 Watch state: read from the session registry, never the state lock.
             Arc::new(jellyfin_core::pending_local_item_ids),
         ));
@@ -4659,20 +5077,21 @@ impl JellybeamCore {
     }
 
     /// docs/13 Server compatibility: one task from [`Self::new`] refreshing the installed client's
-    /// server version every `SERVER_VERSION_REFRESH_INTERVAL` (the first, immediate tick skipped
-    /// since every install path refreshes); holds the state `Weak` and ends once the core drops.
+    /// server version every `SERVER_VERSION_REFRESH_INTERVAL` in the foreground (the first,
+    /// immediate tick skipped since every install path refreshes); holds the state `Weak` and ends
+    /// once the core drops.
     fn spawn_server_version_poll(
         state: std::sync::Weak<SharedState>,
         data_dir: PathBuf,
         session_lock: Arc<Mutex<()>>,
+        mut presence: tokio::sync::watch::Receiver<media_cache::AppPresence>,
         runtime: &tokio::runtime::Runtime,
     ) {
         runtime.spawn(async move {
             let mut interval = tokio::time::interval(SERVER_VERSION_REFRESH_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
-            loop {
-                interval.tick().await;
+            while media_cache::foreground_tick(&mut interval, &mut presence).await {
                 let Some(state) = state.upgrade() else { break };
                 let current = state.lock().account.current_client();
                 if let Some((epoch, client)) = current {
@@ -5278,22 +5697,6 @@ fn decision_source(
     }
 }
 
-/// The chosen source's own video stream codec, lowercased -- Auto mode's
-/// local-codec-corroboration input (docs/18-playback-quality.md §2):
-/// [`resolve_plan`] compares this against
-/// `jellyfin_core::android_direct_play_video_codecs(caps)`. `None` when the
-/// source has no `Video` stream or no `Codec` fact -- a codec-blind source
-/// must never be treated as "known unsupported".
-fn video_stream_codec(source: &jellyfin_api::models::MediaSourceInfo) -> Option<String> {
-    source
-        .media_streams
-        .iter()
-        .find(|stream| stream.type_ == Some(jellyfin_api::models::MediaStreamType::Video))
-        .and_then(|stream| stream.codec.clone())
-        .filter(|codec| !codec.is_empty())
-        .map(|codec| codec.to_lowercase())
-}
-
 /// [`JellybeamCore::prepare_playback`]'s per-mode resolution of one negotiated
 /// [`jellyfin_core::PlaybackDecision`] for `DirectPlay`/`Auto` modes (`Cap`
 /// never calls this). docs/18-playback-quality.md §2: Auto only transcodes
@@ -5307,11 +5710,11 @@ fn video_stream_codec(source: &jellyfin_api::models::MediaSourceInfo) -> Option<
 /// - `Transcode` decision, mode `Auto`, `tolerate_mislabeled_levels` is
 ///   `false` -> `Ok(Transcode)` on `hls_url` -- with the setting off, level
 ///   verdicts are the TV's own declared limits talking (docs/18 §1.1 row 2).
-/// - `Transcode` decision, mode `Auto`, `video_codec` is `Some` and not in
-///   `supported_codecs` -> `Ok(Transcode)` on the decision's own `hls_url`,
+/// - `Transcode` decision, mode `Auto`, `miss` is a `VideoCodec` miss ->
+///   `Ok(Transcode)` on the decision's own `hls_url`,
 ///   `reason: "no <codec> decoder on this TV"`.
-/// - `Transcode` decision, mode `Auto`, `video_codec` is `None` or in
-///   `supported_codecs` -> `Ok(DirectPlay)` on `direct_url`,
+/// - `Transcode` decision, mode `Auto`, any other `miss` (or none, as for a
+///   codec-blind source) -> `Ok(DirectPlay)` on `direct_url`,
 ///   `server_verdict: Some(...)` -- a server "would transcode" verdict
 ///   alone is never a reason to transcode (docs/18 §1).
 ///
@@ -5320,8 +5723,7 @@ fn video_stream_codec(source: &jellyfin_api::models::MediaSourceInfo) -> Option<
 fn resolve_plan(
     quality: &PlaybackQuality,
     decision: jellyfin_core::PlaybackDecision,
-    video_codec: Option<&str>,
-    supported_codecs: &[jellyfin_core::VideoCodec],
+    miss: Option<&jellyfin_core::ProfileMiss>,
     tolerate_mislabeled_levels: bool,
 ) -> Result<ResolvedPlan, String> {
     match decision {
@@ -5341,61 +5743,38 @@ fn resolve_plan(
             if matches!(quality, PlaybackQuality::DirectPlay) {
                 return Err(reasons.join("; "));
             }
-            if !tolerate_mislabeled_levels {
-                // The profile carried honest per-profile level ceilings
-                // (`tolerate_mislabeled_levels` off), so this verdict is
-                // the TV's own declared limits -- trust it up front.
-                return Ok(ResolvedPlan::Transcode {
-                    source,
-                    url: hls_url,
-                    reason: reasons.join("; "),
-                });
-            }
-            let locally_unsupported = match video_codec {
-                Some(codec) => match jellyfin_core::VideoCodec::from_server_codec(codec) {
-                    Some(vc) => !supported_codecs.contains(&vc),
-                    // Not even a codec this app can name -- can't possibly
-                    // be one of `supported_codecs` either.
-                    None => true,
-                },
-                None => false,
-            };
-            if locally_unsupported {
-                let codec = video_codec.expect("Some in every locally_unsupported=true case above");
-                Ok(ResolvedPlan::Transcode {
-                    source,
-                    url: hls_url,
-                    reason: format!("no {codec} decoder on this TV"),
-                })
-            } else {
-                Ok(ResolvedPlan::DirectPlay {
+            // docs/18 §1.1: everything else is a Direct Play attempt.
+            if !crate::types::auto_transcodes_up_front(miss, tolerate_mislabeled_levels) {
+                return Ok(ResolvedPlan::DirectPlay {
                     source,
                     url: direct_url,
                     server_verdict: Some(reasons.join("; ")),
-                })
+                });
             }
+            let reason = match miss {
+                Some(miss) if tolerate_mislabeled_levels => {
+                    format!("no {} decoder on this TV", miss.value)
+                }
+                _ => reasons.join("; "),
+            };
+            Ok(ResolvedPlan::Transcode {
+                source,
+                url: hls_url,
+                reason,
+            })
         }
     }
 }
 
-/// A subtitle stream named in a first negotiation, with the source JF12 needs beside it (§3.1).
-struct NamedSubtitle {
-    media_source_id: Option<String>,
-    index: i32,
-}
-
-/// docs/18 §3.1: JF12 honours `SubtitleStreamIndex` only beside `MediaSourceId`.
-fn subtitle_options(subtitle: Option<NamedSubtitle>) -> jellyfin_api::PlaybackInfoOptions {
-    let Some(NamedSubtitle {
-        media_source_id,
-        index,
-    }) = subtitle
-    else {
+/// docs/18 §3.1: the options naming `named`'s streams beside their source.
+fn stream_options(named: Option<NamedStreams>) -> jellyfin_api::PlaybackInfoOptions {
+    let Some(named) = named else {
         return jellyfin_api::PlaybackInfoOptions::default();
     };
     jellyfin_api::PlaybackInfoOptions {
-        media_source_id: media_source_id.filter(|id| !id.is_empty()),
-        subtitle_stream_index: Some(index),
+        media_source_id: named.media_source_id.filter(|id| !id.is_empty()),
+        subtitle_stream_index: named.subtitle,
+        audio_stream_index: named.audio,
         ..Default::default()
     }
 }
@@ -5475,7 +5854,11 @@ pub(crate) mod tests {
     fn owner_view(core: &JellybeamCore) -> (u64, Option<PlaybackClaim>, u64) {
         let state = core.lock_state();
         let owner = &state.playback_owner;
-        (owner.highest_seq, owner.claim.clone(), state.account.epoch)
+        (
+            owner.highest_seq,
+            owner.current_claim().cloned(),
+            state.account.epoch,
+        )
     }
 
     /// Admits the next request directly, as a prepare would before negotiating.
@@ -5523,16 +5906,21 @@ pub(crate) mod tests {
             play_session_id: String,
         ) -> Result<PlaybackPlan, CoreError> {
             let request = self.next_request();
-            self.prepare_transcode_fallback(
+            let plan = self.prepare_transcode_fallback(
                 item_id,
                 position_ticks,
                 reason,
                 play_session_id,
                 Some(FailedTrackFfi::Video),
-                None,
-                None,
+                TranscodeStreamsFfi::Named {
+                    subtitle: None,
+                    audio: None,
+                },
+                TranscodeCauseFfi::Fallback,
                 request,
-            )
+            )?;
+            self.commit_transcode(plan.play_session_id.clone(), request)?;
+            Ok(plan)
         }
     }
 
@@ -5809,6 +6197,67 @@ pub(crate) mod tests {
         assert!(matches!(
             core.series_episodes_read(BROWSE_PARENT.to_string()),
             BrowseRead::Items { cards } if cards.is_empty()
+        ));
+    }
+
+    #[test]
+    fn season_episodes_before_the_mirror_opens_is_not_ready() {
+        let (_dir, core) = core_in_tempdir();
+        assert!(matches!(
+            core.season_episodes_read(BROWSE_PARENT.to_string()),
+            BrowseRead::NotReady
+        ));
+    }
+
+    #[test]
+    fn season_episodes_of_an_empty_season_is_genuinely_empty() {
+        let (_dir, core) = core_with_open_mirror();
+        assert!(matches!(
+            core.season_episodes_read(BROWSE_PARENT.to_string()),
+            BrowseRead::Items { cards } if cards.is_empty()
+        ));
+    }
+
+    #[test]
+    fn season_episodes_when_the_query_fails_is_failed() {
+        let (dir, core) = core_with_open_mirror();
+        break_mirror_reads(dir.path(), &core);
+        assert!(matches!(
+            core.season_episodes_read(BROWSE_PARENT.to_string()),
+            BrowseRead::Failed
+        ));
+    }
+
+    #[test]
+    fn series_summary_before_the_mirror_opens_is_not_ready() {
+        let (_dir, core) = core_in_tempdir();
+        assert!(matches!(
+            core.series_summary_read(BROWSE_PARENT.to_string(), false),
+            SeriesSummaryRead::NotReady
+        ));
+    }
+
+    #[test]
+    fn series_summary_of_a_series_without_seasons_is_empty() {
+        let (_dir, core) = core_with_open_mirror();
+        assert_eq!(
+            core.series_summary_read(BROWSE_PARENT.to_string(), false),
+            SeriesSummaryRead::Resolved {
+                summary: crate::types::SeriesSummary {
+                    target: None,
+                    seasons: Vec::new(),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn series_summary_when_the_query_fails_is_failed() {
+        let (dir, core) = core_with_open_mirror();
+        break_mirror_reads(dir.path(), &core);
+        assert!(matches!(
+            core.series_summary_read(BROWSE_PARENT.to_string(), false),
+            SeriesSummaryRead::Failed
         ));
     }
 
@@ -6738,7 +7187,7 @@ pub(crate) mod tests {
     #[test]
     fn resolve_plan_direct_play_decision_is_always_direct_play_with_no_verdict() {
         for quality in [PlaybackQuality::DirectPlay, PlaybackQuality::Auto] {
-            match resolve_plan(&quality, direct_play_decision(), Some("h264"), &[], true) {
+            match resolve_plan(&quality, direct_play_decision(), None, true) {
                 Ok(ResolvedPlan::DirectPlay {
                     url,
                     server_verdict,
@@ -6759,8 +7208,7 @@ pub(crate) mod tests {
         let err = resolve_plan(
             &PlaybackQuality::DirectPlay,
             transcode_decision(Some("wmv3")),
-            Some("wmv3"),
-            &[],
+            None,
             true,
         )
         .expect_err("Direct Play mode must refuse a Transcode decision outright");
@@ -6773,12 +7221,10 @@ pub(crate) mod tests {
     fn resolve_plan_auto_mode_trusts_a_transcode_verdict_when_tolerate_mislabeled_levels_is_off() {
         // With the tolerate setting off, even a locally-supported codec
         // (hevc) transcodes up front on the server's own reasons.
-        let supported = [jellyfin_core::VideoCodec::Hevc];
         match resolve_plan(
             &PlaybackQuality::Auto,
             transcode_decision(Some("hevc")),
-            Some("hevc"),
-            &supported,
+            None,
             false,
         ) {
             Ok(ResolvedPlan::Transcode { url, reason, .. }) => {
@@ -6791,15 +7237,14 @@ pub(crate) mod tests {
 
     #[test]
     fn resolve_plan_auto_mode_transcode_decision_with_an_unsupported_codec_transcodes() {
-        let supported = [
-            jellyfin_core::VideoCodec::H264,
-            jellyfin_core::VideoCodec::Hevc,
-        ];
+        let miss = jellyfin_core::ProfileMiss {
+            kind: jellyfin_core::MissKind::VideoCodec,
+            value: "mpeg4".to_string(),
+        };
         match resolve_plan(
             &PlaybackQuality::Auto,
             transcode_decision(Some("mpeg4")),
-            Some("mpeg4"),
-            &supported,
+            Some(&miss),
             true,
         ) {
             Ok(ResolvedPlan::Transcode { url, reason, .. }) => {
@@ -6814,12 +7259,10 @@ pub(crate) mod tests {
     /// DirectPlay plan (docs/18 §1's "never a reason to transcode").
     #[test]
     fn resolve_plan_auto_mode_transcode_decision_with_a_supported_codec_attempts_direct_play() {
-        let supported = [jellyfin_core::VideoCodec::Hevc];
         match resolve_plan(
             &PlaybackQuality::Auto,
             transcode_decision(Some("hevc")),
-            Some("hevc"),
-            &supported,
+            None,
             true,
         ) {
             Ok(ResolvedPlan::DirectPlay {
@@ -6837,17 +7280,32 @@ pub(crate) mod tests {
         }
     }
 
+    /// Auto + a miss that is not a missing decoder (here a profile) -> the same attempt-anyway
+    /// plan: only a missing decoder is proof enough to transcode up front.
+    #[test]
+    fn resolve_plan_auto_mode_transcode_decision_with_a_non_codec_miss_attempts_direct_play() {
+        let miss = jellyfin_core::ProfileMiss {
+            kind: jellyfin_core::MissKind::VideoProfile,
+            value: "Main 10".to_string(),
+        };
+        match resolve_plan(
+            &PlaybackQuality::Auto,
+            transcode_decision(Some("hevc")),
+            Some(&miss),
+            true,
+        ) {
+            Ok(ResolvedPlan::DirectPlay { server_verdict, .. }) => {
+                assert!(server_verdict.is_some());
+            }
+            other => panic!("expected an attempt-anyway Ok(DirectPlay), got {other:?}"),
+        }
+    }
+
     /// Auto + a codec-blind `Transcode` decision -> same attempt-anyway
     /// plan as a known-supported codec.
     #[test]
     fn resolve_plan_auto_mode_codec_blind_transcode_decision_attempts_direct_play() {
-        match resolve_plan(
-            &PlaybackQuality::Auto,
-            transcode_decision(None),
-            None,
-            &[],
-            true,
-        ) {
+        match resolve_plan(&PlaybackQuality::Auto, transcode_decision(None), None, true) {
             Ok(ResolvedPlan::DirectPlay { server_verdict, .. }) => {
                 assert!(server_verdict.is_some());
             }
@@ -7879,6 +8337,74 @@ pub(crate) mod tests {
         assert!(core.library_genres("view-1".to_string()).is_empty());
     }
 
+    /// docs/07 §5: grid and shelf cards cross the FFI without the overview; `card_by_id` keeps it.
+    #[test]
+    fn grid_and_shelf_cards_leave_the_overview_to_card_by_id() {
+        let (dir, core) = core_with_open_mirror();
+        rusqlite::Connection::open(
+            dir.path()
+                .join(installed_mirror_dir(&core))
+                .join("mirror.db"),
+        )
+        .expect("opens the mirror file")
+        .execute_batch(
+            "INSERT INTO items (id, item_type, name, sort_name, parent_id, overview, \
+                 runtime_ticks, playback_position_ticks, dto, updated_at) VALUES \
+                 ('item-a', 'Movie', 'Synthetic', 'synthetic', 'view-1', 'Synthetic synopsis', \
+                 72000000000, 18000000000, '{}', 0);",
+        )
+        .expect("seeds an item");
+
+        let grid = core
+            .library_grid(
+                "view-1".to_string(),
+                GridSort::default(),
+                GridFilters::default(),
+                0,
+                20,
+            )
+            .expect("grid reads");
+        assert_eq!(grid.len(), 1);
+        assert_eq!(grid[0].overview, None);
+        let HomeSnapshot::Classic { home } = core.home_snapshot(HomeLayout::Classic);
+        let shelved: Vec<&Card> = home.shelves.iter().flat_map(|s| &s.cards).collect();
+        assert!(!shelved.is_empty(), "the in-progress movie is shelved");
+        assert!(shelved.iter().all(|c| c.overview.is_none()));
+        let full = core
+            .card_by_id("item-a".to_string())
+            .expect("reads")
+            .expect("known");
+        assert_eq!(full.overview.as_deref(), Some("Synthetic synopsis"));
+    }
+
+    /// docs/07 §5: the series-wide episode list (random pick, Watch Together queue) draws no
+    /// overview, so it crosses the FFI as list cells.
+    #[test]
+    fn series_episodes_cross_as_list_cells_without_the_overview() {
+        let (dir, core) = core_with_open_mirror();
+        rusqlite::Connection::open(
+            dir.path()
+                .join(installed_mirror_dir(&core))
+                .join("mirror.db"),
+        )
+        .expect("opens the mirror file")
+        .execute_batch(
+            "INSERT INTO items (id, item_type, name, sort_name, parent_id, overview, \
+                 runtime_ticks, playback_position_ticks, dto, updated_at) VALUES \
+                 ('season-a', 'Season', 'Synthetic Season', 'synthetic season', 'series-a', NULL, \
+                 NULL, 0, '{}', 0), \
+                 ('episode-a', 'Episode', 'Synthetic Episode', 'synthetic episode', 'season-a', \
+                 'Synthetic synopsis', 72000000000, 0, '{}', 0);",
+        )
+        .expect("seeds a season and an episode");
+
+        let BrowseRead::Items { cards } = core.series_episodes_read("series-a".to_string()) else {
+            panic!("series episodes read");
+        };
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].overview, None);
+    }
+
     #[test]
     fn home_snapshot_skips_hidden_library_ids_in_latest_shelves() {
         let (_dir, core) = core_in_tempdir();
@@ -7904,6 +8430,7 @@ pub(crate) mod tests {
             is_default: false,
             is_selected: false,
             is_forced: false,
+            is_hearing_impaired: false,
         }
     }
 
@@ -8037,8 +8564,13 @@ pub(crate) mod tests {
         assert_eq!(decision.subtitle_track_id, Some(2));
     }
 
-    fn remember(core: &JellybeamCore, series_id: &str, kind: TrackKindFfi, memory: TrackMemoryFfi) {
-        core.remember_track_memory(series_id.to_string(), kind, memory);
+    fn remember(
+        core: &JellybeamCore,
+        subject_id: &str,
+        kind: TrackKindFfi,
+        memory: TrackMemoryFfi,
+    ) {
+        core.remember_track_memory(subject_id.to_string(), kind, memory);
     }
 
     fn core_with_global_subtitles_always() -> (tempfile::TempDir, Arc<JellybeamCore>) {
@@ -8217,6 +8749,42 @@ pub(crate) mod tests {
         );
         let decision = core.resolve_tracks(Some("series-1".to_string()), tracks);
         assert_eq!(decision.audio_track_id, Some(2));
+    }
+
+    /// docs/12: a movie's item id is a memory subject like a series id, and an identity saved from
+    /// one listing still picks the same kind of track from another, across a fresh core.
+    #[test]
+    fn a_movie_item_id_remembers_its_subtitle_identity_like_a_series() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let core = JellybeamCore::new(dir.path().to_string_lossy().to_string());
+        let movie = "00000000-0000-4000-8000-000000000001";
+        let row = |id, title: &str, is_forced, is_hearing_impaired| TrackInfo {
+            title: Some(title.to_string()),
+            is_forced,
+            is_hearing_impaired,
+            ..track(id, TrackKindFfi::Subtitle, Some("eng"))
+        };
+        let listing = [
+            row(2001, "English Forced", true, false),
+            row(2002, "English SDH", false, true),
+            row(2003, "English", false, false),
+        ];
+        // The viewer picked the SDH row.
+        remember(
+            &core,
+            movie,
+            TrackKindFfi::Subtitle,
+            crate::track_memory_of(listing[1].clone()),
+        );
+
+        let reopened = JellybeamCore::new(dir.path().to_string_lossy().to_string());
+        let decision = reopened.resolve_tracks(Some(movie.to_string()), listing.to_vec());
+        assert_eq!(decision.subtitle_track_id, Some(2002));
+        let other = reopened.resolve_tracks(
+            Some("00000000-0000-4000-8000-000000000002".to_string()),
+            listing.to_vec(),
+        );
+        assert_eq!(other.subtitle_track_id, None, "another item has no memory");
     }
 
     /// Thin [`RouteMockServer`] config scoped to exactly the two request
@@ -8430,11 +8998,58 @@ pub(crate) mod tests {
             generation: 0,
             item_id: item_id.to_string(),
             source: jellyfin_api::models::MediaSourceInfo::default(),
-            url: "http://example.invalid/stream".to_string(),
-            play_session_id: "play-session".to_string(),
-            server_verdict: None,
+            plan: PreloadPlan::DirectPlay {
+                url: "http://example.invalid/stream".to_string(),
+                play_session_id: "play-session".to_string(),
+                server_verdict: None,
+            },
             created_at: Instant::now(),
         }
+    }
+
+    /// docs/18 §2: which negotiations a Play still runs for the preload it took; Cap mode keeps
+    /// today's Direct Play early return.
+    #[test]
+    fn negotiation_start_skips_only_what_the_cached_plan_answers() {
+        let transcode = || PreloadCache {
+            plan: PreloadPlan::Transcode,
+            ..fake_preload_cache("item-1")
+        };
+        let cap = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        let label = |start: NegotiationStart| match start {
+            NegotiationStart::Cached { .. } => "no PlaybackInfo",
+            NegotiationStart::SecondOnly { .. } => "second only",
+            NegotiationStart::Full => "full",
+        };
+        // (mode, cached entry, expected start)
+        let rows = [
+            (
+                PlaybackQuality::Auto,
+                Some(fake_preload_cache("item-1")),
+                "no PlaybackInfo",
+            ),
+            (PlaybackQuality::Auto, Some(transcode()), "second only"),
+            (PlaybackQuality::Auto, None, "full"),
+            (
+                PlaybackQuality::DirectPlay,
+                Some(fake_preload_cache("item-1")),
+                "no PlaybackInfo",
+            ),
+            (PlaybackQuality::DirectPlay, Some(transcode()), "full"),
+            (PlaybackQuality::DirectPlay, None, "full"),
+            (cap, Some(fake_preload_cache("item-1")), "no PlaybackInfo"),
+            (cap, Some(transcode()), "full"),
+            (cap, None, "full"),
+        ];
+        let mismatches: Vec<String> = rows
+            .into_iter()
+            .enumerate()
+            .filter_map(|(row, (quality, cached, expected))| {
+                let got = label(negotiation_start(quality, cached));
+                (got != expected).then(|| format!("row {row}: {got}, expected {expected}"))
+            })
+            .collect();
+        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 
     #[test]
@@ -9361,6 +9976,756 @@ pub(crate) mod tests {
         );
     }
 
+    /// `compatible_codec_transcode_fixture`'s source with three English subtitle streams the
+    /// server would burn in or offer over HLS: Forced (2), SDH (3), plain (4).
+    fn english_subtitle_variants(playback_info_json: &mut serde_json::Value) {
+        use jellyfin_api::models::{MediaStream, MediaStreamType, SubtitleDeliveryMethod};
+        let streams = playback_info_json["MediaSources"][0]["MediaStreams"]
+            .as_array_mut()
+            .expect("streams");
+        for (index, title, forced, sdh) in [
+            (2, "English Forced", true, false),
+            (3, "English SDH", false, true),
+            (4, "English", false, false),
+        ] {
+            streams.push(
+                serde_json::to_value(MediaStream {
+                    index: Some(index),
+                    type_: Some(MediaStreamType::Subtitle),
+                    language: Some("eng".to_string()),
+                    title: Some(title.to_string()),
+                    codec: Some("subrip".to_string()),
+                    is_forced: Some(forced),
+                    is_hearing_impaired: Some(sdh),
+                    is_external: Some(false),
+                    delivery_method: Some(SubtitleDeliveryMethod::Hls),
+                    ..Default::default()
+                })
+                .expect("serialize stream"),
+            );
+        }
+    }
+
+    /// docs/18 §3.1 + docs/12: a transcode names the subtitle stream the viewer's memory picks,
+    /// and a movie's memory lives under its own item id, not a series id it does not have.
+    #[test]
+    fn a_cap_transcode_names_the_stream_a_movies_item_memory_picks() {
+        let (item_json, mut playback_info_json) = compatible_codec_transcode_fixture();
+        english_subtitle_variants(&mut playback_info_json);
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_info_json);
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        core.set_settings(settings);
+        remember(
+            &core,
+            "item-1",
+            TrackKindFfi::Subtitle,
+            TrackMemoryFfi::Track {
+                identity: crate::types::TrackIdentityFfi {
+                    lang: Some("eng".to_string()),
+                    title: Some("English SDH".to_string()),
+                    forced: false,
+                    sdh: true,
+                    codec: Some("subrip".to_string()),
+                },
+            },
+        );
+
+        core.prepare_playback_now("item-1".to_string(), false)
+            .expect("Cap mode always produces a plan");
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "the memory's stream needs a second negotiation"
+        );
+        assert_eq!(bodies[1]["SubtitleStreamIndex"], 3);
+    }
+
+    /// A source with an English default audio stream (1) and a Japanese one (2).
+    fn english_default_and_japanese_audio(playback_info_json: &mut serde_json::Value) {
+        use jellyfin_api::models::{MediaStream, MediaStreamType};
+        let source = &mut playback_info_json["MediaSources"][0];
+        source["DefaultAudioStreamIndex"] = 1.into();
+        let streams = source["MediaStreams"].as_array_mut().expect("streams");
+        for (index, lang, default) in [(1, "eng", true), (2, "jpn", false)] {
+            streams.push(
+                serde_json::to_value(MediaStream {
+                    index: Some(index),
+                    type_: Some(MediaStreamType::Audio),
+                    language: Some(lang.to_string()),
+                    codec: Some("aac".to_string()),
+                    is_default: Some(default),
+                    ..Default::default()
+                })
+                .expect("serialize stream"),
+            );
+        }
+    }
+
+    fn remember_audio(core: &JellybeamCore, lang: &str) {
+        remember(
+            core,
+            "item-1",
+            TrackKindFfi::Audio,
+            TrackMemoryFfi::Track {
+                identity: crate::types::TrackIdentityFfi {
+                    lang: Some(lang.to_string()),
+                    title: None,
+                    forced: false,
+                    sdh: false,
+                    codec: Some("aac".to_string()),
+                },
+            },
+        );
+    }
+
+    /// docs/18 §3.1: a transcode names the audio stream a movie's memory picks in the same
+    /// negotiation as its remembered subtitle, since the player only ever sees the one delivered.
+    #[test]
+    fn a_cap_transcode_names_the_audio_stream_a_movies_item_memory_picks() {
+        let (item_json, mut playback_info_json) = compatible_codec_transcode_fixture();
+        english_subtitle_variants(&mut playback_info_json);
+        english_default_and_japanese_audio(&mut playback_info_json);
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_info_json);
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        core.set_settings(settings);
+        remember_audio(&core, "jpn");
+        remember(
+            &core,
+            "item-1",
+            TrackKindFfi::Subtitle,
+            TrackMemoryFfi::Track {
+                identity: crate::types::TrackIdentityFfi {
+                    lang: Some("eng".to_string()),
+                    title: Some("English SDH".to_string()),
+                    forced: false,
+                    sdh: true,
+                    codec: Some("subrip".to_string()),
+                },
+            },
+        );
+
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Cap mode always produces a plan");
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "the memory's streams need a second negotiation"
+        );
+        assert_eq!(bodies[1]["AudioStreamIndex"], 2);
+        assert_eq!(bodies[1]["SubtitleStreamIndex"], 3);
+        assert_eq!(bodies[1]["MediaSourceId"], "ms-4");
+        assert_eq!(plan.delivered_audio_index, Some(2));
+    }
+
+    /// docs/18 §3.1: with no memory, the global audio language names its stream on an Auto
+    /// transcode's second negotiation.
+    #[test]
+    fn an_auto_transcode_names_the_global_audio_language_stream() {
+        let (_, mut playback_info_json) = transcode_fixture();
+        english_default_and_japanese_audio(&mut playback_info_json);
+        let (_dir, core, mock) = auto_core(vec![playback_info_json]);
+        let mut settings = core.get_settings();
+        settings.language.audio = Some("jpn".to_string());
+        core.set_settings(settings);
+
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Auto takes the transcode");
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 2, "Auto renegotiates its transcode");
+        assert!(bodies[0].get("AudioStreamIndex").is_none());
+        assert_eq!(bodies[1]["AudioStreamIndex"], 2);
+        assert!(bodies[1].get("SubtitleStreamIndex").is_none());
+        assert_eq!(plan.delivered_audio_index, Some(2));
+    }
+
+    /// docs/18 §3.1: memory of the stream the server already delivers names nothing, so a Cap
+    /// transcode stays on one negotiation.
+    #[test]
+    fn a_cap_transcode_remembering_the_default_audio_names_no_stream() {
+        let (item_json, mut playback_info_json) = compatible_codec_transcode_fixture();
+        english_default_and_japanese_audio(&mut playback_info_json);
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_info_json);
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        core.set_settings(settings);
+        remember_audio(&core, "eng");
+
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Cap mode always produces a plan");
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 1, "nothing to name, nothing to renegotiate");
+        assert!(bodies[0].get("AudioStreamIndex").is_none());
+        assert_eq!(plan.delivered_audio_index, Some(1));
+    }
+
+    /// docs/18 §3.1 (C4): a Cap start whose policy turns subtitles off names `-1`, beside its
+    /// source, only over a stream the server burned; with nothing burned, a named rendition
+    /// included, it negotiates once.
+    #[test]
+    fn cap_start_off_adds_no_playback_info_when_nothing_is_burned() {
+        for (query, negotiations) in [
+            ("", 1),
+            ("?SubtitleStreamIndex=2&SubtitleMethod=Hls", 1),
+            ("?SubtitleStreamIndex=2&SubtitleMethod=Encode", 2),
+        ] {
+            let (item_json, mut playback_info_json) = compatible_codec_transcode_fixture();
+            english_subtitle_variants(&mut playback_info_json);
+            playback_info_json["MediaSources"][0]["TranscodingUrl"] =
+                format!("/videos/ms-4/master.m3u8{query}").into();
+            let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_info_json);
+            let mut settings = core.get_settings();
+            settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
+            settings.language.subtitle_mode = crate::settings::SubtitleModeSetting::None;
+            core.set_settings(settings);
+
+            core.prepare_playback_now("item-1".to_string(), false)
+                .expect("Cap mode always produces a plan");
+
+            let bodies = mock.playback_info_bodies();
+            assert_eq!(bodies.len(), negotiations, "{query:?}");
+            if negotiations == 2 {
+                assert_eq!(bodies[1]["SubtitleStreamIndex"], -1);
+                assert_eq!(bodies[1]["MediaSourceId"], "ms-4");
+            }
+        }
+    }
+
+    /// docs/18 §3.1 (inv 12): a Cap plan's policy decision is the policy run over the plan's own
+    /// track rows, ids being stream indexes, so Kotlin and the core read one list.
+    #[test]
+    fn policy_input_equals_the_plans_track_rows() {
+        use crate::types::TrackDeliveryFfi::Rendition;
+        use playback_policy::tracks::{resolve_track_selection, Track};
+        let (item_json, mut playback_info_json) = compatible_codec_transcode_fixture();
+        english_subtitle_variants(&mut playback_info_json);
+        playback_info_json["MediaSources"][0]["TranscodingUrl"] =
+            "/videos/ms-4/master.m3u8?SubtitleStreamIndex=4&SubtitleMethod=Hls".into();
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_info_json);
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        settings.language.subtitle = Some("eng".to_string());
+        settings.language.subtitle_mode = crate::settings::SubtitleModeSetting::Always;
+        core.set_settings(settings);
+
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Cap mode always produces a plan");
+
+        assert_eq!(
+            mock.playback_info_bodies().len(),
+            1,
+            "the URL names the pick"
+        );
+        let tracks: Vec<Track> = plan.track_rows.iter().map(Track::from).collect();
+        let global = playback_policy::prefs::LanguagePrefs::from(core.get_settings().language);
+        let decision = TrackDecisionFfi::from(resolve_track_selection(&tracks, None, &global));
+        assert_eq!(plan.policy_decision, Some(decision));
+        assert_eq!(decision.subtitle_track_id, Some(4));
+        let rows: Vec<_> = plan
+            .track_rows
+            .iter()
+            .map(|r| (r.stream_index, r.delivery))
+            .collect();
+        assert_eq!(rows, [(2, Rendition), (3, Rendition), (4, Rendition)]);
+    }
+
+    /// docs/18 §3.1: a Cap plan returns the decision whose stream its renegotiated URL carries.
+    #[test]
+    fn a_cap_prepare_returns_the_policy_decision_its_url_carries() {
+        let (item_json, mut first) = compatible_codec_transcode_fixture();
+        english_subtitle_variants(&mut first);
+        let mut second = first.clone();
+        second["MediaSources"][0]["TranscodingUrl"] =
+            "/videos/ms-4/master.m3u8?SubtitleStreamIndex=3&SubtitleMethod=Hls".into();
+        let (_dir, core, mock) = core_signed_in_against_mock_with_responses(
+            item_json,
+            vec![first, second],
+            Duration::ZERO,
+        );
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        core.set_settings(settings);
+        remember(
+            &core,
+            "item-1",
+            TrackKindFfi::Subtitle,
+            TrackMemoryFfi::Track {
+                identity: crate::types::TrackIdentityFfi {
+                    lang: Some("eng".to_string()),
+                    title: Some("English SDH".to_string()),
+                    forced: false,
+                    sdh: true,
+                    codec: Some("subrip".to_string()),
+                },
+            },
+        );
+
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Cap mode always produces a plan");
+
+        assert_eq!(mock.playback_info_bodies()[1]["SubtitleStreamIndex"], 3);
+        assert_eq!(
+            plan.policy_decision,
+            Some(TrackDecisionFfi {
+                audio_track_id: None,
+                subtitle_action: crate::types::SubtitleActionFfi::Leave,
+                subtitle_track_id: Some(3),
+            })
+        );
+        let carried = plan.track_rows.iter().find(|r| r.stream_index == 3);
+        assert_eq!(
+            carried.map(|r| r.delivery),
+            Some(crate::types::TrackDeliveryFfi::Rendition)
+        );
+    }
+
+    /// Remembers `compatible_codec_transcode_fixture`'s English SDH subtitle (stream 3).
+    fn remember_english_sdh(core: &JellybeamCore) {
+        remember(
+            core,
+            "item-1",
+            TrackKindFfi::Subtitle,
+            TrackMemoryFfi::Track {
+                identity: crate::types::TrackIdentityFfi {
+                    lang: Some("eng".to_string()),
+                    title: Some("English SDH".to_string()),
+                    forced: false,
+                    sdh: true,
+                    codec: Some("subrip".to_string()),
+                },
+            },
+        );
+    }
+
+    /// docs/18 §3.1: a Cap pick the manifest already carries as a rendition names nothing, so
+    /// the start negotiates once.
+    #[test]
+    fn a_cap_pick_already_delivered_as_a_rendition_names_nothing() {
+        let (item_json, mut playback_info_json) = compatible_codec_transcode_fixture();
+        english_subtitle_variants(&mut playback_info_json);
+        playback_info_json["MediaSources"][0]["TranscodingUrl"] =
+            "/videos/ms-4/master.m3u8?SubtitleStreamIndex=4&SubtitleMethod=Hls".into();
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_info_json);
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        core.set_settings(settings);
+        remember_english_sdh(&core);
+
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Cap mode always produces a plan");
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 1, "the manifest carries the pick");
+        assert!(bodies[0].get("SubtitleStreamIndex").is_none());
+        assert_eq!(
+            plan.policy_decision.and_then(|d| d.subtitle_track_id),
+            Some(3)
+        );
+    }
+
+    /// docs/18 §3.1: Auto's second negotiation names the policy's stream even where the first URL
+    /// already carries it, since that negotiation's sidecar-free profile may pick another one.
+    #[test]
+    fn an_auto_transcode_names_its_subtitle_pick_in_the_second_negotiation() {
+        let (_, mut playback_info_json) = transcode_fixture();
+        english_subtitle_variants(&mut playback_info_json);
+        playback_info_json["MediaSources"][0]["TranscodingUrl"] =
+            "/videos/ms-2/master.m3u8?SubtitleStreamIndex=4&SubtitleMethod=Hls".into();
+        let (_dir, core, mock) = auto_core(vec![playback_info_json]);
+        let mut settings = core.get_settings();
+        settings.language.subtitle = Some("eng".to_string());
+        settings.language.subtitle_mode = crate::settings::SubtitleModeSetting::Always;
+        core.set_settings(settings);
+
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Auto takes the transcode");
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 2, "Auto renegotiates its transcode");
+        assert_eq!(bodies[1]["SubtitleStreamIndex"], 4);
+        assert_eq!(bodies[1]["MediaSourceId"], "ms-2");
+        assert_eq!(
+            plan.policy_decision.and_then(|d| d.subtitle_track_id),
+            Some(4)
+        );
+    }
+
+    /// docs/18 §2: an Auto transcode Play after a dwell preload reuses the preload's first answer,
+    /// asking only the sidecar-free, policy-named second negotiation, under that one's session.
+    #[test]
+    fn an_auto_transcode_after_a_preload_asks_only_the_second_playback_info() {
+        let (_, mut first) = transcode_fixture();
+        english_default_and_japanese_audio(&mut first);
+        let mut second = first.clone();
+        second["PlaySessionId"] = "play-session-second".into();
+        let (_dir, core, mock) = auto_core(vec![first, second]);
+        let mut settings = core.get_settings();
+        settings.language.audio = Some("jpn".to_string());
+        core.set_settings(settings);
+
+        core.preload_playback("item-1".to_string(), None);
+        wait_for_preload_idle(&core);
+        assert_eq!(mock.playback_info_hit_count(), 1, "the preload asks once");
+
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Auto takes the transcode");
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 2, "Play asks only the second negotiation");
+        assert!(!offers_ass_sidecars(&bodies[1]));
+        assert_eq!(bodies[1]["AudioStreamIndex"], 2);
+        assert_eq!(bodies[1]["MediaSourceId"], "ms-2");
+        assert_eq!(plan.play_method, PlayMethodFfi::Transcode);
+        assert_eq!(plan.play_session_id, "play-session-second");
+        assert_eq!(plan.delivered_audio_index, Some(2));
+        assert!(
+            core.lock_state().preload_cache.is_none(),
+            "the cache is single-use"
+        );
+    }
+
+    /// docs/18 §3.1: the policy after a preload reads the streams the first answer's URL already
+    /// delivers, exactly as without one, so an audio pick it carries is not named again.
+    #[test]
+    fn an_auto_transcode_after_a_preload_reads_the_first_answers_delivered_audio() {
+        let (_, mut first) = transcode_fixture();
+        english_default_and_japanese_audio(&mut first);
+        first["MediaSources"][0]["TranscodingUrl"] =
+            "/videos/ms-2/master.m3u8?AudioStreamIndex=2".into();
+        let (_dir, core, mock) = auto_core(vec![first]);
+        let mut settings = core.get_settings();
+        settings.language.audio = Some("jpn".to_string());
+        core.set_settings(settings);
+
+        core.preload_playback("item-1".to_string(), None);
+        wait_for_preload_idle(&core);
+        core.prepare_playback_now("item-1".to_string(), false)
+            .expect("Auto takes the transcode");
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 2, "Play asks only the second negotiation");
+        assert!(bodies[1].get("AudioStreamIndex").is_none());
+    }
+
+    /// How a Play meets an Auto preload of a transcode item.
+    #[derive(Clone, Copy, Debug)]
+    enum TranscodePreloadPlay {
+        /// Play for the item inside the TTL.
+        Hit,
+        /// Play joins the item's preload while it still negotiates.
+        Joined,
+        /// Play after the TTL.
+        Expired,
+        /// Play for another item.
+        OtherItem,
+        /// A second Play for the item after the first consumed the cache.
+        Used,
+    }
+
+    /// PlaybackInfo requests in total after an Auto preload of item-1 (a transcode) and `play`.
+    fn playback_info_calls_after_transcode_preload(play: TranscodePreloadPlay) -> usize {
+        let (item_json, _) = direct_play_fixture();
+        let delays = match play {
+            TranscodePreloadPlay::Joined => vec![Duration::from_millis(150), Duration::ZERO],
+            _ => Vec::new(),
+        };
+        let (_dir, core, mock) = core_signed_in_against_mock_with_responses_and_delays(
+            item_json,
+            vec![transcode_fixture().1],
+            delays,
+        );
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Auto;
+        core.set_settings(settings);
+
+        core.preload_playback("item-1".to_string(), None);
+        match play {
+            TranscodePreloadPlay::Joined => wait_for_playback_info_hits(&mock, 1),
+            _ => wait_for_preload_idle(&core),
+        }
+        if let TranscodePreloadPlay::Expired = play {
+            let mut state = core.lock_state();
+            let cache = state.preload_cache.as_mut().expect("a cached transcode");
+            cache.created_at = Instant::now() - PRELOAD_CACHE_TTL - Duration::from_secs(1);
+        }
+        let item = match play {
+            TranscodePreloadPlay::OtherItem => "item-2",
+            _ => "item-1",
+        };
+        core.prepare_playback_now(item.to_string(), false)
+            .expect("Auto takes the transcode");
+        if let TranscodePreloadPlay::Used = play {
+            core.prepare_playback_now(item.to_string(), false)
+                .expect("Auto takes the transcode again");
+        }
+        mock.playback_info_hit_count()
+    }
+
+    /// docs/18 §2: a preload's transcode answer saves one Play for its item, inside the TTL, its
+    /// first PlaybackInfo; every other Play asks both of Auto's negotiations.
+    #[test]
+    fn a_cached_auto_transcode_saves_one_play_for_its_item_its_first_playback_info() {
+        use TranscodePreloadPlay::{Expired, Hit, Joined, OtherItem, Used};
+        // (play, PlaybackInfo requests in total: the preload's one, then Play's)
+        let mismatches: Vec<String> = [
+            (Hit, 2),
+            (Joined, 2),
+            (Expired, 3),
+            (OtherItem, 3),
+            (Used, 4),
+        ]
+        .into_iter()
+        .filter_map(|(play, expected)| {
+            let calls = playback_info_calls_after_transcode_preload(play);
+            (calls != expected).then(|| format!("{play:?}: {calls} requests, expected {expected}"))
+        })
+        .collect();
+        assert!(mismatches.is_empty(), "{mismatches:?}");
+    }
+
+    /// docs/18 §3.1 (inv 12): when the policy renegotiates, its decision's ids name rows of the
+    /// final plan, each of its kind and delivered by the URL the plan carries.
+    #[test]
+    fn a_renegotiated_plans_policy_ids_name_its_final_track_rows() {
+        use crate::types::TrackDeliveryFfi::{DeliveredAudio, Rendition};
+        let (item_json, mut first) = compatible_codec_transcode_fixture();
+        english_subtitle_variants(&mut first);
+        english_default_and_japanese_audio(&mut first);
+        let mut second = first.clone();
+        second["MediaSources"][0]["TranscodingUrl"] =
+            "/videos/ms-4/master.m3u8?AudioStreamIndex=2&SubtitleStreamIndex=3&SubtitleMethod=Hls"
+                .into();
+        let (_dir, core, mock) = core_signed_in_against_mock_with_responses(
+            item_json,
+            vec![first, second],
+            Duration::ZERO,
+        );
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        core.set_settings(settings);
+        remember_audio(&core, "jpn");
+        remember_english_sdh(&core);
+
+        let plan = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("Cap mode always produces a plan");
+
+        assert_eq!(
+            mock.playback_info_bodies().len(),
+            2,
+            "the policy renegotiates"
+        );
+        let decision = plan.policy_decision.expect("the policy ran");
+        let row = |id: Option<i64>| {
+            let row = (plan.track_rows.iter()).find(|r| Some(i64::from(r.stream_index)) == id);
+            row.map(|r| (r.kind, r.delivery))
+        };
+        assert_eq!(
+            row(decision.audio_track_id),
+            Some((TrackKindFfi::Audio, DeliveredAudio))
+        );
+        assert_eq!(
+            row(decision.subtitle_track_id),
+            Some((TrackKindFfi::Subtitle, Rendition))
+        );
+    }
+
+    /// Sidecar subtitle streams on the fixture's source: two fetchable (5, 6), one bitmap (7)
+    /// and one served off-server (8), which no picker may offer.
+    fn sidecar_variants(playback_info_json: &mut serde_json::Value) {
+        use jellyfin_api::models::{MediaStream, MediaStreamType, SubtitleDeliveryMethod};
+        let source = &mut playback_info_json["MediaSources"][0];
+        if source["MediaStreams"].is_null() {
+            source["MediaStreams"] = serde_json::json!([]);
+        }
+        let streams = source["MediaStreams"].as_array_mut().expect("streams");
+        for (index, codec, lang, title, default, forced, sdh) in [
+            (5, "srt", "ger", "German", true, false, false),
+            (6, "ass", "fre", "French SDH", false, true, true),
+            (7, "pgssub", "eng", "English", false, false, false),
+            (8, "srt", "spa", "Spanish", false, false, false),
+        ] {
+            let url = match index {
+                8 => "http://elsewhere.test/Subtitles/8/Stream.srt".to_string(),
+                _ => format!("/Videos/item-1/ms/Subtitles/{index}/0/Stream.srt"),
+            };
+            streams.push(
+                serde_json::to_value(MediaStream {
+                    index: Some(index),
+                    type_: Some(MediaStreamType::Subtitle),
+                    language: Some(lang.to_string()),
+                    display_title: Some(title.to_string()),
+                    codec: Some(codec.to_string()),
+                    is_default: Some(default),
+                    is_forced: Some(forced),
+                    is_hearing_impaired: Some(sdh),
+                    is_external: Some(true),
+                    delivery_method: Some(SubtitleDeliveryMethod::External),
+                    delivery_url: Some(url),
+                    ..Default::default()
+                })
+                .expect("serialize stream"),
+            );
+        }
+    }
+
+    /// docs/18 §3.2: both plans list exactly the sidecars Kotlin can fetch as rows carrying what
+    /// its picker shows; Direct Play lists only those, its file's own tracks being Media3's.
+    #[test]
+    fn track_rows_carry_the_fetchable_sidecars_on_direct_play_and_transcode() {
+        use crate::types::{TrackDeliveryFfi, TrackRowFfi};
+        let sidecar =
+            |index, title: &str, lang: &str, codec: &str, default, forced, sdh| TrackRowFfi {
+                kind: TrackKindFfi::Subtitle,
+                stream_index: index,
+                title: Some(title.to_string()),
+                display_title: Some(title.to_string()),
+                lang: Some(lang.to_string()),
+                codec: Some(codec.to_string()),
+                is_default: default,
+                is_forced: forced,
+                is_hearing_impaired: sdh,
+                delivery: TrackDeliveryFfi::Sidecar,
+                is_selected: false,
+            };
+        let expected = [
+            sidecar(5, "German", "ger", "srt", true, false, false),
+            sidecar(6, "French SDH", "fre", "ass", false, true, true),
+        ];
+        let cap = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        for (label, (item_json, mut playback_info_json), quality) in [
+            ("Direct Play", direct_play_fixture(), None),
+            ("Transcode", compatible_codec_transcode_fixture(), Some(cap)),
+        ] {
+            sidecar_variants(&mut playback_info_json);
+            let (_dir, core, _mock) = core_signed_in_against_mock(item_json, playback_info_json);
+            if let Some(quality) = quality {
+                let mut settings = core.get_settings();
+                settings.playback_quality = quality;
+                core.set_settings(settings);
+            }
+
+            let plan = core
+                .prepare_playback_now("item-1".to_string(), false)
+                .expect("a plan");
+
+            let indexes: Vec<i32> = plan.external_subtitles.iter().map(|s| s.index).collect();
+            assert_eq!(indexes, [5, 6], "{label}");
+            let sidecars: Vec<_> = (plan.track_rows.iter())
+                .filter(|r| r.delivery == TrackDeliveryFfi::Sidecar)
+                .cloned()
+                .collect();
+            assert_eq!(sidecars, expected, "{label}");
+            if quality.is_none() {
+                assert_eq!(plan.track_rows, expected, "{label}: sidecars only");
+            }
+        }
+    }
+
+    /// docs/18 §3.1: a fallback asking for the policy runs it once, over its first forced
+    /// negotiation, and names the picked stream in the one renegotiation that follows.
+    #[test]
+    fn a_fallback_asking_for_the_policy_names_its_streams_once() {
+        let mut transcode = transcode_fixture().1;
+        english_subtitle_variants(&mut transcode);
+        let (_dir, core, mock) =
+            auto_core(vec![direct_play_fixture().1, transcode.clone(), transcode]);
+        remember(
+            &core,
+            "item-1",
+            TrackKindFfi::Subtitle,
+            TrackMemoryFfi::Track {
+                identity: crate::types::TrackIdentityFfi {
+                    lang: Some("eng".to_string()),
+                    title: Some("English SDH".to_string()),
+                    forced: false,
+                    sdh: true,
+                    codec: Some("subrip".to_string()),
+                },
+            },
+        );
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+
+        let request = core.next_request();
+        let plan = core
+            .prepare_transcode_fallback(
+                "item-1".to_string(),
+                0,
+                "decoder error".to_string(),
+                a.play_session_id,
+                Some(FailedTrackFfi::Video),
+                TranscodeStreamsFfi::Policy,
+                TranscodeCauseFfi::Fallback,
+                request,
+            )
+            .expect("the fallback negotiates");
+
+        let named: Vec<_> = mock.playback_info_bodies()[1..]
+            .iter()
+            .map(|body| body["SubtitleStreamIndex"].clone())
+            .collect();
+        assert_eq!(named, [serde_json::Value::Null, 3.into()]);
+        assert_eq!(
+            plan.policy_decision.and_then(|d| d.subtitle_track_id),
+            Some(3)
+        );
+    }
+
+    /// docs/12: the plan carries the one memory subject Kotlin remembers under: the series for an
+    /// episode, the item for a movie; a renegotiated fallback plan names the same one.
+    #[test]
+    fn a_plan_names_its_track_memory_subject() {
+        let series = "00000000-0000-4000-8000-000000000009";
+        let (movie_json, direct_play_json) = direct_play_fixture();
+        let mut episode_json = movie_json.clone();
+        episode_json["Items"][0]["Type"] = "Episode".into();
+        episode_json["Items"][0]["SeriesId"] = series.into();
+        for (label, item_json, want) in [
+            ("episode", episode_json, series),
+            ("movie", movie_json, "item-1"),
+        ] {
+            let (_dir, core, _mock) = core_signed_in_against_mock_with_responses(
+                item_json,
+                vec![direct_play_json.clone(), transcode_fixture().1],
+                Duration::ZERO,
+            );
+            let mut settings = core.get_settings();
+            settings.playback_quality = PlaybackQuality::Auto;
+            core.set_settings(settings);
+
+            let plan = core
+                .prepare_playback_now("item-1".to_string(), false)
+                .expect("Direct Play plan");
+            assert_eq!(plan.track_memory_subject, want, "{label}");
+            let fallback = core
+                .prepare_transcode_fallback_now(
+                    "item-1".to_string(),
+                    0,
+                    "decoder error".to_string(),
+                    plan.play_session_id,
+                )
+                .expect("fallback plan");
+            assert_eq!(fallback.track_memory_subject, want, "{label} fallback");
+        }
+    }
+
     /// docs/18-playback-quality.md §2: `set_settings` always invalidates
     /// any preload result, so a plan negotiated under the old Quality
     /// setting can never reach `prepare_playback`.
@@ -9470,7 +10835,7 @@ pub(crate) mod tests {
 
         assert_eq!(mock.playback_info_hit_count(), 2);
         assert_eq!(
-            core.lock_state().playback_owner.claim,
+            core.lock_state().playback_owner.current_claim().cloned(),
             None,
             "an install consumes its claim"
         );
@@ -10010,8 +11375,8 @@ pub(crate) mod tests {
                     "decoder error".to_string(),
                     a.play_session_id,
                     failed,
-                    subtitle,
-                    audio,
+                    TranscodeStreamsFfi::Named { subtitle, audio },
+                    TranscodeCauseFfi::Fallback,
                     request,
                 )
                 .expect("the fallback negotiates");
@@ -10028,6 +11393,10 @@ pub(crate) mod tests {
             let audio_index = audio.map_or(serde_json::Value::Null, serde_json::Value::from);
             assert_eq!(body["AudioStreamIndex"], audio_index, "{failed:?}");
             assert_eq!(plan.delivered_audio_index, audio, "{failed:?}");
+            assert_eq!(
+                plan.policy_decision, None,
+                "{failed:?}: the viewer's streams, no policy"
+            );
         }
     }
 
@@ -10169,6 +11538,237 @@ pub(crate) mod tests {
             .filter(|body| body["PlaySessionId"] == play_session_id)
             .filter_map(|body| body["PositionTicks"].as_i64())
             .collect()
+    }
+
+    /// A renegotiation of `play_session_id` for `cause` at `ticks`, admitted as the next request.
+    fn renegotiate(
+        core: &JellybeamCore,
+        play_session_id: &str,
+        cause: TranscodeCauseFfi,
+        ticks: i64,
+    ) -> (PlaybackRequest, Result<PlaybackPlan, CoreError>) {
+        let request = core.next_request();
+        let result = core.prepare_transcode_fallback(
+            "item-1".to_string(),
+            ticks,
+            "subtitle choice".to_string(),
+            play_session_id.to_string(),
+            None,
+            TranscodeStreamsFfi::Named {
+                subtitle: Some(2),
+                audio: None,
+            },
+            cause,
+            request,
+        );
+        (request, result)
+    }
+
+    /// docs/18 §2.1 (B2): a renegotiation that fails leaves the playing session installed,
+    /// reporting and holding its sidecars; nothing stops it until the viewer does.
+    #[test]
+    fn a_failed_renegotiation_leaves_the_playing_session_reporting() {
+        let failing = serde_json::json!({ "MediaSources": [], "PlaySessionId": "x" });
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1, failing]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        core.lock_state().sidecars = Some(test_sidecars(&a.play_session_id));
+
+        let (_, result) = renegotiate(
+            &core,
+            &a.play_session_id,
+            TranscodeCauseFfi::Renegotiate,
+            20_000_000,
+        );
+        result.expect_err("an empty negotiation fails");
+
+        assert_eq!(
+            active_play_session_id(&core),
+            Some(a.play_session_id.clone())
+        );
+        assert!(
+            (core.lock_state().sidecars.as_ref())
+                .is_some_and(|s| s.url_for(&a.play_session_id, 3).is_some()),
+            "its sidecars stay with it"
+        );
+        core.stop_playback(a.play_session_id.clone(), 30_000_000);
+        wait_until(
+            || !stopped_positions(&mock, &a.play_session_id).is_empty(),
+            "A's Stopped report",
+        );
+        assert_eq!(stopped_positions(&mock, &a.play_session_id), [30_000_000]);
+    }
+
+    /// docs/18 §2 + §2.1: a renegotiation after the viewer switched a playing transcode to Direct
+    /// Play mode is refused before anything is admitted: nothing installs, and the playing
+    /// session keeps reporting with its sidecars.
+    #[test]
+    fn a_renegotiation_under_direct_play_mode_leaves_the_playing_transcode_alone() {
+        let (_dir, core, mock) = auto_core(vec![transcode_fixture().1]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A transcodes");
+        core.lock_state().sidecars = Some(test_sidecars(&a.play_session_id));
+        let negotiations = mock.playback_info_bodies().len();
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::DirectPlay;
+        core.set_settings(settings);
+
+        let (request, result) = renegotiate(
+            &core,
+            &a.play_session_id,
+            TranscodeCauseFfi::Renegotiate,
+            20_000_000,
+        );
+
+        assert!(
+            matches!(result, Err(CoreError::WouldTranscode { .. })),
+            "{result:?}"
+        );
+        assert_eq!(mock.playback_info_bodies().len(), negotiations);
+        let commit = core.commit_transcode(a.play_session_id.clone(), request);
+        assert!(
+            matches!(commit, Err(CoreError::StalePlaybackSession)),
+            "nothing was prepared: {commit:?}"
+        );
+        assert_eq!(
+            active_play_session_id(&core),
+            Some(a.play_session_id.clone())
+        );
+        assert!(
+            (core.lock_state().sidecars.as_ref())
+                .is_some_and(|s| s.url_for(&a.play_session_id, 3).is_some()),
+            "its sidecars stay with it"
+        );
+        assert_start_reports(&mock, 1);
+        assert!(stopped_positions(&mock, &a.play_session_id).is_empty());
+    }
+
+    /// docs/18 §2.1 (B2): stopping the playing session while its renegotiation waits for the
+    /// commit revokes the claim, so the commit is refused and the prepared session never starts.
+    #[test]
+    fn a_stop_during_a_renegotiation_revokes_its_commit() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1, transcode_fixture().1]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let (request, result) = renegotiate(
+            &core,
+            &a.play_session_id,
+            TranscodeCauseFfi::Renegotiate,
+            20_000_000,
+        );
+        let plan = result.expect("the renegotiation prepares");
+        assert_eq!(
+            active_play_session_id(&core),
+            Some(a.play_session_id.clone()),
+            "A plays on until the commit"
+        );
+
+        core.stop_playback(a.play_session_id.clone(), 30_000_000);
+
+        let commit = core.commit_transcode(plan.play_session_id, request);
+        assert!(
+            matches!(commit, Err(CoreError::StalePlaybackSession)),
+            "{commit:?}"
+        );
+        assert_eq!(active_play_session_id(&core), None);
+        assert_start_reports(&mock, 1);
+        assert_eq!(stopped_positions(&mock, &a.play_session_id), [30_000_000]);
+    }
+
+    /// docs/18 §2.1 (B2): a renegotiation chained onto a fallback that has not committed takes
+    /// over its retired session; only the chain's session starts, and the retired one ends once,
+    /// where the chain takes over.
+    #[test]
+    fn a_chain_after_a_fallback_keeps_one_retiring_session() {
+        let mut chained = transcode_fixture().1;
+        chained["PlaySessionId"] = "play-session-chain".into();
+        let (_dir, core, mock) = auto_core(vec![
+            direct_play_fixture().1,
+            transcode_fixture().1,
+            chained,
+        ]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let (fallback_request, fallback) = renegotiate(
+            &core,
+            &a.play_session_id,
+            TranscodeCauseFfi::Fallback,
+            20_000_000,
+        );
+        let fallback = fallback.expect("the fallback prepares");
+
+        let (chain_request, chain) = renegotiate(
+            &core,
+            &a.play_session_id,
+            TranscodeCauseFfi::Renegotiate,
+            25_000_000,
+        );
+        let chain = chain.expect("a chain onto the retired session is admitted");
+
+        let superseded = core.commit_transcode(fallback.play_session_id, fallback_request);
+        assert!(
+            matches!(superseded, Err(CoreError::StalePlaybackSession)),
+            "{superseded:?}"
+        );
+        core.commit_transcode(chain.play_session_id.clone(), chain_request)
+            .expect("the chain commits");
+        assert_eq!(active_play_session_id(&core), Some(chain.play_session_id));
+        assert!(core.lock_state().playback_owner.retiring.is_none());
+        assert_start_reports(&mock, 2);
+        wait_until(
+            || !stopped_positions(&mock, &a.play_session_id).is_empty(),
+            "A's Stopped report",
+        );
+        assert_eq!(stopped_positions(&mock, &a.play_session_id), [25_000_000]);
+    }
+
+    /// docs/18 §2.1 (B2): a prepared session lives on its claim, so every path that clears the
+    /// claim -- a newer admission, a revoking stop, leaving the account, a release -- drops it:
+    /// its commit is refused, it never reports, and stopping it later stops nothing.
+    #[test]
+    fn a_prepared_session_is_dropped_unstarted_on_every_claim_clearing_path() {
+        let paths: [(&str, fn(&JellybeamCore, &str)); 4] = [
+            ("a newer admission", |core, _| {
+                admit(core);
+            }),
+            ("a revoking stop", |core, a| {
+                core.stop_playback(a.to_string(), 30_000_000);
+            }),
+            ("leaving the account", |core, _| remove_active_account(core)),
+            ("a release", |core, _| {
+                let claim = core.lock_state().playback_owner.current_claim().cloned();
+                core.release_claim(&claim.expect("the prepared claim"));
+            }),
+        ];
+        for cause in [TranscodeCauseFfi::Fallback, TranscodeCauseFfi::Renegotiate] {
+            for (label, clear) in paths {
+                let (_dir, core, mock) =
+                    auto_core(vec![direct_play_fixture().1, transcode_fixture().1]);
+                let a = core
+                    .prepare_playback_now("item-1".to_string(), false)
+                    .expect("A plays");
+                let (request, result) = renegotiate(&core, &a.play_session_id, cause, 20_000_000);
+                let plan = result.expect("the negotiation prepares");
+
+                clear(&core, &a.play_session_id);
+
+                let commit = core.commit_transcode(plan.play_session_id.clone(), request);
+                assert!(
+                    matches!(commit, Err(CoreError::StalePlaybackSession)),
+                    "{cause:?}, {label}: {commit:?}"
+                );
+                core.stop_playback(plan.play_session_id.clone(), 40_000_000);
+                assert_start_reports(&mock, 1);
+                assert!(
+                    stopped_positions(&mock, &plan.play_session_id).is_empty(),
+                    "{cause:?}, {label}: the prepared session never reported"
+                );
+            }
+        }
     }
 
     /// docs/18 §2.1: the session a fallback took over keeps reporting until the claim resolves, and
@@ -11104,8 +12704,11 @@ pub(crate) mod tests {
                         "decoder error".to_string(),
                         plan.play_session_id,
                         None,
-                        None,
-                        None,
+                        TranscodeStreamsFfi::Named {
+                            subtitle: None,
+                            audio: None,
+                        },
+                        TranscodeCauseFfi::Fallback,
                         a_request(core, a_epoch),
                     )
                     .expect_err("a forced negotiation answered with Direct Play fails");
@@ -12786,6 +14389,181 @@ pub(crate) mod tests {
             2,
             "the second call asks the server again"
         );
+    }
+
+    /// docs/18 §6: the Detail page's playability reads the transcoding permission validation
+    /// cached; it never fetches `/Users/Me` itself.
+    #[test]
+    fn item_detail_playability_reads_the_cached_transcoding_permission() {
+        use crate::types::{Playability, PlayabilityReason};
+        let (_dir, core, mock) = core_signed_in_against_routes();
+        let item_id = "00000000-0000-4000-8000-000000000a49";
+        mock.route(
+            "GET",
+            "/Items",
+            200,
+            serde_json::json!({
+                "Items": [{
+                    "Id": item_id,
+                    "Name": "Sample Movie",
+                    "Type": "Movie",
+                    "MediaSources": [{
+                        "Id": "ms-1",
+                        "MediaStreams": [{"Type": "Video", "Codec": "av1", "Index": 0}]
+                    }]
+                }],
+                "TotalRecordCount": 1,
+                "StartIndex": 0
+            }),
+        );
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Auto;
+        core.set_settings(settings);
+        let users_me = |transcoding: bool| {
+            mock.route(
+                "GET",
+                "/Users/Me",
+                200,
+                serde_json::json!({
+                    "Id": "00000000-0000-0000-0000-000000000040",
+                    "Name": "jellybeam-user",
+                    "Policy": {
+                        "EnableVideoPlaybackTranscoding": transcoding,
+                        "AuthenticationProviderId": "synthetic-provider",
+                        "PasswordResetProviderId": "synthetic-provider"
+                    }
+                }),
+            );
+            core.validate_session().expect("a live token validates");
+        };
+        let playability = || {
+            core.get_item_detail(item_id.to_string(), None)
+                .expect("the item is served")
+                .playability
+        };
+
+        users_me(false);
+        let validations = mock.hit_count("GET", "/Users/Me");
+        assert_eq!(
+            playability(),
+            Playability::WontPlay {
+                reason: PlayabilityReason::VideoCodec,
+                value: Some("av1".to_string()),
+            }
+        );
+        users_me(true);
+        assert_eq!(
+            playability(),
+            Playability::WillTranscode {
+                reason: Some(PlayabilityReason::VideoCodec),
+                value: Some("av1".to_string()),
+            }
+        );
+        assert_eq!(
+            mock.hit_count("GET", "/Users/Me"),
+            validations + 1,
+            "the Detail page asks for nothing beyond the item"
+        );
+
+        // `is_administrator` reads the same reply, so it keeps the permission too.
+        mock.route(
+            "GET",
+            "/Users/Me",
+            200,
+            serde_json::json!({
+                "Id": "00000000-0000-0000-0000-000000000040",
+                "Policy": {
+                    "EnableVideoPlaybackTranscoding": false,
+                    "AuthenticationProviderId": "synthetic-provider",
+                    "PasswordResetProviderId": "synthetic-provider"
+                }
+            }),
+        );
+        let _ = core.is_administrator();
+        assert_eq!(
+            playability(),
+            Playability::WontPlay {
+                reason: PlayabilityReason::VideoCodec,
+                value: Some("av1".to_string()),
+            }
+        );
+    }
+
+    /// docs/18 §6: a first Detail load that needs the permission fetches `/Users/Me` itself, once,
+    /// and the same reply answers `is_administrator`; a verdict the policy can't change asks nothing.
+    #[test]
+    fn item_detail_fetches_the_transcoding_permission_when_the_verdict_needs_it() {
+        use crate::types::{Playability, PlayabilityReason};
+        let item_id = "00000000-0000-4000-8000-000000000a49";
+        let served = |mode: PlaybackQuality| {
+            let (_dir, core, mock) = core_signed_in_against_routes();
+            mock.route(
+                "GET",
+                "/Items",
+                200,
+                serde_json::json!({
+                    "Items": [{
+                        "Id": item_id,
+                        "Name": "Sample Movie",
+                        "Type": "Movie",
+                        "MediaSources": [{
+                            "Id": "ms-1",
+                            "MediaStreams": [{"Type": "Video", "Codec": "av1", "Index": 0}]
+                        }]
+                    }],
+                    "TotalRecordCount": 1,
+                    "StartIndex": 0
+                }),
+            );
+            mock.route(
+                "GET",
+                "/Users/Me",
+                200,
+                serde_json::json!({
+                    "Id": "00000000-0000-0000-0000-000000000040",
+                    "Name": "jellybeam-user",
+                    "Policy": {
+                        "IsAdministrator": true,
+                        "EnableVideoPlaybackTranscoding": false,
+                        "AuthenticationProviderId": "synthetic-provider",
+                        "PasswordResetProviderId": "synthetic-provider"
+                    }
+                }),
+            );
+            let mut settings = core.get_settings();
+            settings.playback_quality = mode;
+            core.set_settings(settings);
+            let before = mock.hit_count("GET", "/Users/Me");
+            let playability = core
+                .get_item_detail(item_id.to_string(), None)
+                .expect("the item is served")
+                .playability;
+            let fetched = mock.hit_count("GET", "/Users/Me") - before;
+            let admin = core.is_administrator().expect("cached by the detail fetch");
+            let after_admin = mock.hit_count("GET", "/Users/Me") - before;
+            (playability, fetched, admin, after_admin)
+        };
+
+        let (playability, fetched, admin, after_admin) = served(PlaybackQuality::Auto);
+        assert_eq!(
+            playability,
+            Playability::WontPlay {
+                reason: PlayabilityReason::VideoCodec,
+                value: Some("av1".to_string()),
+            }
+        );
+        assert_eq!((fetched, after_admin), (1, 1), "one /Users/Me serves both");
+        assert!(admin);
+
+        let (playability, fetched, ..) = served(PlaybackQuality::DirectPlay);
+        assert_eq!(
+            playability,
+            Playability::WontPlay {
+                reason: PlayabilityReason::VideoCodec,
+                value: Some("av1".to_string()),
+            }
+        );
+        assert_eq!(fetched, 0, "the policy can't change a Direct Play verdict");
     }
 
     /// Full-sync `/Items` payload for one series/season/three-episode tree,
@@ -14588,6 +16366,59 @@ pub(crate) mod tests {
         assert!(core.server_at_least(12, 1));
     }
 
+    #[test]
+    fn server_version_poll_sleeps_while_backgrounded_and_resumes_on_foreground() {
+        let (_dir, core) = core_in_tempdir();
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        mock.route(
+            "POST",
+            "/Users/AuthenticateByName",
+            200,
+            serde_json::json!({
+                "User": {"Id": "00000000-0000-4000-8000-000000000002", "Name": "jellybeam-user"},
+                "AccessToken": "tok",
+            }),
+        );
+        mock.route(
+            "GET",
+            "/System/Info/Public",
+            200,
+            serde_json::json!({"Version": "12.0.0"}),
+        );
+        core.sign_in(
+            mock.base_url.clone(),
+            "user".to_string(),
+            "pass".to_string(),
+        )
+        .expect("sign_in against mock server");
+        wait_until(
+            || core.server_version() == Some("12.0.0".to_string()),
+            "sign-in's own refresh to settle",
+        );
+
+        core.on_background();
+        // Lets a tick that passed the gate before the call land on the old route.
+        std::thread::sleep(SERVER_VERSION_REFRESH_INTERVAL * 2);
+        mock.route(
+            "GET",
+            "/System/Info/Public",
+            200,
+            serde_json::json!({"Version": "12.1.0"}),
+        );
+        std::thread::sleep(SERVER_VERSION_REFRESH_INTERVAL * 5);
+        assert_eq!(
+            core.server_version().as_deref(),
+            Some("12.0.0"),
+            "no poll runs while backgrounded"
+        );
+
+        core.on_foreground();
+        wait_until(
+            || core.server_version() == Some("12.1.0".to_string()),
+            "the poll to resume after the return",
+        );
+    }
+
     /// restore_session seeds the version synchronously from disk; a
     /// subsequent failed background refresh must leave that value alone.
     #[test]
@@ -14935,6 +16766,7 @@ pub(crate) mod tests {
                 test_bus_client(),
                 bus,
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                tokio::sync::watch::channel(media_cache::AppPresence::Foreground).1,
                 Arc::new(jellyfin_core::pending_local_item_ids),
             ))
             .expect("opens local SQLite only")

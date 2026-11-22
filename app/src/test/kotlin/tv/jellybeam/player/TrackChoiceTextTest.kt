@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import tv.jellybeam.i18n.ResourceUiStrings
 import uniffi.jellybeam_core.AudioStreamFfi
+import uniffi.jellybeam_core.ExternalSubtitleFfi
 import uniffi.jellybeam_core.TrackInfo
 import uniffi.jellybeam_core.TrackKindFfi
 
@@ -19,9 +20,10 @@ class TrackChoiceTextTest {
         codec: String?,
         kind: TrackKindFfi = TrackKindFfi.SUBTITLE,
         forced: Boolean = false,
+        sdh: Boolean = false,
     ) = TrackInfo(
         id = 1L, kind = kind, title = title, lang = lang, codec = codec,
-        isDefault = false, isSelected = false, isForced = forced,
+        isDefault = false, isSelected = false, isForced = forced, isHearingImpaired = sdh,
     )
 
     private fun label(info: TrackInfo, index: Int = 0) = TrackChoiceText.label(strings, info, index, us)
@@ -30,8 +32,7 @@ class TrackChoiceTextTest {
         info: TrackInfo,
         external: Boolean = false,
         status: SidecarStatus? = null,
-        facts: SubtitleFacts? = null,
-    ) = TrackChoiceText.meta(strings, info, external, status, facts, us)
+    ) = TrackChoiceText.meta(strings, info, external, status, us)
 
     @Test
     fun `a title shows verbatim, else the language name, else Track N`() {
@@ -49,6 +50,15 @@ class TrackChoiceTextTest {
         assertEquals("Portuguese", label(info(null, "por", null)))
         assertEquals("French", label(info(null, "fre", null)))
         assertEquals("German", label(info(null, "ger", null)))
+    }
+
+    @Test
+    fun `a language name starts with a capital in every locale, and an unknown code stays as written`() {
+        assertEquals("Anglais", TrackChoiceText.languageName("eng", Locale.FRENCH))
+        assertEquals("Français", TrackChoiceText.languageName("fre", Locale.FRENCH))
+        assertEquals("English", TrackChoiceText.languageName("eng", us))
+        assertEquals("xyz", TrackChoiceText.languageName("xyz", us))
+        assertNull(TrackChoiceText.languageName("und", us))
     }
 
     @Test
@@ -70,14 +80,12 @@ class TrackChoiceTextTest {
 
     @Test
     fun `meta runs language, format, Forced, SDH in that order`() {
-        val facts = SubtitleFacts(hearingImpaired = true, forced = false, codec = null)
         assertEquals(
             "Portuguese · SRT · Forced · SDH",
-            meta(info("Brasileiro", "por", "application/x-subrip", forced = true), facts = facts),
+            meta(info("Brasileiro", "por", "application/x-subrip", forced = true, sdh = true)),
         )
-        assertEquals("SDH", meta(info(null, "por", null), facts = facts))
+        assertEquals("SDH", meta(info(null, "por", null, sdh = true)))
         assertEquals("Forced", meta(info(null, "por", null, forced = true)))
-        assertEquals("Forced", meta(info(null, "por", null), facts = SubtitleFacts(hearingImpaired = false, forced = true, codec = null)))
     }
 
     @Test
@@ -87,10 +95,9 @@ class TrackChoiceTextTest {
         assertEquals("SRT · External · Loading…", meta(srt, external = true, status = SidecarStatus.LOADING))
         assertEquals("External", meta(info(null, null, null), external = true))
         assertEquals("External · Unavailable", meta(info(null, null, null), external = true, status = SidecarStatus.UNAVAILABLE))
-        val facts = SubtitleFacts(hearingImpaired = true, forced = false, codec = null)
         assertEquals(
             "English · SRT · Forced · SDH · External · Loading…",
-            meta(info("Full", "en", "srt", forced = true), external = true, status = SidecarStatus.LOADING, facts = facts),
+            meta(info("Full", "en", "srt", forced = true, sdh = true), external = true, status = SidecarStatus.LOADING),
         )
     }
 
@@ -108,12 +115,9 @@ class TrackChoiceTextTest {
     }
 
     @Test
-    fun `the server codec decides the format when it is known`() {
-        val ssa = SubtitleFacts(hearingImpaired = false, forced = false, codec = "ssa")
-        assertEquals("SSA", meta(info(null, "en", "text/x-ssa"), facts = ssa))
+    fun `the server's own codec name tells SSA from the ASS Media3 reports for both`() {
+        assertEquals("SSA", meta(info(null, "en", "ssa")))
         assertEquals("ASS", meta(info(null, "en", "text/x-ssa")))
-        assertEquals("ASS", meta(info(null, "en", "text/x-ssa"), facts = SubtitleFacts(false, false, codec = null)))
-        assertEquals("ASS", meta(info(null, "en", "text/x-ssa"), facts = SubtitleFacts(false, false, codec = " ")))
     }
 
     @Test
@@ -171,21 +175,47 @@ class TrackChoiceTextTest {
         assertEquals("English · SRT", TrackChoiceText.delayTrack(strings, info(null, "en", "application/x-subrip"), 0, locale = us))
         assertEquals("English", TrackChoiceText.delayTrack(strings, info(null, "en", "application/x-media3-cues"), 0, locale = us))
         assertEquals("Signs · ASS", TrackChoiceText.delayTrack(strings, info("Signs", "en", "ass"), 0, locale = us))
-        val ssa = SubtitleFacts(hearingImpaired = false, forced = false, codec = "ssa")
-        assertEquals("Signs · SSA", TrackChoiceText.delayTrack(strings, info("Signs", "en", "text/x-ssa"), 0, ssa, us))
+        assertEquals("Signs · SSA", TrackChoiceText.delayTrack(strings, info("Signs", "en", "ssa"), 0, locale = us))
     }
 
     /** docs/12 §16: a transcode's audio rows read like Direct Play's, not as the server's joined label. */
     @Test
     fun `a transcode audio row has the Direct Play label and meta`() {
-        val (main, commentary) = transcodeAudioRows(
+        val (main, commentary) = coreTrackRows(
             listOf(
                 AudioStreamFfi(index = 1, displayTitle = "English - Dolby Digital+ - 5.1 - Default", language = "eng", codec = "eac3", channels = 6, isDefault = true),
                 AudioStreamFfi(index = 2, displayTitle = "Commentary - English - AAC - Stereo", title = "Commentary", language = "eng", codec = "aac", channels = 2, isDefault = false),
             ),
-            shown = 1,
-        )
+            embedded = emptyList(),
+            sidecars = emptyList(),
+            delivered = 1,
+            burned = null,
+            renditions = false,
+        ).map { it.info() }
         assertEquals("English" to "Dolby Digital Plus", label(main) to meta(main))
         assertEquals("Commentary" to "English · AAC", label(commentary, 1) to meta(commentary))
+    }
+
+    /** docs/18 §3.2: a sidecar's picker row reads the plan's sidecar row: the server's label verbatim, then language, format, flags. */
+    @Test
+    fun `a sidecar picker row reads the server's label, language, format and flags`() {
+        val rows = sidecarRows(
+            coreSidecarRows(
+                listOf(
+                    ExternalSubtitleFfi(index = 5, codec = "srt", language = "eng", displayTitle = "English SDH", isDefault = false, isForced = false, hearingImpaired = true),
+                    ExternalSubtitleFfi(index = 6, codec = "ass", language = "fre", displayTitle = null, isDefault = false, isForced = true),
+                    ExternalSubtitleFfi(index = 7, codec = "vtt", language = null, displayTitle = null, isDefault = true, isForced = false),
+                ),
+            ),
+        )
+        assertEquals(listOf(5, 6, 7).map(ExternalSubtitles::idFor), rows.map { it.id })
+        assertEquals(
+            listOf(
+                "English SDH" to "English · SRT · SDH · External",
+                "French" to "ASS · Forced · External",
+                "Track 3" to "VTT · External",
+            ),
+            rows.mapIndexed { index, row -> label(row, index) to meta(row, external = true) },
+        )
     }
 }
