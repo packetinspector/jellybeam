@@ -661,6 +661,20 @@ class SettingsViewModelTest {
         assertEquals(seeded.copy(miniPlayerEnabled = true), gateway.setSettingsCalls.single())
     }
 
+    // ---- Allow remote control (docs/31 §8) ----------------------------------
+
+    @Test
+    fun `toggleRemoteControl turns the default-on flag off and persists`() = runTest {
+        val seeded = defaultTestSettings().copy(remoteControlEnabled = true)
+        val gateway = FakeCoreGateway(settings = seeded)
+        val viewModel = SettingsViewModel(gateway, SettingsStore(gateway, backgroundScope), ioDispatcher = Dispatchers.Main)
+
+        viewModel.toggleRemoteControl()
+
+        assertEquals(seeded.copy(remoteControlEnabled = false), viewModel.state.value.settings)
+        assertEquals(seeded.copy(remoteControlEnabled = false), gateway.setSettingsCalls.single())
+    }
+
     // ---- Normalize volume (docs/29 §1) -----------------------------------
 
     @Test

@@ -42,6 +42,8 @@ Decisions, where the design was left open:
    `FROM 10`, `NEVER PLAYED`, `SERIES`, `ALREADY IN`). Never an instruction.
 6. **Server names verbatim.** Series names and collection names are shown
    exactly as the server sends them.
+7. **Menu key.** The remote's Menu key opens and closes the panel from
+   anywhere on Detail, as the door does (docs/31 §4.5 `ToggleContextMenu`).
 
 ### 1.1 Contents per page
 

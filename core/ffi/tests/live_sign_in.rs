@@ -63,7 +63,14 @@ fn live_prepare_playback() {
         .unwrap_or_else(|| panic!("expected at least one Movie card somewhere in home/children"));
 
     let plan = core
-        .prepare_playback(movie_id.clone(), false, first_request(&core))
+        .prepare_playback(
+            movie_id.clone(),
+            false,
+            first_request(&core),
+            None,
+            None,
+            None,
+        )
         .unwrap_or_else(|e| panic!("prepare_playback({movie_id}): {e}"));
 
     assert_eq!(plan.item_id, movie_id);
@@ -241,7 +248,14 @@ fn live_trickplay() {
         .unwrap_or_else(|| panic!("expected to find an item named \"98\" in the synced mirror"));
 
     let plan = core
-        .prepare_playback(item_id.clone(), false, first_request(&core))
+        .prepare_playback(
+            item_id.clone(),
+            false,
+            first_request(&core),
+            None,
+            None,
+            None,
+        )
         .unwrap_or_else(|e| panic!("prepare_playback({item_id}): {e}"));
 
     let poll_deadline = Instant::now() + Duration::from_secs(180);

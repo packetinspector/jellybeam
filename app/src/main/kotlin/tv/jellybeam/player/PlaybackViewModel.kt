@@ -55,6 +55,7 @@ import uniffi.jellybeam_core.PlaybackOsdDetail
 import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.PlaybackRequest
 import uniffi.jellybeam_core.PlayMethodFfi
+import uniffi.jellybeam_core.ReportFactsFfi
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SubtitleActionFfi
@@ -115,13 +116,6 @@ internal fun streamRowId(index: Int): Long = STREAM_ROW_ID_BASE - index
 
 private fun streamRowIndexOf(id: Long): Int? = id.takeIf { it <= STREAM_ROW_ID_BASE }?.let { (STREAM_ROW_ID_BASE - it).toInt() }
 
-// Two tracks of one language can only be told apart by title, so a title on both sides must agree.
-private fun sameSubtitleTrack(stream: EmbeddedSubtitleFfi, info: TrackInfo): Boolean {
-    val titles = listOf(stream.title, info.title).map { it?.trim().orEmpty() }
-    return normalizedLanguage(stream.language) == normalizedLanguage(info.lang) &&
-        (titles.any { it.isEmpty() } || titles[0] == titles[1])
-}
-
 private fun EmbeddedSubtitleFfi.facts() = SubtitleFacts(hearingImpaired = hearingImpaired, forced = forced, codec = codec)
 
 /**
@@ -147,7 +141,7 @@ internal fun serverSubtitleFacts(infos: List<TrackInfo>, streams: List<EmbeddedS
     val text = infos.filter { it.kind == TrackKindFfi.SUBTITLE }
     // A manifest sidecar copy is not a track of the file Media3 reads.
     val inFile = streams.filter { it.delivery != SubtitleDeliveryFfi.HLS }
-    val paired = inFile.size == text.size && inFile.zip(text).all { (stream, info) -> sameSubtitleTrack(stream, info) }
+    val paired = inFile.size == text.size && inFile.zip(text).all { (stream, info) -> sameTrack(stream.identity(), info.identity()) }
     return if (paired) text.zip(inFile).associate { (info, stream) -> info.id to stream.facts() } else emptyMap()
 }
 
@@ -258,7 +252,7 @@ data class PlaybackUiState internal constructor(
     /**
      * Top-region breadcrumb fields for [PlaybackBreadcrumb.format] (docs/12)
      * -- always `null` today: `PlaybackPlan` only carries a bare `itemName`,
-     * and the full `Card` fields exist only for [nextEpisode], never the
+     * and the full `Card` fields exist only for the episode neighbours, never the
      * loaded item. Wired end-to-end so a future [start] change lights up the
      * full breadcrumb; until then this degrades to [itemName].
      */
@@ -580,7 +574,7 @@ sealed interface PlaybackEvent {
  * the process-lifetime scope avoids the report being cancelled before its `Dispatchers.IO`
  * dispatch starts. Tests inject a deterministic scope.
  */
-class PlaybackViewModel(
+class PlaybackViewModel internal constructor(
     private val gateway: CoreGateway,
     internal val playerHolder: PlaybackPlayer,
     itemId: String,
@@ -612,6 +606,11 @@ class PlaybackViewModel(
     private val forGroup: Boolean = false,
     /** docs/05 external: START_MS for the constructor's initial [start] only; implies [startFromBeginning]. */
     private val startMs: Long? = null,
+    /** docs/31 §4.1: a remote Play's list and stream picks, for the constructor's initial [start] only. */
+    private val remoteQueue: RemoteQueue? = null,
+    private val trackRequest: TrackRequest? = null,
+    /** docs/31 Seam 1 R3: the bridge's one drop line, for a remote Play this player refuses after it was routed. */
+    private val remoteDropped: (cmd: String, why: DropWhy) -> Unit = { cmd, why -> AppGraph.remoteControl.dropped(cmd, why) },
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(PlaybackUiState())
@@ -653,6 +652,9 @@ class PlaybackViewModel(
     /** The item the live session plays on the browsed account, else `null`: the Activity's own id goes stale after autoplay,
      * and a parked account's session must be replaced, not expanded (docs/05 external, docs/17 §2). */
     internal val liveItemId: String? get() = liveScope?.takeIf { it.accountEpoch == gateway.accountEpochs.value.epoch }?.itemId
+
+    /** The live session's scope for the remote router (docs/31 §5): `null` while none plays. */
+    internal val liveSession: SessionScope? get() = liveScope
 
     private fun SessionScope.isCurrent(): Boolean = liveScope?.generation == generation
 
@@ -824,13 +826,20 @@ class PlaybackViewModel(
     /** docs/12 §8: this session's episode-edge lookup, reset to [NeighborLookup.Unknown] by [start]. */
     private var neighbors: NeighborLookup = NeighborLookup.Unknown
 
-    /** The next episode, `null` while unknown or failed, or at the series finale. */
-    private val nextEpisode: Card? get() = (neighbors as? NeighborLookup.Known)?.next
+    /** docs/31 §4.1.1: the live session's remote list; [sendList] is its only writer. */
+    private var remoteList: RemoteList = RemoteList.None
 
-    /** The previous episode, `null` for the same three reasons as [nextEpisode]. Only
-     * [PlaybackUiState.hasPreviousEpisode] is exposed.
-     */
-    private val previousEpisode: Card? get() = (neighbors as? NeighborLookup.Known)?.previous
+    /** docs/31 §4.1.1: what a [step] plays now, the list's neighbour before the episode's. */
+    private fun successorFor(step: ListStep): Successor = successor(remoteList, neighbors, step)
+
+    /** docs/31 §7: position, pause, facts and immediate reports, in call order; each names its session on Main as it is sent. */
+    private val reports = ReportQueue(viewModelScope)
+
+    /** docs/31 §7: the facts last sent and the session they went to, since a session a transcode installs starts with none; written by [sendTrack] and [reportRemote]. */
+    private var factsSent: Pair<String, ReportFactsFfi>? = null
+
+    /** docs/31 §4.1: a remote Play's stream picks, tried once on the first track announcement; reset by [start]. */
+    private var trackHint: TrackRequest? = null
 
     /** Back-dismiss: once dismissed, the next-up card stays hidden for the rest of this session,
      * reset by [start]. */
@@ -915,7 +924,10 @@ class PlaybackViewModel(
     /** docs/28 §5: read once per entry point; only [executePort] enters a group and [leaveGroupMode] leaves it. */
     internal var mode: PlayerMode = PlayerMode.Solo
         set(value) {
+            val entering = value is PlayerMode.Group && field !is PlayerMode.Group
             field = value
+            // docs/31 §4.1.1: the group's queue decides what follows, so a remote list ends.
+            if (entering) sendList(RemoteListEvent.Clear)
             // docs/28 §1: the one writer of [PlaybackUiState.syncPlay], so it always names the mode's membership.
             _state.update { it.copy(syncPlay = (value as? PlayerMode.Group)?.exec) }
         }
@@ -962,6 +974,7 @@ class PlaybackViewModel(
             // Stamped with the plan on screen at receipt, so a later plan never reads them as its own; a prepared stream lists its video or text.
             val announced = tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO || it.type == C.TRACK_TYPE_TEXT }
             currentPlan?.let { sendTrack(TrackEvent.Tracks(it.playSessionId, rowsOnScreen(tracks), announced)) }
+            applyTrackHint(tracks)
             // docs/18 §1's second local-evidence signal (the other is onPlayerError below): every track of a
             // present type rejected by this device's decoders. Declined with nothing negotiating, the live owner
             // ends rather than play black or silent.
@@ -1170,6 +1183,91 @@ class PlaybackViewModel(
             trackDispatching = false
         }
         publishTracks()
+        // docs/31 §7: a changed stream rides the next report; a remote command reports it at once.
+        val facts = remoteFacts(trackChoice, remoteList)
+        val session = sessionOnScreen()
+        if (liveScope != null && session != null && factsSent != session to facts) {
+            // docs/31 §4.1.1 (I8): a session new to the server under a playing list hears its list at once, not on the next tick.
+            if (reportsAtOnce(factsSent, session, facts)) return reportRemote()
+            factsSent = session to facts
+            reports.send { gateway.reportFacts(session, facts) }
+        }
+    }
+
+    /** docs/31 §4.2, §7: an immediate Progress for the live session, from where the player stands, naming the streams shown and the list. */
+    internal fun reportRemote() {
+        if (liveScope == null) return
+        val session = sessionOnScreen() ?: return
+        val ticks = playerHolder.currentPositionTicks()
+        val facts = remoteFacts(trackChoice, remoteList)
+        factsSent = session to facts
+        reports.send { gateway.reportNow(session, ticks, facts) }
+    }
+
+    /** docs/31 §4.1.1: the one writer of [remoteList]; returns the step's effects for the caller to run. */
+    private fun stepList(event: RemoteListEvent): List<RemoteListEffect> {
+        val (next, effects) = reduceRemoteList(remoteList, event, grouped = mode is PlayerMode.Group)
+        remoteList = next
+        publishSuccessor()
+        return effects
+    }
+
+    /** docs/31 §4.1.1: a list change on the live session, its effects run; returns [DropWhy.NotApplicable] when the list refuses [event]. */
+    internal fun sendList(event: RemoteListEvent): DropWhy? {
+        var dropped: DropWhy? = null
+        stepList(event).forEach {
+            when (it) {
+                RemoteListEffect.Report -> reportRemote()
+                RemoteListEffect.Refused -> dropped = DropWhy.NotApplicable
+            }
+        }
+        return dropped
+    }
+
+    /** docs/31 §4.1.1 (I8): the edge buttons show exactly when a step has a successor, and a list's next replaces the next-up card. */
+    private fun publishSuccessor() {
+        val next = successorFor(ListStep.Next)
+        _state.update {
+            it.copy(
+                hasPreviousEpisode = successorFor(ListStep.Previous) != Successor.None,
+                hasNextEpisode = next != Successor.None,
+                nextUp = it.nextUp.takeUnless { next is Successor.ListItem },
+            )
+        }
+    }
+
+    /**
+     * docs/31 §4.1: a same-item remote Play's list and stream picks over the live session, without a
+     * reload (docs/05 "Same item"), so its version stays; reported at once.
+     */
+    internal fun remoteExtras(queue: RemoteQueue?, tracks: TrackRequest?) {
+        if (tracks != null) {
+            trackHint = tracks
+            playerHolder.currentTracks?.let(::applyTrackHint)
+        }
+        val before = remoteList
+        // docs/31 §4.1.1: the Play was routed before this player refused its list, so the drop is logged here.
+        sendList(listOpening(queue))?.let { remoteDropped(PLAY_VIDEO_DIAG, it) }
+        if (tracks != null && remoteList == before) reportRemote()
+    }
+
+    /**
+     * docs/31 §4.1: the hint's streams become the first picks once Media3 announces [tracks], through
+     * the picker's own gates, so a hint never forces a transcode the viewer's pick would not.
+     */
+    private fun applyTrackHint(tracks: Tracks) {
+        val hint = trackHint ?: return
+        if (tracks.groups.none { it.type == C.TRACK_TYPE_AUDIO || it.type == C.TRACK_TYPE_TEXT }) return
+        trackHint = null
+        hint.audioStreamIndex?.let { remoteRowFor(TrackKindFfi.AUDIO, it) }?.let { chooseAudio(it, byUser = false) }
+        hint.subtitleStreamIndex?.let { remoteRowFor(TrackKindFfi.SUBTITLE, it) }?.let { chooseSubtitle(it, byUser = false) }
+    }
+
+    /** docs/31 §4.3: the picker row on screen showing server stream [index] of [kind], `null` when none does. */
+    internal fun remoteRowFor(kind: TrackKindFfi, index: Int): Long? {
+        val plan = currentPlan ?: return null
+        val tracks = playerHolder.currentTracks ?: return null
+        return rowForStreamIndex(plan.trackFacts(), rowsOnScreen(tracks), kind, index)
     }
 
     private fun runTrackEffect(effect: TrackEffect) {
@@ -1409,7 +1507,7 @@ class PlaybackViewModel(
                 }
             }
             if (initialRequest == null || currentRequest != initialRequest) return@launch
-            start(itemId, remintIfRestored(initialRequest), startFromBeginning = startFromBeginning, opening = startAt(startMs))
+            start(itemId, remintIfRestored(initialRequest), startFromBeginning, startAt(startMs), listOpening(remoteQueue), trackRequest)
         }
     }
 
@@ -1481,7 +1579,15 @@ class PlaybackViewModel(
         _events.tryEmit(PlaybackEvent.Finish)
     }
 
-    private suspend fun start(itemId: String, request: PlaybackRequest, startFromBeginning: Boolean = false, opening: LoadStart = LoadStart.Resume) {
+    /** [list] is how this session's request changes the remote list; [tracks], a remote Play's version and picks (docs/31 §4.1). */
+    private suspend fun start(
+        itemId: String,
+        request: PlaybackRequest,
+        startFromBeginning: Boolean,
+        opening: LoadStart,
+        list: RemoteListEvent,
+        tracks: TrackRequest?,
+    ) {
         PerfLog.markPlayback("viewModel.start")
         // docs/21 §2.1: one line per negotiation attempt, before the network round trip.
         AppGraph.diag.event("playback.prepare") {
@@ -1510,7 +1616,14 @@ class PlaybackViewModel(
                     }
                 }
                 // docs/05 external: an explicit start position is never overruled by the server's saved one.
-                val plan = gateway.preparePlayback(itemId, startFromBeginning || opening is LoadStart.At, request)
+                val plan = gateway.preparePlayback(
+                    itemId,
+                    startFromBeginning || opening is LoadStart.At,
+                    request,
+                    tracks?.mediaSourceId,
+                    tracks?.audioStreamIndex,
+                    tracks?.subtitleStreamIndex,
+                )
                 PerfLog.markPlayback("plan.ready")
                 plan to runCatching { settingsDeferred.await() }.getOrNull()
             }
@@ -1548,6 +1661,8 @@ class PlaybackViewModel(
         playbackWasActive = false
         outroStartSecs = null // populated by fetchMediaSegments below, not read off the plan
         neighbors = NeighborLookup.Unknown
+        // docs/31 §4.1.1: the list steps before the load, so no track callback reports this session under the ended list; its report rides the plan's adoption.
+        stepList(list)
         nextUpDismissed = false
         preloadedNextUpItemId = null
         lastAutoSkipSegmentKey = null
@@ -1569,6 +1684,7 @@ class PlaybackViewModel(
         clearStillWatching()
         stillWatchingEvaluationPending = false
         endedWhileDeciding = false
+        trackHint = tracks
 
         // Settings: a local disk read, negligible latency before `load` below.
         // Failure (shouldn't happen) falls back to this class's own defaults.
@@ -1648,8 +1764,6 @@ class PlaybackViewModel(
                 seekPreviewSize = settings?.seekPreviewSize ?: SeekPreviewSize.MEDIUM,
                 miniPlayerEnabled = settings?.miniPlayerEnabled ?: false,
                 playbackRate = 1f,
-                hasPreviousEpisode = false,
-                hasNextEpisode = false,
                 nonDefaultTrackActive = false,
             )
         }
@@ -1687,12 +1801,7 @@ class PlaybackViewModel(
             val found = runCatchingCancellable { gateway.episodeNeighbors(scope.itemId, seriesId, scope.accountEpoch) }.getOrNull()
             scope.ifCurrent {
                 neighbors = found?.let { NeighborLookup.Known(it.previous, it.next) } ?: NeighborLookup.Failed(retried)
-                _state.update {
-                    it.copy(
-                        hasPreviousEpisode = previousEpisode != null,
-                        hasNextEpisode = nextEpisode != null,
-                    )
-                }
+                publishSuccessor()
             }
         }
     }
@@ -1814,7 +1923,16 @@ class PlaybackViewModel(
                 // Named on main: a report queued behind a stop never lands on the next session.
                 val reportTo = sessionOnScreen()
                 if (reportTo != null && ProgressReportGate.shouldReportPosition(playerHolder.isPlaying)) {
-                    runCatchingCancellable { gateway.reportPosition(reportTo, ticks) }
+                    // Awaited, so the tick evaluates nothing until its report has landed.
+                    val landed = CompletableDeferred<Unit>()
+                    reports.send {
+                        try {
+                            gateway.reportPosition(reportTo, ticks)
+                        } finally {
+                            landed.complete(Unit)
+                        }
+                    }
+                    landed.await()
                 }
                 if (!scope.isCurrent()) return@launch // docs/18 §2.1: a report held across a newer start evaluates nothing
                 when (val group = mode) {
@@ -1869,6 +1987,8 @@ class PlaybackViewModel(
      * lookup is retried once on entering the trigger zone.
      */
     private fun evaluateNextUp(scope: SessionScope, positionTicks: Long) {
+        // docs/31 §4.1.1: the list's next item plays at the natural end instead (handlePlaybackEnded).
+        if (successorFor(ListStep.Next) is Successor.ListItem) return
         val lookup = neighbors
         // Only a known next episode, or a failure not yet retried, has anything to evaluate.
         if (lookup is NeighborLookup.Unknown || lookup is NeighborLookup.Failed && lookup.retried) return
@@ -1916,6 +2036,13 @@ class PlaybackViewModel(
                         return@launch
                     }
                     stillWatchingEvaluationPending = false
+                    // docs/31 §4.1.1: a list that gained a next while deciding moots the answer; an end met meanwhile plays the list's item.
+                    val listNext = successorFor(ListStep.Next)
+                    if (listNext is Successor.ListItem) {
+                        if (endedWhileDeciding) transitionTo(listNext)
+                        endedWhileDeciding = false
+                        return@launch
+                    }
                     when (decision) {
                         StillWatchingDecision.ASK_STILL_WATCHING -> {
                             endedWhileDeciding = false
@@ -1944,7 +2071,7 @@ class PlaybackViewModel(
                             )
                             endedWhileDeciding = false
                             when (outcome) {
-                                CountdownOutcome.ADVANCE_NOW -> transitionTo(next)
+                                CountdownOutcome.ADVANCE_NOW -> transitionTo(Successor.Episode(next))
                                 CountdownOutcome.SHOW_CARD -> showCountdownCard(scope, next, playableSecs, positionTicks)
                             }
                         }
@@ -2037,7 +2164,8 @@ class PlaybackViewModel(
         val card = _state.value.stillWatching?.card ?: return
         clearStillWatching()
         viewModelScope.launch { runCatchingCancellable { gateway.resetStillWatching(clock.nowMs().toULong()) } }
-        transitionTo(card)
+        // docs/31 §4.1.1 (approved Q1 a): a list's next enqueued under the card plays before the card's episode.
+        transitionTo(successorFor(ListStep.Next).takeIf { it is Successor.ListItem } ?: Successor.Episode(card))
     }
 
     /** "Stop" on the still-watching card, or its timeout elapsing. Ends the finished
@@ -2095,25 +2223,38 @@ class PlaybackViewModel(
     /** Shared end-then-start transition: ends the current session then starts a fresh one for
      * [card]'s item. A no-op unless a session is [SessionOwner.Playing], so a double press or a
      * simultaneous EOF and countdown moves on once.
-     * [playNext]/[playPrevious]/[playNextEpisode]/[stillWatchingContinue] all funnel through this.
+     * [playNext]/[playPrevious]/[playNextEpisode]/[stillWatchingContinue] all funnel through this;
+     * a list item plays by id and moves the list to its index, an episode ends the list (docs/31 §4.1.1).
      */
-    private fun transitionTo(card: Card) {
+    private fun transitionTo(to: Successor) {
         if (owner !is SessionOwner.Playing) return
+        val (itemId, list) = when (to) {
+            is Successor.ListItem -> to.id to RemoteListEvent.Adopted(to.id, to.at)
+            is Successor.Episode -> to.card.id to RemoteListEvent.Adopted(to.card.id, null)
+            Successor.None -> return
+        }
         val request = claimRequest()
         // Undispatched: the stop names the session at once, so no landing fallback sees the new
         // request before it (see adoptPlan).
-        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { replaceWith(card.id, request) }
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { replaceWith(itemId, request, false, LoadStart.Resume, list, null) }
     }
 
     /** The end-then-start body [transitionTo] and [replaceItem] share, keyed by a raw item id since
      * JellybeamCore owns a single reporting session: the final stop must finish before
      * `preparePlayback` replaces it, and only the newest [request] gets that far (docs/18 §2.1).
      */
-    private suspend fun replaceWith(itemId: String, request: PlaybackRequest, startFromBeginning: Boolean = false, opening: LoadStart = LoadStart.Resume) {
+    private suspend fun replaceWith(
+        itemId: String,
+        request: PlaybackRequest,
+        startFromBeginning: Boolean,
+        opening: LoadStart,
+        list: RemoteListEvent,
+        tracks: TrackRequest?,
+    ) {
         stopPlaybackAndAwait(keep = request)
         gateway.awaitAccountRestored()
         if (currentRequest != request) return
-        start(itemId, remintIfRestored(request), startFromBeginning, opening)
+        start(itemId, remintIfRestored(request), startFromBeginning, opening, list, tracks)
     }
 
     /** docs/18 §2.1: a request minted before the launch restore moved the epoch is re-minted; any
@@ -2127,16 +2268,17 @@ class PlaybackViewModel(
      * keyed by raw item id. Always the newest request: one still negotiating, an autoplay's
      * included, is obsolete and its plan abandoned (docs/18 §2.1).
      */
-    fun replaceItem(itemId: String, startFromBeginning: Boolean = false, startMs: Long? = null) {
+    internal fun replaceItem(itemId: String, startFromBeginning: Boolean = false, startMs: Long? = null, queue: RemoteQueue? = null, tracks: TrackRequest? = null) {
         leaveGroup() // docs/28 §4: picking other content leaves the group first
-        replace(itemId, startFromBeginning, startAt(startMs))
+        replace(itemId, startFromBeginning, startAt(startMs), queue, tracks)
     }
 
-    /** The newest request's stop-then-start, for an intent and for the group's Load. */
-    internal fun replace(itemId: String, startFromBeginning: Boolean, opening: LoadStart) {
+    /** The newest request's stop-then-start, for an intent and for the group's Load; a request without [queue] ends the remote list. */
+    internal fun replace(itemId: String, startFromBeginning: Boolean, opening: LoadStart, queue: RemoteQueue? = null, tracks: TrackRequest? = null) {
         // Minted now, so an initial prepare still negotiating is already obsolete (docs/18 §2.1).
         val request = claimRequest(fresh = true)
-        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { replaceWith(itemId, request, startFromBeginning, opening) } // as transitionTo
+        val list = listOpening(queue)
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { replaceWith(itemId, request, startFromBeginning, opening, list, tracks) } // as transitionTo
     }
 
     /** Autoplay/"Play now": advances to the next-up card's episode via [transitionTo]. A no-op if
@@ -2144,26 +2286,24 @@ class PlaybackViewModel(
      */
     fun playNext() {
         val next = _state.value.nextUp?.card ?: return
-        transitionTo(next)
+        transitionTo(Successor.Episode(next))
     }
 
-    /** OSD "Previous episode" transport button (docs/12 §8) -- mirrors [playNext], against
-     * [previousEpisode]. A no-op when none is known.
-     */
-    fun playPrevious() {
-        (mode as? PlayerMode.Group)?.let { return it.request(SyncPlayInput.Prev) } // docs/28 §4: the group's queue
-        val previous = previousEpisode ?: return
-        transitionTo(previous)
-    }
+    /** OSD "Previous episode" transport button (docs/12 §8) -- mirrors [playNextEpisode] one step back. */
+    internal fun playPrevious(): DropWhy? = walk(ListStep.Previous, SyncPlayInput.Prev)
 
-    /** OSD "Next episode" transport button (docs/12 §8) -- against [nextEpisode] directly rather
-     * than [playNext]'s countdown-gated card, so it works before the threshold is crossed. A no-op
-     * when none is known.
+    /** OSD "Next episode" transport button (docs/12 §8) -- against the successor directly rather
+     * than [playNext]'s countdown-gated card, so it works before the threshold is crossed.
      */
-    fun playNextEpisode() {
-        (mode as? PlayerMode.Group)?.let { return it.request(SyncPlayInput.Next) } // docs/28 §4: the group's queue
-        val next = nextEpisode ?: return
-        transitionTo(next)
+    internal fun playNextEpisode(): DropWhy? = walk(ListStep.Next, SyncPlayInput.Next)
+
+    /** docs/31 §4.1.1: a step plays its successor; with none it is [DropWhy.NotApplicable] for a remote. In a group the group's queue steps (docs/28 §4). */
+    private fun walk(step: ListStep, group: SyncPlayInput): DropWhy? {
+        (mode as? PlayerMode.Group)?.let { it.request(group); return null }
+        val to = successorFor(step)
+        if (to == Successor.None) return DropWhy.NotApplicable
+        transitionTo(to)
+        return null
     }
 
     /**
@@ -2296,19 +2436,19 @@ class PlaybackViewModel(
         else -> TrackEvent.Gate.SOLO
     }
 
-    /** Chooses [id] as the audio track (docs/09 slice 3b); a no-op for an id no row on screen carries. */
-    fun chooseAudio(id: Long) {
+    /** Chooses [id] as the audio track (docs/09 slice 3b); a no-op for an id no row on screen carries. [byUser] false: a hint, not remembered. */
+    fun chooseAudio(id: Long, byUser: Boolean = true) {
         val tracks = playerHolder.currentTracks ?: return
         val input = streamRowIndexOf(id)?.let { TrackEvent.AudioInput.Stream(it) }
             ?: rowsOnScreen(tracks).firstOrNull { it.kind == TrackKindFfi.AUDIO && it.id == id }?.let { TrackEvent.AudioInput.Player(it) }
             ?: return
-        sendTrack(TrackEvent.PickAudio(input, pickGate()))
+        sendTrack(TrackEvent.PickAudio(input, pickGate(), byUser))
     }
 
     /** Chooses [id] as the subtitle track, or [TRACK_PICKER_SUBTITLE_OFF_ID] to disable subtitles;
-     * "Off" is itself a real remembered choice (docs/18 §3.1).
+     * "Off" is itself a real remembered choice (docs/18 §3.1); [byUser] as [chooseAudio].
      */
-    fun chooseSubtitle(id: Long) {
+    fun chooseSubtitle(id: Long, byUser: Boolean = true) {
         val tracks = playerHolder.currentTracks ?: return
         val input = if (id == TRACK_PICKER_SUBTITLE_OFF_ID) {
             TrackEvent.TextInput.Off
@@ -2318,7 +2458,7 @@ class PlaybackViewModel(
                 ?: rowsOnScreen(tracks).firstOrNull { it.kind == TrackKindFfi.SUBTITLE && it.id == id }?.let { TrackEvent.TextInput.Player(it) }
                 ?: return
         }
-        sendTrack(TrackEvent.PickText(input, pickGate()))
+        sendTrack(TrackEvent.PickText(input, pickGate(), byUser))
     }
 
     /** Shared by every pick: remembers [memory] under [memorySubject] (docs/12 §16). */
@@ -2406,7 +2546,7 @@ class PlaybackViewModel(
         if (ProgressReportGate.shouldReportPaused(lastReportedPaused, isPaused)) {
             lastReportedPaused = isPaused
             sessionOnScreen()?.let { reportTo ->
-                viewModelScope.launch { runCatchingCancellable { gateway.reportPaused(reportTo, isPaused) } }
+                reports.send { gateway.reportPaused(reportTo, isPaused) }
             }
         }
 
@@ -2424,6 +2564,9 @@ class PlaybackViewModel(
      */
     private fun handlePlaybackEnded() {
         if (_state.value.stillWatching != null) return
+        // docs/31 §4.1.1 (approved Q2): a remote list plays on at a natural end, before any card or decision.
+        val listNext = successorFor(ListStep.Next)
+        if (listNext is Successor.ListItem) return transitionTo(listNext)
         // The still-watching decision may still be in flight when outro auto-skip's
         // deferral lets the file reach genuine EOF under it -- wait for that decision;
         // endedWhileDeciding tells evaluateNextUp's launch there's no live position left.
@@ -2514,8 +2657,19 @@ class PlaybackViewModel(
         group.request(if (playerHolder.playWhenReady) SyncPlayInput.Pause else SyncPlayInput.Unpause)
     }
 
-    /** The play/pause intent, which [MediaKeyRouter] reads so a repeated Play or Pause never toggles. */
-    val playWhenReady: Boolean get() = playerHolder.playWhenReady
+    /** docs/31 §4.2: an idempotent pause; in a group it asks the group, as [togglePlayPause] does. */
+    fun pause() {
+        if (!playerHolder.playWhenReady) return
+        (mode as? PlayerMode.Group)?.let { return it.request(SyncPlayInput.Pause) }
+        playerHolder.pause()
+    }
+
+    /** docs/31 §4.2: an idempotent unpause, group-aware as [pause]. */
+    fun unpause() {
+        if (playerHolder.playWhenReady) return
+        (mode as? PlayerMode.Group)?.let { return it.request(SyncPlayInput.Unpause) }
+        playerHolder.play()
+    }
 
     /** docs/17 §2: a remote's Stop ends playback exactly like Back, whatever the session is doing --
      * a transition still preparing its title is retired with it, so that title never plays.
@@ -2924,7 +3078,9 @@ class PlaybackViewModel(
         // names, a landed fallback included (see adoptPlan).
         reportScope.launch {
             try {
-                withContext(NonCancellable) { runCatchingCancellable { gateway.stopPlayback(snapshot.playSessionId, snapshot.ticks) } }
+                withContext(NonCancellable) {
+                    runCatchingCancellable { gateway.stopPlayback(snapshot.playSessionId, snapshot.ticks) }
+                }
             } finally {
                 playbackActivityTracker.onFinalStopHandedOff()
                 landing.complete(Unit)
@@ -2981,6 +3137,8 @@ class PlaybackViewModel(
         val playSessionId = sessionOnScreen()
         owner = SessionOwner.Ended(ending.generation, playSessionId)
         cancelSessionJobsAndCloseMenus()
+        // docs/31 §7: reset after the ending session's last facts check, so its end sends nothing; the next session starts with none in the core.
+        factsSent = null
         return report(playSessionId).also {
             playerHolder.stopAndClear()
             sendEnd(EndEvent.Released)
@@ -3042,7 +3200,7 @@ class PlaybackViewModel(
     }
 }
 
-class PlaybackViewModelFactory(
+class PlaybackViewModelFactory internal constructor(
     private val gateway: CoreGateway,
     private val playerHolder: PlaybackPlayer,
     private val itemId: String,
@@ -3051,10 +3209,14 @@ class PlaybackViewModelFactory(
     private val sheetFetcher: SheetFetcher? = null,
     private val forGroup: Boolean = false,
     private val startMs: Long? = null,
+    private val remoteQueue: RemoteQueue? = null,
+    private val trackRequest: TrackRequest? = null,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(PlaybackViewModel::class.java))
-        return PlaybackViewModel(gateway, playerHolder, itemId, strings, startFromBeginning = startFromBeginning, sheetFetcher = sheetFetcher, forGroup = forGroup, startMs = startMs) as T
+        return PlaybackViewModel(gateway, playerHolder, itemId, strings, startFromBeginning = startFromBeginning, sheetFetcher = sheetFetcher, forGroup = forGroup, startMs = startMs,
+            remoteQueue = remoteQueue, trackRequest = trackRequest,
+        ) as T
     }
 }

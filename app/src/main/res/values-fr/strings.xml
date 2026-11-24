@@ -208,6 +208,8 @@
     <string name="settings_desc_playback_autoplay_delay">Temps d\'attente avant que la lecture automatique lance l\'épisode suivant.</string>
     <string name="settings_mini_player">Mini-lecteur</string>
     <string name="settings_desc_playback_mini_player">Pendant la lecture, Retour ou Accueil réduit la vidéo dans une fenêtre en coin d\'écran, qui continue de jouer pendant que vous naviguez.</string>
+    <string name="settings_remote_control">Autoriser la télécommande</string>
+    <string name="settings_desc_playback_remote_control">Permet à l\'application Jellyfin, à Home Assistant et à d\'autres contrôleurs de lancer et de piloter des médias sur ce téléviseur.</string>
     <string name="settings_normalize_volume">Normaliser le volume</string>
     <string name="settings_desc_playback_normalize_volume">Lit les morceaux à un volume sonore comparable, grâce au gain mesuré par votre serveur pour chaque piste ou album. Musique uniquement.</string>
     <string name="settings_desc_playback_mini_player_unsupported">Indisponible sur cet appareil. L\'incrustation d\'image (PiP) est absente ou désactivée pour Jellybeam dans les paramètres système.</string>

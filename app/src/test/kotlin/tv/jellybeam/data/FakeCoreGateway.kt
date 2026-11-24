@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import uniffi.jellybeam_core.AccountEpochs
+import uniffi.jellybeam_core.ReportFactsFfi
 import uniffi.jellybeam_core.AccountIdentity
 import uniffi.jellybeam_core.AccountInfo
 import uniffi.jellybeam_core.AlbumSummary
@@ -786,7 +787,12 @@ class FakeCoreGateway(
         return cardsByItemId[itemId]
     }
 
-    override suspend fun cardsByIds(itemIds: List<String>): List<Card> = itemIds.mapNotNull { cardsByItemId[it] }
+    var cardsByIdsCalls = 0
+
+    override suspend fun cardsByIds(itemIds: List<String>): List<Card> {
+        cardsByIdsCalls++
+        return itemIds.mapNotNull { cardsByItemId[it] }
+    }
 
     /** One gate per [getPlaybackOsdDetail] call, popped in call order; its value is that call's
      * answer. An empty queue answers at once from [itemDetailResultsByItemId].
@@ -955,8 +961,23 @@ class FakeCoreGateway(
     /** Holds [preparePlayback] for an item id (after recording the call) until completed. */
     val preparePlaybackGates = mutableMapOf<String, CompletableDeferred<Unit>>()
 
-    override suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean, request: PlaybackRequest): PlaybackPlan {
+    /** Every [preparePlayback]'s named media source, in call order. */
+    val preparePlaybackMediaSources = mutableListOf<String?>()
+
+    /** Each [preparePlayback]'s (audio, subtitle) stream indexes, in call order. */
+    val preparePlaybackStreams = mutableListOf<Pair<Int?, Int?>>()
+
+    override suspend fun preparePlayback(
+        itemId: String,
+        startFromBeginning: Boolean,
+        request: PlaybackRequest,
+        mediaSourceId: String?,
+        audioStreamIndex: Int?,
+        subtitleStreamIndex: Int?,
+    ): PlaybackPlan {
         playbackRequests.add(request)
+        preparePlaybackMediaSources.add(mediaSourceId)
+        preparePlaybackStreams.add(audioStreamIndex to subtitleStreamIndex)
         _preparePlaybackCalls.add(itemId)
         _preparePlaybackStartFromBeginningCalls.add(startFromBeginning)
         val result = preparePlaybackResultsByItemId[itemId]
@@ -1107,6 +1128,22 @@ class FakeCoreGateway(
         reportLog.add("paused $playSessionId $paused")
     }
 
+    /** Every [reportNow] as `now <session>@<ticks>`, with its facts in [reportNowFacts] at the same index. */
+    val reportNowLog = mutableListOf<String>()
+    val reportNowFacts = mutableListOf<ReportFactsFfi>()
+
+    override suspend fun reportNow(playSessionId: String, ticks: Long, facts: ReportFactsFfi) {
+        reportNowLog.add("now $playSessionId@$ticks")
+        reportNowFacts.add(facts)
+    }
+
+    /** Every [reportFacts], in call order. */
+    val reportFactsCalls = mutableListOf<Pair<String, ReportFactsFfi>>()
+
+    override suspend fun reportFacts(playSessionId: String, facts: ReportFactsFfi) {
+        reportFactsCalls.add(playSessionId to facts)
+    }
+
     override suspend fun stopPlayback(playSessionId: String, positionTicks: Long) {
         stopPlaybackEntered++
         stopPlaybackGate?.await()
@@ -1177,7 +1214,9 @@ class FakeCoreGateway(
         return playlistItemsByPlaylist[playlistId].orEmpty().drop(offset.toInt()).take(limit.toInt())
     }
 
-    override suspend fun instantMix(seed: MixSeedFfi): List<Card> = instantMixResult
+    val instantMixSeeds = mutableListOf<MixSeedFfi>()
+
+    override suspend fun instantMix(seed: MixSeedFfi): List<Card> = instantMixResult.also { instantMixSeeds += seed }
 
     var musicHasNormalizationGainResult = false
 

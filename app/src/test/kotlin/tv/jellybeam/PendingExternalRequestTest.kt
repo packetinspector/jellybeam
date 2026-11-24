@@ -15,7 +15,7 @@ class PendingExternalRequestTest {
     private val started = mutableListOf<Req<*>>()
 
     init {
-        tracker.attachHost(RequestHost(start = { started += it }, signInRequired = {}, leaveGroup = {}))
+        tracker.attachHost(RequestHost(start = { started += it }, signInRequired = {}, leaveGroup = {}, remoteDropped = {}, showMain = {}))
     }
 
     @Test

@@ -312,7 +312,7 @@ fn khz(hz: u32) -> String {
     format!("{whole}.{}", frac.trim_end_matches('0'))
 }
 
-fn live_cards(items: &[BaseItemDto]) -> Vec<Card> {
+pub(crate) fn live_cards(items: &[BaseItemDto]) -> Vec<Card> {
     items
         .iter()
         .filter_map(|dto| Card::try_from(dto).ok())

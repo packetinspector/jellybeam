@@ -344,6 +344,13 @@ internal fun PlaybackSectionContent(state: SettingsUiState, viewModel: SettingsV
             key = "playback/mini_player",
             enabled = miniPlayerSupported,
         )
+        ToggleRow(
+            label = stringResource(R.string.settings_remote_control),
+            description = stringResource(R.string.settings_desc_playback_remote_control),
+            value = settings.remoteControlEnabled,
+            onToggle = viewModel::toggleRemoteControl,
+            key = "playback/remote_control",
+        )
         SectionHeader(stringResource(R.string.settings_still_watching_group))
         StillWatchingGroup(state = state, viewModel = viewModel)
 

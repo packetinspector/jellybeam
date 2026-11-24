@@ -246,6 +246,7 @@ impl JellybeamCore {
             media: ReportMedia::Audio {
                 queue: queue_ids.into(),
             },
+            volume: self.report_volume(),
         };
         let (successor_tx, successor_rx) = tokio::sync::oneshot::channel();
         let (account, ended, installed) = {

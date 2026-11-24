@@ -210,4 +210,38 @@ class PlaybackOsdControllerTest {
         controller.onPausedChanged(true, SyncPlayPhase.PAUSED)
         assertTrue(controller.isVisible)
     }
+
+    // ---- remote toggles (docs/31 §4.5) --------------------------------------
+
+    @Test
+    fun `a remote's OSD toggle hides a shown OSD and reveals a hidden one`() {
+        assertEquals(OsdToggleStep.HIDE, osdToggleStep(osdVisible = true, OpenSurface.None))
+        assertEquals(OsdToggleStep.REVEAL, osdToggleStep(osdVisible = false, OpenSurface.None))
+    }
+
+    @Test
+    fun `a remote's OSD toggle leaves an open menu, sheet or delay strip alone`() {
+        assertEquals(OsdToggleStep.UNAVAILABLE, osdToggleStep(osdVisible = true, OpenSurface.Speed))
+        assertEquals(OsdToggleStep.UNAVAILABLE, osdToggleStep(osdVisible = false, OpenSurface.Chapters))
+    }
+
+    private val fullRow = listOf(ControlButton.PLAY_PAUSE, ControlButton.SPEED, ControlButton.TRACKS, ControlButton.CHAPTERS)
+
+    @Test
+    fun `a remote's menu toggle opens speed first, else chapters, else nothing`() {
+        assertEquals(OsdMenuStep.OPEN_SPEED, osdMenuStep(OpenSurface.None, cardShown = false, fullRow))
+        assertEquals(OsdMenuStep.OPEN_CHAPTERS, osdMenuStep(OpenSurface.None, cardShown = false, fullRow - ControlButton.SPEED))
+        assertEquals(OsdMenuStep.UNAVAILABLE, osdMenuStep(OpenSurface.None, cardShown = false, listOf(ControlButton.PLAY_PAUSE, ControlButton.TRACKS)))
+    }
+
+    @Test
+    fun `a remote's menu toggle closes whatever surface is open`() {
+        assertEquals(OsdMenuStep.CLOSE, osdMenuStep(OpenSurface.Speed, cardShown = false, fullRow))
+        assertEquals(OsdMenuStep.CLOSE, osdMenuStep(OpenSurface.Chapters, cardShown = true, fullRow))
+    }
+
+    @Test
+    fun `a remote's menu toggle opens nothing over a next-up or still-watching card`() {
+        assertEquals(OsdMenuStep.UNAVAILABLE, osdMenuStep(OpenSurface.None, cardShown = true, fullRow))
+    }
 }

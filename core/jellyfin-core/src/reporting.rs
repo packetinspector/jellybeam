@@ -16,11 +16,15 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use jellyfin_api::{ApiError, JellyfinClient, PlaybackReport, PlaybackReportKind};
+use jellyfin_api::{
+    ApiError, JellyfinClient, PlaybackReport, PlaybackReportKind, QueueModes, RemoteRepeat,
+    RemoteShuffle,
+};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::Instant;
 
 use crate::backoff::Backoff;
-use crate::ReportContext;
+use crate::{ReportContext, Volume};
 
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 const RETRY_BASE: Duration = Duration::from_secs(1);
@@ -28,9 +32,12 @@ const RETRY_CAP: Duration = Duration::from_secs(60);
 /// Start/progress reports are superseded 10s later, so they aren't retried forever -- only the
 /// final Stopped report gets that guarantee (see [`FlushQueue`]).
 const TRANSIENT_REPORT_MAX_ATTEMPTS: u32 = 5;
-/// No volume control is wired in yet; report max volume so the server doesn't record a misleadingly
-/// low value.
-const DEFAULT_VOLUME: u8 = 100;
+/// docs/31 §4.4: reported when no [`crate::VolumeSource`] reads the system's, so the server records
+/// no misleadingly low value.
+const FALLBACK_VOLUME: Volume = Volume {
+    level: 100,
+    muted: false,
+};
 /// Ceiling on how long the background flush queue keeps retrying one final Stopped report --
 /// comfortably covers a Wi-Fi blip, server restart, or brief partition, without a
 /// permanently-unreachable server accumulating a background task forever.
@@ -72,16 +79,149 @@ impl ReportSink for JellyfinClient {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PlaybackState {
-    position_ticks: i64,
-    is_paused: bool,
-    audio_stream_index: Option<i32>,
-    subtitle_stream_index: Option<i32>,
+/// docs/31 §7: the actor's report state; [`Edges::step`] is its one transition, pure (`now` is a
+/// parameter), and the runner performs the effects it returns.
+#[derive(Debug, Clone)]
+struct Edges {
+    position: i64,
+    paused: bool,
+    /// The last [`ReportingSession::report_now`]'s or [`ReportingSession::report_facts`]'s; `None` before any.
+    facts: Option<ReportFacts>,
+    pending: Pending,
+}
+
+/// An edge report not yet sent: a seek waits out [`SEEK_DEBOUNCE`] of quiet from `due`'s arming;
+/// `Now` goes once the queued commands and positions have applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    None,
+    Seek { due: Instant },
+    Now,
+}
+
+#[derive(Debug, Clone)]
+enum EdgeEvent {
+    Position(i64),
+    Pause(bool),
+    /// docs/31 §7: report `facts` now; the position comes only from the watch, never from here.
+    Now {
+        facts: ReportFacts,
+    },
+    /// docs/31 §7: facts that ride the next report rather than forcing one.
+    Facts(ReportFacts),
+    /// The progress ticker fired.
+    Tick,
+    /// [`Edges::due`] passed.
+    Due,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeEffect {
+    SendProgress,
+    ResetTicker,
+}
+
+impl Edges {
+    fn new(position: i64) -> Self {
+        Self {
+            position,
+            paused: false,
+            facts: None,
+            pending: Pending::None,
+        }
+    }
+
+    /// When the runner must deliver [`EdgeEvent::Due`]; `None` while nothing is pending.
+    fn due(&self, now: Instant) -> Option<Instant> {
+        match self.pending {
+            Pending::None => None,
+            Pending::Seek { due } => Some(due),
+            Pending::Now => Some(now),
+        }
+    }
+
+    fn step(&mut self, event: EdgeEvent, now: Instant) -> Vec<EdgeEffect> {
+        match event {
+            // A jump past `seek_threshold_ticks` (re)arms the quiet window, so a scrub coalesces.
+            EdgeEvent::Position(ticks) => {
+                let jump = (ticks - self.position).abs() > seek_threshold_ticks();
+                self.position = ticks;
+                if jump {
+                    self.pending = Pending::Seek {
+                        due: now + SEEK_DEBOUNCE,
+                    };
+                }
+                Vec::new()
+            }
+            EdgeEvent::Pause(paused) if paused == self.paused => Vec::new(),
+            EdgeEvent::Pause(paused) => {
+                self.paused = paused;
+                self.sent_now();
+                vec![EdgeEffect::SendProgress, EdgeEffect::ResetTicker]
+            }
+            // A seek's quiet window, already pending, carries the facts.
+            EdgeEvent::Now { facts } => {
+                self.facts = Some(facts);
+                if self.pending == Pending::None {
+                    self.pending = Pending::Now;
+                }
+                Vec::new()
+            }
+            EdgeEvent::Facts(facts) => {
+                self.facts = Some(facts);
+                Vec::new()
+            }
+            EdgeEvent::Tick => {
+                self.sent_now();
+                vec![EdgeEffect::SendProgress]
+            }
+            EdgeEvent::Due => match self.pending {
+                Pending::Seek { due } if now < due => Vec::new(),
+                Pending::None => Vec::new(),
+                Pending::Seek { .. } | Pending::Now => {
+                    self.pending = Pending::None;
+                    vec![EdgeEffect::SendProgress, EdgeEffect::ResetTicker]
+                }
+            },
+        }
+    }
+
+    /// A report about to go satisfies a pending `Now`; a seek still waits out its window.
+    fn sent_now(&mut self) {
+        if self.pending == Pending::Now {
+            self.pending = Pending::None;
+        }
+    }
+}
+
+/// docs/31 §7: what a report says beyond position and pause, as the player knows it now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportFacts {
+    /// `audio`/`subtitle`: the chosen stream indices (`subtitle` -1 for off), `None` when unknown.
+    Video {
+        audio: Option<i32>,
+        subtitle: Option<i32>,
+        list: Option<ReportList>,
+    },
+    Audio {
+        repeat: RemoteRepeat,
+        shuffle: RemoteShuffle,
+    },
+}
+
+/// docs/31 §4.1.1: a video remote list, `at` the playing entry (an id may repeat).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportList {
+    pub ids: Arc<[String]>,
+    pub at: usize,
 }
 
 enum Cmd {
     Pause(bool),
+    Now {
+        facts: ReportFacts,
+    },
+    Facts(ReportFacts),
     /// Processed by the reporting actor, not directly by `ReportingSession::stop`, so a slow Start
     /// can never land after Stopped.
     Stop {
@@ -572,6 +712,20 @@ impl ReportingSession {
         let _ = self.cmd_tx.send(Cmd::Pause(paused));
     }
 
+    /// docs/31 §7: reports `facts` once the queued commands have applied, coalesced with a pending
+    /// seek's quiet window; `ticks` goes through the position watch first, so a newer position
+    /// sent before the runner wakes wins.
+    pub fn report_now(&mut self, ticks: i64, facts: ReportFacts) {
+        let _ = self.position_tx.send(ticks);
+        let _ = self.cmd_tx.send(Cmd::Now { facts });
+    }
+
+    /// docs/31 §7: replaces the facts the next report carries without sending one, so an in-app
+    /// track change costs no request of its own.
+    pub fn report_facts(&mut self, facts: ReportFacts) {
+        let _ = self.cmd_tx.send(Cmd::Facts(facts));
+    }
+
     /// Discards a session superseded before playback became active. Deliberately doesn't emit
     /// `Stopped(0)` (could overwrite a newer session's resume point); logs the trade-off since
     /// `stopped = true` suppresses the `Drop` warning.
@@ -640,17 +794,9 @@ impl ReportingSession {
             }
             // Bounded background retry, never inline (would hold `stop()` for a full request
             // timeout); also repairs a never-acked Start (see `flush_with_cap`).
-            let report = build_report(
-                &self.ctx,
-                PlaybackReportKind::Stopped,
-                ticks,
-                DEFAULT_VOLUME,
-                None,
-                None,
-            );
+            let report = stopped_report(&self.ctx, ticks);
             flush_queue().enqueue(
                 self.sink.clone(),
-                self.ctx.clone(),
                 self.start_acked.load(Ordering::Relaxed),
                 report,
                 take_delivery(&delivered),
@@ -670,23 +816,12 @@ async fn send_final_stopped(
     ticks: i64,
     delivered: Option<Delivery>,
 ) {
-    let report = build_report(
-        ctx,
-        PlaybackReportKind::Stopped,
-        ticks,
-        DEFAULT_VOLUME,
-        None,
-        None,
-    );
+    let report = stopped_report(ctx, ticks);
     if !start_acked {
-        let start_report = build_report(
-            ctx,
-            PlaybackReportKind::Start,
-            ticks,
-            DEFAULT_VOLUME,
-            None,
-            None,
-        );
+        let start_report = PlaybackReport {
+            kind: PlaybackReportKind::Start,
+            ..report.clone()
+        };
         match send_final_request(sink, delivered.as_ref(), start_report).await {
             Sent::Done(Ok(())) => {}
             Sent::Cancelled => return,
@@ -695,7 +830,7 @@ async fn send_final_stopped(
                     "start-repair before final stopped did not land inline; queuing \
                      ordered pair for bounded background retry"
                 );
-                flush_queue().enqueue(sink.clone(), ctx.clone(), false, report, delivered);
+                flush_queue().enqueue(sink.clone(), false, report, delivered);
                 return;
             }
         }
@@ -707,7 +842,7 @@ async fn send_final_stopped(
                 "stopped report did not land inline; queuing for bounded background retry"
             );
             // Start is established by this point, so the flush only needs to deliver the Stopped.
-            flush_queue().enqueue(sink.clone(), ctx.clone(), true, report, delivered);
+            flush_queue().enqueue(sink.clone(), true, report, delivered);
         }
     }
 }
@@ -727,32 +862,8 @@ impl Drop for ReportingSession {
     }
 }
 
-fn build_report(
-    ctx: &ReportContext,
-    kind: PlaybackReportKind,
-    position_ticks: i64,
-    volume_level: u8,
-    audio_stream_index: Option<i32>,
-    subtitle_stream_index: Option<i32>,
-) -> PlaybackReport {
-    PlaybackReport {
-        kind,
-        item_id: ctx.item_id.clone(),
-        media_source_id: ctx.media_source_id.clone(),
-        position_ticks,
-        is_paused: false,
-        volume_level,
-        audio_stream_index,
-        subtitle_stream_index,
-        play_session_id: ctx.play_session_id.clone(),
-        play_method: ctx.play_method,
-        now_playing_queue: ctx.media.now_playing_queue(),
-    }
-}
-
-/// The background actor: owns the authoritative playback state, the 10s progress ticker, and
-/// immediate edge reports on pause/seek/track-change (seek reports debounced -- see
-/// [`SEEK_DEBOUNCE`]).
+/// The background actor: sends Start, then runs [`Edges::step`] over commands, positions, its due
+/// time and the 10 s ticker, sending the reports it asks for; Stop ends it.
 async fn run(
     sink: Arc<dyn ReportSink>,
     ctx: ReportContext,
@@ -762,62 +873,28 @@ async fn run(
     start_acked: Arc<AtomicBool>,
     final_owner: Arc<AtomicU8>,
 ) {
-    let mut state = PlaybackState {
-        position_ticks: 0,
-        is_paused: false,
-        audio_stream_index: None,
-        subtitle_stream_index: None,
-    };
+    let mut edges = Edges::new(0);
 
     if let Some(predecessor) = predecessor {
         let _ = tokio::time::timeout(PREDECESSOR_STOP_WAIT, predecessor).await;
     }
-    let start_ok = send_retrying(&sink, report_for(&ctx, &state, PlaybackReportKind::Start)).await;
+    let start_ok = send_retrying(&sink, report_for(&ctx, &edges, PlaybackReportKind::Start)).await;
     start_acked.store(start_ok, Ordering::Relaxed);
 
     let mut ticker = tokio::time::interval(PROGRESS_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await; // first tick fires immediately; consume it
 
-    // A detected seek (re)starts this deadline, so a burst of scrubbing collapses into one report
-    // once quiet for SEEK_DEBOUNCE.
-    let mut seek_report_deadline: Option<tokio::time::Instant> = None;
-
     loop {
-        let sleep_until_seek_deadline = tokio::time::sleep_until(
-            seek_report_deadline.unwrap_or_else(tokio::time::Instant::now),
-        );
-
-        tokio::select! {
-            _ = ticker.tick() => {
-                send_retrying(&sink, report_for(&ctx, &state, PlaybackReportKind::Progress)).await;
-            }
-            () = sleep_until_seek_deadline, if seek_report_deadline.is_some() => {
-                seek_report_deadline = None;
-                send_retrying(&sink, report_for(&ctx, &state, PlaybackReportKind::Progress)).await;
-                ticker.reset();
-            }
-            changed = position_rx.changed() => {
-                if changed.is_ok() {
-                    apply_pending_position(&mut position_rx, &mut state, &mut seek_report_deadline);
-                }
-                // Err means `ReportingSession` was dropped; `cmd_rx` closing ends the loop below.
-            }
+        let due = edges.due(Instant::now());
+        // Biased: commands and positions apply before a due report or tick sends, so it carries them.
+        let events: [Option<EdgeEvent>; 2] = tokio::select! {
+            biased;
             cmd = cmd_rx.recv() => {
-                // A position sent just before this command must land first, or the command's own
-                // report (Pause/TrackChange) would carry a stale `position_ticks` -- the command
-                // channel and the position watch have no ordering guarantee between them.
-                if position_rx.has_changed().unwrap_or(false) {
-                    apply_pending_position(&mut position_rx, &mut state, &mut seek_report_deadline);
-                }
-                match cmd {
-                    Some(Cmd::Pause(paused)) => {
-                        if state.is_paused != paused {
-                            state.is_paused = paused;
-                            send_retrying(&sink, report_for(&ctx, &state, PlaybackReportKind::Progress)).await;
-                            ticker.reset();
-                        }
-                    }
+                let event = match cmd {
+                    Some(Cmd::Pause(paused)) => EdgeEvent::Pause(paused),
+                    Some(Cmd::Now { facts }) => EdgeEvent::Now { facts },
+                    Some(Cmd::Facts(facts)) => EdgeEvent::Facts(facts),
                     Some(Cmd::Stop { ticks, completion, delivered }) => {
                         if !claim_final(&final_owner, FINAL_BY_ACTOR) {
                             break;
@@ -833,27 +910,36 @@ async fn run(
                         break;
                     }
                     None => break,
+                };
+                // A position sent just before this command lands first, or the command's report
+                // would carry a stale one: the channel and the watch have no order between them.
+                let position = position_rx
+                    .has_changed()
+                    .unwrap_or(false)
+                    .then(|| EdgeEvent::Position(*position_rx.borrow_and_update()));
+                [position, Some(event)]
+            }
+            changed = position_rx.changed() => match changed {
+                Ok(()) => [Some(EdgeEvent::Position(*position_rx.borrow_and_update())), None],
+                // `ReportingSession` dropped; `cmd_rx` closing ends the loop.
+                Err(_) => [None, None],
+            },
+            () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
+                [Some(EdgeEvent::Due), None]
+            }
+            _ = ticker.tick() => [Some(EdgeEvent::Tick), None],
+        };
+        for event in events.into_iter().flatten() {
+            for effect in edges.step(event, Instant::now()) {
+                match effect {
+                    EdgeEffect::SendProgress => {
+                        let report = report_for(&ctx, &edges, PlaybackReportKind::Progress);
+                        send_retrying(&sink, report).await;
+                    }
+                    EdgeEffect::ResetTicker => ticker.reset(),
                 }
             }
         }
-    }
-}
-
-/// Applies the latest value already sitting in the position watch to `state`, detecting a seek
-/// edge exactly as the `changed` select branch does. Shared so draining the watch ahead of a
-/// `Cmd` (to avoid that command's report carrying a stale position) doesn't duplicate the logic.
-fn apply_pending_position(
-    position_rx: &mut watch::Receiver<i64>,
-    state: &mut PlaybackState,
-    seek_report_deadline: &mut Option<tokio::time::Instant>,
-) {
-    let ticks = *position_rx.borrow_and_update();
-    let jump = (ticks - state.position_ticks).abs();
-    state.position_ticks = ticks;
-    // A >2s jump is a seek edge, debounced by (re)arming the quiet-window deadline so a scrub-bar
-    // drag coalesces into one report.
-    if jump > seek_threshold_ticks() {
-        *seek_report_deadline = Some(tokio::time::Instant::now() + SEEK_DEBOUNCE);
     }
 }
 
@@ -863,24 +949,50 @@ fn seek_threshold_ticks() -> i64 {
     2 * 10_000_000
 }
 
-fn report_for(
-    ctx: &ReportContext,
-    state: &PlaybackState,
-    kind: PlaybackReportKind,
-) -> PlaybackReport {
+fn report_for(ctx: &ReportContext, edges: &Edges, kind: PlaybackReportKind) -> PlaybackReport {
+    // Stopped's body carries no volume, so the stop path never calls into the source.
+    let volume = match (kind, &ctx.volume) {
+        (PlaybackReportKind::Stopped, _) | (_, None) => FALLBACK_VOLUME,
+        (_, Some(source)) => (source.0)(),
+    };
+    let (audio_stream_index, subtitle_stream_index, list, queue_modes) = match &edges.facts {
+        Some(ReportFacts::Video {
+            audio,
+            subtitle,
+            list,
+        }) => (*audio, *subtitle, list.as_ref(), None),
+        Some(ReportFacts::Audio { repeat, shuffle }) => (
+            None,
+            None,
+            None,
+            Some(QueueModes {
+                repeat: *repeat,
+                shuffle: *shuffle,
+            }),
+        ),
+        None => (None, None, None, None),
+    };
     PlaybackReport {
         kind,
         item_id: ctx.item_id.clone(),
         media_source_id: ctx.media_source_id.clone(),
-        position_ticks: state.position_ticks,
-        is_paused: state.is_paused,
-        volume_level: DEFAULT_VOLUME,
-        audio_stream_index: state.audio_stream_index,
-        subtitle_stream_index: state.subtitle_stream_index,
+        position_ticks: edges.position,
+        is_paused: edges.paused,
+        volume_level: volume.level,
+        is_muted: volume.muted,
+        audio_stream_index,
+        subtitle_stream_index,
         play_session_id: ctx.play_session_id.clone(),
         play_method: ctx.play_method,
-        now_playing_queue: ctx.media.now_playing_queue(),
+        now_playing_queue: list.map_or_else(|| ctx.media.now_playing_queue(), |l| l.ids.clone()),
+        queue_index: list.map(|l| l.at),
+        queue_modes,
     }
+}
+
+/// The final Stopped at `ticks`; its body names only the item, source, position and session.
+fn stopped_report(ctx: &ReportContext, ticks: i64) -> PlaybackReport {
+    report_for(ctx, &Edges::new(ticks), PlaybackReportKind::Stopped)
 }
 
 /// Bounded retry for start/progress reports -- not worth retrying forever since a fresher one
@@ -926,7 +1038,6 @@ impl FlushQueue {
     fn enqueue(
         &'static self,
         sink: Arc<dyn ReportSink>,
-        ctx: ReportContext,
         start_acked: bool,
         report: PlaybackReport,
         delivered: Option<Delivery>,
@@ -946,7 +1057,7 @@ impl FlushQueue {
         }
 
         tokio::spawn(async move {
-            flush_with_cap(&sink, &ctx, start_acked, &report, delivered.as_ref()).await;
+            flush_with_cap(&sink, start_acked, &report, delivered.as_ref()).await;
             self.in_flight
                 .lock()
                 .expect("flush queue lock")
@@ -968,7 +1079,6 @@ fn flush_queue() -> &'static FlushQueue {
 /// cancelled one ends the loop before its next attempt, mid-backoff included.
 async fn flush_with_cap(
     sink: &Arc<dyn ReportSink>,
-    ctx: &ReportContext,
     start_acked: bool,
     report: &PlaybackReport,
     delivery: Option<&Delivery>,
@@ -978,14 +1088,10 @@ async fn flush_with_cap(
     let mut start_delivered = start_acked;
 
     while !start_delivered {
-        let start_report = build_report(
-            ctx,
-            PlaybackReportKind::Start,
-            report.position_ticks,
-            report.volume_level,
-            report.audio_stream_index,
-            report.subtitle_stream_index,
-        );
+        let start_report = PlaybackReport {
+            kind: PlaybackReportKind::Start,
+            ..report.clone()
+        };
         match send_final_request_waiting(sink, delivery, &start_report).await {
             None => return,
             Some(Ok(())) => start_delivered = true,
@@ -1156,6 +1262,7 @@ mod tests {
             play_session_id: "session".into(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
             media: crate::ReportMedia::Video,
+            volume: None,
         }
     }
 
@@ -1168,6 +1275,7 @@ mod tests {
             play_session_id: play_session_id.into(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
             media: crate::ReportMedia::Video,
+            volume: None,
         }
     }
 
@@ -1242,6 +1350,416 @@ mod tests {
         session.stop(0).await;
     }
 
+    const SECOND: i64 = 10_000_000;
+
+    fn video_facts(audio: i32) -> ReportFacts {
+        ReportFacts::Video {
+            audio: Some(audio),
+            subtitle: Some(-1),
+            list: None,
+        }
+    }
+
+    fn sent(effects: &[EdgeEffect]) -> usize {
+        effects
+            .iter()
+            .filter(|e| **e == EdgeEffect::SendProgress)
+            .count()
+    }
+
+    /// docs/31 §7: every state and event of the reporting edges.
+    #[test]
+    fn edges_follow_the_transition_table() {
+        use EdgeEffect::{ResetTicker as Reset, SendProgress as Send};
+        let now = Instant::now() + Duration::from_secs(5);
+        let armed = Pending::Seek {
+            due: now + SEEK_DEBOUNCE,
+        };
+        let waiting = Pending::Seek {
+            due: now + Duration::from_millis(100),
+        };
+        let small = SECOND;
+        let jump = 30 * SECOND;
+        let now_ev = || EdgeEvent::Now {
+            facts: video_facts(3),
+        };
+        let (idle, queued, due_now) = (Pending::None, Pending::Now, Pending::Seek { due: now });
+        let pos = EdgeEvent::Position;
+        let facts = || EdgeEvent::Facts(video_facts(4));
+        let rows: Vec<(Pending, EdgeEvent, Vec<EdgeEffect>, Pending)> = vec![
+            (idle, pos(small), vec![], idle),
+            (idle, pos(jump), vec![], armed),
+            (idle, EdgeEvent::Pause(false), vec![], idle),
+            (idle, EdgeEvent::Pause(true), vec![Send, Reset], idle),
+            (idle, now_ev(), vec![], queued),
+            (idle, facts(), vec![], idle),
+            (idle, EdgeEvent::Tick, vec![Send], idle),
+            (idle, EdgeEvent::Due, vec![], idle),
+            (waiting, pos(small), vec![], waiting),
+            (waiting, pos(jump), vec![], armed),
+            (waiting, EdgeEvent::Pause(false), vec![], waiting),
+            (waiting, EdgeEvent::Pause(true), vec![Send, Reset], waiting),
+            (waiting, now_ev(), vec![], waiting),
+            (waiting, facts(), vec![], waiting),
+            (waiting, EdgeEvent::Tick, vec![Send], waiting),
+            (waiting, EdgeEvent::Due, vec![], waiting),
+            (due_now, EdgeEvent::Due, vec![Send, Reset], idle),
+            (queued, pos(small), vec![], queued),
+            (queued, pos(jump), vec![], armed),
+            (queued, EdgeEvent::Pause(false), vec![], queued),
+            (queued, EdgeEvent::Pause(true), vec![Send, Reset], idle),
+            (queued, now_ev(), vec![], queued),
+            (queued, facts(), vec![], queued),
+            (queued, EdgeEvent::Tick, vec![Send], idle),
+            (queued, EdgeEvent::Due, vec![Send, Reset], idle),
+        ];
+        let mut failures = Vec::new();
+        for (pending, event, effects, next) in rows {
+            let mut edges = Edges {
+                pending,
+                ..Edges::new(0)
+            };
+            let label = format!("{pending:?} x {event:?}");
+            let got = edges.step(event, now);
+            if got != effects || edges.pending != next {
+                failures.push(format!(
+                    "{label}: got {got:?} -> {:?}, want {effects:?} -> {next:?}",
+                    edges.pending
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// docs/31 §7: every event sequence up to length 4, 300 ms apart so a seek's quiet window
+    /// both is and isn't over at a later `Due`, keeps the edges' invariants.
+    #[test]
+    fn edges_keep_their_invariants_over_every_sequence_up_to_length_four() {
+        #[derive(Clone, Copy, Debug)]
+        enum Ev {
+            Small,
+            Jump,
+            Pause,
+            Play,
+            Now,
+            Facts,
+            Tick,
+            Due,
+        }
+        let alphabet = [
+            Ev::Small,
+            Ev::Jump,
+            Ev::Pause,
+            Ev::Play,
+            Ev::Now,
+            Ev::Facts,
+            Ev::Tick,
+            Ev::Due,
+        ];
+        let ctx = ctx();
+        let t0 = Instant::now();
+        let mut sequences: Vec<Vec<Ev>> = vec![Vec::new()];
+        let mut checked = 0;
+        for _ in 0..4 {
+            let mut longer = Vec::new();
+            for seq in &sequences {
+                for ev in alphabet {
+                    let mut next = seq.clone();
+                    next.push(ev);
+                    longer.push(next);
+                }
+            }
+            for seq in &longer {
+                let mut edges = Edges::new(0);
+                let (mut position, mut paused, mut facts) = (0_i64, false, None);
+                for (i, ev) in seq.iter().enumerate() {
+                    let now = t0 + Duration::from_millis(300 * i as u64);
+                    let label = format!("{seq:?} at step {i}");
+                    let before = edges.clone();
+                    let event = match ev {
+                        Ev::Small => EdgeEvent::Position(position + SECOND),
+                        Ev::Jump => EdgeEvent::Position(position + 30 * SECOND),
+                        Ev::Pause => EdgeEvent::Pause(true),
+                        Ev::Play => EdgeEvent::Pause(false),
+                        Ev::Now => EdgeEvent::Now {
+                            facts: video_facts(i as i32),
+                        },
+                        Ev::Facts => EdgeEvent::Facts(video_facts(100 + i as i32)),
+                        Ev::Tick => EdgeEvent::Tick,
+                        Ev::Due => EdgeEvent::Due,
+                    };
+                    match &event {
+                        EdgeEvent::Position(t) => position = *t,
+                        EdgeEvent::Pause(p) => paused = *p,
+                        EdgeEvent::Now { facts: f } | EdgeEvent::Facts(f) => {
+                            facts = Some(f.clone())
+                        }
+                        EdgeEvent::Tick | EdgeEvent::Due => {}
+                    }
+                    let is_now = matches!(event, EdgeEvent::Now { .. });
+                    let is_facts = matches!(event, EdgeEvent::Facts(_));
+                    let is_due_or_tick = matches!(event, EdgeEvent::Due | EdgeEvent::Tick);
+                    let same_pause = matches!(event, EdgeEvent::Pause(p) if p == before.paused);
+                    let effects = edges.step(event, now);
+                    let sends = sent(&effects);
+                    if matches!(before.pending, Pending::Seek { .. }) && is_now {
+                        assert!(
+                            matches!(edges.pending, Pending::Seek { .. }),
+                            "a Now inside a seek window keeps it {label}"
+                        );
+                    }
+                    if is_now {
+                        assert_eq!(
+                            edges.position, before.position,
+                            "a Now never moves the position {label}"
+                        );
+                    }
+                    if sends > 0 {
+                        assert!(
+                            edges.pending != Pending::Now,
+                            "a send clears the pending Now {label}"
+                        );
+                    }
+                    if same_pause {
+                        assert!(effects.is_empty(), "the same pause acts not {label}");
+                    }
+                    if before.pending == Pending::Now && is_due_or_tick {
+                        assert_eq!(sends, 1, "a pending Now sends at Due or Tick {label}");
+                    }
+                    assert_eq!(edges.facts, facts, "the latest facts are kept {label}");
+                    assert!(sends <= 1, "at most one send {label}");
+                    if is_facts {
+                        assert!(
+                            effects.is_empty() && edges.pending == before.pending,
+                            "facts never send {label}"
+                        );
+                    }
+                    let report = report_for(&ctx, &edges, PlaybackReportKind::Progress);
+                    let audio = facts.as_ref().and_then(|f| match f {
+                        ReportFacts::Video { audio, .. } => *audio,
+                        ReportFacts::Audio { .. } => None,
+                    });
+                    assert_eq!(
+                        (
+                            report.position_ticks,
+                            report.is_paused,
+                            report.audio_stream_index
+                        ),
+                        (position, paused, audio),
+                        "the report carries the edges {label}"
+                    );
+                    checked += 1;
+                }
+            }
+            sequences = longer;
+        }
+        assert!(checked > 4096, "{checked} steps checked");
+    }
+
+    fn volume(level: u8, muted: bool) -> Option<crate::VolumeSource> {
+        Some(crate::VolumeSource(Arc::new(move || crate::Volume {
+            level,
+            muted,
+        })))
+    }
+
+    /// docs/31 §7, §10: Start carries the system volume and mute; the stream indices, unknown at
+    /// Start, reach the Progress that `report_now` sends right after, volume too.
+    #[tokio::test(start_paused = true)]
+    async fn stream_indices_and_volume_appear_in_start_and_progress() {
+        let sink = FakeSink::new(0);
+        let loud = ReportContext {
+            volume: volume(37, true),
+            ..ctx()
+        };
+        let mut session = ReportingSession::start_with_sink(sink.clone(), loud);
+        tokio::task::yield_now().await;
+        session.report_now(SECOND, video_facts(2));
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 2, "Start, then report_now's Progress");
+        let start = &calls[0];
+        assert!(matches!(start.kind, PlaybackReportKind::Start));
+        assert_eq!((start.volume_level, start.is_muted), (37, true));
+        let progress = &calls[1];
+        assert!(matches!(progress.kind, PlaybackReportKind::Progress));
+        assert_eq!((progress.volume_level, progress.is_muted), (37, true));
+        assert_eq!(
+            (progress.audio_stream_index, progress.subtitle_stream_index),
+            (Some(2), Some(-1))
+        );
+        assert_eq!(progress.position_ticks, SECOND);
+        session.stop(SECOND).await;
+
+        let sink = FakeSink::new(0);
+        let session = ReportingSession::start_with_sink(sink.clone(), ctx());
+        tokio::task::yield_now().await;
+        let start = &sink.calls()[0];
+        assert_eq!(
+            (start.volume_level, start.is_muted),
+            (100, false),
+            "no source reports full and unmuted"
+        );
+        session.stop(0).await;
+    }
+
+    /// docs/31 §4.1.1: a video list reports its ids and the playing entry by index.
+    #[tokio::test(start_paused = true)]
+    async fn a_video_list_reports_its_queue_and_playing_entry() {
+        let sink = FakeSink::new(0);
+        let mut session = ReportingSession::start_with_sink(sink.clone(), ctx());
+        tokio::task::yield_now().await;
+        let ids: Arc<[String]> = vec!["x".to_string(), "y".into(), "x".into()].into();
+        session.report_now(
+            0,
+            ReportFacts::Video {
+                audio: None,
+                subtitle: None,
+                list: Some(ReportList {
+                    ids: ids.clone(),
+                    at: 2,
+                }),
+            },
+        );
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].now_playing_queue, ids);
+        assert_eq!(calls[1].queue_index, Some(2));
+        session.stop(0).await;
+    }
+
+    /// docs/31 §4.5, §10: a music session's repeat and shuffle reach its reports.
+    #[tokio::test(start_paused = true)]
+    async fn music_repeat_and_shuffle_round_trip_into_the_report() {
+        let sink = FakeSink::new(0);
+        let audio = ReportContext {
+            media: crate::ReportMedia::Audio {
+                queue: vec!["a".to_string()].into(),
+            },
+            ..ctx()
+        };
+        let mut session = ReportingSession::start_with_sink(sink.clone(), audio);
+        tokio::task::yield_now().await;
+        session.report_now(
+            0,
+            ReportFacts::Audio {
+                repeat: RemoteRepeat::One,
+                shuffle: RemoteShuffle::Shuffled,
+            },
+        );
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].queue_modes, None,
+            "unknown before the first report_now"
+        );
+        assert_eq!(
+            calls[1].queue_modes,
+            Some(QueueModes {
+                repeat: RemoteRepeat::One,
+                shuffle: RemoteShuffle::Shuffled,
+            })
+        );
+        assert_eq!(
+            calls[1].now_playing_queue.len(),
+            1,
+            "the queue stays the session's"
+        );
+        session.stop(0).await;
+    }
+
+    /// docs/31 §7: `report_now` during a seek's quiet window joins it: nothing until the window
+    /// ends, then one report carrying the seek and the facts.
+    #[tokio::test(start_paused = true)]
+    async fn report_now_during_a_seek_debounce_sends_one_report_at_the_quiet_windows_end() {
+        let sink = FakeSink::new(0);
+        let mut session = ReportingSession::start_with_sink(sink.clone(), ctx());
+        tokio::task::yield_now().await;
+        session.on_position(30 * SECOND);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        session.report_now(30 * SECOND, video_facts(4));
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            sink.calls().len(),
+            1,
+            "the seek's quiet window holds report_now"
+        );
+
+        tokio::time::advance(Duration::from_millis(600)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 2, "one report for the seek and report_now");
+        assert_eq!(calls[1].position_ticks, 30 * SECOND);
+        assert_eq!(calls[1].audio_stream_index, Some(4));
+        session.stop(0).await;
+    }
+
+    /// docs/31 §7: a position sent after `report_now` but before the runner wakes is the one its
+    /// report carries, so a queued `report_now` never rewinds the watch.
+    #[tokio::test(start_paused = true)]
+    async fn report_now_then_a_newer_position_before_the_runner_wakes_reports_the_newer() {
+        let sink = FakeSink::new(0);
+        let mut session = ReportingSession::start_with_sink(sink.clone(), ctx());
+        tokio::task::yield_now().await;
+        session.report_now(SECOND, video_facts(4));
+        session.on_position(2 * SECOND);
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        let progress: Vec<_> = sink
+            .calls()
+            .into_iter()
+            .filter(|r| matches!(r.kind, PlaybackReportKind::Progress))
+            .collect();
+        assert_eq!(progress.len(), 1, "report_now sends once");
+        assert_eq!(progress[0].position_ticks, 2 * SECOND, "the newer position");
+        assert_eq!(progress[0].audio_stream_index, Some(4));
+        session.stop(0).await;
+    }
+
+    /// docs/31 §7: report_now calls queued behind a slow send coalesce into one report carrying
+    /// the last facts.
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_of_report_now_behind_a_slow_send_sends_once() {
+        let sink = BlockingStartSink::new();
+        let mut session = ReportingSession::start_with_sink(sink.clone(), ctx());
+        while !sink.start_entered.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        for audio in 1..=5 {
+            session.report_now(SECOND, video_facts(audio));
+        }
+        sink.release_start.notify_one();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let progress: Vec<_> = sink
+            .calls()
+            .into_iter()
+            .filter(|r| matches!(r.kind, PlaybackReportKind::Progress))
+            .collect();
+        assert_eq!(progress.len(), 1, "the burst sends once");
+        assert_eq!(
+            progress[0].audio_stream_index,
+            Some(5),
+            "with the last facts"
+        );
+        assert_eq!(
+            progress[0].position_ticks, SECOND,
+            "at report_now's position"
+        );
+        session.stop(SECOND).await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn sends_progress_report_every_ten_seconds() {
         let sink = FakeSink::new(0);
@@ -1280,7 +1798,7 @@ mod tests {
 
     /// Pins: a position sent immediately before an edge command (no intervening await) is applied
     /// before that command's own report, even though the position watch and the `Cmd` channel have
-    /// no ordering guarantee between them -- see `apply_pending_position`.
+    /// no ordering guarantee between them.
     #[tokio::test(start_paused = true)]
     async fn a_position_sent_just_before_pause_is_reflected_in_the_pause_report() {
         let sink = FakeSink::new(0);
@@ -2304,20 +2822,13 @@ mod tests {
     async fn flush_queue_dedups_a_second_enqueue_for_a_session_already_in_flight() {
         let sink = Arc::new(GatedSink::default());
         let ctx = ctx_with_session("dedup-session");
-        let report = build_report(
-            &ctx,
-            PlaybackReportKind::Stopped,
-            42,
-            DEFAULT_VOLUME,
-            None,
-            None,
-        );
+        let report = stopped_report(&ctx, 42);
 
         // `start_acked: true`: not exercising the never-acked-Start resend path here.
-        flush_queue().enqueue(sink.clone(), ctx.clone(), true, report.clone(), None);
+        flush_queue().enqueue(sink.clone(), true, report.clone(), None);
         tokio::task::yield_now().await;
         // Pins: a second enqueue for the same in-flight session is dropped, not a new task.
-        flush_queue().enqueue(sink.clone(), ctx.clone(), true, report.clone(), None);
+        flush_queue().enqueue(sink.clone(), true, report.clone(), None);
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
 
@@ -2337,25 +2848,11 @@ mod tests {
         let sink = Arc::new(GatedSink::default());
         let ctx_a = ctx_with_session("session-a");
         let ctx_b = ctx_with_session("session-b");
-        let report_a = build_report(
-            &ctx_a,
-            PlaybackReportKind::Stopped,
-            1,
-            DEFAULT_VOLUME,
-            None,
-            None,
-        );
-        let report_b = build_report(
-            &ctx_b,
-            PlaybackReportKind::Stopped,
-            2,
-            DEFAULT_VOLUME,
-            None,
-            None,
-        );
+        let report_a = stopped_report(&ctx_a, 1);
+        let report_b = stopped_report(&ctx_b, 2);
 
-        flush_queue().enqueue(sink.clone(), ctx_a, true, report_a, None);
-        flush_queue().enqueue(sink.clone(), ctx_b, true, report_b, None);
+        flush_queue().enqueue(sink.clone(), true, report_a, None);
+        flush_queue().enqueue(sink.clone(), true, report_b, None);
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
 
@@ -2375,15 +2872,8 @@ mod tests {
         // Never succeeds -- the "server is permanently unreachable" case the cap exists for.
         let sink = FakeSink::new(u32::MAX);
         let ctx = ctx_with_session("cap-test-session");
-        let report = build_report(
-            &ctx,
-            PlaybackReportKind::Stopped,
-            7,
-            DEFAULT_VOLUME,
-            None,
-            None,
-        );
-        flush_queue().enqueue(sink.clone(), ctx, true, report, None);
+        let report = stopped_report(&ctx, 7);
+        flush_queue().enqueue(sink.clone(), true, report, None);
 
         // Advance well past FLUSH_MAX_DURATION (30 minutes).
         for _ in 0..40 {

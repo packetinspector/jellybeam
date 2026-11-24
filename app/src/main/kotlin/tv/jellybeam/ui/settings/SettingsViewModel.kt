@@ -440,6 +440,9 @@ class SettingsViewModel(
     /** Playback section, "Mini player" row (docs/17-mini-player.md §4), default off. */
     fun toggleMiniPlayer() = updateSettings { it.copy(miniPlayerEnabled = !it.miniPlayerEnabled) }
 
+    /** docs/31 §8: Playback "Allow remote control" row; the core reposts capabilities on this write. */
+    fun toggleRemoteControl() = updateSettings { it.copy(remoteControlEnabled = !it.remoteControlEnabled) }
+
     fun toggleNormalization() = updateSettings { it.copy(normalizationEnabled = !it.normalizationEnabled) }
 
     /** docs/30 §8: stored as the style's key. */

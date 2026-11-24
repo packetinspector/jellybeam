@@ -224,6 +224,10 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
         args("--features", "update-test-fixture")
         environment("JELLYBEAM_UPDATE_TEST_CA", rootProject.file("internal/updates/ca.pem").absolutePath)
     }
+    // The core reports this to the server as the client version (object.rs `app_version`).
+    val appVersionName = android.defaultConfig.versionName.orEmpty()
+    environment("JELLYBEAM_APP_VERSION", appVersionName)
+    inputs.property("appVersionName", appVersionName)
     // docs/06: 32-bit ARM Rust code gets NEON (the bundled C code already has it, so no device is
     // newly excluded); nothing newer such as VFPv4, and never a host-tuned target-cpu.
     val armv7RustFlags = "-C target-feature=+neon"

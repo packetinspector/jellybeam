@@ -82,8 +82,10 @@ internal data class PlayerFlow(
 /** A play or detail request; [id] is minted by [PlaybackActivityTracker.arrive]; [K] lets a player start take only a Play. */
 internal data class Req<out K : Req.Kind>(val id: Long, val kind: K, val origin: Origin) {
     sealed interface Kind {
-        data class Play(val item: String, val start: Start = Start.Resume) : Kind
-        data class OpenDetail(val item: String) : Kind
+        /** [tracks] and [queue] come only with a remote Play (docs/31 §4.1). */
+        data class Play(val item: String, val start: Start = Start.Resume, val tracks: TrackRequest? = null, val queue: RemoteQueue? = null) : Kind
+        /** [library] (docs/31 §4.3, Rust's item type) opens a library page rather than an item's detail. */
+        data class OpenDetail(val item: String, val library: Boolean = false) : Kind
     }
 
     /** docs/05 "external": the saved position, the beginning, or an absolute start in milliseconds. */
@@ -93,8 +95,14 @@ internal data class Req<out K : Req.Kind>(val id: Long, val kind: K, val origin:
         data class At(val ms: Long) : Start
     }
 
-    enum class Origin { External, InApp, Group }
+    enum class Origin { External, InApp, Group, Remote }
 }
+
+/** docs/31 §4.1: a remote Play's initial picks as server stream indexes; a subtitle index of -1 is off. */
+internal data class TrackRequest(val mediaSourceId: String?, val audioStreamIndex: Int?, val subtitleStreamIndex: Int?)
+
+/** docs/31 §4.1.1: a remote Play's video ids and the one it starts at. */
+internal data class RemoteQueue(val ids: List<String>, val startIndex: Int)
 
 /** Every input to [reduce]. */
 internal sealed interface FlowEvent
@@ -155,6 +163,12 @@ internal sealed interface PlayerEffect {
 
     /** docs/28 §4: a newer request replaced the group's waiting load, so this device can't follow the group and leaves it. */
     data object LeaveGroup : PlayerEffect
+
+    /** docs/31 §5: remote request [id] left without a start; it is never queued for later. */
+    data class RemoteDropped(val id: Long) : PlayerEffect
+
+    /** docs/31 §5 (approved Q1): brings MainActivity in front of another app, which our visible mini player allows. */
+    data object ShowMain : PlayerEffect
 }
 
 internal data class PlayerStep(val state: PlayerFlow, val effects: List<PlayerEffect> = emptyList())
@@ -169,7 +183,16 @@ internal fun reduce(state: PlayerFlow, event: FlowEvent, liveItem: () -> String?
         is PlayerEvent.Callback -> playerStep(state, event)
         is HostEvent -> hostStep(state, event)
     }
-    return settle(step, liveItem)
+    return remoteDrops(listOf(state.request, step.state.request), event, settle(step, liveItem, arrived = event is HostEvent.Arrive))
+}
+
+/** docs/31 §5: a remote request waiting, arriving or requeued in [held] that leaves without a start or its detail opening is reported dropped, once. */
+private fun remoteDrops(held: List<Request>, event: FlowEvent, step: PlayerStep): PlayerStep {
+    val started = step.effects.mapNotNull { (it as? PlayerEffect.Launch)?.req ?: (it as? PlayerEffect.Deliver)?.req }
+    val left = held.mapNotNull { (it as? Request.Waiting)?.req }.distinct().filter { r ->
+        r.origin == Req.Origin.Remote && (step.state.request as? Request.Waiting)?.req != r && r !in started && event != HostEvent.DetailDone(r.id)
+    }
+    return if (left.isEmpty()) step else step.copy(effects = step.effects + left.map { PlayerEffect.RemoteDropped(it.id) })
 }
 
 /** Generation [g] takes the slot and any live instance drains; Fresh is about the instance the intent shrank, which [g] is not. */
@@ -281,8 +304,21 @@ private fun arrivalPolicy(state: PlayerFlow, req: Req<*>): PlayerFlow.Policy {
     return if (req.origin == Req.Origin.External && req.kind is Req.Kind.Play && covered) PlayerFlow.Policy.Fresh else PlayerFlow.Policy.Any
 }
 
-/** docs/17 §3: the waiting request against the step's result; a no-op on a settled state. */
-private fun settle(step: PlayerStep, liveItem: () -> String?): PlayerStep {
+/**
+ * docs/31 §5: a remote request is never queued, so one still waiting while MainActivity is hidden is dropped; but a detail over a
+ * mini player floating on another app (approved Q1) brings MainActivity forward as it arrives and waits for it while that player stays.
+ */
+private fun settle(step: PlayerStep, liveItem: () -> String?, arrived: Boolean): PlayerStep {
+    val settled = settleWaiting(step, liveItem, arrived)
+    val state = settled.state
+    val req = (state.request as? Request.Waiting)?.req
+    if (req?.origin != Req.Origin.Remote || state.main == Main.Shown) return settled
+    if (req.kind is Req.Kind.OpenDetail && state.player is Player.Pip) return if (arrived) settled.then(state, PlayerEffect.ShowMain) else settled
+    return settled.copy(state = state.copy(request = Request.None))
+}
+
+/** docs/17 §3: the waiting request against the step's result, [arrived] in this step or held from an earlier one; a no-op on a settled state. */
+private fun settleWaiting(step: PlayerStep, liveItem: () -> String?, arrived: Boolean): PlayerStep {
     val state = step.state
     val waiting = state.request as? Request.Waiting ?: return step
     val req = waiting.req
@@ -307,8 +343,9 @@ private fun settle(step: PlayerStep, liveItem: () -> String?): PlayerStep {
         is Player.Launching, is Player.Shrinking, is Player.Expanding, is Player.Closing -> step
         is Player.Fullscreen -> if (waiting.policy == PlayerFlow.Policy.Any) step.then(issuing, PlayerEffect.Deliver(player.g, play)) else step
         is Player.Pip -> when (waiting.policy) {
+            // docs/31 §5: a remote Play arriving also expands a mini player floating over another app; one whose expand the platform interrupted isn't forced back in.
             PlayerFlow.Policy.Any ->
-                if (state.main == Main.Shown) step.then(issuing.copy(player = Player.Expanding(player.g, play)), PlayerEffect.Deliver(player.g, play)) else step
+                if (state.main == Main.Shown || (arrived && req.origin == Req.Origin.Remote)) step.then(issuing.copy(player = Player.Expanding(player.g, play)), PlayerEffect.Deliver(player.g, play)) else step
             // A request that shrank a fullscreen player keeps it in PiP for its own item, else replaces it (expanding out of a PiP entry can stop it).
             PlayerFlow.Policy.Fresh -> {
                 val start = play.kind.start
@@ -321,14 +358,29 @@ private fun settle(step: PlayerStep, liveItem: () -> String?): PlayerStep {
 
 private fun PlayerStep.then(next: PlayerFlow, effect: PlayerEffect?): PlayerStep = PlayerStep(next, effects + listOfNotNull(effect))
 
-/** What the tracker can do to a live player Activity; attached at its create, detached at its destroy. [liveItemId] is read only once the player reached PiP, never during its create. */
-internal class PlayerHandle(val finishAndRemoveTask: () -> Unit, val liveItemId: () -> String?)
+/**
+ * What the tracker can do to a live player Activity; attached at its create, detached at its destroy. [liveItemId] is read only once the
+ * player reached PiP, never during its create; [session] and [remote] serve the remote router (docs/31 §4.2), [remote] answering why an op dropped.
+ */
+internal class PlayerHandle(
+    val finishAndRemoveTask: () -> Unit,
+    val liveItemId: () -> String?,
+    val session: () -> SessionScope? = { null },
+    val remote: (VideoOp) -> DropWhy? = { DropWhy.NotApplicable },
+)
 
 /**
  * What the tracker asks of the app for a request. [start] may run its platform call later: it then runs only if
- * [PlaybackActivityTracker.confirmStart] agrees, and reports a throw as [HostEvent.LaunchFailed]; [leaveGroup] leaves the running group.
+ * [PlaybackActivityTracker.confirmStart] agrees, and reports a throw as [HostEvent.LaunchFailed]; [leaveGroup] leaves the running group;
+ * [remoteDropped] records a dropped remote request by id; [showMain] brings MainActivity to the front.
  */
-internal class RequestHost(val start: (Req<Req.Kind.Play>) -> Unit, val signInRequired: () -> Unit, val leaveGroup: () -> Unit)
+internal class RequestHost(
+    val start: (Req<Req.Kind.Play>) -> Unit,
+    val signInRequired: () -> Unit,
+    val leaveGroup: () -> Unit,
+    val remoteDropped: (Long) -> Unit,
+    val showMain: () -> Unit,
+)
 
 /**
  * docs/17 §3: the one owner of player presence, PiP state and the waiting play request,
@@ -353,8 +405,11 @@ internal class PlaybackActivityTracker {
     /** docs/28 §1: the slot's player is in PiP or headed into or out of it, so a refused group create offers to stop it. */
     val inPip: Boolean get() = _state.value.player.inPip
 
+    /** The slot player's handle, `null` with no live instance; read-only for the remote router (docs/31 §4.2). */
+    fun liveHandle(): PlayerHandle? = (_state.value.player as? Player.Live)?.let { handles[it.g] }
+
     /** The slot player's live session item (`null` with no player, or once its session ended). */
-    private fun liveItemId(): String? = (_state.value.player as? Player.Live)?.let { handles[it.g] }?.liveItemId?.invoke()
+    private fun liveItemId(): String? = liveHandle()?.liveItemId?.invoke()
 
     fun attachHost(host: RequestHost) {
         this.host = host
@@ -406,6 +461,8 @@ internal class PlaybackActivityTracker {
             is PlayerEffect.Deliver -> start(effect.req)
             PlayerEffect.SignInRequired -> host?.signInRequired?.invoke()
             PlayerEffect.LeaveGroup -> host?.leaveGroup?.invoke()
+            is PlayerEffect.RemoteDropped -> host?.remoteDropped?.invoke(effect.id)
+            PlayerEffect.ShowMain -> host?.showMain?.invoke()
         }
     }
 

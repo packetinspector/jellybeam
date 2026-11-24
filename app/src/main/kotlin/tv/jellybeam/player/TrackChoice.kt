@@ -131,8 +131,9 @@ internal sealed interface TrackEvent {
     data class Tracks(val session: String, val rows: List<TrackInfo>, val announced: Boolean = rows.any { it.isPlayerRow() }) : TrackEvent
     data class Resolved(val session: String, val decision: TrackDecisionFfi, val rows: List<TrackInfo>) : TrackEvent
     data class ResolveFailed(val session: String) : TrackEvent
-    data class PickText(val pick: TextInput, val gate: Gate) : TrackEvent
-    data class PickAudio(val pick: AudioInput, val gate: Gate) : TrackEvent
+    /** [byUser] false: a remote Play's hint (docs/31 §4.1), a first pick never remembered. */
+    data class PickText(val pick: TextInput, val gate: Gate, val byUser: Boolean = true) : TrackEvent
+    data class PickAudio(val pick: AudioInput, val gate: Gate, val byUser: Boolean = true) : TrackEvent
     data object Fallback : TrackEvent
 
     /** The playing stream failed with [code] while a negotiation was out. */
@@ -230,7 +231,7 @@ internal fun reduceTracks(state: TrackChoice, event: TrackEvent): TrackStep {
     }
 }
 
-private val TrackChoice.plan: PlanFacts?
+internal val TrackChoice.plan: PlanFacts?
     get() = when (this) {
         TrackChoice.Idle -> null
         is TrackChoice.Awaiting -> p
@@ -240,7 +241,7 @@ private val TrackChoice.plan: PlanFacts?
         is CoreDeciding -> p
     }
 
-private val TrackChoice.text: TextPick?
+internal val TrackChoice.text: TextPick?
     get() = when (this) {
         is TrackChoice.Awaiting -> text
         is Resolving -> text
@@ -249,7 +250,7 @@ private val TrackChoice.text: TextPick?
         else -> null
     }
 
-private val TrackChoice.audio: AudioPick?
+internal val TrackChoice.audio: AudioPick?
     get() = when (this) {
         is TrackChoice.Awaiting -> audio
         is Resolving -> audio
@@ -391,8 +392,8 @@ private fun pickText(state: TrackChoice, p: PlanFacts, event: TrackEvent.PickTex
             val stream = p.embedded.firstOrNull { it.index == input.index } ?: return TrackStep(state)
             TextPick.Track(stream.identity(), input.index, if (input.index == p.burned) TextPick.On.Burned else TextPick.On.Due)
         }
-        is TextInput.Sidecar -> (old as? TextPick.Sidecar)?.takeIf { it.index == input.index }?.copy(byUser = true)
-            ?: sidecarPick(p, input.index, byUser = true) ?: return TrackStep(state)
+        is TextInput.Sidecar -> (old as? TextPick.Sidecar)?.takeIf { it.index == input.index }?.let { it.copy(byUser = it.byUser || event.byUser) }
+            ?: sidecarPick(p, input.index, event.byUser) ?: return TrackStep(state)
     }
     val needs = p.transcode && needsNegotiation(p, picked)
     // docs/18 §3.1: a rendition picked before Media3 announces waits for the announcement to show it or say only a negotiation does.
@@ -402,7 +403,7 @@ private fun pickText(state: TrackChoice, p: PlanFacts, event: TrackEvent.PickTex
     val text = if (early) (picked as TextPick.Track).copy(on = TextPick.On.Pending(live = gate == Gate.SOLO)) else picked
     if (text == old && state.text != null) return TrackStep(state)
     // docs/18 §3.2: a sidecar is remembered once it loads.
-    val remember = TrackEffect.Remember(TrackKindFfi.SUBTITLE, rememberedRow(p, input, text)).takeIf { text !is TextPick.Sidecar || text.load == TextPick.Load.Shown }
+    val remember = TrackEffect.Remember(TrackKindFfi.SUBTITLE, rememberedRow(p, input, text)).takeIf { event.byUser && (text !is TextPick.Sidecar || text.load == TextPick.Load.Shown) }
     // docs/18 §3.1: a choice that needs a renegotiation it may not start only changes memory.
     val negotiates = state is Decided && needs
     if (negotiates && gate == Gate.NOT_LIVE) return TrackStep(state, listOfNotNull(remember))
@@ -435,7 +436,7 @@ private fun pickAudio(state: TrackChoice, p: PlanFacts, event: TrackEvent.PickAu
         val row = (input as? AudioInput.Player)?.row ?: return TrackStep(state)
         val audio = audioPick(row)
         if (audio == state.audio) return TrackStep(state)
-        val effects = listOf(playAudio(row.id), TrackEffect.Remember(TrackKindFfi.AUDIO, row))
+        val effects = listOfNotNull(playAudio(row.id), TrackEffect.Remember(TrackKindFfi.AUDIO, row).takeIf { event.byUser })
         return when (state) {
             is TrackChoice.Awaiting -> TrackStep(state.copy(audio = audio), effects)
             is Resolving -> TrackStep(state.copy(audio = audio), effects)
@@ -449,7 +450,7 @@ private fun pickAudio(state: TrackChoice, p: PlanFacts, event: TrackEvent.PickAu
     val index = (input as? AudioInput.Stream)?.index ?: p.delivered ?: return TrackStep(state)
     val stream = p.audioStreams.firstOrNull { it.index == index } ?: return TrackStep(state)
     val audio = AudioPick.Track(streamAudioChoice(stream), id = null)
-    val remember = p.rows.firstOrNull { it.kind == TrackKindFfi.AUDIO && it.streamIndex == index }?.let { TrackEffect.Remember(TrackKindFfi.AUDIO, it.info(selected = false)) }
+    val remember = p.rows.firstOrNull { it.kind == TrackKindFfi.AUDIO && it.streamIndex == index }?.takeIf { event.byUser }?.let { TrackEffect.Remember(TrackKindFfi.AUDIO, it.info(selected = false)) }
     val negotiating = state is Negotiating
     return when (audioStreamPick(index, p.delivered, negotiating, inGroup = event.gate == Gate.GROUP)) {
         AudioStreamPick.UNCHANGED -> TrackStep(state)
@@ -679,7 +680,7 @@ private fun carried(q: PlanFacts, sent: TranscodeStreamsFfi): TranscodeStreamsFf
 private fun contradicts(want: TranscodeStreamsFfi.Named, got: TranscodeStreamsFfi.Named) =
     (want.subtitle != null && want.subtitle != got.subtitle) || (want.audio != null && want.audio != got.audio)
 
-private fun subtitleIndex(p: PlanFacts, text: TextPick): Int? = subtitleStreamIndexFor(
+internal fun subtitleIndex(p: PlanFacts, text: TextPick): Int? = subtitleStreamIndexFor(
     when (text) {
         TextPick.Leave -> TextChoice.Leave
         TextPick.Off -> TextChoice.Off
@@ -689,7 +690,7 @@ private fun subtitleIndex(p: PlanFacts, text: TextPick): Int? = subtitleStreamIn
     p.embedded,
 )
 
-private fun audioIndex(p: PlanFacts, audio: AudioPick): Int? = (audio as? AudioPick.Track)?.let { audioStreamIndexFor(it.choice, p.audioStreams) }
+internal fun audioIndex(p: PlanFacts, audio: AudioPick): Int? = (audio as? AudioPick.Track)?.let { audioStreamIndexFor(it.choice, p.audioStreams) }
 
 /** docs/18 §3.1: the choice [p]'s policy decision names, its ids being stream indexes. */
 private fun policyText(p: PlanFacts): TextPick {

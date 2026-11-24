@@ -18,6 +18,9 @@ internal sealed interface MusicSource {
 
     /** One song the caller already holds, so it plays with its metadata and no fetch. */
     data class Single(val song: Card) : MusicSource
+
+    /** docs/31 §4.1: a remote Play's songs as Rust resolved them, queued as sent. */
+    data class Items(val songs: List<Card>) : MusicSource
 }
 
 /** The [n]th track start reported in session [sid]: each one is ended exactly once. */
@@ -83,7 +86,8 @@ internal sealed interface MusicNotice {
     data class StartFailed(val ticket: Long) : MusicNotice
 
     /** docs/29 §8.4: request [r] queued [title] as [mode]. */
-    data class Queued(val r: Long, val mode: EnqueueMode, val title: String) : MusicNotice
+    /** [title] `null`: a remote's items, which come with no name to show. */
+    data class Queued(val r: Long, val mode: EnqueueMode, val title: String?) : MusicNotice
 
     /** docs/29 §8.4: write [id] added to [playlist] verbatim; [again] when it already held the song. */
     data class AddedToPlaylist(val id: Long, val playlist: String, val again: Boolean) : MusicNotice
@@ -121,7 +125,7 @@ internal sealed interface MusicEvent {
     data class Play(val r: Long, val source: MusicSource, val epoch: ULong, val startIndex: Int = 0, val shuffled: Boolean = false) : MusicEvent
 
     /** Play next or Add to queue, minted under account [epoch]; with nothing playing it plays [source] as request [r]. [title] is what the bar confirms. */
-    data class Enqueue(val r: Long, val mode: EnqueueMode, val source: MusicSource, val epoch: ULong, val title: String) : MusicEvent
+    data class Enqueue(val r: Long, val mode: EnqueueMode, val source: MusicSource, val epoch: ULong, val title: String?) : MusicEvent
     data class CancelFetch(val r: Long) : MusicEvent
     data object Stop : MusicEvent
     data object UserPlay : MusicEvent

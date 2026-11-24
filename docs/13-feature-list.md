@@ -27,7 +27,7 @@ mirror, no server round-trip for navigation; the library list in the menu follow
 server changes live, and a library's sort and filter choice is saved even if you leave
 right after changing it); Home shelves (resume, next-up,
 favorites, latest, per-library visibility; a music library's Latest shows one square card per album,
-OK opens the album and the remote's Play plays it, or pauses and resumes it when it is the album playing; a user-set shelf size caps every row,
+OK opens the album and the remote's Play plays it, or pauses and resumes it when it is the album playing; a user-set shelf size caps every row, a row whose newest card changes jumps back to its start so new titles show at the left (the row you are on keeps your place),
 and Next Up never repeats a Continue Watching title and moves on as soon as an
 episode is finished or marked watched, here or on another device; watched, unwatched and
 partly watched changes from other clients show after a launch, a return to the app, a
@@ -907,20 +907,37 @@ public display.)*
   Stop ends playback and saves the position (like Back, and also while the
   next title is still loading or the "Still watching?" card is up), Fast
   Forward and Rewind skip by the Settings skip-forward and skip-back seconds,
-  and Play / Pause toggle playback without restarting a finished item. Media
+  and Play / Pause toggle playback without restarting a finished item. Next
+  and Previous skip to the next or previous episode or remote-list item, the
+  same as the on-screen buttons, and only while there is one. Media
   keys pressed before the first frame are ignored rather than reaching another
   app. Keys a button-remapper app or the cast shell sends work too, in
   fullscreen and in the mini player.
   <!-- verified: app/src/main/kotlin/tv/jellybeam/player/MediaKeyRouter.kt MediaKeyRouter/MediaKeys; app/src/test/kotlin/tv/jellybeam/player/MediaKeyRouterTest.kt; PlaybackViewModel.stopFromRemote -->
+- Remote control from the server (docs/31): Jellyfin web and phone "Play
+  on", Home Assistant and scripts calling the Sessions API can drive the TV.
+  Play starts a movie, an episode, a series (its next up), a list of videos
+  (Next and Previous walk it, it plays on at each item's end and beats the
+  next-up card) or music, including titles added since the last sync;
+  Play Next and Play Last queue. Pause, resume, seek, skip, rewind, fast
+  forward and stop work in fullscreen, in the mini player (also over another
+  app) and on music with Jellybeam hidden. Audio and subtitle switches,
+  system volume and mute (offered only when the TV's volume isn't fixed) and
+  messages as a toast work too, and the controller shows the real state
+  within a second. Beyond the official client: the phone types into any
+  focused text field (search, sign-in), a full D-pad with Back, Home, Search
+  and Settings shortcuts, library letter jumps, the ··· menu, the player's
+  controls, chapters/speed menu and stats sheet, mini player ↔ fullscreen,
+  and music repeat and shuffle. Settings › Playback › Allow remote control
+  (on by default) turns it all off. A Play or page request while Jellybeam
+  is in the background with nothing on screen is dropped, never queued.
+  Through a multi-server proxy, control works from clients signed in
+  through the same proxy. Costs nothing until a command arrives: one
+  capabilities post per server connection.
+  <!-- verified: app/src/main/kotlin/tv/jellybeam/player/RemoteControl.kt route/RemoteControlBridge; app/src/test/kotlin/tv/jellybeam/player/RemoteControlTest.kt; core/ffi/src/remote.rs CapsLink; core/jellyfin-api/src/remote.rs; core/jellyfin-core/src/reporting.rs Edges -->
 
 ## Planned
 
-- Remote control from the server (next release, docs/31): Jellyfin web
-  "Play on", Home Assistant and other controllers can play, pause, seek,
-  skip, switch tracks, set volume, open a page and show a message, at parity
-  with the official Android TV client; beyond it, type a search from the
-  phone, a full D-pad remote, stats on demand, Quality and music repeat/shuffle
-  from the remote.
 - Byte-level preload (buffering actual media bytes ahead of Play, not just
   the playback handshake -- see Shipped/Playback's focus-dwell preload for
   the metadata-only tier already in place).

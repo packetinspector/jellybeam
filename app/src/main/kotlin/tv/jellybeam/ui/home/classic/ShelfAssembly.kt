@@ -91,3 +91,15 @@ fun albumPlayKey(key: Key, type: KeyEventType, repeatCount: Int): AlbumKey = whe
     type == KeyEventType.KeyDown && repeatCount == 0 -> AlbumKey.PLAY
     else -> AlbumKey.CONSUME
 }
+
+/** The shelf id inside a `shelf:<id>/card:<id>` focus key; null for a hero key or no key. */
+fun shelfIdOf(focusKey: String?): String? =
+    focusKey?.takeIf { it.startsWith("shelf:") }?.removePrefix("shelf:")?.substringBefore("/card:")
+
+/**
+ * docs/07 §1: a refresh that changes a seen shelf's head card rewinds that shelf to its
+ * start, since a keyed row otherwise keeps its old first card in view and hides the new one to the
+ * left; [keptShelfId], the shelf holding (or owed back) focus, is never moved (docs/15 §3).
+ */
+fun shelvesToRewind(seenHeads: Map<String, String?>, heads: Map<String, String?>, keptShelfId: String?): List<String> =
+    heads.filter { (id, head) -> id != keptShelfId && id in seenHeads && seenHeads[id] != head }.keys.toList()

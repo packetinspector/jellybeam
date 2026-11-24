@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::error::CoreError;
 use crate::home::{HomeLayout, HomeSnapshot};
 use crate::library_prefs::LibraryGridPrefsFile;
+use crate::remote::{CapsEvent, CapsInput, CapsLink, RemoteControlListener, ReportFactsFfi};
 use crate::settings::{PlaybackQuality, Settings};
 use crate::syncplay::{rejoin_event, sync_play_feed, StepCtx, SyncPlayOwner};
 use crate::track_prefs::TrackPrefsFile;
@@ -24,8 +25,8 @@ use crate::types::{
     ImageKind, ImageUrlPrefix, ItemDetail, LibraryGridPrefs, LiveSort, MediaSegment,
     MirrorItemCounts, MirrorLibrary, MirrorStats, NamedStreams, PlayMethodFfi, PlaybackOsdDetail,
     PlaybackPlan, PlaybackRequest, QuickConnectSession, SecondNegotiation, SeriesSummaryRead,
-    ServerDetails, ServerInfoSnapshot, SortOrder, SyncStatus, TrackDecisionFfi, TrackInfo,
-    TrackKindFfi, TrackMemoryFfi, TranscodeCauseFfi, TranscodeStreamsFfi, ViewSnapshot,
+    ServerDetails, ServerInfoSnapshot, SortOrder, StreamHints, SyncStatus, TrackDecisionFfi,
+    TrackInfo, TrackKindFfi, TrackMemoryFfi, TranscodeCauseFfi, TranscodeStreamsFfi, ViewSnapshot,
 };
 use crate::{device_id, library_prefs, session, settings, signin, track_prefs};
 use playback_policy::syncplay::Event as SyncPlayIn;
@@ -36,8 +37,8 @@ use playback_policy::syncplay::Event as SyncPlayIn;
 #[uniffi::export(foreign)]
 pub trait ChangeListener: Send + Sync {
     fn on_change(&self, event: ChangeEvent) -> Result<(), crate::error::CallbackError>;
-    /// docs/18 §2.1: the installed bus's socket rejected `account`'s token, at most once per bus;
-    /// called on a runtime thread that a core teardown may be joining, so it must not call the core.
+    /// docs/18 §2.1, docs/31 §3: the installed bus's socket or capabilities post rejected
+    /// `account`'s token, at most once per bus; called on a runtime thread that a core teardown may be joining, so it must not call the core.
     fn on_unauthorized(&self, account: AccountIdentity) -> Result<(), crate::error::CallbackError>;
 }
 
@@ -433,6 +434,22 @@ fn installed_session_locked<'a>(
     session
 }
 
+/// The session `play_session_id` names: a pending fallback's retired one, else the installed one.
+fn named_session_locked<'a>(
+    state: &'a mut State,
+    play_session_id: &str,
+) -> Option<&'a mut jellyfin_core::ReportingSession> {
+    let retiring = state
+        .playback_owner
+        .retiring
+        .as_ref()
+        .is_some_and(|retiring| retiring.session.context().play_session_id == play_session_id);
+    if retiring {
+        return retiring_session_locked(state, play_session_id).map(|r| &mut r.session);
+    }
+    installed_session_locked(state, play_session_id)
+}
+
 /// What [`JellybeamCore::take_session_or_revoke_locked`] took for a stop/abandon.
 pub(crate) enum Taken {
     /// The installed session.
@@ -723,6 +740,11 @@ pub(crate) struct State {
     /// player-session construction anyway. `pub(crate)` for the same
     /// cross-module reason as [`Self::seerr`].
     pub(crate) still_watching: playback_policy::still_watching::InactivityState,
+    /// docs/31 §3: what every bus forwarder posts as capabilities; seeded from the loaded settings
+    /// in [`JellybeamCore::new`], written only through `send_if_modified`.
+    pub(crate) remote_caps: tokio::sync::watch::Sender<CapsInput>,
+    /// docs/31 §9: set by [`JellybeamCore::set_remote_control_listener`]; `None` drops commands.
+    pub(crate) remote_listener: Option<Arc<dyn RemoteControlListener>>,
 }
 
 impl State {
@@ -942,6 +964,14 @@ pub struct JellybeamCore {
     runtime: tokio::runtime::Runtime,
 }
 
+/// The version the server sees: the app's `versionName`, which Gradle passes in at build time;
+/// the crate version is only a fallback for host builds, since it is never bumped on release.
+fn app_version(from_gradle: Option<&'static str>) -> &'static str {
+    from_gradle
+        .filter(|v| !v.is_empty())
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 #[uniffi::export]
 impl JellybeamCore {
     #[uniffi::constructor]
@@ -974,7 +1004,12 @@ impl JellybeamCore {
             .build()
             .expect("jellybeam-core tokio runtime should always build");
 
+        let remote_caps = tokio::sync::watch::Sender::new(CapsInput {
+            enabled: loaded_settings.remote_control_enabled,
+            volume_adjustable: None,
+        });
         let state = Arc::new(SharedState(Mutex::new(State {
+            remote_caps,
             settings: loaded_settings,
             track_prefs: loaded_track_prefs,
             library_grid_prefs: loaded_library_grid_prefs,
@@ -2054,6 +2089,12 @@ impl JellybeamCore {
     pub fn set_device_caps(&self, caps: DeviceCaps) {
         let preload_task = {
             let mut state = self.lock_state();
+            let volume_adjustable = Some(caps.volume_adjustable);
+            state.remote_caps.send_if_modified(|input| {
+                let changed = input.volume_adjustable != volume_adjustable;
+                input.volume_adjustable = volume_adjustable;
+                changed
+            });
             state.caps = caps.into();
             state.preload_invalidate()
         };
@@ -2076,6 +2117,11 @@ impl JellybeamCore {
             let next_up_changed = changed_next_up_options(&state.settings, &new_settings).is_some();
             state.settings = new_settings.clone();
             state.settings_revision += 1;
+            state.remote_caps.send_if_modified(|input| {
+                let changed = input.enabled != new_settings.remote_control_enabled;
+                input.enabled = new_settings.remote_control_enabled;
+                changed
+            });
             Self::push_next_up_options_locked(&state);
             let preload_task = state.preload_invalidate();
             (
@@ -2170,12 +2216,29 @@ impl JellybeamCore {
     /// aborted (§2), so Play reuses it rather than starting over. A preload
     /// for any other item is stale the moment a real Play arrives: it is
     /// aborted and Play negotiates at once, never waiting on it.
+    ///
+    /// `media_source_id` (docs/31 §4.1): a remote Play's version, asked for when the item lists it.
+    /// `audio_stream_index`/`subtitle_stream_index` (§4.1): its streams (`-1` subtitle is off),
+    /// named by whichever negotiation a transcode starts from, so it never restarts for them;
+    /// Direct Play ignores them.
+    #[uniffi::method(default(
+        media_source_id = None,
+        audio_stream_index = None,
+        subtitle_stream_index = None
+    ))]
     pub fn prepare_playback(
         &self,
         item_id: String,
         start_from_beginning: bool,
         request: PlaybackRequest,
+        media_source_id: Option<String>,
+        audio_stream_index: Option<i32>,
+        subtitle_stream_index: Option<i32>,
     ) -> Result<PlaybackPlan, CoreError> {
+        let hints = StreamHints {
+            audio: audio_stream_index,
+            subtitle: subtitle_stream_index,
+        };
         let (admitted, claim) = {
             let mut state = self.lock_state();
             // docs/18 §2.1: a playback kept across an account change goes on with its own account.
@@ -2200,7 +2263,14 @@ impl JellybeamCore {
             (admitted, claim)
         };
         // A failed negotiation undoes its admission (docs/18 §2.1).
-        let result = self.negotiate_admitted(item_id, start_from_beginning, admitted, &claim);
+        let result = self.negotiate_admitted(
+            item_id,
+            start_from_beginning,
+            admitted,
+            &claim,
+            media_source_id,
+            hints,
+        );
         if result.is_err() {
             self.release_claim(&claim);
         }
@@ -2273,64 +2343,34 @@ impl JellybeamCore {
     /// Only for the session `play_session_id` names: the installed one, or one a pending fallback
     /// took over (whose stream still plays); a report queued before a stop never reaches another.
     pub fn report_position(&self, play_session_id: String, ticks: i64) {
-        let checkpoint = {
-            let mut state = self.lock_state();
-            if let Some(retiring) = retiring_session_locked(&mut state, &play_session_id) {
-                retiring.session.on_position(ticks);
-                retiring.reported = Some(ticks);
-                return;
-            }
-            let Some(session) = installed_session_locked(&mut state, &play_session_id) else {
-                return;
-            };
-            session.on_position(ticks);
-            let item_id = session.context().item_id.clone();
-            // docs/feature-dev/music-design-brief.md §1.2: a song keeps no resume position.
-            let keeps_resume = session.context().media.keeps_resume_position();
-
-            if keeps_resume
-                && state
-                    .local_progress_checkpoint
-                    .should_commit(ticks, Instant::now())
-            {
-                Self::playback_account_locked(&state).mirror.map(|mirror| {
-                    // Acquired while `state` is still held: see the field's
-                    // ordering comment for the stop/checkpoint race this
-                    // closes; no path acquires these in the opposite order.
-                    let write_guard = self
-                        .playback_write
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    (write_guard, mirror, item_id)
-                })
-            } else {
-                None
-            }
-        };
-
-        if let Some((_write_guard, mirror, item_id)) = checkpoint {
-            let committed = self
-                .runtime
-                .block_on(mirror.apply_local_user_data_and_wait(&item_id, ticks, None));
-            if !committed {
-                tracing::error!(
-                    item_id,
-                    "playback progress checkpoint did not commit to the mirror"
-                );
-            }
-        }
+        self.forward_position(&play_session_id, ticks, |session| {
+            session.on_position(ticks)
+        });
     }
 
     /// Forwards a pause/resume edge to the installed session `play_session_id` names, as
     /// [`Self::report_position`].
     pub fn report_paused(&self, play_session_id: String, paused: bool) {
-        let mut state = self.lock_state();
-        if let Some(retiring) = retiring_session_locked(&mut state, &play_session_id) {
-            retiring.session.on_pause(paused);
-            return;
-        }
-        if let Some(session) = installed_session_locked(&mut state, &play_session_id) {
+        if let Some(session) = named_session_locked(&mut self.lock_state(), &play_session_id) {
             session.on_pause(paused);
+        }
+    }
+
+    /// docs/31 §4.2, §7: asks the session `play_session_id` names for an immediate Progress
+    /// carrying `facts`, its `ticks` moving the position exactly as [`Self::report_position`].
+    pub fn report_now(&self, play_session_id: String, ticks: i64, facts: ReportFactsFfi) {
+        let facts = jellyfin_core::ReportFacts::from(facts);
+        self.forward_position(&play_session_id, ticks, |session| {
+            session.report_now(ticks, facts)
+        });
+    }
+
+    /// docs/31 §7: replaces the facts the next report of session `play_session_id` carries, without
+    /// sending one; gated as [`Self::report_now`].
+    pub fn report_facts(&self, play_session_id: String, facts: ReportFactsFfi) {
+        let facts = jellyfin_core::ReportFacts::from(facts);
+        if let Some(session) = named_session_locked(&mut self.lock_state(), &play_session_id) {
+            session.report_facts(facts);
         }
     }
 
@@ -2518,6 +2558,7 @@ impl JellybeamCore {
                         &source,
                         &url,
                         SecondNegotiation::IfNamed,
+                        StreamHints::default(),
                         |named: Option<NamedStreams>| match named {
                             Some(n) => negotiate(n.subtitle, n.audio),
                             None => negotiate(None, None),
@@ -2537,6 +2578,7 @@ impl JellybeamCore {
                 play_session_id: play_session_id.clone(),
                 play_method: jellyfin_api::ReportPlayMethod::Transcode,
                 media: jellyfin_core::ReportMedia::Video,
+                volume: self.report_volume(),
             };
             let (sidecars, sidecar_tracks) =
                 Self::session_sidecars(&client, &source, &play_session_id);
@@ -3241,6 +3283,63 @@ struct PolicyRun<T> {
 }
 
 impl JellybeamCore {
+    /// docs/31 §7: the one path an export moving the position takes: `send` hands `ticks` to the
+    /// session `play_session_id` names, then a retired one records it and an installed one may
+    /// checkpoint it, as [`Self::report_position`] documents.
+    fn forward_position(
+        &self,
+        play_session_id: &str,
+        ticks: i64,
+        send: impl FnOnce(&mut jellyfin_core::ReportingSession),
+    ) {
+        let checkpoint = {
+            let mut state = self.lock_state();
+            if let Some(retiring) = retiring_session_locked(&mut state, play_session_id) {
+                send(&mut retiring.session);
+                retiring.reported = Some(ticks);
+                return;
+            }
+            let Some(session) = installed_session_locked(&mut state, play_session_id) else {
+                return;
+            };
+            send(session);
+            let item_id = session.context().item_id.clone();
+            // docs/feature-dev/music-design-brief.md §1.2: a song keeps no resume position.
+            let keeps_resume = session.context().media.keeps_resume_position();
+
+            if keeps_resume
+                && state
+                    .local_progress_checkpoint
+                    .should_commit(ticks, Instant::now())
+            {
+                Self::playback_account_locked(&state).mirror.map(|mirror| {
+                    // Acquired while `state` is still held: see the field's
+                    // ordering comment for the stop/checkpoint race this
+                    // closes; no path acquires these in the opposite order.
+                    let write_guard = self
+                        .playback_write
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    (write_guard, mirror, item_id)
+                })
+            } else {
+                None
+            }
+        };
+
+        if let Some((_write_guard, mirror, item_id)) = checkpoint {
+            let committed = self
+                .runtime
+                .block_on(mirror.apply_local_user_data_and_wait(&item_id, ticks, None));
+            if !committed {
+                tracing::error!(
+                    item_id,
+                    "playback progress checkpoint did not commit to the mirror"
+                );
+            }
+        }
+    }
+
     /// docs/18 §2.1: the current account's epoch; Kotlin reads it through [`Self::account_epochs`].
     pub(crate) fn account_epoch(&self) -> u64 {
         self.lock_state().account.epoch
@@ -3556,6 +3655,8 @@ impl JellybeamCore {
         start_from_beginning: bool,
         admitted: AdmittedPlay,
         claim: &PlaybackClaim,
+        media_source_id: Option<String>,
+        hints: StreamHints,
     ) -> Result<PlaybackPlan, CoreError> {
         let AdmittedPlay {
             client,
@@ -3593,6 +3694,12 @@ impl JellybeamCore {
 
         let dto = self.fetch_item_dto(&client, &mirror, &item_id)?;
         refuse_if_virtual(&item_id, &dto)?;
+        // docs/31 §4.1: a preload of another version never stands in for the named one.
+        let cached = cached.filter(|c| {
+            media_source_id
+                .as_deref()
+                .is_none_or(|id| c.source.id.as_deref() == Some(id))
+        });
 
         let item_name = dto.name.clone().unwrap_or_default();
         let item_type = dto
@@ -3635,6 +3742,8 @@ impl JellybeamCore {
             start_ticks,
             cached,
             &track_memory_subject,
+            media_source_id.as_deref(),
+            hints,
         )?;
 
         let media_source_id = source.id.clone().unwrap_or_default();
@@ -3648,6 +3757,7 @@ impl JellybeamCore {
             play_session_id: play_session_id.clone(),
             play_method: report_play_method,
             media: jellyfin_core::ReportMedia::Video,
+            volume: self.report_volume(),
         };
         // Started fresh every call, cache hit or not -- a preload never starts a reporting session.
         let (sidecars, sidecar_tracks) = Self::session_sidecars(&client, &source, &play_session_id);
@@ -3848,9 +3958,10 @@ impl JellybeamCore {
     /// [`JellybeamCore::prepare_playback`] uses and caches what it resolves to; an error
     /// (`DirectPlay` mode's refused transcode) discards.
     async fn build_preload_cache(request: &PreloadRequest) -> Option<PreloadCache> {
-        let dto = Self::fetch_item_dto_async(&request.client, &request.mirror, &request.item_id)
-            .await
-            .ok()?;
+        let dto =
+            Self::fetch_item_dto_async(&request.client, &request.mirror, &request.item_id, &[])
+                .await
+                .ok()?;
         refuse_if_virtual(&request.item_id, &dto).ok()?;
 
         let start_ticks = resolved_start_ticks(false, &dto);
@@ -3961,7 +4072,7 @@ impl JellybeamCore {
             client: "Jellybeam TV".to_string(),
             device: "Android TV".to_string(),
             device_id,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: app_version(option_env!("JELLYBEAM_APP_VERSION")).to_string(),
         }
     }
 
@@ -4232,7 +4343,7 @@ impl JellybeamCore {
             return Ok(dto);
         }
         self.runtime
-            .block_on(Self::fetch_from_network(client, item_id))
+            .block_on(Self::fetch_from_network(client, item_id, &[]))
     }
 
     /// The async half of that same rule, used only by
@@ -4242,10 +4353,11 @@ impl JellybeamCore {
     /// directly could starve the other preload/negotiation task.
     /// `run_preload_worker`'s own generation re-check still discards a
     /// result that arrives after its caller stopped caring.
-    async fn fetch_item_dto_async(
+    pub(crate) async fn fetch_item_dto_async(
         client: &jellyfin_api::JellyfinClient,
         mirror: &media_cache::Mirror,
         item_id: &str,
+        fields: &[String],
     ) -> Result<jellyfin_api::models::BaseItemDto, CoreError> {
         let owned_mirror = mirror.clone();
         let owned_item_id = item_id.to_string();
@@ -4255,7 +4367,7 @@ impl JellybeamCore {
         if let Some(dto) = mirror_hit {
             return Ok(dto);
         }
-        Self::fetch_from_network(client, item_id).await
+        Self::fetch_from_network(client, item_id, fields).await
     }
 
     /// Network fallback shared by [`Self::fetch_item_dto`] and
@@ -4264,11 +4376,13 @@ impl JellybeamCore {
     async fn fetch_from_network(
         client: &jellyfin_api::JellyfinClient,
         item_id: &str,
+        fields: &[String],
     ) -> Result<jellyfin_api::models::BaseItemDto, CoreError> {
         let result = client
             .get_items(&jellyfin_api::ItemQuery {
                 ids: vec![item_id.to_string()],
                 limit: 1,
+                fields: fields.to_vec(),
                 enable_user_data: Some(true),
                 ..jellyfin_api::ItemQuery::default()
             })
@@ -4300,7 +4414,18 @@ impl JellybeamCore {
         start_ticks: Option<i64>,
         cached: Option<PreloadCache>,
         subject_id: &str,
+        named_source: Option<&str>,
+        hints: StreamHints,
     ) -> Result<NegotiatedSource, CoreError> {
+        // docs/31 §4.1: the first negotiation asks for the named version; the rest follow its
+        // answer. A transcode-only first (Cap's) also names the hinted streams beside it.
+        let first = |hints: StreamHints| {
+            named_source.map(|id| NamedStreams {
+                media_source_id: Some(id.to_string()),
+                audio: hints.audio,
+                subtitle: hints.subtitle,
+            })
+        };
         let cached_transcode = match negotiation_start(quality, cached) {
             NegotiationStart::Cached {
                 source,
@@ -4342,13 +4467,14 @@ impl JellybeamCore {
                         .ok_or(jellyfin_core::CoreError::NoPlayableSource)?;
                     Ok((play_session_id, source, url))
                 };
-                let (mut play_session_id, mut source, mut url) = negotiate(None)?;
+                let (mut play_session_id, mut source, mut url) = negotiate(first(hints))?;
                 let run = self.negotiate_with_policy(
                     client,
                     subject_id,
                     &source,
                     &url,
                     SecondNegotiation::IfNamed,
+                    hints,
                     negotiate,
                 )?;
                 if let Some(renegotiated) = run.renegotiated {
@@ -4402,6 +4528,7 @@ impl JellybeamCore {
                         source,
                         url,
                         SecondNegotiation::Always,
+                        hints,
                         |named| negotiate(&profile, named),
                     )?;
                     // `Always` renegotiates, so the first answer never stands.
@@ -4413,7 +4540,7 @@ impl JellybeamCore {
                 let (play_session_id, plan, policy) = match cached_transcode {
                     // The cached answer's URL, rebuilt as `decide_playback` built it.
                     Some(source) => second(&source, &client.stream_url(item_id, &source))?,
-                    None => match negotiate(profile, None)? {
+                    None => match negotiate(profile, first(StreamHints::default()))? {
                         (_, Ok(ResolvedPlan::Transcode { source, url, .. })) => {
                             second(&source, &url)?
                         }
@@ -4459,7 +4586,8 @@ impl JellybeamCore {
     /// fallback) over `source`/`url`'s canonical rows, under the viewer's language settings and
     /// `subject_id`'s memory; renegotiates with the streams it names (always, under
     /// [`SecondNegotiation::Always`]), since a second `PlaybackInfo` is far cheaper than an
-    /// ffmpeg restart.
+    /// ffmpeg restart; `hints` stand in for the policy's picks.
+    #[allow(clippy::too_many_arguments)]
     fn negotiate_with_policy<T>(
         &self,
         client: &jellyfin_api::JellyfinClient,
@@ -4467,6 +4595,7 @@ impl JellybeamCore {
         source: &jellyfin_api::models::MediaSourceInfo,
         url: &str,
         second: SecondNegotiation,
+        hints: StreamHints,
         renegotiate: impl FnOnce(Option<NamedStreams>) -> Result<T, CoreError>,
     ) -> Result<PolicyRun<T>, CoreError> {
         let (global, series_pref) = {
@@ -4489,6 +4618,7 @@ impl JellybeamCore {
             series_pref.as_ref(),
             &global,
             second,
+            hints,
         );
         let audio = named.as_ref().and_then(|n| n.audio);
         let renegotiated = if named.is_some() || second == SecondNegotiation::Always {
@@ -4926,9 +5056,11 @@ impl JellybeamCore {
     /// each `Connected` refreshes the server version with that bus's `client`, tagged with the
     /// `epoch` the bundle was committed under, and the first
     /// `Unauthorized` asks the listener to reauthorize. docs/28 §4: it also steps the group with
-    /// every SyncPlay frame, a lag, and the installed bus's connection changes. Holds the state
-    /// `Weak`; aborting it (`stop_event_bus`) cancels an in-flight refresh, and joining it waits
-    /// out a running ask.
+    /// every SyncPlay frame, a lag, and the installed bus's connection changes. docs/31 §3: it
+    /// steps the bus's [`CapsLink`], posting capabilities joined with that refresh and on each
+    /// `remote_caps` change; §9: Remote frames go to the remote listener in arrival order, never
+    /// onto the bundle. Holds the state `Weak`; aborting it (`stop_event_bus`) cancels an in-flight
+    /// refresh, post or Play enrichment, and joining it waits out a running ask.
     fn spawn_bus_forwarder(
         &self,
         mut real_bus_rx: tokio::sync::broadcast::Receiver<jellyfin_core::BusEvent>,
@@ -4937,10 +5069,19 @@ impl JellybeamCore {
         client: jellyfin_api::JellyfinClient,
         epoch: u64,
     ) -> tokio::task::JoinHandle<()> {
+        use futures_util::StreamExt;
         let state = Arc::downgrade(&self.state);
         let data_dir = self.data_dir.clone();
         let session_lock = self.session_lock.clone();
         self.runtime.spawn(async move {
+            // Subscribed here, not at the call: `open_finish` spawns this under the state lock.
+            let Some(mut remote_caps) = state.upgrade().map(|s| s.lock().remote_caps.subscribe())
+            else {
+                return;
+            };
+            let mut caps = CapsLink::Down;
+            // docs/31 §9: delivered in arrival order, each once its Play enrichment resolves.
+            let mut deliveries = futures_util::stream::FuturesOrdered::new();
             // Off once the supervisor ends or rejects; the relay runs on until the real bus closes.
             let mut watching = true;
             loop {
@@ -4958,21 +5099,28 @@ impl JellybeamCore {
                                 let Some(shared) = state.upgrade() else { break };
                                 let installed =
                                     Self::installed_bus_locked(&shared.lock(), &connection);
-                                if installed {
+                                if !installed {
+                                    crate::remote::feed_caps(&mut caps, CapsEvent::ConnectedTaken, &state, &connection, &client).await;
+                                    continue;
+                                }
+                                // docs/31 §3: the post lands before any event sent after this
+                                // connect, its reconcile included.
+                                let want = remote_caps.borrow_and_update().mode();
+                                tokio::join!(
                                     Self::refresh_server_version_once(
                                         epoch,
                                         client.clone(),
                                         data_dir.clone(),
                                         shared.clone(),
                                         session_lock.clone(),
-                                    )
-                                    .await;
-                                    // docs/28 §4: stepped once the refresh returns, so the group's
-                                    // snapshot window starts with the server's facts known, and
-                                    // only while this bus is still the one the group follows.
-                                    if Self::installed_bus_locked(&shared.lock(), &connection) {
-                                        sync_play_feed(&state, epoch, SyncPlayIn::BusConnected);
-                                    }
+                                    ),
+                                    crate::remote::feed_caps(&mut caps, CapsEvent::Connected { want }, &state, &connection, &client),
+                                );
+                                // docs/28 §4: stepped once the refresh returns, so the group's
+                                // snapshot window starts with the server's facts known, and
+                                // only while this bus is still the one the group follows.
+                                if Self::installed_bus_locked(&shared.lock(), &connection) {
+                                    sync_play_feed(&state, epoch, SyncPlayIn::BusConnected);
                                 }
                             }
                             jellyfin_core::BusConnection::Disconnected => {
@@ -4980,29 +5128,27 @@ impl JellybeamCore {
                                 if Self::installed_bus_locked(&shared.lock(), &connection) {
                                     sync_play_feed(&state, epoch, SyncPlayIn::BusDisconnected);
                                 }
+                                crate::remote::feed_caps(&mut caps, CapsEvent::Disconnected, &state, &connection, &client).await;
                             }
-                            jellyfin_core::BusConnection::Unauthorized { .. } => {
+                            jellyfin_core::BusConnection::Unauthorized { owner } => {
                                 // Terminal: the supervisor stops, so this bus asks at most once.
                                 watching = false;
                                 let Some(shared) = state.upgrade() else { break };
-                                let installed = {
-                                    let guard = shared.lock();
-                                    Self::installed_bus_locked(&guard, &connection)
-                                        .then(|| Self::bus_reauthorization_locked(&guard, &now))
-                                };
-                                let Some(ask) = installed else { continue };
-                                // docs/28 §4: the group ends without a Leave, which would 401 too.
-                                sync_play_feed(&state, epoch, SyncPlayIn::BusUnauthorized);
-                                if let Some((listener, account)) = ask {
-                                    if let Err(error) = listener.on_unauthorized(account) {
-                                        tracing::warn!(
-                                            error = %error,
-                                            "change listener threw on a socket rejection"
-                                        );
-                                    }
+                                if Self::installed_bus_locked(&shared.lock(), &connection) {
+                                    // docs/28 §4: the group ends without a Leave, which would 401 too.
+                                    sync_play_feed(&state, epoch, SyncPlayIn::BusUnauthorized);
                                 }
+                                drop(shared);
+                                crate::remote::feed_caps(&mut caps, CapsEvent::Unauthorized(owner), &state, &connection, &client).await;
                             }
                         }
+                    }
+                    changed = remote_caps.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let want = remote_caps.borrow_and_update().mode();
+                        crate::remote::feed_caps(&mut caps, CapsEvent::Want(want), &state, &connection, &client).await;
                     }
                     // `recv_bus` unmerged: this lag rejoins, a connect's reconcile does not.
                     event = real_bus_rx.recv() => {
@@ -5016,6 +5162,15 @@ impl JellybeamCore {
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         };
+                        if let jellyfin_core::BusEvent::Server(jellyfin_api::ServerEvent::Remote(
+                            command,
+                        )) = event
+                        {
+                            let input = *remote_caps.borrow();
+                            let admitted = crate::remote::admit_remote(command, input, &state, &connection, &client);
+                            deliveries.extend(admitted);
+                            continue;
+                        }
                         if let jellyfin_core::BusEvent::Server(jellyfin_api::ServerEvent::SyncPlay(
                             frame,
                         )) = &event
@@ -5024,13 +5179,18 @@ impl JellybeamCore {
                         }
                         let _ = bundle_tx.send(event);
                     }
+                    Some(command) = deliveries.next(), if !deliveries.is_empty() => {
+                        if let Some(command) = command {
+                            crate::remote::deliver_remote(&state, epoch, command);
+                        }
+                    }
                 }
             }
         })
     }
 
     /// Whether `bus` is the installed bundle's connection watch, the one bus whose changes count.
-    fn installed_bus_locked(
+    pub(crate) fn installed_bus_locked(
         state: &State,
         bus: &tokio::sync::watch::Receiver<jellyfin_core::BusConnection>,
     ) -> bool {
@@ -5042,14 +5202,28 @@ impl JellybeamCore {
 
     /// docs/18 §2.1: whom a rejection on the installed bus asks to reauthorize: the bound
     /// listener, naming the rejected token's owner; an unnamed owner asks nobody.
-    fn bus_reauthorization_locked(
+    pub(crate) fn bus_reauthorization_locked(
         state: &State,
-        now: &jellyfin_core::BusConnection,
+        owner: Option<&jellyfin_api::TokenOwner>,
     ) -> Option<(Arc<dyn ChangeListener>, AccountIdentity)> {
-        let jellyfin_core::BusConnection::Unauthorized { owner: Some(owner) } = now else {
-            return None;
-        };
-        Some((state.listener.clone()?, owner.clone().into()))
+        Some((state.listener.clone()?, owner?.clone().into()))
+    }
+
+    /// docs/31 §4.4: the volume reader a new reporting session builds its reports with; `None`
+    /// (full, unmuted) while no remote listener is registered. Takes the state lock.
+    pub(crate) fn report_volume(&self) -> Option<jellyfin_core::VolumeSource> {
+        let listener = self.lock_state().remote_listener.clone();
+        listener.map(crate::remote::volume_source)
+    }
+
+    /// docs/31 §4.1: the installed bundle's mirror while `bus` is its connection watch.
+    pub(crate) fn installed_bus_mirror_locked(
+        state: &State,
+        bus: &tokio::sync::watch::Receiver<jellyfin_core::BusConnection>,
+    ) -> Option<media_cache::Mirror> {
+        Self::installed_bus_locked(state, bus)
+            .then(|| state.account.bundle().map(|bundle| bundle.mirror.clone()))
+            .flatten()
     }
 
     /// docs/28 §3.3: whether the installed account's bus is connected, so a group can follow it.
@@ -5461,7 +5635,7 @@ fn changed_next_up_options(
 }
 
 /// Normalize UUID spellings; leave non-UUID identifiers unchanged.
-fn canonicalize_item_id(item_id: &str) -> String {
+pub(crate) fn canonicalize_item_id(item_id: &str) -> String {
     uuid::Uuid::parse_str(item_id)
         .map(|id| id.to_string())
         .unwrap_or_else(|_| item_id.to_string())
@@ -5861,6 +6035,13 @@ pub(crate) mod tests {
         )
     }
 
+    #[test]
+    fn the_server_sees_the_gradle_version_not_the_crate_version() {
+        assert_eq!(app_version(Some("9.8.7")), "9.8.7");
+        assert_eq!(app_version(Some("")), env!("CARGO_PKG_VERSION"));
+        assert_eq!(app_version(None), env!("CARGO_PKG_VERSION"));
+    }
+
     /// Admits the next request directly, as a prepare would before negotiating.
     pub(crate) fn admit(core: &JellybeamCore) -> PlaybackClaim {
         let request = core.next_request();
@@ -5895,7 +6076,7 @@ pub(crate) mod tests {
             start_from_beginning: bool,
         ) -> Result<PlaybackPlan, CoreError> {
             let request = self.next_request();
-            self.prepare_playback(item_id, start_from_beginning, request)
+            self.prepare_playback(item_id, start_from_beginning, request, None, None, None)
         }
 
         fn prepare_transcode_fallback_now(
@@ -7126,6 +7307,29 @@ pub(crate) mod tests {
             bodies[1].get("EnableDirectPlay").is_none(),
             "still the server's own choice"
         );
+    }
+
+    /// docs/31 §4.1: a remote Play's version is asked for on the first negotiation; without one
+    /// the server picks.
+    #[test]
+    fn a_named_media_source_is_asked_for_on_the_first_negotiation() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1, direct_play_fixture().1]);
+        let request = core.next_request();
+        core.prepare_playback(
+            "item-1".to_string(),
+            false,
+            request,
+            Some("ms-7".to_string()),
+            None,
+            None,
+        )
+        .expect("direct play");
+        let request = core.next_request();
+        core.prepare_playback("item-1".to_string(), false, request, None, None, None)
+            .expect("direct play");
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies[0]["MediaSourceId"], "ms-7");
+        assert!(bodies[1].get("MediaSourceId").is_none(), "{}", bodies[1]);
     }
 
     #[test]
@@ -10147,6 +10351,88 @@ pub(crate) mod tests {
         assert_eq!(plan.delivered_audio_index, Some(2));
     }
 
+    /// `prepare_playback` with a remote Play's version and stream hints.
+    fn prepare_hinted(
+        core: &JellybeamCore,
+        media_source_id: Option<&str>,
+        audio: Option<i32>,
+        subtitle: Option<i32>,
+    ) -> PlaybackPlan {
+        let request = core.next_request();
+        core.prepare_playback(
+            "item-1".to_string(),
+            false,
+            request,
+            media_source_id.map(str::to_string),
+            audio,
+            subtitle,
+        )
+        .expect("a plan")
+    }
+
+    /// docs/31 §4.1: a remote Play's audio hint rides Auto's second negotiation in place of the
+    /// language setting's pick, so its transcode starts on that stream.
+    #[test]
+    fn an_auto_transcode_names_a_remote_plays_audio_hint_over_the_policy() {
+        let (_, mut playback_info_json) = transcode_fixture();
+        english_default_and_japanese_audio(&mut playback_info_json);
+        let (_dir, core, mock) = auto_core(vec![playback_info_json]);
+
+        let plan = prepare_hinted(&core, None, Some(2), None);
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 2, "Auto's own renegotiation, no third");
+        assert!(bodies[0].get("AudioStreamIndex").is_none(), "{}", bodies[0]);
+        assert_eq!(bodies[1]["AudioStreamIndex"], 2);
+        assert_eq!(plan.delivered_audio_index, Some(2));
+    }
+
+    /// docs/31 §4.1: a Cap start names the hinted streams beside the named version on its one
+    /// negotiation; an answer that delivers them needs no second.
+    #[test]
+    fn a_cap_start_names_a_remote_plays_hints_on_its_first_negotiation() {
+        let (item_json, mut playback_info_json) = compatible_codec_transcode_fixture();
+        english_subtitle_variants(&mut playback_info_json);
+        english_default_and_japanese_audio(&mut playback_info_json);
+        playback_info_json["MediaSources"][0]["TranscodingUrl"] =
+            "/videos/ms-4/master.m3u8?AudioStreamIndex=2&SubtitleStreamIndex=-1".into();
+        let (_dir, core, mock) = core_signed_in_against_mock(item_json, playback_info_json);
+        let mut settings = core.get_settings();
+        settings.playback_quality = PlaybackQuality::Cap { max_bps: 8_000_000 };
+        core.set_settings(settings);
+
+        let plan = prepare_hinted(&core, Some("ms-4"), Some(2), Some(-1));
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(
+            bodies.len(),
+            1,
+            "the hinted streams need no second negotiation"
+        );
+        assert_eq!(bodies[0]["MediaSourceId"], "ms-4");
+        assert_eq!(bodies[0]["AudioStreamIndex"], 2);
+        assert_eq!(bodies[0]["SubtitleStreamIndex"], -1);
+        assert_eq!(plan.delivered_audio_index, Some(2));
+    }
+
+    /// docs/31 §4.1: Direct Play never sends the hints; the player applies them locally.
+    #[test]
+    fn a_direct_play_start_sends_no_stream_hints() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1]);
+
+        let plan = prepare_hinted(&core, Some("ms-1"), Some(2), Some(3));
+
+        let bodies = mock.playback_info_bodies();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].get("AudioStreamIndex").is_none(), "{}", bodies[0]);
+        assert!(
+            bodies[0].get("SubtitleStreamIndex").is_none(),
+            "{}",
+            bodies[0]
+        );
+        assert_eq!(plan.play_method, PlayMethodFfi::DirectPlay);
+    }
+
     /// docs/18 §3.1: memory of the stream the server already delivers names nothing, so a Cap
     /// transcode stays on one negotiation.
     #[test]
@@ -11185,6 +11471,7 @@ pub(crate) mod tests {
             play_session_id: "attempt-a".to_string(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
             media: jellyfin_core::ReportMedia::Video,
+            volume: None,
         };
         let older = admit(&core);
         let _newer = admit(&core);
@@ -11222,6 +11509,7 @@ pub(crate) mod tests {
             play_session_id: "attempt-a".to_string(),
             play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
             media: jellyfin_core::ReportMedia::Video,
+            volume: None,
         };
         let claim = admit(&core);
         core.install_claimed_session(&claim, &client, ctx, Some(test_sidecars("attempt-a")))
@@ -11771,6 +12059,72 @@ pub(crate) mod tests {
         }
     }
 
+    /// docs/31 §7: a pause and facts for the session a pending fallback retired reach it, since its
+    /// stream still plays.
+    #[test]
+    fn a_retired_session_still_takes_a_pause_with_its_facts() {
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1, transcode_fixture().1]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let held = mock.hold_playback_info(1);
+        let fallback = spawn_fallback(&core, &a.play_session_id);
+        wait_for_playback_info_hits(&mock, 2);
+
+        let facts = crate::remote::ReportFactsFfi::Video {
+            audio: Some(3),
+            subtitle: None,
+            list: None,
+        };
+        core.report_facts(a.play_session_id.clone(), facts);
+        core.report_paused(a.play_session_id.clone(), true);
+        let paused = || {
+            mock.routes
+                .request_bodies_containing("POST", "/Sessions/Playing/Progress")
+                .into_iter()
+                .filter(|body| body["PlaySessionId"] == a.play_session_id.as_str())
+                .filter(|body| body["IsPaused"] == true)
+                .collect::<Vec<_>>()
+        };
+        wait_until(|| !paused().is_empty(), "the retired session's pause");
+        assert_eq!(paused()[0]["AudioStreamIndex"], 3);
+        held.open();
+        let _ = join(fallback);
+    }
+
+    /// docs/31 §7, docs/18 §2.1: `report_now`'s position counts as a reported one, so a retired
+    /// session abandoned after it ends there, not at the fallback's position.
+    #[test]
+    fn a_retired_session_abandoned_after_report_now_ends_at_its_position() {
+        let reported_ticks = 23_000_000;
+        let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1, transcode_fixture().1]);
+        let a = core
+            .prepare_playback_now("item-1".to_string(), false)
+            .expect("A plays");
+        let held = mock.hold_playback_info(1);
+        let fallback = spawn_fallback(&core, &a.play_session_id);
+        wait_for_playback_info_hits(&mock, 2);
+
+        let facts = crate::remote::ReportFactsFfi::Video {
+            audio: Some(3),
+            subtitle: None,
+            list: None,
+        };
+        core.report_now(a.play_session_id.clone(), reported_ticks, facts);
+        core.abandon_playback(a.play_session_id.clone());
+        held.open();
+        let _ = join(fallback);
+        wait_until(
+            || !stopped_positions(&mock, &a.play_session_id).is_empty(),
+            "the retired session's final report",
+        );
+        assert_eq!(
+            stopped_positions(&mock, &a.play_session_id)[0],
+            reported_ticks,
+            "ends where report_now left it"
+        );
+    }
+
     /// docs/18 §2.1: the session a fallback took over keeps reporting until the claim resolves, and
     /// each way the claim resolves ends it at the right position, exactly once.
     #[test]
@@ -12080,10 +12434,10 @@ pub(crate) mod tests {
     fn a_request_that_is_not_newer_than_the_last_admitted_is_refused_before_the_network() {
         let (_dir, core, mock) = auto_core(vec![direct_play_fixture().1]);
         let request = core.next_request();
-        core.prepare_playback("item-1".to_string(), false, request)
+        core.prepare_playback("item-1".to_string(), false, request, None, None, None)
             .expect("first use plays");
 
-        let again = core.prepare_playback("item-1".to_string(), false, request);
+        let again = core.prepare_playback("item-1".to_string(), false, request, None, None, None);
 
         assert!(matches!(again, Err(CoreError::StalePlaybackSession)));
         assert_eq!(mock.playback_info_hit_count(), 1);
@@ -12099,10 +12453,10 @@ pub(crate) mod tests {
             seq: older.seq + 1,
             ..older
         };
-        core.prepare_playback("item-2".to_string(), false, newer)
+        core.prepare_playback("item-2".to_string(), false, newer, None, None, None)
             .expect("the newer request plays");
 
-        let result = core.prepare_playback("item-1".to_string(), false, older);
+        let result = core.prepare_playback("item-1".to_string(), false, older, None, None, None);
 
         assert!(
             matches!(result, Err(CoreError::StalePlaybackSession)),
@@ -12124,7 +12478,7 @@ pub(crate) mod tests {
         change_account(&core);
         change_account(&core);
 
-        let result = core.prepare_playback("item-1".to_string(), false, request);
+        let result = core.prepare_playback("item-1".to_string(), false, request, None, None, None);
 
         assert!(
             matches!(result, Err(CoreError::AccountChanged)),
@@ -12182,6 +12536,9 @@ pub(crate) mod tests {
                     seq: core.next_request().seq,
                     account_epoch: playing_epoch,
                 },
+                None,
+                None,
+                None,
             )
             .expect("next item plays on the same account");
         assert_eq!(mock.playback_info_hit_count(), 2);
@@ -12272,6 +12629,9 @@ pub(crate) mod tests {
                 seq: core.next_request().seq,
                 account_epoch: a_epoch,
             },
+            None,
+            None,
+            None,
         )
         .expect("next-up negotiates with the parked mirror");
     }
@@ -12975,6 +13335,7 @@ pub(crate) mod tests {
                 play_session_id: "attempt-a".to_string(),
                 play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
                 media: jellyfin_core::ReportMedia::Video,
+                volume: None,
             };
             let claim = admit(&core);
             core.install_claimed_session(&claim, &client, ctx, Some(test_sidecars("attempt-a")))
@@ -16772,6 +17133,25 @@ pub(crate) mod tests {
             .expect("opens local SQLite only")
     }
 
+    /// docs/31 §4.1 enrichment fixture: a route mock, a client on it and an empty mirror.
+    pub(crate) fn remote_enrich_fixture() -> (
+        tempfile::TempDir,
+        Arc<JellybeamCore>,
+        RouteMockServer,
+        jellyfin_api::JellyfinClient,
+        media_cache::Mirror,
+    ) {
+        let (dir, core) = core_in_tempdir();
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        let client = jellyfin_api::JellyfinClient::from_token(
+            &mock.base_url,
+            JellybeamCore::identity_with("dev".to_string()),
+            "tok",
+        );
+        let mirror = test_mirror(&core.runtime, dir.path());
+        (dir, core, mock, client, mirror)
+    }
+
     /// A client whose token the test buses reject, owned by [`BUS_USER`].
     fn test_bus_client() -> jellyfin_api::JellyfinClient {
         jellyfin_api::JellyfinClient::from_token(
@@ -17190,13 +17570,12 @@ pub(crate) mod tests {
             if !bus.watching || !bus.rx.has_changed().unwrap_or(false) {
                 return None;
             }
-            let now = bus.rx.borrow_and_update().clone();
-            if !matches!(now, BusConnection::Unauthorized { .. }) {
+            let BusConnection::Unauthorized { owner } = bus.rx.borrow_and_update().clone() else {
                 return None;
-            }
+            };
             bus.watching = false;
             JellybeamCore::installed_bus_locked(state, &bus.rx)
-                .then(|| JellybeamCore::bus_reauthorization_locked(state, &now))
+                .then(|| JellybeamCore::bus_reauthorization_locked(state, owner.as_ref()))
                 .flatten()
                 .map(|(_, account)| account)
         }
@@ -17318,6 +17697,535 @@ pub(crate) mod tests {
             failures.len(),
             failures.first()
         );
+    }
+
+    const CAPS_PATH: &str = "/Sessions/Capabilities/Full";
+
+    /// [`unprobed_caps_mock`] on a core whose device probe already landed (fixed volume).
+    fn caps_mock(core: &JellybeamCore) -> (RouteMockServer, jellyfin_api::JellyfinClient) {
+        core.set_device_caps(DeviceCaps::default());
+        unprobed_caps_mock(core)
+    }
+
+    /// A mock answering capabilities posts, and a bus client against it owned by [`BUS_USER`].
+    fn unprobed_caps_mock(core: &JellybeamCore) -> (RouteMockServer, jellyfin_api::JellyfinClient) {
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        mock.route("POST", CAPS_PATH, 200, serde_json::json!({}));
+        let client = jellyfin_api::JellyfinClient::from_token(
+            &mock.base_url,
+            JellybeamCore::identity_with("dev".to_string()),
+            "tok",
+        )
+        .with_user_id(BUS_USER);
+        (mock, client)
+    }
+
+    fn caps_posts(mock: &RouteMockServer) -> Vec<serde_json::Value> {
+        mock.request_bodies_containing("POST", CAPS_PATH)
+    }
+
+    fn advertises(body: &serde_json::Value, command: &str) -> bool {
+        body["SupportedCommands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|c| c == command))
+    }
+
+    fn next_relayed(core: &JellybeamCore, bus: &mut TestBus) -> jellyfin_core::BusEvent {
+        core.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), bus.bundle_rx.recv())
+                .await
+                .expect("the forwarder relays")
+                .expect("bundle open")
+        })
+    }
+
+    /// docs/31 §3: each Connected of the installed bus posts once, and the events sent after
+    /// it (the connect's reconcile) wait for that post.
+    #[test]
+    fn every_installed_connect_posts_capabilities_once_before_its_reconcile() {
+        use jellyfin_core::{BusConnection, BusEvent};
+        let (_dir, core) = core_in_tempdir();
+        let (mock, client) = caps_mock(&core);
+        let held = mock.gate("POST", CAPS_PATH, 0);
+        let mut bus = spawn_test_bus(&core, client);
+
+        bus.connection.send_replace(BusConnection::Connected);
+        bus.real_tx.send(BusEvent::NeedsReconcile).expect("send");
+        wait_until(
+            || mock.hit_count("POST", CAPS_PATH) == 1,
+            "the connect's capabilities post",
+        );
+        assert!(
+            matches!(
+                bus.bundle_rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "the reconcile waits for the post"
+        );
+        held.open();
+        assert!(matches!(
+            next_relayed(&core, &mut bus),
+            BusEvent::NeedsReconcile
+        ));
+
+        let rows = [
+            (BusConnection::Disconnected, 1, "socket down: no post"),
+            (BusConnection::Connected, 2, "socket back up: one post"),
+            (BusConnection::Disconnected, 2, "socket down again: no post"),
+            (BusConnection::Connected, 3, "up again: one post"),
+        ];
+        for (connection, expected, row) in rows {
+            bus.connection.send_replace(connection);
+            bus.caught_up(&core);
+            assert_eq!(caps_posts(&mock).len(), expected, "{row}");
+        }
+        assert!(caps_posts(&mock)
+            .iter()
+            .all(|body| body["SupportsMediaControl"] == serde_json::json!(true)));
+        bus.finish(&core);
+    }
+
+    /// docs/31 §2, §3: a socket that connects before the device probe lands posts once, after
+    /// the probe, with what the probe found.
+    #[test]
+    fn a_cold_start_posts_capabilities_once_after_the_device_probe() {
+        let (_dir, core) = core_in_tempdir();
+        let (mock, client) = unprobed_caps_mock(&core);
+        let mut bus = spawn_test_bus(&core, client);
+
+        bus.connection
+            .send_replace(jellyfin_core::BusConnection::Connected);
+        bus.caught_up(&core);
+        core.set_device_caps(DeviceCaps {
+            volume_adjustable: true,
+            ..DeviceCaps::default()
+        });
+        bus.caught_up(&core);
+        let posts = caps_posts(&mock);
+        assert_eq!(posts.len(), 1, "connect then probe: one post");
+        assert!(
+            advertises(&posts[0], "SetVolume"),
+            "the post carries the probe"
+        );
+        bus.finish(&core);
+    }
+
+    /// docs/31 §3: a socket that connected while the mirror was still opening, so its watch
+    /// already reads Connected when `open_finish` spawns the forwarder, still posts once.
+    #[test]
+    fn a_bus_connected_before_its_forwarder_spawned_posts_capabilities_once() {
+        let (_dir, core) = core_in_tempdir();
+        let (mock, client) = caps_mock(&core);
+        let (real_tx, real_rx) = tokio::sync::broadcast::channel(16);
+        let (bundle_tx, bundle_rx) = tokio::sync::broadcast::channel(16);
+        let connection = install_test_bus(&core, bundle_tx.clone(), None);
+        connection.send_replace(jellyfin_core::BusConnection::Connected);
+        let forwarder = core.spawn_bus_forwarder(
+            real_rx,
+            bundle_tx,
+            installed_bus_connection(&core),
+            client,
+            core.account_epoch(),
+        );
+        let mut bus = TestBus {
+            connection,
+            real_tx,
+            bundle_rx,
+            forwarder: Some(forwarder),
+        };
+
+        bus.caught_up(&core);
+        assert_eq!(caps_posts(&mock).len(), 1, "the earlier connect posts once");
+        bus.finish(&core);
+    }
+
+    /// docs/31 §3, §8: a setting change while the socket is down posts nothing until the next
+    /// connect, which posts the latest; a change while up posts at once.
+    #[test]
+    fn a_setting_flip_while_disconnected_posts_on_the_next_connect_only() {
+        let (_dir, core) = core_in_tempdir();
+        let (mock, client) = caps_mock(&core);
+        let mut bus = spawn_test_bus(&core, client);
+        let with_remote = |enabled| Settings {
+            remote_control_enabled: enabled,
+            ..core.get_settings()
+        };
+
+        core.set_settings(with_remote(false));
+        bus.caught_up(&core);
+        assert!(
+            caps_posts(&mock).is_empty(),
+            "a flip while down posts nothing"
+        );
+
+        bus.connection
+            .send_replace(jellyfin_core::BusConnection::Connected);
+        bus.caught_up(&core);
+        let posts = caps_posts(&mock);
+        assert_eq!(posts.len(), 1, "the connect posts once");
+        assert_eq!(posts[0]["SupportsMediaControl"], serde_json::json!(false));
+
+        core.set_settings(with_remote(true));
+        bus.caught_up(&core);
+        let posts = caps_posts(&mock);
+        assert_eq!(posts.len(), 2, "a flip while up posts once");
+        assert_eq!(posts[1]["SupportsMediaControl"], serde_json::json!(true));
+        bus.finish(&core);
+    }
+
+    /// docs/31 §4.4: the volume probe landing reposts with the volume commands; the same
+    /// caps again post nothing.
+    #[test]
+    fn a_volume_probe_landing_reposts_with_the_volume_commands() {
+        let (_dir, core) = core_in_tempdir();
+        let (mock, client) = caps_mock(&core);
+        let mut bus = spawn_test_bus(&core, client);
+        bus.connection
+            .send_replace(jellyfin_core::BusConnection::Connected);
+        bus.caught_up(&core);
+        assert!(!advertises(&caps_posts(&mock)[0], "SetVolume"));
+
+        let adjustable = DeviceCaps {
+            volume_adjustable: true,
+            ..DeviceCaps::default()
+        };
+        core.set_device_caps(adjustable.clone());
+        bus.caught_up(&core);
+        let posts = caps_posts(&mock);
+        assert_eq!(posts.len(), 2, "the probe reposts");
+        assert!(advertises(&posts[1], "SetVolume"));
+
+        core.set_device_caps(adjustable);
+        bus.caught_up(&core);
+        assert_eq!(caps_posts(&mock).len(), 2, "unchanged caps post nothing");
+        bus.finish(&core);
+    }
+
+    /// docs/31 §3: a 401 on the post asks to reauthorize once; the bus posts and asks no
+    /// more, a later socket rejection included.
+    #[test]
+    fn a_rejected_capabilities_post_asks_to_reauthorize_once() {
+        use jellyfin_core::BusConnection;
+        let (_dir, core) = core_in_tempdir();
+        let (mock, client) = caps_mock(&core);
+        mock.route("POST", CAPS_PATH, 401, serde_json::json!({}));
+        let recorder = Arc::new(AskRecorder::default());
+        core.set_change_listener(recorder.clone());
+        let mut bus = spawn_test_bus(&core, client);
+
+        bus.connection.send_replace(BusConnection::Connected);
+        bus.caught_up(&core);
+        let asks = recorder.asks();
+        assert_eq!(asks.len(), 1, "the rejected post asks");
+        assert_eq!(asks[0].user_id, BUS_USER);
+
+        for connection in [
+            BusConnection::Disconnected,
+            BusConnection::Connected,
+            rejected(BUS_USER),
+        ] {
+            bus.connection.send_replace(connection);
+            bus.caught_up(&core);
+        }
+        assert_eq!(
+            mock.hit_count("POST", CAPS_PATH),
+            1,
+            "a dead link posts no more"
+        );
+        assert_eq!(recorder.asks().len(), 1, "one ask per bus");
+        bus.finish(&core);
+    }
+
+    /// Records every delivered remote command with its epoch; reads a fixed volume.
+    struct RemoteRecorder(Mutex<std::sync::mpsc::Sender<(u64, crate::remote::RemoteCommandFfi)>>);
+
+    impl crate::remote::RemoteControlListener for RemoteRecorder {
+        fn on_command(
+            &self,
+            epoch: u64,
+            command: crate::remote::RemoteCommandFfi,
+        ) -> Result<(), crate::error::CallbackError> {
+            let _ = self
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .send((epoch, command));
+            Ok(())
+        }
+
+        fn volume(&self) -> Result<crate::remote::VolumeFfi, crate::error::CallbackError> {
+            Ok(crate::remote::VolumeFfi {
+                level: 37,
+                muted: true,
+            })
+        }
+    }
+
+    fn remote_recorder(
+        core: &JellybeamCore,
+    ) -> std::sync::mpsc::Receiver<(u64, crate::remote::RemoteCommandFfi)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        core.set_remote_control_listener(Arc::new(RemoteRecorder(Mutex::new(tx))));
+        rx
+    }
+
+    fn remote_frame(command: jellyfin_api::RemoteCommand) -> jellyfin_core::BusEvent {
+        jellyfin_core::BusEvent::Server(jellyfin_api::ServerEvent::Remote(command))
+    }
+
+    /// docs/31 §4.6, §8, §9: a command reaches the listener, tagged with the bus's epoch, only
+    /// while the setting is on and only when supported; none reaches the change stream.
+    #[test]
+    fn remote_frames_reach_the_listener_only_while_on_and_never_the_change_stream() {
+        use crate::remote::{PlaystateCommandFfi, RemoteCommandFfi};
+        use jellyfin_api::{GeneralCommand, PlaystateCommand, RemoteCommand};
+        let (_dir, core) = core_in_tempdir();
+        let delivered = remote_recorder(&core);
+        let mut bus = spawn_test_bus(&core, test_bus_client());
+        let with_remote = |enabled| Settings {
+            remote_control_enabled: enabled,
+            ..core.get_settings()
+        };
+
+        core.set_settings(with_remote(false));
+        bus.caught_up(&core);
+        let rounds = [
+            vec![remote_frame(RemoteCommand::General(GeneralCommand::Mute))],
+            vec![
+                remote_frame(RemoteCommand::Unsupported("TakeScreenshot".into())),
+                remote_frame(RemoteCommand::Playstate(PlaystateCommand::Pause)),
+            ],
+        ];
+        for (round, frames) in rounds.into_iter().enumerate() {
+            if round == 1 {
+                core.set_settings(with_remote(true));
+            }
+            for frame in frames {
+                bus.real_tx.send(frame).expect("send");
+            }
+            bus.real_tx
+                .send(jellyfin_core::BusEvent::NeedsReconcile)
+                .expect("send");
+            // The marker relayed means every frame before it was handled under this round's setting.
+            assert!(
+                matches!(
+                    next_relayed(&core, &mut bus),
+                    jellyfin_core::BusEvent::NeedsReconcile
+                ),
+                "a Remote frame never reaches the change stream"
+            );
+        }
+        let (epoch, command) = delivered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the Pause is delivered");
+        assert_eq!(epoch, core.account_epoch());
+        assert!(
+            command
+                == RemoteCommandFfi::Playstate {
+                    command: PlaystateCommandFfi::Pause
+                },
+            "the off-setting Mute and the unsupported command were dropped"
+        );
+        bus.finish(&core);
+    }
+
+    /// docs/31 §8: a command admitted while the setting was on reaches the listener only if the
+    /// setting is still on when it is delivered.
+    #[test]
+    fn a_command_admitted_while_on_is_dropped_if_the_setting_is_off_at_delivery() {
+        use crate::remote::{PlaystateCommandFfi, RemoteCommandFfi};
+        use jellyfin_api::{PlaystateCommand, RemoteCommand};
+        let (_dir, core) = core_in_tempdir();
+        let delivered = remote_recorder(&core);
+        let (bundle_tx, _bundle_rx) = tokio::sync::broadcast::channel(16);
+        let _connection = install_test_bus(&core, bundle_tx, None);
+        let with_remote = |enabled| Settings {
+            remote_control_enabled: enabled,
+            ..core.get_settings()
+        };
+        let state = Arc::downgrade(&core.state);
+        let epoch = core.account_epoch();
+
+        core.set_settings(with_remote(true));
+        let input = *core.lock_state().remote_caps.borrow();
+        let admitted = crate::remote::admit_remote(
+            RemoteCommand::Playstate(PlaystateCommand::Pause),
+            input,
+            &state,
+            &installed_bus_connection(&core),
+            &test_bus_client(),
+        )
+        .expect("admitted while on");
+        let command = core.runtime.block_on(admitted).expect("ready");
+
+        core.set_settings(with_remote(false));
+        crate::remote::deliver_remote(&state, epoch, command.clone());
+        assert!(
+            delivered.try_recv().is_err(),
+            "the setting went off between admission and delivery"
+        );
+
+        core.set_settings(with_remote(true));
+        crate::remote::deliver_remote(&state, epoch, command);
+        let (_, got) = delivered.try_recv().expect("delivered while on");
+        assert!(
+            got == RemoteCommandFfi::Playstate {
+                command: PlaystateCommandFfi::Pause
+            },
+            "the admitted Pause"
+        );
+    }
+
+    /// docs/31 §4.1: a Play missing from the mirror is classified by one lookup and delivered as
+    /// its family with canonical ids, before a command sent after it; the forwarder keeps relaying
+    /// while the lookup is held.
+    #[test]
+    fn a_remote_play_is_delivered_enriched_and_ahead_of_a_later_command() {
+        use crate::remote::{PlayCommandFfi, RemoteCommandFfi, RemoteItems};
+        use jellyfin_api::{PlayCommand, PlayRequest, PlaystateCommand, RemoteCommand};
+        const MOVIE: &str = "00000000-0000-4000-8000-000000000a01";
+        let (_dir, core) = core_in_tempdir();
+        let (mock, client) = caps_mock(&core);
+        mock.route(
+            "GET",
+            "/Items",
+            200,
+            serde_json::json!({
+                "Items": [{"Id": MOVIE, "Name": "Sample Movie", "Type": "Movie"}],
+                "TotalRecordCount": 1
+            }),
+        );
+        let held = mock.gate("GET", "/Items", 0);
+        let delivered = remote_recorder(&core);
+        let mut bus = spawn_test_bus(&core, client);
+
+        let play = PlayRequest {
+            item_ids: vec![MOVIE.replace('-', "")],
+            start_index: None,
+            start_position_ticks: Some(600_000_000),
+            play_command: PlayCommand::PlayNow,
+            media_source_id: None,
+            audio_stream_index: None,
+            subtitle_stream_index: None,
+        };
+        let send = |event| bus.real_tx.send(event).expect("send");
+        send(remote_frame(RemoteCommand::Play(play)));
+        send(remote_frame(RemoteCommand::Playstate(
+            PlaystateCommand::Pause,
+        )));
+        wait_until(
+            || mock.hit_count("GET", "/Items") == 1,
+            "the Play's item lookup",
+        );
+        bus.caught_up(&core);
+        held.open();
+
+        let (_, first) = delivered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the Play is delivered");
+        let RemoteCommandFfi::Play { play } = first else {
+            panic!("the Play arrives first");
+        };
+        assert!(
+            play.items
+                == RemoteItems::Video {
+                    ids: vec![MOVIE.to_string()]
+                },
+            "the movie, canonical"
+        );
+        assert_eq!(play.start_index, 0);
+        assert_eq!(play.start_position_ticks, Some(600_000_000));
+        assert_eq!(play.play_command, PlayCommandFfi::PlayNow);
+        let (_, second) = delivered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the Pause is delivered");
+        assert!(matches!(second, RemoteCommandFfi::Playstate { .. }));
+        bus.finish(&core);
+    }
+
+    /// docs/31 §4.2, §4.4, §7: `report_now` sends a Progress with its facts and the listener's
+    /// volume to the session it names; another id reports nothing.
+    #[test]
+    fn report_now_sends_a_progress_with_its_facts_and_the_listeners_volume() {
+        let (_dir, core) = core_in_tempdir();
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        let client = jellyfin_api::JellyfinClient::from_token(
+            &mock.base_url,
+            core.client_identity("http://example.test"),
+            "tok",
+        );
+        let _delivered = remote_recorder(&core);
+        let ctx = jellyfin_core::ReportContext {
+            item_id: "item-1".to_string(),
+            media_source_id: "ms-1".to_string(),
+            play_session_id: "attempt-a".to_string(),
+            play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+            media: jellyfin_core::ReportMedia::Video,
+            volume: core.report_volume(),
+        };
+        let claim = admit(&core);
+        core.install_claimed_session(&claim, &client, ctx, Some(test_sidecars("attempt-a")))
+            .expect("installs");
+
+        let facts = || crate::remote::ReportFactsFfi::Video {
+            audio: Some(2),
+            subtitle: Some(-1),
+            list: None,
+        };
+        core.report_now("attempt-b".to_string(), 999, facts());
+        core.report_now("attempt-a".to_string(), 1234, facts());
+        let progress = || mock.request_bodies_containing("POST", "/Sessions/Playing/Progress");
+        wait_until(|| !progress().is_empty(), "the immediate Progress");
+        let body = &progress()[0];
+        assert_eq!(body["PositionTicks"], 1234);
+        assert_eq!(body["AudioStreamIndex"], 2);
+        assert_eq!(body["SubtitleStreamIndex"], -1);
+        assert_eq!(body["VolumeLevel"], 37);
+        assert_eq!(body["IsMuted"], true);
+    }
+
+    /// docs/31 §7: `report_facts` sends nothing itself; the next report of the session it names
+    /// carries its facts, and another id's facts are dropped.
+    #[test]
+    fn report_facts_rides_the_next_report_of_the_session_it_names() {
+        let (_dir, core) = core_in_tempdir();
+        let mock = core.runtime.block_on(RouteMockServer::start());
+        let client = jellyfin_api::JellyfinClient::from_token(
+            &mock.base_url,
+            core.client_identity("http://example.test"),
+            "tok",
+        );
+        let ctx = jellyfin_core::ReportContext {
+            item_id: "item-1".to_string(),
+            media_source_id: "ms-1".to_string(),
+            play_session_id: "attempt-a".to_string(),
+            play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
+            media: jellyfin_core::ReportMedia::Video,
+            volume: None,
+        };
+        let claim = admit(&core);
+        core.install_claimed_session(&claim, &client, ctx, Some(test_sidecars("attempt-a")))
+            .expect("installs");
+
+        let facts = |audio| crate::remote::ReportFactsFfi::Video {
+            audio: Some(audio),
+            subtitle: None,
+            list: None,
+        };
+        core.report_facts("attempt-a".to_string(), facts(3));
+        core.report_facts("attempt-b".to_string(), facts(5));
+        let progress = || mock.request_bodies_containing("POST", "/Sessions/Playing/Progress");
+        // An immediate report would be out well inside this; the ticker's first is 10 s away.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            progress().is_empty(),
+            "the facts send no report of their own"
+        );
+        core.report_paused("attempt-a".to_string(), true);
+        wait_until(|| !progress().is_empty(), "the pause's Progress");
+        let body = &progress()[0];
+        assert_eq!(body["IsPaused"], true);
+        assert_eq!(body["AudioStreamIndex"], 3);
     }
 
     /// docs/13 About > server info: a Server flood that laps the forwarder must not lose Connected.

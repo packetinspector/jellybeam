@@ -85,6 +85,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.boundsInRoot
@@ -427,7 +428,21 @@ fun DetailScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // docs/19 §1, docs/31 §4.5: the Menu key toggles the panel the door opens, so a remote's
+    // ToggleContextMenu (sent as this key) reaches it; consumed on both halves so a hold acts once.
+    val menuKey = Modifier.onKeyEvent { event ->
+        if (event.key != Key.Menu) return@onKeyEvent false
+        if (event.type == KeyEventType.KeyUp) {
+            if (menu == null) {
+                memory.captureInvoker()
+                viewModel.openMenu()
+            } else {
+                viewModel.closeMenu()
+            }
+        }
+        true
+    }
+    Box(modifier = Modifier.fillMaxSize().then(menuKey)) {
         // The action panel is a sibling of the per-type body, not a descendant, so a body's root
         // `onFocusChanged` reports `hasFocus = false` while the panel holds focus even though
         // focus is legitimately still on this page. [panelOpen] spans the panel's whole composed

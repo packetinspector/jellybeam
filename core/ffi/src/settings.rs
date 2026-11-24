@@ -198,6 +198,11 @@ fn default_show_clock() -> bool {
     true
 }
 
+/// docs/31 §8: remote control is on unless the viewer turned it off.
+fn default_remote_control_enabled() -> bool {
+    true
+}
+
 /// [`Settings::crash_reports_enabled`]'s real default -- `true`, not
 /// `bool`'s zero value: docs/21 §1.3/§6 "Crash reports" is opt-out, not
 /// opt-in.
@@ -535,6 +540,10 @@ pub struct Settings {
     #[serde(default = "default_ambient_style")]
     #[uniffi(default = "cover")]
     pub ambient_style: String,
+    /// docs/31 §8: whether this TV advertises and answers remote control.
+    #[serde(default = "default_remote_control_enabled")]
+    #[uniffi(default = true)]
+    pub remote_control_enabled: bool,
 }
 
 impl Default for Settings {
@@ -590,6 +599,7 @@ impl Default for Settings {
             visualizer_pattern: default_visualizer_pattern(),
             visualizer_auto_change: default_visualizer_auto_change(),
             ambient_style: default_ambient_style(),
+            remote_control_enabled: default_remote_control_enabled(),
         }
     }
 }
@@ -697,6 +707,7 @@ mod tests {
 
     fn sample() -> Settings {
         Settings {
+            remote_control_enabled: false,
             automatic_update_checks: true,
             next_up_cutoff_days: Some(30),
             next_up_rewatching: true,
@@ -1549,6 +1560,31 @@ mod tests {
 
         let loaded: Settings = serde_json::from_value(json).expect("deserialize");
         assert_eq!(loaded, original);
+    }
+
+    /// Pins [`Settings::remote_control_enabled`]'s JSON shape at its non-default value.
+    #[test]
+    fn remote_control_enabled_round_trips_through_json() {
+        let original = Settings {
+            remote_control_enabled: false,
+            ..Settings::default()
+        };
+        let json = serde_json::to_value(&original).expect("serialize");
+        assert_eq!(json["remote_control_enabled"], false);
+
+        let loaded: Settings = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(loaded, original);
+    }
+
+    /// docs/31 §8: `remote_control_enabled` absent loads as on, not `bool`'s zero value.
+    #[test]
+    fn load_tolerates_a_settings_json_written_before_remote_control_existed() {
+        let mut raw = serde_json::to_value(Settings::default()).expect("serialize");
+        raw.as_object_mut()
+            .expect("object")
+            .remove("remote_control_enabled");
+        let loaded = load_from_json(raw);
+        assert!(loaded.remote_control_enabled);
     }
 
     /// `crash_reports_enabled` absent falls back to `true` (docs/21 §6

@@ -164,4 +164,46 @@ class IndexRailModelTest {
     fun `entryIndexForOffset is zero for an empty list`() {
         assertEquals(0, IndexRailModel.entryIndexForOffset(emptyList(), 42))
     }
+
+    // ---- one-letter steps (docs/16 §4.4, docs/31 §4.5) ----------------------
+
+    private val stepEntries = listOf(
+        RailEntry("#", 0, 0),
+        RailEntry("A", 0, 4),
+        RailEntry("B", 4, 0),
+        RailEntry("C", 4, 2),
+        RailEntry("D", 6, 0),
+    )
+
+    @Test
+    fun `a letter step skips empty letters both ways`() {
+        assertEquals(3, IndexRailModel.stepIndex(stepEntries, 1, forward = true))
+        assertEquals(1, IndexRailModel.stepIndex(stepEntries, 3, forward = false))
+    }
+
+    @Test
+    fun `a letter step stops at either end and past only empty letters`() {
+        assertEquals(null, IndexRailModel.stepIndex(stepEntries, 1, forward = false))
+        assertEquals(null, IndexRailModel.stepIndex(stepEntries, 3, forward = true))
+        assertEquals(null, IndexRailModel.stepIndex(emptyList(), 0, forward = true))
+    }
+
+    // ---- remote letter steps (docs/31 §4.5) --------------------------------
+
+    private val letters = listOf(RailEntry("A", 0, 2), RailEntry("B", 2, 0), RailEntry("C", 2, 3), RailEntry("D", 5, 1))
+
+    @Test
+    fun `a step sent while the last one is still landing walks on from that letter`() {
+        assertEquals(3, IndexRailModel.remoteStep(letters, railIndex = 0, gridEntry = 0, railFocused = false, landingAt = 2, forward = true))
+    }
+
+    @Test
+    fun `with no step landing a step walks from the grid's poster, not a stale rail entry`() {
+        assertEquals(2, IndexRailModel.remoteStep(letters, railIndex = 3, gridEntry = 0, railFocused = false, landingAt = null, forward = true))
+    }
+
+    @Test
+    fun `while the rail holds focus a step walks from the rail's entry`() {
+        assertEquals(0, IndexRailModel.remoteStep(letters, railIndex = 2, gridEntry = 3, railFocused = true, landingAt = 3, forward = false))
+    }
 }

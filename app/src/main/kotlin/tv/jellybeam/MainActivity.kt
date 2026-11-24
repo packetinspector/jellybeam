@@ -10,6 +10,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.annotation.SuppressLint
 import android.view.FrameMetrics
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.ViewTreeObserver
 import android.view.Window
@@ -103,7 +104,13 @@ import tv.jellybeam.perf.ProfileStatus
 import tv.jellybeam.player.ExternalPlaybackContract
 import tv.jellybeam.player.ExternalPlaybackIntentResult
 import tv.jellybeam.player.HostEvent
+import tv.jellybeam.player.DropWhy
 import tv.jellybeam.player.PlaybackActivity
+import tv.jellybeam.player.RemoteUi
+import tv.jellybeam.player.DISPLAY_CONTENT_DIAG
+import tv.jellybeam.player.endAmbient
+import tv.jellybeam.player.endAmbientBefore
+import tv.jellybeam.player.pressKey
 import tv.jellybeam.player.SyncPlayExecutor
 import tv.jellybeam.player.authorizationRecoveryCoordinator
 import tv.jellybeam.player.PlayerFlow
@@ -199,6 +206,31 @@ class MainActivity : ComponentActivity() {
     /** docs/29 §6: set by [AmbientHost] while a music session exists; it sees every key first, `true` when ambient consumed it. */
     internal var ambientKeys: ((KeyEvent) -> Boolean)? = null
 
+    /** docs/31 §4.5: what a remote's browsing ops reach, filled by the rail and stack that claim them. */
+    private val remoteTargets = RemoteTargets()
+
+    /** docs/31 §4.5: this instance's port on the remote bridge; nothing takes an op unless it is resumed. */
+    /** docs/29 §6: [ambientKeys] as a port that is `false` while no music session exists. */
+    internal val ambient: (KeyEvent) -> Boolean = { ambientKeys?.invoke(it) == true }
+
+    private val remoteUi = RemoteUi { op ->
+        lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+            remoteTargets.take(op.also { endAmbientBefore(it, ambient) }, ::typeRemote) { key ->
+                pressKey(key, ::dispatchKeyEvent, onBackPressedDispatcher::onBackPressed, ambient)
+            }
+    }
+
+    /**
+     * docs/31 §4.5: [text] typed as key presses into the focused field, which keeps its own cursor and
+     * IME; false with no field focused. Compose's view is a text editor only while a field holds input.
+     */
+    private fun typeRemote(text: String): Boolean {
+        if (window.currentFocus?.onCheckIsTextEditor() != true) return false
+        val keys = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
+        keystrokes(text) { keys.getEvents(charArrayOf(it)) }.forEach(::dispatchKeyEvent)
+        return true
+    }
+
     /** docs/15 §4: a D-pad key while nothing is focused re-enters the top layer instead of a framework search. */
     @SuppressLint("RestrictedApi") // lint flags every ComponentActivity override of this framework method
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
@@ -218,8 +250,12 @@ class MainActivity : ComponentActivity() {
                 start = { startPlayer(app, it) },
                 signInRequired = { Toast.makeText(app, R.string.external_playback_sign_in_required, Toast.LENGTH_LONG).show() },
                 leaveGroup = SyncPlayExecutor::leave,
+                remoteDropped = { AppGraph.remoteControl.dropped("request", DropWhy.NotStarted) },
+                // docs/31 §5: singleTask reorders this instance forward; a launch from behind is allowed while our mini player is visible.
+                showMain = { app.startActivity(Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION)) },
             ),
         )
+        AppGraph.remoteControl.ui = remoteUi
         arrive(createArrival(restored = savedInstanceState != null, parseExternalIntent(intent)))
         // docs/21 §1.3: the crash dialog never appears on a launch headed straight into
         // playback/detail -- computed once from this Activity's own launch intent, not the owner's
@@ -227,7 +263,7 @@ class MainActivity : ComponentActivity() {
         val launchedForExternalPlayback = isExternalPlaybackIntent(intent)
         setContent {
             ProvideAccent {
-                CompositionLocalProvider(LocalAmbientBlock provides remember { AmbientBlocks() }) {
+                CompositionLocalProvider(LocalAmbientBlock provides remember { AmbientBlocks() }, LocalRemoteTargets provides remoteTargets) {
                     JellybeamRoot(
                         onExitApp = ::finish,
                         launchedForExternalPlayback = launchedForExternalPlayback,
@@ -340,6 +376,8 @@ class MainActivity : ComponentActivity() {
      */
     override fun onDestroy() {
         if (!isFinishing) playbackActivityTracker.send(HostEvent.RootChanged(PlayerFlow.Root.Pending))
+        // A newer instance may have attached its port first; only this one's is detached, so a dead Activity is never held.
+        if (AppGraph.remoteControl.ui === remoteUi) AppGraph.remoteControl.ui = RemoteUi.Absent
         super.onDestroy()
     }
 
@@ -445,7 +483,7 @@ private fun startPlayer(app: Context, req: Req<Req.Kind.Play>) {
     AppGraph.beforePlayback {
         val started = playbackActivityTracker.confirmStart(req.id) && try {
             app.startActivity(
-                PlaybackActivity.intent(app, launch.item, launch.fromBeginning, launch.startMs, launch.group).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PlaybackActivity.intent(app, launch).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
             true
         } catch (e: Exception) {
@@ -502,30 +540,54 @@ private class FrameMetricsReporter(private val handler: Handler) : Window.OnFram
  * The OPEN_DETAIL branch of the external-request effect: consuming clears the effect key and
  * cancels this coroutine, so [consume] runs last on every path that completes normally.
  * [stillPending] says whether [request] survived the card lookup; an account change that dropped it
- * while the lookup ran must neither navigate nor consume (docs/18 §2.1).
+ * while the lookup ran must neither navigate nor consume (docs/18 §2.1). A library open (docs/31 §4.3) reads no card:
+ * it lands as the drawer's pick or leaves one [dropped], then consumes. A remote open that can't land, or finds [stackCovered] when it would, drops the same way.
  */
 internal suspend fun handleOpenDetail(
     request: Req<Req.Kind.OpenDetail>,
     readyStack: NavBackStack,
     gateway: CoreGateway,
+    dropped: () -> Unit,
+    stackCovered: () -> Boolean,
+    endAmbient: () -> Unit,
     stillPending: () -> Req<Req.Kind.OpenDetail>?,
     consume: () -> Unit,
     navigate: (NavBackStack) -> Unit,
 ) {
-    if (readyStack.isHomeRooted) {
-        // docs/10 `detail.push` starts at the request, so the card lookup is counted.
-        PerfLog.markDetailPush()
-        val card = resolveLibraryCard(gateway, request.kind.item)
-        if (stillPending() != request) return
-        if (card != null) {
-            val current = readyStack.current
-            val newStack = if (current is Screen.Detail && current.card.itemType == EPISODE_ITEM_TYPE) {
-                readyStack.replaceDetail(card)
-            } else {
-                readyStack.pushDetail(card)
-            }
-            navigate(newStack)
+    val remote = request.origin == Req.Origin.Remote
+    // docs/31 §4.3: a remote open never moves a stack a prompt or account surface hides.
+    if (remote && stackCovered()) return run { dropped(); consume() }
+    // docs/31 §4.3, §4.5, docs/29 §6: the cover is re-read at landing, since the lookup suspends; a remote open that lands ends a drawing ambient first.
+    val land = { stack: NavBackStack ->
+        if (remote && stackCovered()) {
+            dropped()
+        } else {
+            if (remote) endAmbient()
+            navigate(stack)
         }
+    }
+    if (request.kind.library) {
+        val opened = libraryOpenStack(readyStack, gateway.viewsState.value, request.kind.item)
+        if (opened != null) land(opened) else dropped()
+        consume()
+        return
+    }
+    // docs/31 §4.3: a remote open that can't land leaves one drop line; any other origin is consumed quietly.
+    if (!readyStack.isHomeRooted) return run { if (remote) dropped(); consume() }
+    // docs/10 `detail.push` starts at the request, so the card lookup is counted.
+    PerfLog.markDetailPush()
+    val card = resolveLibraryCard(gateway, request.kind.item)
+    if (stillPending() != request) return
+    if (card != null) {
+        val current = readyStack.current
+        val newStack = if (current is Screen.Detail && current.card.itemType == EPISODE_ITEM_TYPE) {
+            readyStack.replaceDetail(card)
+        } else {
+            readyStack.pushDetail(card)
+        }
+        land(newStack)
+    } else if (remote) {
+        dropped()
     }
     consume()
 }
@@ -1051,6 +1113,8 @@ private fun JellybeamRoot(
     // docs/05 "external": the owner holds an OPEN_DETAIL on Home until it navigates here.
     val trackerState = playbackActivityTracker.state.collectAsState()
     val detailRequest by remember { derivedStateOf { trackerState.value.waitingDetail() } }
+    // docs/31 §4.3: a surface over the stack that a remote open must not move under.
+    val stackCovered = { crashPromptVisible || addServerActive || manageServersActive || reauthorizationTarget != null }
     LaunchedEffect(detailRequest, stack) {
         val request = detailRequest ?: return@LaunchedEffect
         val readyStack = stack ?: return@LaunchedEffect
@@ -1058,6 +1122,9 @@ private fun JellybeamRoot(
             request = request,
             readyStack = readyStack,
             gateway = gateway,
+            dropped = { AppGraph.remoteControl.dropped(DISPLAY_CONTENT_DIAG, DropWhy.NotApplicable) },
+            stackCovered = stackCovered,
+            endAmbient = { (context as? MainActivity)?.let { endAmbient(it.ambient) } },
             stillPending = { playbackActivityTracker.state.value.waitingDetail() },
             consume = { playbackActivityTracker.send(HostEvent.DetailDone(request.id)) },
             navigate = { navigate(it) },
@@ -1292,6 +1359,12 @@ private fun JellybeamRoot(
             }
 
             if (stack.isHomeRooted) {
+                // docs/31 §4.5: a remote's Go* and library opens take the drawer's path while no prompt covers the stack.
+                val remoteNavigate = LocalRemoteTargets.current?.navigate
+                DisposableEffect(remoteNavigate, crashPromptShown) {
+                    if (!crashPromptShown) remoteNavigate?.claim(navigateFromDrawer)
+                    onDispose { remoteNavigate?.release(navigateFromDrawer) }
+                }
                 val entries = stack.entries
                 val topIndex = entries.lastIndex
                 val entryKeys = stack.entryKeys()

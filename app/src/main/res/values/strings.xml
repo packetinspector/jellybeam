@@ -274,6 +274,8 @@
     <string name="settings_desc_playback_autoplay_delay">How long to wait before autoplay starts the next episode.</string>
     <string name="settings_mini_player">Mini player</string>
     <string name="settings_desc_playback_mini_player">Back or Home during playback shrinks the video into a corner window that keeps playing while you browse.</string>
+    <string name="settings_remote_control">Allow remote control</string>
+    <string name="settings_desc_playback_remote_control">Let the Jellyfin app, Home Assistant and other controllers play and control media on this TV.</string>
     <!-- docs/29 §1: shown once the server sent a loudness gain for any song. -->
     <string name="settings_normalize_volume">Normalize volume</string>
     <string name="settings_desc_playback_normalize_volume">Plays songs at a similar loudness, using the gain your server measured for each track or album. Music only.</string>

@@ -12,9 +12,10 @@ import org.junit.Test
 /** docs/17 §2: the MediaSession's commands reach the view model's own stop/seek/toggle paths. */
 class MediaKeyRouterTest {
     private val calls = mutableListOf<String>()
-    private var playing = true
     private var forwardMs = 30_000L
     private var backMs = 10_000L
+    private var hasNext = true
+    private var hasPrevious = true
 
     private fun router() = MediaKeyRouter(
         stop = { calls += "stop" },
@@ -22,8 +23,12 @@ class MediaKeyRouterTest {
         seekToMs = { calls += "seekToMs($it)" },
         skipForwardMs = { forwardMs },
         skipBackMs = { backMs },
-        playWhenReady = { playing },
-        togglePlayPause = { calls += "toggle" },
+        play = { calls += "play" },
+        pause = { calls += "pause" },
+        next = { calls += "next" },
+        previous = { calls += "previous" },
+        hasNext = { hasNext },
+        hasPrevious = { hasPrevious },
     )
 
     @Test
@@ -54,29 +59,26 @@ class MediaKeyRouterTest {
         assertEquals(listOf("seekToMs(90000)"), calls)
     }
 
+    /** docs/31 §4.2: the view model's idempotent pause and unpause, the ones a remote uses. */
     @Test
-    fun `play and pause toggle only when they change the intent`() {
+    fun `play and pause reach the view model's own play and pause`() {
         val router = router()
 
-        playing = true
         router.onPlay()
         router.onPause()
-        playing = false
-        router.onPause()
-        router.onPlay()
 
-        assertEquals(listOf("toggle", "toggle"), calls)
+        assertEquals(listOf("play", "pause"), calls)
     }
 
     @Test
     fun `every transport key reaches the session hidden or shown, and fast forward and rewind reveal a hidden OSD`() {
-        val transport = listOf(Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause, Key.MediaStop, Key.MediaFastForward, Key.MediaRewind)
+        val transport = listOf(Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause, Key.MediaStop, Key.MediaNext, Key.MediaPrevious, Key.MediaFastForward, Key.MediaRewind)
         for (key in transport) {
             val revealing = key == Key.MediaFastForward || key == Key.MediaRewind
             assertEquals("$key hidden", if (revealing) MediaKeyRoute.SESSION_REVEAL_OSD else MediaKeyRoute.SESSION, MediaKeys.route(key, osdVisible = false))
             assertEquals("$key shown", MediaKeyRoute.SESSION, MediaKeys.route(key, osdVisible = true))
         }
-        for (key in listOf(Key.DirectionLeft, Key.DirectionCenter, Key.Back, Key.MediaNext, Key.MediaPrevious, Key.PageUp)) {
+        for (key in listOf(Key.DirectionLeft, Key.DirectionCenter, Key.Back, Key.PageUp)) {
             assertEquals("$key", MediaKeyRoute.NOT_TRANSPORT, MediaKeys.route(key, osdVisible = false))
         }
     }
@@ -101,7 +103,6 @@ class MediaKeyRouterTest {
     fun `Play and PlayPause at ENDED or IDLE reach the router and never prepare or restart the wrapped player`() {
         for (state in listOf(Player.STATE_ENDED, Player.STATE_IDLE)) {
             calls.clear()
-            playing = false
             val session = RoutedPlayer(wrappedIn(state), router())
 
             Util.handlePlayButtonAction(session)
@@ -109,7 +110,7 @@ class MediaKeyRouterTest {
             session.setPlayWhenReady(true)
             session.setPlayWhenReady(false)
 
-            assertEquals("state $state: only the router acts", listOf("toggle", "toggle", "toggle"), calls)
+            assertEquals("state $state: only the router acts", listOf("play", "play", "play", "pause"), calls)
         }
     }
 
@@ -136,7 +137,6 @@ class MediaKeyRouterTest {
         } as Player
         val session = RoutedPlayer(wrapped, router())
 
-        playing = false
         session.stop()
         session.seekForward()
         session.seekBack()
@@ -144,11 +144,43 @@ class MediaKeyRouterTest {
         session.seekTo(0, 6_000L)
         session.play()
         session.pause()
+        session.seekToNext()
+        session.seekToNextMediaItem()
+        session.seekToPrevious()
+        session.seekToPreviousMediaItem()
 
         assertEquals(
-            listOf("stop", "seekBy(30000)", "seekBy(-10000)", "seekToMs(5000)", "seekToMs(6000)", "toggle"),
+            listOf("stop", "seekBy(30000)", "seekBy(-10000)", "seekToMs(5000)", "seekToMs(6000)", "play", "pause", "next", "next", "previous", "previous"),
             calls,
         )
+    }
+
+    /** docs/12 §8 rows 1 and 5: the session offers a skip exactly while the OSD shows its button, though the wrapped player has one item. */
+    @Test
+    fun `the session offers next and previous exactly while the view model has a neighbour`() {
+        val oneItem = Player.Commands.Builder().addAllCommands().apply { skipCommands.forEach(::remove) }.build()
+        val session = RoutedPlayer(wrappedIn(Player.STATE_READY, oneItem), router())
+        val next = setOf(Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+        for ((withNext, withPrevious) in listOf(false to false, true to false, false to true, true to true)) {
+            hasNext = withNext
+            hasPrevious = withPrevious
+            for (command in skipCommands) {
+                val expected = if (command in next) withNext else withPrevious
+                assertEquals("next=$withNext previous=$withPrevious command $command", expected, session.isCommandAvailable(command))
+                assertEquals("next=$withNext previous=$withPrevious command $command advertised", expected, session.availableCommands.contains(command))
+            }
+        }
+    }
+
+    /** docs/31 §4.1.1: a Next or Previous media key (as the MediaSession dispatches it) reaches the view model's own calls. */
+    @Test
+    fun `Next and Previous reach the router's next and previous`() {
+        val router = router()
+
+        router.onNext()
+        router.onPrevious()
+
+        assertEquals(listOf("next", "previous"), calls)
     }
 
     private val transportKeyCodes = listOf(
@@ -192,7 +224,14 @@ class MediaKeyRouterTest {
         }
     }
 
-    private val allowedCommands = setOf(
+    private val skipCommands = setOf(
+        Player.COMMAND_SEEK_TO_NEXT,
+        Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+        Player.COMMAND_SEEK_TO_PREVIOUS,
+        Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+    )
+
+    private val allowedCommands = skipCommands + setOf(
         Player.COMMAND_PLAY_PAUSE,
         Player.COMMAND_STOP,
         Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
@@ -219,6 +258,7 @@ class MediaKeyRouterTest {
         for ((name, command) in commandConstants()) {
             assertEquals("$name available", command in allowedCommands, everything.isCommandAvailable(command))
             assertEquals("$name advertised", command in allowedCommands, everything.availableCommands.contains(command))
+            if (command in skipCommands) continue // the view model's neighbours, not the wrapped player's: the skip test below
             assertFalse("$name without the wrapped player's support", nothing.isCommandAvailable(command))
             assertFalse("$name advertised without support", nothing.availableCommands.contains(command))
         }
@@ -239,19 +279,13 @@ class MediaKeyRouterTest {
         assertEquals(ConnectionResult.DEFAULT_UNTRUSTED_SESSION_COMMANDS, untrusted.availableSessionCommands)
     }
 
-    /** Music brief §1.3: the music session adds next and previous track to the same allowlist, and nothing else. */
+    /** Music brief §1.3: the music session grants the same allowlist, which includes next and previous track. */
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     @Test
     fun `a music controller is also granted next and previous track`() {
-        val music = allowedCommands + setOf(
-            Player.COMMAND_SEEK_TO_NEXT,
-            Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
-            Player.COMMAND_SEEK_TO_PREVIOUS,
-            Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
-        )
         val untrusted = grantedCommands(ConnectionResult.accept(ConnectionResult.DEFAULT_UNTRUSTED_SESSION_COMMANDS, ConnectionResult.DEFAULT_UNTRUSTED_PLAYER_COMMANDS), MUSIC_COMMANDS)
         for ((name, command) in commandConstants()) {
-            assertEquals("$name music", command in music, untrusted.availablePlayerCommands.contains(command))
+            assertEquals("$name music", command in allowedCommands, untrusted.availablePlayerCommands.contains(command))
         }
     }
 }

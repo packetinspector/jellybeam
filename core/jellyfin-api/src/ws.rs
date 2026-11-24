@@ -16,6 +16,7 @@ use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::models;
+use crate::remote::RemoteCommand;
 use crate::syncplay::SyncPlayEvent;
 use crate::util::{describe_error_chain, percent_encode};
 use crate::{auth_header, ApiError, ClientIdentity, ServerEvent};
@@ -247,6 +248,20 @@ fn decode_frame(text: &str) -> Option<(ServerEvent, Option<u64>)> {
                 None => {
                     // No error text: serde quotes the offending value, which may be a user name.
                     tracing::debug!(message_type, "failed to decode SyncPlay frame");
+                    ServerEvent::Ignored(message_type.to_string())
+                }
+            }
+        }
+        "Play" | "Playstate" | "GeneralCommand" => {
+            let data = value
+                .get("Data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            match RemoteCommand::decode(message_type, data) {
+                Some(command) => ServerEvent::Remote(command),
+                None => {
+                    // No error text: it would quote the offending value, which may be typed text.
+                    tracing::debug!(message_type, "failed to decode remote-control frame");
                     ServerEvent::Ignored(message_type.to_string())
                 }
             }

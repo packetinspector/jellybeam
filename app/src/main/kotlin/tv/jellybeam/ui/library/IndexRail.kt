@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -41,6 +42,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import tv.jellybeam.JellybeamTheme
 import tv.jellybeam.LocalAccent
+import tv.jellybeam.LocalRemoteTargets
 import tv.jellybeam.ui.nav.LocalDrawerLeftEdgeSuppressed
 import tv.jellybeam.ui.focus.LocalFocusGate
 import tv.jellybeam.ui.focus.FocusMemory
@@ -58,19 +60,6 @@ private val RAIL_RING_HEIGHT = 22.dp
 
 /** Same Enter/D-pad-center pair every Select-style key check in this app uses. */
 private val RAIL_SELECT_KEYS = setOf(Key.DirectionCenter, Key.Enter)
-
-/** Next entry index in [entries] with a non-zero count, walking from [current]; `null` at the
- * list end (§4.4 "stop at ends").
- */
-private fun nextNonEmptyIndex(entries: List<RailEntry>, current: Int, forward: Boolean): Int? {
-    val step = if (forward) 1 else -1
-    var i = current + step
-    while (i in entries.indices) {
-        if (entries[i].count > 0) return i
-        i += step
-    }
-    return null
-}
 
 /**
  * docs/16-library-sort-filter.md §4.4's index rail: a focusable column at the grid's right edge
@@ -105,6 +94,9 @@ internal fun IndexRail(
     // matches the newest target, and only that target scrolls the grid.
     var jumpJob by remember { mutableStateOf<Job?>(null) }
     var jumpOffset by remember { mutableIntStateOf(0) }
+    // docs/31 §4.5: the last remote step's entry and land-and-focus job; a newer step walks on from it and cancels it.
+    var gridStepAt by remember { mutableIntStateOf(0) }
+    var gridStep by remember { mutableStateOf<Job?>(null) }
 
     // §4.4: the entry containing the first visible grid item is Panna when unfocused.
     val current by remember(entries, focusedIndex) {
@@ -117,6 +109,50 @@ internal fun IndexRail(
     DisposableEffect(drawerLeftEdgeSuppressed, railFocused) {
         drawerLeftEdgeSuppressed?.value = railFocused
         onDispose { drawerLeftEdgeSuppressed?.value = false }
+    }
+
+    /** docs/16 §4.4: [next] becomes the rail's entry and the grid loads and scrolls to it, focus staying on the rail. */
+    fun jump(next: Int) {
+        onRailIndexChange(next)
+        jumpOffset = entries[next].offset
+        if (jumpJob?.isActive != true) {
+            jumpJob = scope.launch {
+                var done = -1
+                while (done != jumpOffset) {
+                    val target = jumpOffset
+                    viewModel.ensureLoadedThrough(target)
+                    if (target == jumpOffset) {
+                        gridState.scrollToItem(GridPaging.rowStart(target, columns))
+                    }
+                    done = target
+                }
+            }
+        }
+    }
+
+    // docs/31 §4.5: a remote's letter step lands on that letter's first poster (the rail's entry while it
+    // holds focus); claimed only while this library is on top.
+    val step by rememberUpdatedState<(Boolean) -> Boolean> { forward ->
+        val landingAt = gridStepAt.takeIf { gridStep?.isActive == true }
+        val next = IndexRailModel.remoteStep(entries, railIndex, current, railFocused, landingAt, forward)
+        when {
+            next == null -> Unit
+            railFocused -> jump(next)
+            else -> {
+                jumpJob?.cancel()
+                gridStep?.cancel()
+                onRailIndexChange(next)
+                gridStepAt = next
+                gridStep = focusGridEntry(entries[next], scope, viewModel, gridState, memory, focusGate, columns)
+            }
+        }
+        next != null
+    }
+    val letterTarget = remember { { forward: Boolean -> step(forward) } }
+    val remoteLetters = LocalRemoteTargets.current?.letters
+    DisposableEffect(remoteLetters, isTop) {
+        if (isTop) remoteLetters?.claim(letterTarget)
+        onDispose { remoteLetters?.release(letterTarget) }
     }
 
     BackHandler(enabled = isTop && railFocused) {
@@ -136,25 +172,7 @@ internal fun IndexRail(
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when (event.key) {
                     Key.DirectionUp, Key.DirectionDown -> {
-                        val next = nextNonEmptyIndex(entries, railIndex, forward = event.key == Key.DirectionDown)
-                        if (next != null) {
-                            onRailIndexChange(next)
-                            val entry = entries[next]
-                            jumpOffset = entry.offset
-                            if (jumpJob?.isActive != true) {
-                                jumpJob = scope.launch {
-                                    var done = -1
-                                    while (done != jumpOffset) {
-                                        val target = jumpOffset
-                                        viewModel.ensureLoadedThrough(target)
-                                        if (target == jumpOffset) {
-                                            gridState.scrollToItem(GridPaging.rowStart(target, columns))
-                                        }
-                                        done = target
-                                    }
-                                }
-                            }
-                        }
+                        IndexRailModel.stepIndex(entries, railIndex, forward = event.key == Key.DirectionDown)?.let(::jump)
                         true
                     }
                     // A jump still in flight would scroll to its own target after focus lands.
@@ -230,9 +248,9 @@ private fun focusGridEntry(
     memory: FocusMemory,
     focusGate: MutableState<Boolean>,
     columns: Int,
-) {
-    if (entry == null) return
-    scope.launch {
+): Job? {
+    if (entry == null) return null
+    return scope.launch {
         val loaded = viewModel.ensureLoadedThrough(entry.offset)
         gridState.scrollToItem(GridPaging.rowStart(entry.offset, columns))
         val items = viewModel.state.value.items

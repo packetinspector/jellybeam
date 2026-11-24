@@ -18,11 +18,16 @@ pub mod dns;
 #[allow(clippy::derivable_impls)]
 pub mod models;
 mod music;
+mod remote;
 mod syncplay;
 mod util;
 mod ws;
 
 pub use music::{LyricLine, MixSeed, PlaylistItemsShape};
+pub use remote::{
+    GeneralCommand, PlayCommand, PlayRequest, PlaystateCommand, RemoteCommand, RemoteRepeat,
+    RemoteShuffle,
+};
 pub use syncplay::{GroupUpdate, SyncPlayEvent};
 
 /// Fuzzing-only re-exports. `cargo fuzz` builds with `--cfg fuzzing`, so
@@ -425,6 +430,8 @@ pub struct ItemQuery {
     pub person_ids: Vec<String>,
     /// `mediaTypes` query param (`Audio`, `Video`, ...): a playlist's media type. Empty omits it.
     pub media_types: Vec<String>,
+    /// `artistIds` query param: items by any of these artists. Empty omits it.
+    pub artist_ids: Vec<String>,
 }
 
 impl ItemQuery {
@@ -789,6 +796,9 @@ impl JellyfinClient {
         if !q.media_types.is_empty() {
             query.push(("mediaTypes", q.media_types.join(",")));
         }
+        if !q.artist_ids.is_empty() {
+            query.push(("artistIds", q.artist_ids.join(",")));
+        }
         if let Some(min_date_last_saved) = &q.min_date_last_saved {
             query.push(("minDateLastSaved", min_date_last_saved.clone()));
             // Not a second filter: see `ItemQuery::min_date_last_saved`'s doc comment (10.10.x 500s
@@ -1032,6 +1042,27 @@ impl JellyfinClient {
         }
         .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
 
+        self.check(resp).await?;
+        Ok(())
+    }
+
+    /// `POST /Sessions/Capabilities/Full` -- docs/31 §3: replaces the capabilities of the session
+    /// this token belongs to. The server forgets them when the session lapses, so callers post on
+    /// every socket connect.
+    pub async fn post_capabilities(
+        &self,
+        capabilities: &ClientCapabilitiesDto,
+    ) -> Result<(), ApiError> {
+        let url = format!("{}/Sessions/Capabilities/Full", self.inner.base_url);
+        let resp = self
+            .inner
+            .http
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .json(capabilities)
+            .send()
+            .await
+            .map_err(|e| ApiError::Transport(describe_error_chain(&e)))?;
         self.check(resp).await?;
         Ok(())
     }
@@ -1479,6 +1510,8 @@ pub struct PlaybackReport {
     pub position_ticks: i64,
     pub is_paused: bool,
     pub volume_level: u8,
+    /// docs/31 §4.4: the system stream's mute, read when the report is built.
+    pub is_muted: bool,
     pub audio_stream_index: Option<i32>,
     pub subtitle_stream_index: Option<i32>,
     pub play_session_id: String,
@@ -1489,6 +1522,18 @@ pub struct PlaybackReport {
     /// `NowPlayingQueue` on Start (all of it) and Progress (a window, [`queue_window`]) so other
     /// clients see it; empty sends none (video).
     pub now_playing_queue: std::sync::Arc<[String]>,
+    /// docs/31 §4.1.1: the playing entry of `now_playing_queue` when the caller knows it (a video
+    /// remote list, where an id may repeat); `None` takes the first entry holding `item_id`.
+    pub queue_index: Option<usize>,
+    /// docs/31 §4.5: a music session's repeat and shuffle; `None` sends neither.
+    pub queue_modes: Option<QueueModes>,
+}
+
+/// docs/31 §4.5: sent as `RepeatMode` and `PlaybackOrder` so controllers show the real modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueModes {
+    pub repeat: RemoteRepeat,
+    pub shuffle: RemoteShuffle,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1537,6 +1582,8 @@ pub enum ServerEvent {
     },
     ForceKeepAlive,
     SyncPlay(SyncPlayEvent),
+    /// docs/31 §4: a `Play`, `Playstate` or `GeneralCommand` frame.
+    Remote(RemoteCommand),
     Ignored(String),
 }
 
@@ -1573,6 +1620,12 @@ struct StartProgressBody<'a> {
     play_method: &'static str,
     #[serde(rename = "NowPlayingQueue", skip_serializing_if = "Vec::is_empty")]
     now_playing_queue: Vec<QueueEntry<'a>>,
+    #[serde(rename = "PlaylistItemId", skip_serializing_if = "Option::is_none")]
+    playlist_item_id: Option<String>,
+    #[serde(rename = "RepeatMode", skip_serializing_if = "Option::is_none")]
+    repeat_mode: Option<&'static str>,
+    #[serde(rename = "PlaybackOrder", skip_serializing_if = "Option::is_none")]
+    playback_order: Option<&'static str>,
 }
 
 /// One `NowPlayingQueue` entry: `PlaylistItemId` numbers the queue position, so an item queued
@@ -1604,7 +1657,7 @@ fn start_progress_body(report: &PlaybackReport) -> StartProgressBody<'_> {
         media_source_id: &report.media_source_id,
         position_ticks: report.position_ticks,
         is_paused: report.is_paused,
-        is_muted: false,
+        is_muted: report.is_muted,
         volume_level: report.volume_level,
         audio_stream_index: report.audio_stream_index,
         subtitle_stream_index: report.subtitle_stream_index,
@@ -1617,7 +1670,30 @@ fn start_progress_body(report: &PlaybackReport) -> StartProgressBody<'_> {
                 playlist_item_id: format!("playlistItem{n}"),
             })
             .collect(),
+        playlist_item_id: (!report.now_playing_queue.is_empty())
+            .then(|| format!("playlistItem{}", playing_entry(report))),
+        repeat_mode: report.queue_modes.map(|modes| match modes.repeat {
+            RemoteRepeat::Off => "RepeatNone",
+            RemoteRepeat::All => "RepeatAll",
+            RemoteRepeat::One => "RepeatOne",
+        }),
+        playback_order: report.queue_modes.map(|modes| match modes.shuffle {
+            RemoteShuffle::Sorted => "Default",
+            RemoteShuffle::Shuffled => "Shuffle",
+        }),
     }
+}
+
+/// The playing entry of the report's queue: its `queue_index`, else the first entry holding
+/// `item_id`, else 0.
+fn playing_entry(report: &PlaybackReport) -> usize {
+    report.queue_index.unwrap_or_else(|| {
+        report
+            .now_playing_queue
+            .iter()
+            .position(|id| *id == report.item_id)
+            .unwrap_or(0)
+    })
 }
 
 /// Entries a Progress report names before / after the playing one; Start names them all.
@@ -1625,17 +1701,13 @@ const PROGRESS_QUEUE_BEFORE: usize = 5;
 const PROGRESS_QUEUE_AFTER: usize = 50;
 
 /// The queue positions `report` sends: all on Start, a window around the playing entry on
-/// Progress so a long queue isn't re-posted every few seconds. The playing entry is the first
-/// one holding `item_id` (0 when none does).
+/// Progress so a long queue isn't re-posted every few seconds.
 fn queue_window(report: &PlaybackReport) -> std::ops::Range<usize> {
     let queue = &report.now_playing_queue;
     if !matches!(report.kind, PlaybackReportKind::Progress) {
         return 0..queue.len();
     }
-    let playing = queue
-        .iter()
-        .position(|id| *id == report.item_id)
-        .unwrap_or(0);
+    let playing = playing_entry(report);
     playing.saturating_sub(PROGRESS_QUEUE_BEFORE)
         ..(playing + PROGRESS_QUEUE_AFTER + 1).min(queue.len())
 }
@@ -1822,11 +1894,14 @@ mod tests {
             position_ticks: 123_456_789,
             is_paused: true,
             volume_level: 42,
+            is_muted: false,
             audio_stream_index: Some(1),
             subtitle_stream_index: None,
             play_session_id: "session-1".to_string(),
             play_method: ReportPlayMethod::DirectPlay,
             now_playing_queue: Default::default(),
+            queue_index: None,
+            queue_modes: None,
         }
     }
 
@@ -1865,6 +1940,92 @@ mod tests {
                 "CanSeek": true,
                 "PlayMethod": "DirectPlay",
             })
+        );
+    }
+
+    /// docs/31 §4.4, §7: the report's volume, mute and stream indices reach the body as built.
+    #[test]
+    fn the_body_carries_the_reports_mute_and_stream_indices() {
+        let report = PlaybackReport {
+            is_muted: true,
+            subtitle_stream_index: Some(-1),
+            ..sample_report(PlaybackReportKind::Progress)
+        };
+        let value = serde_json::to_value(start_progress_body(&report)).expect("serializes");
+        assert_eq!(value["IsMuted"], true);
+        assert_eq!(value["VolumeLevel"], 42);
+        assert_eq!(value["AudioStreamIndex"], 1);
+        assert_eq!(value["SubtitleStreamIndex"], -1);
+    }
+
+    /// docs/31 §4.5: music repeat and shuffle round-trip into the body with the server's wire
+    /// names; a report without modes (video) sends neither.
+    #[test]
+    fn music_repeat_and_shuffle_round_trip_into_the_body() {
+        let rows = [
+            (
+                RemoteRepeat::Off,
+                RemoteShuffle::Sorted,
+                "RepeatNone",
+                "Default",
+            ),
+            (
+                RemoteRepeat::All,
+                RemoteShuffle::Shuffled,
+                "RepeatAll",
+                "Shuffle",
+            ),
+            (
+                RemoteRepeat::One,
+                RemoteShuffle::Sorted,
+                "RepeatOne",
+                "Default",
+            ),
+        ];
+        for (repeat, shuffle, repeat_wire, order_wire) in rows {
+            let report = PlaybackReport {
+                queue_modes: Some(QueueModes { repeat, shuffle }),
+                ..sample_report(PlaybackReportKind::Progress)
+            };
+            let value = serde_json::to_value(start_progress_body(&report)).expect("serializes");
+            assert_eq!(value["RepeatMode"], repeat_wire, "{repeat:?}");
+            assert_eq!(value["PlaybackOrder"], order_wire, "{shuffle:?}");
+        }
+        let value = serde_json::to_value(start_progress_body(&sample_report(
+            PlaybackReportKind::Progress,
+        )))
+        .expect("serializes");
+        assert!(value.get("RepeatMode").is_none(), "{value}");
+        assert!(value.get("PlaybackOrder").is_none(), "{value}");
+    }
+
+    /// docs/31 §4.1.1: a video list names its playing entry by index, so a repeated id is the
+    /// right one, as `PlaylistItemId` and as the centre of Progress's queue window.
+    #[test]
+    fn a_known_queue_index_names_the_playing_entry_and_centres_the_window() {
+        let queue: std::sync::Arc<[String]> = (0..100)
+            .map(|n| {
+                if n % 2 == 0 {
+                    "a".to_string()
+                } else {
+                    "b".to_string()
+                }
+            })
+            .collect();
+        let report = PlaybackReport {
+            item_id: "a".to_string(),
+            now_playing_queue: queue,
+            queue_index: Some(60),
+            ..sample_report(PlaybackReportKind::Progress)
+        };
+        let value = serde_json::to_value(start_progress_body(&report)).expect("serializes");
+        assert_eq!(value["PlaylistItemId"], "playlistItem60");
+        let entries = value["NowPlayingQueue"].as_array().expect("queue");
+        assert_eq!(entries[0]["PlaylistItemId"], "playlistItem55");
+        assert_eq!(
+            entries.len(),
+            45,
+            "5 before the playing entry, it, and the rest"
         );
     }
 
@@ -2672,6 +2833,43 @@ mod tests {
         assert!(
             matches!(err, ApiError::Status { code: 500, .. }),
             "unexpected error variant: {err:?}"
+        );
+    }
+
+    /// docs/31 §3: the body is the capabilities DTO as JSON, posted to the `Full` endpoint.
+    #[tokio::test]
+    async fn post_capabilities_sends_the_dto_as_json_to_the_full_endpoint() {
+        let (base_url, rx) = test_server::capturing_server("204 No Content", String::new()).await;
+        let client = JellyfinClient::from_token(&base_url, sample_identity(), "tok");
+        let capabilities = ClientCapabilitiesDto {
+            playable_media_types: vec![MediaType::Video, MediaType::Audio],
+            supported_commands: vec![GeneralCommandType::DisplayMessage],
+            supports_media_control: Some(true),
+            ..Default::default()
+        };
+        client
+            .post_capabilities(&capabilities)
+            .await
+            .expect("post against mock server");
+        let request = rx.await.expect("mock server captured a request");
+        let (head, body) = request.split_once("\r\n\r\n").expect("head and body");
+        assert_eq!(
+            head.lines().next(),
+            Some("POST /Sessions/Capabilities/Full HTTP/1.1")
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "{head}"
+        );
+        let body: serde_json::Value = serde_json::from_str(body).expect("JSON body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "PlayableMediaTypes": ["Video", "Audio"],
+                "SupportedCommands": ["DisplayMessage"],
+                "SupportsMediaControl": true,
+            })
         );
     }
 

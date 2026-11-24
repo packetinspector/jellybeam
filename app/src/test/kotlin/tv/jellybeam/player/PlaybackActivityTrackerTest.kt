@@ -165,6 +165,46 @@ class PlaybackActivityTrackerTest {
         assertTrue(tracker.isActive)
     }
 
+    /** docs/31 §5: a remote Play MainActivity can't show reaches the host's drop record, with no start and no toast. */
+    @Test
+    fun `a dropped remote request reaches the host`() {
+        val tracker = PlaybackActivityTracker().apply { send(HostEvent.RootChanged(PlayerFlow.Root.Home)) }
+        val host = RecordingHost(tracker).also { tracker.attachHost(it.host) }
+        tracker.arrive(Req.Kind.Play("item-a"), Req.Origin.Remote)
+        assertEquals(listOf(1L), host.dropped)
+        assertTrue(host.started.isEmpty())
+        assertEquals(0, host.toasts)
+    }
+
+    /** docs/31 §5 (approved Q1): a remote detail over a mini player floating on another app brings MainActivity forward. */
+    @Test
+    fun `a remote detail over a mini player on another app brings MainActivity forward`() {
+        val tracker = PlaybackActivityTracker().apply { send(HostEvent.RootChanged(PlayerFlow.Root.Home)) }
+        val host = RecordingHost(tracker).also { tracker.attachHost(it.host) }
+        val player = TrackedPlayer(tracker, "item-a").create()
+        tracker.send(PlayerEvent.PipEntered(player.g))
+
+        tracker.arrive(Req.Kind.OpenDetail("item-b"), Req.Origin.Remote)
+
+        assertEquals(1, host.mainShows)
+        assertTrue(host.dropped.isEmpty())
+    }
+
+    /** docs/31 §4.3: a library open rides the same arrival as an item's, so a mini player on another app brings MainActivity forward and the open waits for it. */
+    @Test
+    fun `a remote library open over a mini player on another app brings MainActivity forward and waits`() {
+        val tracker = PlaybackActivityTracker().apply { send(HostEvent.RootChanged(PlayerFlow.Root.Home)) }
+        val host = RecordingHost(tracker).also { tracker.attachHost(it.host) }
+        val player = TrackedPlayer(tracker, "item-a").create()
+        tracker.send(PlayerEvent.PipEntered(player.g))
+
+        tracker.arrive(Req.Kind.OpenDetail("lib-1", library = true), Req.Origin.Remote)
+
+        assertEquals(1, host.mainShows)
+        assertTrue(host.dropped.isEmpty())
+        assertEquals(Req.Kind.OpenDetail("lib-1", library = true), (tracker.state.value.request as PlayerFlow.Request.Waiting).req.kind)
+    }
+
     /** docs/17 §3: a Fresh request reads the live item from the slot's player, never from an older one, whose destroy detaches only its own handle. */
     @Test
     fun `a fresh request reads the live item from the slot's player, not an older one`() {
@@ -188,10 +228,14 @@ class PlaybackActivityTrackerTest {
         val started = mutableListOf<Req<Req.Kind.Play>>()
         var toasts = 0
         var leaves = 0
+        val dropped = mutableListOf<Long>()
+        var mainShows = 0
         val host = RequestHost(
             start = { if (fails) tracker.send(HostEvent.LaunchFailed(it.id)) else started += it },
             signInRequired = { toasts++ },
             leaveGroup = { leaves++ },
+            remoteDropped = { dropped += it },
+            showMain = { mainShows++ },
         )
     }
 
@@ -296,7 +340,7 @@ class PlaybackActivityTrackerTest {
     private class DeferringHost(private val tracker: PlaybackActivityTracker) {
         private val pending = mutableListOf<Req<Req.Kind.Play>>()
         val started = mutableListOf<Req<Req.Kind.Play>>()
-        val host = RequestHost(start = { pending += it }, signInRequired = {}, leaveGroup = {})
+        val host = RequestHost(start = { pending += it }, signInRequired = {}, leaveGroup = {}, remoteDropped = {}, showMain = {})
 
         fun runDeferred(order: (List<Req<Req.Kind.Play>>) -> List<Req<Req.Kind.Play>> = { it }) {
             val due = order(pending.toList()).also { pending.clear() }

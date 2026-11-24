@@ -53,7 +53,7 @@ class PlaybackScreenControlsTest {
 
     @Test
     fun `movie, clean, no chapters -- just the three transport buttons plus tracks and info`() {
-        val result = visibleControls(osdDetail = OsdDetailSetting.MINIMAL, isEpisode = false, hasPrev = false, hasNext = false, hasChapters = false, group = false)
+        val result = visibleControls(osdDetail = OsdDetailSetting.MINIMAL, hasPrev = false, hasNext = false, hasChapters = false, group = false)
         assertEquals(
             listOf(ControlButton.SKIP_BACK, ControlButton.PLAY_PAUSE, ControlButton.SKIP_FORWARD, ControlButton.TRACKS, ControlButton.LIBRARY_INFO),
             result,
@@ -61,8 +61,8 @@ class PlaybackScreenControlsTest {
     }
 
     @Test
-    fun `movie, nerdy, no chapters -- adds speed and stats but never the episode buttons`() {
-        val result = visibleControls(osdDetail = OsdDetailSetting.FULL, isEpisode = false, hasPrev = true, hasNext = true, hasChapters = false, group = false)
+    fun `movie, nerdy, no chapters -- adds speed and stats`() {
+        val result = visibleControls(osdDetail = OsdDetailSetting.FULL, hasPrev = false, hasNext = false, hasChapters = false, group = false)
         assertEquals(
             listOf(
                 ControlButton.SKIP_BACK,
@@ -79,27 +79,28 @@ class PlaybackScreenControlsTest {
 
     @Test
     fun `episode with both neighbors, nerdy, with chapters -- the full ten-button set in spec order`() {
-        val result = visibleControls(osdDetail = OsdDetailSetting.FULL, isEpisode = true, hasPrev = true, hasNext = true, hasChapters = true, group = false)
+        val result = visibleControls(osdDetail = OsdDetailSetting.FULL, hasPrev = true, hasNext = true, hasChapters = true, group = false)
         assertEquals(ControlButton.entries.toList(), result)
     }
 
     @Test
     fun `episode with no known neighbors omits both episode-skip buttons even though it's an episode`() {
-        val result = visibleControls(osdDetail = OsdDetailSetting.FULL, isEpisode = true, hasPrev = false, hasNext = false, hasChapters = false, group = false)
+        val result = visibleControls(osdDetail = OsdDetailSetting.FULL, hasPrev = false, hasNext = false, hasChapters = false, group = false)
         assertFalse(result.contains(ControlButton.PREV_EPISODE))
         assertFalse(result.contains(ControlButton.NEXT_EPISODE))
     }
 
+    /** docs/31 §4.1.1 (approved Q3): a remote list gives a movie neighbours too, walked by the same buttons. */
     @Test
-    fun `hasPrev-hasNext are ignored entirely for a non-episode item`() {
-        val result = visibleControls(osdDetail = OsdDetailSetting.FULL, isEpisode = false, hasPrev = true, hasNext = true, hasChapters = false, group = false)
-        assertFalse(result.contains(ControlButton.PREV_EPISODE))
-        assertFalse(result.contains(ControlButton.NEXT_EPISODE))
+    fun `a movie with list neighbours shows both episode-skip buttons`() {
+        val result = visibleControls(osdDetail = OsdDetailSetting.FULL, hasPrev = true, hasNext = true, hasChapters = false, group = false)
+        assertTrue(result.contains(ControlButton.PREV_EPISODE))
+        assertTrue(result.contains(ControlButton.NEXT_EPISODE))
     }
 
     @Test
     fun `chapters button shows in clean mode too whenever markers exist`() {
-        val result = visibleControls(osdDetail = OsdDetailSetting.MINIMAL, isEpisode = false, hasPrev = false, hasNext = false, hasChapters = true, group = false)
+        val result = visibleControls(osdDetail = OsdDetailSetting.MINIMAL, hasPrev = false, hasNext = false, hasChapters = true, group = false)
         assertTrue(result.contains(ControlButton.CHAPTERS))
         // Clean never gets speed/stats regardless of chapters.
         assertFalse(result.contains(ControlButton.SPEED))
@@ -109,8 +110,8 @@ class PlaybackScreenControlsTest {
     /** docs/28 §1: a group plays at one speed, so the speed menu is off and every other button stays. */
     @Test
     fun `a group drops the speed button and keeps the rest`() {
-        val solo = visibleControls(osdDetail = OsdDetailSetting.FULL, isEpisode = true, hasPrev = true, hasNext = true, hasChapters = true, group = false)
-        val group = visibleControls(osdDetail = OsdDetailSetting.FULL, isEpisode = true, hasPrev = true, hasNext = true, hasChapters = true, group = true)
+        val solo = visibleControls(osdDetail = OsdDetailSetting.FULL, hasPrev = true, hasNext = true, hasChapters = true, group = false)
+        val group = visibleControls(osdDetail = OsdDetailSetting.FULL, hasPrev = true, hasNext = true, hasChapters = true, group = true)
         assertEquals(solo - ControlButton.SPEED, group)
     }
 
@@ -118,10 +119,8 @@ class PlaybackScreenControlsTest {
     fun `speed and stats are nerdy-only regardless of every other flag`() {
         val allClean = listOf(true, false).flatMap { prev ->
             listOf(true, false).flatMap { next ->
-                listOf(true, false).flatMap { chapters ->
-                    listOf(true, false).map { episode ->
-                        visibleControls(OsdDetailSetting.MINIMAL, episode, prev, next, chapters, group = false)
-                    }
+                listOf(true, false).map { chapters ->
+                    visibleControls(OsdDetailSetting.MINIMAL, prev, next, chapters, group = false)
                 }
             }
         }
@@ -134,24 +133,22 @@ class PlaybackScreenControlsTest {
     @Test
     fun `transport, tracks, and library info always appear regardless of every flag combination`() {
         for (osdDetail in listOf(OsdDetailSetting.MINIMAL, OsdDetailSetting.FULL)) {
-            for (isEpisode in listOf(true, false)) {
-                for (hasPrev in listOf(true, false)) {
-                    for (hasNext in listOf(true, false)) {
-                        for (hasChapters in listOf(true, false)) {
-                            val result = visibleControls(osdDetail, isEpisode, hasPrev, hasNext, hasChapters, group = false)
-                            assertTrue(result.contains(ControlButton.SKIP_BACK))
-                            assertTrue(result.contains(ControlButton.PLAY_PAUSE))
-                            assertTrue(result.contains(ControlButton.SKIP_FORWARD))
-                            assertTrue(result.contains(ControlButton.TRACKS))
-                            assertTrue(result.contains(ControlButton.LIBRARY_INFO))
-                            // §6: no disabled state -- every button present is actionable, no
-                            // duplicates.
-                            assertEquals(result.size, result.toSet().size)
-                            // PREV/NEXT episode gate strictly on isEpisode && has*.
-                            assertEquals(isEpisode && hasPrev, result.contains(ControlButton.PREV_EPISODE))
-                            assertEquals(isEpisode && hasNext, result.contains(ControlButton.NEXT_EPISODE))
-                            assertEquals(hasChapters, result.contains(ControlButton.CHAPTERS))
-                        }
+            for (hasPrev in listOf(true, false)) {
+                for (hasNext in listOf(true, false)) {
+                    for (hasChapters in listOf(true, false)) {
+                        val result = visibleControls(osdDetail, hasPrev, hasNext, hasChapters, group = false)
+                        assertTrue(result.contains(ControlButton.SKIP_BACK))
+                        assertTrue(result.contains(ControlButton.PLAY_PAUSE))
+                        assertTrue(result.contains(ControlButton.SKIP_FORWARD))
+                        assertTrue(result.contains(ControlButton.TRACKS))
+                        assertTrue(result.contains(ControlButton.LIBRARY_INFO))
+                        // §6: no disabled state -- every button present is actionable, no
+                        // duplicates.
+                        assertEquals(result.size, result.toSet().size)
+                        // PREV/NEXT gate strictly on has*.
+                        assertEquals(hasPrev, result.contains(ControlButton.PREV_EPISODE))
+                        assertEquals(hasNext, result.contains(ControlButton.NEXT_EPISODE))
+                        assertEquals(hasChapters, result.contains(ControlButton.CHAPTERS))
                     }
                 }
             }

@@ -12,7 +12,7 @@ import androidx.media3.session.MediaSession.ConnectionResult
 /**
  * One `MediaSession` publishing [PlayerHolder]'s player to the system UI and Assistant (docs/17 §2): scoped to
  * [tv.jellybeam.player.PlaybackActivity], [release]d in `onStop` unless [sessionShouldSurviveStop], and the app's
- * only media-button consumer, routing Stop/FF/REW/seek/Play/Pause through [MediaKeyRouter].
+ * only media-button consumer, routing Stop/FF/REW/seek/Play/Pause/Next/Previous through [MediaKeyRouter].
  */
 class MediaSessionHolder(
     context: Context,
@@ -49,7 +49,11 @@ internal fun sessionShouldSurviveStop(inPip: Boolean, finishing: Boolean): Boole
 internal fun grantedCommands(default: ConnectionResult, allowed: IntArray = ALLOWED_COMMANDS): ConnectionResult =
     ConnectionResult.accept(default.availableSessionCommands, allowedCommands(ConnectionResult.DEFAULT_PLAYER_COMMANDS, allowed))
 
-/** Playback, stop, in-item seeks and the reads the session publishes; nothing that changes the queue, tracks, volume or surface. */
+/** docs/12 §8: the skips the OSD's Next and Previous buttons make, so a media key makes the same one. */
+private val NEXT_COMMANDS = intArrayOf(Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+private val PREVIOUS_COMMANDS = intArrayOf(Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+
+/** Playback, stop, in-item seeks, next and previous, and the reads the session publishes; nothing that changes the queue, tracks, volume or surface. */
 internal val ALLOWED_COMMANDS: IntArray = intArrayOf(
     Player.COMMAND_PLAY_PAUSE,
     Player.COMMAND_STOP,
@@ -62,15 +66,12 @@ internal val ALLOWED_COMMANDS: IntArray = intArrayOf(
     Player.COMMAND_GET_AUDIO_ATTRIBUTES,
     Player.COMMAND_GET_TRACKS,
     Player.COMMAND_GET_DEVICE_VOLUME,
+    *NEXT_COMMANDS,
+    *PREVIOUS_COMMANDS,
 )
 
-/** Music brief §1.3: a music queue also takes next and previous track from the remote and the Now Playing card. */
-internal val MUSIC_COMMANDS: IntArray = ALLOWED_COMMANDS + intArrayOf(
-    Player.COMMAND_SEEK_TO_NEXT,
-    Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
-    Player.COMMAND_SEEK_TO_PREVIOUS,
-    Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
-)
+/** Music brief §1.3: a music queue takes next and previous track from the remote and the Now Playing card too. */
+internal val MUSIC_COMMANDS: IntArray = ALLOWED_COMMANDS
 
 /** The [allowed] commands that [commands] has. */
 internal fun allowedCommands(commands: Player.Commands, allowed: IntArray = ALLOWED_COMMANDS): Player.Commands =
@@ -81,10 +82,16 @@ internal fun allowedCommands(commands: Player.Commands, allowed: IntArray = ALLO
  * [ALLOWED_COMMANDS], which is what the platform session advertises (it has no notification controller to narrow it).
  */
 internal class RoutedPlayer(player: Player, private val router: MediaKeyRouter) : ForwardingPlayer(player) {
-    override fun getAvailableCommands(): Player.Commands = allowedCommands(super.getAvailableCommands())
+    /** The wrapped player holds one item, so a skip is offered by [router]'s neighbours (docs/12 §8) rather than its timeline. */
+    override fun getAvailableCommands(): Player.Commands = allowedCommands(
+        super.getAvailableCommands().buildUpon().apply {
+            for (command in NEXT_COMMANDS) if (router.canSkipNext()) add(command) else remove(command)
+            for (command in PREVIOUS_COMMANDS) if (router.canSkipPrevious()) add(command) else remove(command)
+        }.build(),
+    )
 
     /** `Util.handlePlayButtonAction` asks this before preparing or restarting, so Play at IDLE/ENDED only reaches [router]. */
-    override fun isCommandAvailable(command: Int): Boolean = command in ALLOWED_COMMANDS && super.isCommandAvailable(command)
+    override fun isCommandAvailable(command: Int): Boolean = availableCommands.contains(command)
 
     override fun getSeekForwardIncrement(): Long = router.seekForwardIncrementMs()
 
@@ -103,6 +110,14 @@ internal class RoutedPlayer(player: Player, private val router: MediaKeyRouter) 
     override fun play() = router.onPlay()
 
     override fun pause() = router.onPause()
+
+    override fun seekToNext() = router.onNext()
+
+    override fun seekToNextMediaItem() = router.onNext()
+
+    override fun seekToPrevious() = router.onPrevious()
+
+    override fun seekToPreviousMediaItem() = router.onPrevious()
 
     override fun setPlayWhenReady(playWhenReady: Boolean) = if (playWhenReady) router.onPlay() else router.onPause()
 

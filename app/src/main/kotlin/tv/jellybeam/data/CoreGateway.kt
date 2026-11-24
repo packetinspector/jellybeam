@@ -94,6 +94,8 @@ import uniffi.jellybeam_core.SongSource
 import uniffi.jellybeam_core.SortOrder
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SyncPlayInput
+import uniffi.jellybeam_core.RemoteControlListener
+import uniffi.jellybeam_core.ReportFactsFfi
 import uniffi.jellybeam_core.SyncPlayListener
 import uniffi.jellybeam_core.SyncPlayRooms
 import uniffi.jellybeam_core.SyncPlaySnapshot
@@ -381,10 +383,19 @@ interface CoreGateway {
 
     /** Negotiates playback for [itemId] and starts a fresh reporting session. Direct Play only
      * (CLAUDE.md hard rule): throws [CoreException.WouldTranscode] instead of returning a plan.
-     * [startFromBeginning] (docs/11 item 11 pill) ignores any saved resume position.
+     * [startFromBeginning] (docs/11 item 11 pill) ignores any saved resume position; [mediaSourceId]
+     * is a remote Play's version (docs/31 §4.1), `null` for the server's pick; [audioStreamIndex] and
+     * [subtitleStreamIndex] (-1 off) are its streams, which a transcode is negotiated with from the start.
      */
     @Throws(CoreException::class)
-    suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean, request: PlaybackRequest): PlaybackPlan
+    suspend fun preparePlayback(
+        itemId: String,
+        startFromBeginning: Boolean,
+        request: PlaybackRequest,
+        mediaSourceId: String? = null,
+        audioStreamIndex: Int? = null,
+        subtitleStreamIndex: Int? = null,
+    ): PlaybackPlan
 
     /**
      * The Auto/Cap quality modes' one fallback per item (docs/18 §1/§2): renegotiates [itemId]
@@ -502,6 +513,12 @@ interface CoreGateway {
 
     /** Forwards a pause/resume edge, as [reportPosition]. */
     suspend fun reportPaused(playSessionId: String, paused: Boolean)
+
+    /** docs/31 §4.2, §7: an immediate Progress for the session [playSessionId] names at [ticks], stating [facts]; a no-op for any other. */
+    suspend fun reportNow(playSessionId: String, ticks: Long, facts: ReportFactsFfi)
+
+    /** docs/31 §7: [facts] ride the next report of the session [playSessionId] names, sending none of their own. */
+    suspend fun reportFacts(playSessionId: String, facts: ReportFactsFfi)
 
     /** Ends the active reporting session if it's still the one named by [playSessionId]: a final
      * Stopped report plus a mirror writeback fired over [changeEvents]. Fire-and-forget (docs/18
@@ -873,6 +890,8 @@ internal class RealCoreGateway(
     private val deviceCapsReady: Deferred<Unit>? = null,
     /** Where a call's 401 goes and where a landed re-authorization is noted (docs/18 §2.1). */
     private val authorizationRecovery: AuthorizationRecoveryCoordinator = authorizationRecoveryCoordinator,
+    /** docs/31 §9: registered with the change listener; `null` leaves remote commands dropped by the core. */
+    private val remoteControl: RemoteControlListener? = null,
 ) : CoreGateway {
     override suspend fun updater(facts: uniffi.jellybeam_core.InstalledUpdateFacts): uniffi.jellybeam_core.AppUpdater =
         ffi("updater") { updater(facts) }
@@ -1227,11 +1246,18 @@ internal class RealCoreGateway(
         }
     }
 
-    override suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean, request: PlaybackRequest): PlaybackPlan =
+    override suspend fun preparePlayback(
+        itemId: String,
+        startFromBeginning: Boolean,
+        request: PlaybackRequest,
+        mediaSourceId: String?,
+        audioStreamIndex: Int?,
+        subtitleStreamIndex: Int?,
+    ): PlaybackPlan =
         withContext(Dispatchers.IO) {
             PerfLog.timed("gateway.preparePlayback.total") {
                 deviceCapsReady?.await()
-                PerfLog.timed("ffi.preparePlayback") { core.await().preparePlayback(itemId, startFromBeginning, request) }
+                PerfLog.timed("ffi.preparePlayback") { core.await().preparePlayback(itemId, startFromBeginning, request, mediaSourceId, audioStreamIndex, subtitleStreamIndex) }
             }
         }
 
@@ -1301,6 +1327,12 @@ internal class RealCoreGateway(
 
     override suspend fun reportPaused(playSessionId: String, paused: Boolean) =
         ffi("ffi.reportPaused") { reportPaused(playSessionId, paused) }
+
+    override suspend fun reportNow(playSessionId: String, ticks: Long, facts: ReportFactsFfi) =
+        ffi("ffi.reportNow") { reportNow(playSessionId, ticks, facts) }
+
+    override suspend fun reportFacts(playSessionId: String, facts: ReportFactsFfi) =
+        ffi("ffi.reportFacts") { reportFacts(playSessionId, facts) }
 
     override suspend fun stopPlayback(playSessionId: String, positionTicks: Long) =
         ffi("ffi.stopPlayback") { stopPlayback(playSessionId, positionTicks) }
@@ -1457,6 +1489,8 @@ internal class RealCoreGateway(
                     authorizationRecovery.request(account)
                 }
             })
+            // docs/31 §2: one call at registration; nothing runs until a command arrives.
+            remoteControl?.let(readyCore::setRemoteControlListener)
         }
     }
 

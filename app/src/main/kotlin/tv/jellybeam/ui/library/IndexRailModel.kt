@@ -111,6 +111,24 @@ object IndexRailModel {
         return i
     }
 
+    /** The next entry with a non-zero count walking from [from]; `null` at the list end (§4.4 "stop at ends"). */
+    fun stepIndex(entries: List<RailEntry>, from: Int, forward: Boolean): Int? {
+        val step = if (forward) 1 else -1
+        var i = from + step
+        while (i in entries.indices) {
+            if (entries[i].count > 0) return i
+            i += step
+        }
+        return null
+    }
+
+    /**
+     * docs/31 §4.5: a remote letter step's next entry, walking from [railIndex] while the rail holds focus, else
+     * from [landingAt], an earlier step whose poster isn't focused yet (`null`: none), else from the grid's [gridEntry].
+     */
+    fun remoteStep(entries: List<RailEntry>, railIndex: Int, gridEntry: Int, railFocused: Boolean, landingAt: Int?, forward: Boolean): Int? =
+        stepIndex(entries, if (railFocused) railIndex else landingAt ?: gridEntry, forward)
+
     // ---- label sets, in each field's *natural* order ----------------------
 
     private fun naturalLabels(strings: UiStrings, field: GridSortField, today: LocalDate, locale: Locale): List<String> =

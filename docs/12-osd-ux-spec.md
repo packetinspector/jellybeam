@@ -178,11 +178,11 @@ density.
 
 | # | Button | Glyph | Shown when |
 |---|---|---|---|
-| 1 | Previous episode | bar + left triangle | episode with a known previous |
+| 1 | Previous episode | bar + left triangle | any item with a known previous (episode neighbour or remote list) |
 | 2 | Back *n*s | counter-clockwise arc + numeral | always |
 | 3 | Play / Pause | triangle / two bars, follows `playWhenReady` | always; default focus |
 | 4 | Forward *n*s | mirror of 2 | always |
-| 5 | Next episode | right triangle + bar | episode with a known next |
+| 5 | Next episode | right triangle + bar | any item with a known next (episode neighbour or remote list) |
 | — | spacer | | |
 | 6 | Speed | text `1×` Martian Mono 14sp Bold | Full |
 | 7 | Audio & subtitles | rounded rect + two rows of lines | always |
@@ -244,7 +244,7 @@ Owner: `PlaybackOsdController`, ticked every 250ms.
   **except while a glide is active** (see the Back chain below), where it
   cancels the glide instead.
 - Hardware media transport keys (play / pause / stop / fast forward /
-  rewind) are never consumed here, hidden or visible, while a MediaSession
+  rewind / next / previous) are never consumed here, hidden or visible, while a MediaSession
   exists; they reach it (docs/17 §2) and act at once. With no session (before
   the first frame, after a non-PiP stop released it) the activity swallows them, key
   down and key up, never passing them to another app's session. Play only resumes the intent: it never restarts a

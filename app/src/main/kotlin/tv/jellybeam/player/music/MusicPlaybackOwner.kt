@@ -1,6 +1,5 @@
 package tv.jellybeam.player.music
 
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -10,7 +9,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +20,7 @@ import kotlin.random.Random
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.runCatchingCancellable
 import tv.jellybeam.player.ProgressReportGate
+import tv.jellybeam.player.ReportQueue
 import tv.jellybeam.player.music.MusicFlow.Phase
 import tv.jellybeam.visualizer.tap.PcmTap
 import uniffi.jellybeam_core.AudioEnd
@@ -30,6 +29,9 @@ import uniffi.jellybeam_core.AudioTrackPlan
 import uniffi.jellybeam_core.Card
 import uniffi.jellybeam_core.GridSort
 import uniffi.jellybeam_core.GridSortField
+import uniffi.jellybeam_core.RemoteRepeatFfi
+import uniffi.jellybeam_core.RemoteShuffleFfi
+import uniffi.jellybeam_core.ReportFactsFfi
 import uniffi.jellybeam_core.SongSource
 
 /** What the owner asks of one attached service instance; Main-only. */
@@ -81,11 +83,11 @@ internal const val SERVICE_START_TIMEOUT_MS = 10_000L
 /** Plans asked for ahead of the rest: the playing track and the next two, for time to first sound and a gapless next. */
 internal const val FIRST_PLANS = 3
 
-/** The most entries one source fetch queues. */
+/** docs/31 §4.1: the most entries one source fetch queues; Rust's remote queue uses the same value. */
 internal const val QUEUE_FETCH_LIMIT = 2_000u
 
-/** An artist's songs as a queue: album by album in release order is the server's year sort. */
-private val ARTIST_QUEUE_SORT = GridSort(GridSortField.YEAR, descending = false)
+/** docs/31 §4.1: an artist's songs as a queue, album by album in release order (the server's year sort); Rust's remote queue sorts the same. */
+internal val ARTIST_QUEUE_SORT = GridSort(GridSortField.YEAR, descending = false)
 
 /**
  * Music brief §1.3: the process's one music owner, built on first use by `AppGraph.music` only, so an
@@ -140,7 +142,7 @@ internal class MusicPlaybackOwner(
     private val playSessions = mutableMapOf<TrackRef, String>()
     private var snapshot: MusicNow? = null
 
-    private val reports = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+    private val reports = ReportQueue(scope)
 
     /** The position ticker; runs only while a session is Active. */
     private var positionReports: Job? = null
@@ -148,12 +150,8 @@ internal class MusicPlaybackOwner(
     /** The pause state the playing track's report last heard; the core starts each track unpaused. */
     private var lastPaused = false
 
-    /** Started by the first report, so an owner that never played sends nothing. */
-    private val reportConsumer by lazy {
-        scope.launch {
-            for (report in reports) report()
-        }
-    }
+    /** docs/31 §4.5: the repeat and shuffle modes the playing track's report last heard; the core starts each track with neither. */
+    private var lastModes = RepeatMode.Off to false
 
     init {
         // docs/18 §2.1: every account change reaches the owner, a kept account's removal included; the owner exists only once music was asked for.
@@ -168,7 +166,7 @@ internal class MusicPlaybackOwner(
     }
 
     /** Play next or Add to queue; docs/29 §8.4: the bar confirms [title] when it joins the playing session. */
-    fun enqueue(mode: EnqueueMode, source: MusicSource, title: String): Long {
+    fun enqueue(mode: EnqueueMode, source: MusicSource, title: String?): Long {
         val r = ++lastR
         send(MusicEvent.Enqueue(r, mode, source, gateway.accountEpochs.value.epoch, title))
         return r
@@ -207,10 +205,8 @@ internal class MusicPlaybackOwner(
      */
     fun stopForVideo(launch: () -> Unit) {
         send(MusicEvent.VideoStarting)
-        val drained = CompletableDeferred<Unit>()
-        report { drained.complete(Unit) }
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            drained.await()
+            reports.drain()
             launch()
         }
     }
@@ -239,6 +235,28 @@ internal class MusicPlaybackOwner(
             val ref = active.ref
             report { playSessions[ref]?.let { gateway.reportPaused(it, now.paused) } }
         }
+        if (lastModes != now.repeat to now.shuffle) reportNow(active, now)
+    }
+
+    /** docs/31 §4.2: a remote command against the session, then an immediate report of where it stands. Main-only. */
+    fun remote(event: MusicEvent) {
+        send(event)
+        reportRemote()
+    }
+
+    /** docs/31 §7: the immediate report after any remote command, a volume change's included. Main-only. */
+    fun reportRemote() {
+        val active = _state.value.phase as? Phase.Active ?: return
+        reportNow(active, snapshot ?: return)
+    }
+
+    /** docs/31 §7: queued behind the track's start, at the player's position now, with the modes [now] shows. */
+    private fun reportNow(active: Phase.Active, now: MusicNow) {
+        val ticks = ports[active.g]?.positionTicks() ?: return
+        lastModes = now.repeat to now.shuffle
+        val facts = ReportFactsFfi.Audio(remoteRepeat(now.repeat), if (now.shuffle) RemoteShuffleFfi.SHUFFLED else RemoteShuffleFfi.SORTED)
+        val ref = active.ref
+        report { playSessions[ref]?.let { gateway.reportNow(it, ticks, facts) } }
     }
 
     fun card(item: String): Card? = cards[item]
@@ -292,6 +310,7 @@ internal class MusicPlaybackOwner(
         positionReports?.cancel()
         positionReports = null
         lastPaused = false
+        lastModes = RepeatMode.Off to false
         snapshot = null
         cards.clear()
         plans.clear()
@@ -317,16 +336,16 @@ internal class MusicPlaybackOwner(
         when (effect) {
             is MusicEffect.LaunchFetch -> {
                 val job = scope.launch(start = CoroutineStart.LAZY) {
-                    val result = runCatchingCancellable { fetchQueue(effect.source) }
+                    val result = runCatchingCancellable { fetchSongs(effect.source) }.getOrNull()
                     fetches.remove(effect.r)
-                    send(fetchedEvent(effect.r, result.getOrNull(), effect.startIndex, effect.shuffled))
+                    send(fetchedEvent(effect.r, result, effect.startIndex, effect.shuffled))
                 }
                 fetches[effect.r] = job
                 job.start()
             }
             is MusicEffect.CancelFetch -> fetches.remove(effect.r)?.cancel()
             is MusicEffect.LaunchEnqueue -> sessionScope(effect.sid).launch {
-                val songs = runCatchingCancellable { fetchQueue(effect.source) }.getOrNull()
+                val songs = runCatchingCancellable { fetchSongs(effect.source) }.getOrNull()
                 when {
                     songs == null -> send(MusicEvent.EnqueueFailed(effect.sid, effect.r))
                     songs.isNotEmpty() -> {
@@ -380,6 +399,7 @@ internal class MusicPlaybackOwner(
         val endTicks = effect.ends?.at?.ticks(atStep) ?: 0L
         val plan = planFor(session.epoch, effect.item)
         lastPaused = false
+        lastModes = RepeatMode.Off to false
         report {
             val ended = effect.ends?.let { end -> playSessions.remove(end.ref)?.let { AudioEnd(it, endTicks) } }
             val track = runCatchingCancellable { plan.await() }.getOrNull()?.takeIf { it.stream.reportable }
@@ -407,10 +427,7 @@ internal class MusicPlaybackOwner(
         }
     }
 
-    private fun report(work: suspend () -> Unit) {
-        reportConsumer
-        reports.trySend { runCatchingCancellable { work() } }
-    }
+    private fun report(work: suspend () -> Unit) = reports.send(work)
 
     private fun currentSession(): MusicSession? = when (val phase = _state.value.phase) {
         Phase.Idle -> null
@@ -432,15 +449,21 @@ internal class MusicPlaybackOwner(
         }
     }
 
-    /** `null` when the source can't be read now (the mirror isn't open, or the call failed). */
-    private suspend fun fetchQueue(source: MusicSource): List<Card>? = when (source) {
+    private suspend fun fetchSongs(source: MusicSource): List<Card>? = when (source) {
         is MusicSource.Album -> gateway.albumTracks(source.id, 0u, QUEUE_FETCH_LIMIT)
         is MusicSource.Artist -> gateway.musicSongs(SongSource.Artist(source.id, ARTIST_QUEUE_SORT), 0u, QUEUE_FETCH_LIMIT)
         is MusicSource.Songs -> gateway.musicSongs(source.source, 0u, QUEUE_FETCH_LIMIT)
         is MusicSource.Playlist -> gateway.playlistItems(source.id, 0u, QUEUE_FETCH_LIMIT).map { it.card }
         is MusicSource.Mix -> gateway.instantMix(source.seed)
         is MusicSource.Single -> listOf(source.song)
+        is MusicSource.Items -> source.songs
     }
+}
+
+private fun remoteRepeat(mode: RepeatMode): RemoteRepeatFfi = when (mode) {
+    RepeatMode.Off -> RemoteRepeatFfi.OFF
+    RepeatMode.All -> RemoteRepeatFfi.ALL
+    RepeatMode.One -> RemoteRepeatFfi.ONE
 }
 
 private fun MusicEffect.endsAtPlayer(): Boolean = when (this) {

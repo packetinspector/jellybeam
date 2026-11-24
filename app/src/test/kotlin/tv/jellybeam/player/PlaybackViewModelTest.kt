@@ -59,6 +59,7 @@ import uniffi.jellybeam_core.PlaybackOsdDetail
 import uniffi.jellybeam_core.PlaybackPlan
 import uniffi.jellybeam_core.PlaybackRequest
 import uniffi.jellybeam_core.PlayMethodFfi
+import uniffi.jellybeam_core.PlaystateCommandFfi
 import uniffi.jellybeam_core.SegmentAction
 import uniffi.jellybeam_core.StillWatchingDecision
 import uniffi.jellybeam_core.SubtitleActionFfi
@@ -591,6 +592,31 @@ class PlaybackViewModelTest {
 
             assertEquals(listOf(burned.playSessionId, "clean"), gateway.reportPausedSessionIds)
             assertEquals(listOf(true, true), gateway.reportPausedCalls)
+        }
+    }
+
+    /** docs/31 §7: a fallback's session starts with no stream facts, so it is told the streams though they did not change. */
+    @Test
+    fun `a committed fallback sends the unchanged streams to the landed session`() = runTest(timeout = TEST_TIMEOUT) {
+        val english = AudioStreamFfi(index = 1, displayTitle = "English", title = "English", language = "eng", codec = "aac", channels = 2, isDefault = true)
+        val plan = samplePlan(transcodeFallbackAllowed = true, audioStreams = listOf(english))
+        val transcode = samplePlan(playMethod = PlayMethodFfi.TRANSCODE, playSessionId = "landed", audioStreams = listOf(english), deliveredAudioIndex = 1)
+        val gateway = FakeCoreGateway(
+            preparePlaybackResult = Result.success(plan),
+            prepareTranscodeFallbackResult = Result.success(transcode),
+        )
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.fireTracksChanged(tracksOf(enAudio to true))
+            runCurrent()
+            val before = gateway.reportFactsCalls.last()
+            player.fireError(PlaybackException("boom", null, PlaybackException.ERROR_CODE_DECODING_FAILED))
+            runCurrent()
+
+            assertEquals(listOf("landed"), gateway.commitTranscodeCalls)
+            assertEquals(plan.playSessionId to uniffi.jellybeam_core.ReportFactsFfi.Video(1, null, null), before)
+            assertEquals("landed" to before.second, gateway.reportFactsCalls.last())
         }
     }
 
@@ -2214,9 +2240,9 @@ class PlaybackViewModelTest {
         val gate = CompletableDeferred<Unit>().also { fake.preparePlaybackGates[plan.itemId] = it }
         val order = mutableListOf<String>()
         val gateway = object : CoreGateway by fake {
-            override suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean, request: PlaybackRequest): PlaybackPlan {
+            override suspend fun preparePlayback(itemId: String, startFromBeginning: Boolean, request: PlaybackRequest, mediaSourceId: String?, audioStreamIndex: Int?, subtitleStreamIndex: Int?): PlaybackPlan {
                 order += "prepare"
-                return fake.preparePlayback(itemId, startFromBeginning, request)
+                return fake.preparePlayback(itemId, startFromBeginning, request, mediaSourceId)
             }
         }
         val player = FakePlaybackPlayer().apply { onListenerAdded = { order += "playerBuilt" } }
@@ -8364,6 +8390,68 @@ class PlaybackViewModelTest {
             assertEquals(emptyList<Long>(), rig.player.groupSeekCalls)
             assertEquals(300_000_000L, viewModel.positionTicks.value)
         }
+
+    /** docs/31 §4.2: a remote Pause or Unpause never toggles, so a repeat leaves the state where the first put it. */
+    @Test
+    fun `remote pause and unpause are idempotent`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan()
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(FakeCoreGateway(preparePlaybackResult = Result.success(plan)), player, plan.itemId)
+        withSession(viewModel) {
+            viewModel.pause()
+            viewModel.pause()
+            assertFalse(player.playWhenReady)
+            assertEquals(1, player.pauseCallCount)
+            viewModel.unpause()
+            viewModel.unpause()
+            assertTrue(player.playWhenReady)
+            assertEquals(1, player.playCallCount)
+            assertEquals(0, player.togglePlayPauseCallCount)
+        }
+    }
+
+    /** docs/31 §4.2, docs/28 §4: in a group a remote Pause or Unpause is a request, sent only when it changes the intent. */
+    @Test
+    fun `in a group remote pause and unpause ask the group once and leave the player alone`() =
+        groupTest(groupGateway(samplePlan(itemId = "item-g"))) { rig ->
+            rig.loadAndLand("item-g", startTicks = 300_000_000L)
+            val viewModel = rig.viewModel
+
+            viewModel.pause() // loaded paused
+            viewModel.unpause()
+            rig.player.playWhenReady = true
+            viewModel.unpause()
+            viewModel.pause()
+            runCurrent()
+
+            assertEquals(
+                listOf(SyncPlayInput.ItemLoaded("entry-1", 300_000_000L), SyncPlayInput.Unpause, SyncPlayInput.Pause),
+                rig.inputs,
+            )
+            assertEquals(0, rig.player.pauseCallCount)
+            assertEquals(0, rig.player.playCallCount)
+        }
+
+    /** docs/31 §4.2, §7: an applied remote command reports at once, from where the player stands. */
+    @Test
+    fun `a remote rewind seeks back by the skip setting and reports now`() = runTest(timeout = TEST_TIMEOUT) {
+        val plan = samplePlan(runtimeTicks = 6_000_000_000L)
+        val gateway = FakeCoreGateway(preparePlaybackResult = Result.success(plan))
+        val player = FakePlaybackPlayer()
+        val viewModel = buildViewModel(gateway, player, plan.itemId)
+        withSession(viewModel) {
+            player.firePlaybackStateChanged(Player.STATE_READY)
+            player.positionTicks = 600_000_000L
+            runCurrent()
+            val before = gateway.reportNowLog.size
+
+            assertNull(viewModel.remote(VideoOp.Playstate(PlaystateCommandFfi.Rewind)))
+            runCurrent()
+
+            assertEquals(listOf(-viewModel.state.value.skipBackMs), player.seekCalls)
+            assertEquals(listOf("now ${plan.playSessionId}@${player.positionTicks}"), gateway.reportNowLog.drop(before))
+        }
+    }
 
     /** docs/28 §1: per-member auto-skip would cause seek storms, and the queue, not next-up, picks what follows. */
     @Test

@@ -104,12 +104,22 @@ internal fun newIntentAction(currentItemId: String?, newItemId: String, startFro
     else -> NewIntentAction.Replace
 }
 
-/** What a player intent carries for an owner request (docs/17 §3); [group] marks a Watch Together load, which the group positions (docs/28 §4). */
-internal data class PlayerLaunch(val item: String, val fromBeginning: Boolean, val startMs: Long?, val group: Boolean)
+/**
+ * What a player intent carries for an owner request (docs/17 §3); [group] marks a Watch Together load, which the group
+ * positions (docs/28 §4); [tracks] and [queue] are a remote Play's (docs/31 §4.1).
+ */
+internal data class PlayerLaunch(
+    val item: String,
+    val fromBeginning: Boolean,
+    val startMs: Long?,
+    val group: Boolean,
+    val tracks: TrackRequest? = null,
+    val queue: RemoteQueue? = null,
+)
 
 internal fun playerLaunch(req: Req<Req.Kind.Play>): PlayerLaunch {
     val start = req.kind.start
-    return PlayerLaunch(req.kind.item, start == Req.Start.Beginning, (start as? Req.Start.At)?.ms, req.origin == Req.Origin.Group)
+    return PlayerLaunch(req.kind.item, start == Req.Start.Beginning, (start as? Req.Start.At)?.ms, req.origin == Req.Origin.Group, req.kind.tracks, req.kind.queue)
 }
 
 /**
@@ -159,6 +169,9 @@ class PlaybackActivity : ComponentActivity() {
      * while routing to [MainActivity]'s detail page instead of finishing. */
     private var leavingForDetail = false
 
+    /** docs/31 §4.5: [PlaybackScreen]'s OSD toggle handler while it is composed; `null` before the screen installs. */
+    private var remoteOsd: ((VideoOp.Osd) -> DropWhy?)? = null
+
     /**
      * Feeds [PipController.updateVideoSize] from Media3's reported video size (docs/17 §2) and,
      * while already in PiP, republishes [android.app.PictureInPictureParams] so an item swap
@@ -194,7 +207,9 @@ class PlaybackActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // docs/17 §3: the handle is read only after onCreate returns, by which time viewModel is set.
-        generation = playbackActivityTracker.created(PlayerHandle(finishAndRemoveTask = ::finishAndRemoveTask, liveItemId = { viewModel.liveItemId }))
+        generation = playbackActivityTracker.created(
+            PlayerHandle(finishAndRemoveTask = ::finishAndRemoveTask, liveItemId = { viewModel.liveItemId }, session = { viewModel.liveSession }, remote = ::remote),
+        )
         AppGraph.updateOwnerIfStarted()?.playbackChanged(true)
         // Isolates the cold-Activity-launch phase from ffi.preparePlayback that follows (docs/10).
         PerfLog.markStartup("playback.activityCreate")
@@ -209,7 +224,10 @@ class PlaybackActivity : ComponentActivity() {
         // Obtained here, not in the Composable, so onStop/onDestroy reach the same instance.
         viewModel = ViewModelProvider(
             this,
-            PlaybackViewModelFactory(AppGraph.gateway, AppGraph.playerHolder, itemId, startFromBeginning, AppGraph.strings, AppGraph.trickplayFetcher, forGroup, startMs),
+            PlaybackViewModelFactory(
+                AppGraph.gateway, AppGraph.playerHolder, itemId, startFromBeginning, AppGraph.strings, AppGraph.trickplayFetcher, forGroup, startMs,
+                queueOf(intent), tracksOf(intent),
+            ),
         )[PlaybackViewModel::class.java]
         // docs/28 §4: a recreated Activity keeps its view model's port, or its solo playback once it left the group.
         if (forGroup && savedInstanceState == null) attachToGroup()
@@ -242,8 +260,12 @@ class PlaybackActivity : ComponentActivity() {
                 seekToMs = viewModel::seekToPositionMs,
                 skipForwardMs = { viewModel.state.value.skipForwardMs },
                 skipBackMs = { viewModel.state.value.skipBackMs },
-                playWhenReady = { viewModel.playWhenReady },
-                togglePlayPause = viewModel::togglePlayPause,
+                play = viewModel::unpause,
+                pause = viewModel::pause,
+                next = viewModel::playNextEpisode,
+                previous = viewModel::playPrevious,
+                hasNext = { viewModel.state.value.hasNextEpisode },
+                hasPrevious = { viewModel.state.value.hasPreviousEpisode },
             ),
             sessionActivity = PendingIntent.getActivity(
                 this,
@@ -334,6 +356,7 @@ class PlaybackActivity : ComponentActivity() {
                         focusRestoreEpoch = windowFocusEpoch,
                         inPictureInPicture = inPictureInPicture,
                         onExitRequested = { if (!tryEnterPip()) finish() },
+                        onRemoteOsd = { remoteOsd = it },
                     )
                 }
             }
@@ -370,15 +393,28 @@ class PlaybackActivity : ComponentActivity() {
         val startFromBeginning = intent.getBooleanExtra(EXTRA_START_FROM_BEGINNING, false)
         val startMs = startMsOf(intent)
         val action = newIntentAction(viewModel.liveItemId, newItemId, startFromBeginning, startMs, intent.getBooleanExtra(EXTRA_GROUP, false))
-        if (action == NewIntentAction.Expand) return
+        val queue = queueOf(intent)
+        val tracks = tracksOf(intent)
+        // docs/31 §4.1, docs/05 "Same item": a remote Play of the item on screen adds its list and picks without a reload.
+        if (action == NewIntentAction.Expand) return viewModel.remoteExtras(queue, tracks)
         itemId = newItemId
         if (action == NewIntentAction.Group) return attachToGroup()
-        viewModel.replaceItem(newItemId, startFromBeginning, startMs)
+        viewModel.replaceItem(newItemId, startFromBeginning, startMs, queue, tracks)
     }
 
     /** docs/28 §4: the group's Load decides what plays; a group that already ended closes the player quietly. */
     private fun attachToGroup() {
         SyncPlayExecutor.current.value?.let { it.send(GroupEvent.PortAttached(viewModel.portFor(it))) } ?: closePlayer()
+    }
+
+    /** docs/31 §4.5: window ops run here, the rest against the view model's session; returns why [op] dropped. */
+    private fun remote(op: VideoOp): DropWhy? = when (op) {
+        is VideoOp.Key -> null.also { pressKey(op.key, ::dispatchKeyEvent, onBackPressedDispatcher::onBackPressed) }
+        VideoOp.EnterMini -> if (tryEnterPip()) null else DropWhy.NotApplicable
+        // docs/17 §2: the same resume-in-place intent a system tap on the mini player sends.
+        VideoOp.Expand -> null.also { startActivity(intent(this, itemId).putExtra(EXTRA_RESUME_SESSION, true)) }
+        is VideoOp.Osd -> remoteOsd.let { osd -> if (osd == null) DropWhy.NotReady else osd(op) }
+        is VideoOp.Session -> viewModel.remote(op)
     }
 
     override fun onUserLeaveHint() {
@@ -451,6 +487,26 @@ class PlaybackActivity : ComponentActivity() {
 
         private fun startMsOf(intent: Intent): Long? = if (intent.hasExtra(EXTRA_START_MS)) intent.getLongExtra(EXTRA_START_MS, 0L) else null
 
+        /** docs/31 §4.1.1: a remote Play's video ids and the one it starts at. */
+        private const val EXTRA_QUEUE_IDS = "tv.jellybeam.player.EXTRA_QUEUE_IDS"
+        private const val EXTRA_QUEUE_START = "tv.jellybeam.player.EXTRA_QUEUE_START"
+
+        /** docs/31 §4.1: a remote Play's version and stream picks, each absent when not sent. */
+        private const val EXTRA_MEDIA_SOURCE = "tv.jellybeam.player.EXTRA_MEDIA_SOURCE"
+        private const val EXTRA_AUDIO_STREAM = "tv.jellybeam.player.EXTRA_AUDIO_STREAM"
+        private const val EXTRA_SUBTITLE_STREAM = "tv.jellybeam.player.EXTRA_SUBTITLE_STREAM"
+
+        private fun queueOf(intent: Intent): RemoteQueue? =
+            intent.getStringArrayExtra(EXTRA_QUEUE_IDS)?.let { RemoteQueue(it.toList(), intent.getIntExtra(EXTRA_QUEUE_START, 0)) }
+
+        private fun tracksOf(intent: Intent): TrackRequest? {
+            fun index(key: String) = if (intent.hasExtra(key)) intent.getIntExtra(key, 0) else null
+            val source = intent.getStringExtra(EXTRA_MEDIA_SOURCE)
+            val audio = index(EXTRA_AUDIO_STREAM)
+            val subtitle = index(EXTRA_SUBTITLE_STREAM)
+            return TrackRequest(source, audio, subtitle).takeIf { source != null || audio != null || subtitle != null }
+        }
+
         /** docs/17 §2: marks an Intent as "bring this Activity forward"; [onNewIntent] never
          * restarts the item when `true`. */
         private const val EXTRA_RESUME_SESSION = "tv.jellybeam.player.EXTRA_RESUME_SESSION"
@@ -468,5 +524,19 @@ class PlaybackActivity : ComponentActivity() {
                 .putExtra(EXTRA_START_FROM_BEGINNING, startFromBeginning)
                 .putExtra(EXTRA_GROUP, group)
                 .also { if (startMs != null) it.putExtra(EXTRA_START_MS, startMs) }
+
+        /** docs/17 §3: [launch] as a player intent, a remote Play's list and picks included (docs/31 §4.1). */
+        internal fun intent(context: Context, launch: PlayerLaunch): Intent =
+            intent(context, launch.item, launch.fromBeginning, launch.startMs, launch.group).apply {
+                launch.queue?.let {
+                    putExtra(EXTRA_QUEUE_IDS, it.ids.toTypedArray())
+                    putExtra(EXTRA_QUEUE_START, it.startIndex)
+                }
+                launch.tracks?.let { tracks ->
+                    tracks.mediaSourceId?.let { putExtra(EXTRA_MEDIA_SOURCE, it) }
+                    tracks.audioStreamIndex?.let { putExtra(EXTRA_AUDIO_STREAM, it) }
+                    tracks.subtitleStreamIndex?.let { putExtra(EXTRA_SUBTITLE_STREAM, it) }
+                }
+            }
     }
 }

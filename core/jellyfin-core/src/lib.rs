@@ -14,10 +14,13 @@ pub use device_profile::{
 };
 pub use event_bus::{BusConnection, EventBus, EventBusHandle};
 pub use reporting::{
-    pending_local_item_ids, supersede, FinalDelivery, ReportingSession, Superseded,
+    pending_local_item_ids, supersede, FinalDelivery, ReportFacts, ReportList, ReportingSession,
+    Superseded,
 };
 
-use jellyfin_api::models::{MediaSourceInfo, PlaybackInfoResponse};
+use jellyfin_api::models::{
+    ClientCapabilitiesDto, GeneralCommandType, MediaSourceInfo, MediaType, PlaybackInfoResponse,
+};
 #[cfg(test)]
 use jellyfin_api::models::{MediaStream, MediaStreamType};
 use jellyfin_api::{JellyfinClient, ServerEvent};
@@ -102,6 +105,78 @@ pub fn decide_playback(
     })
 }
 
+/// What this TV tells the server about remote control (docs/31 §3, §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteControl {
+    /// The setting is off: no commands are advertised.
+    Off,
+    /// On, but the TV's output volume is fixed (HDMI-CEC), so no volume commands (docs/31 §4.4).
+    FixedVolume,
+    AdjustableVolume,
+}
+
+/// Commands the official client handles (docs/31 §3).
+const PARITY_COMMANDS: &[GeneralCommandType] = &[
+    GeneralCommandType::DisplayContent,
+    GeneralCommandType::SetSubtitleStreamIndex,
+    GeneralCommandType::SetAudioStreamIndex,
+    GeneralCommandType::DisplayMessage,
+    GeneralCommandType::SendString,
+];
+
+/// Offered only while `RemoteControl::AdjustableVolume` (docs/31 §4.4).
+const VOLUME_COMMANDS: &[GeneralCommandType] = &[
+    GeneralCommandType::VolumeUp,
+    GeneralCommandType::VolumeDown,
+    GeneralCommandType::SetVolume,
+    GeneralCommandType::Mute,
+    GeneralCommandType::Unmute,
+    GeneralCommandType::ToggleMute,
+];
+
+/// docs/31 §4.5. Trailers, Live TV, `SetMaxStreamingBitrate` and `TakeScreenshot` stay out until they ship.
+const BEYOND_PARITY_COMMANDS: &[GeneralCommandType] = &[
+    GeneralCommandType::MoveUp,
+    GeneralCommandType::MoveDown,
+    GeneralCommandType::MoveLeft,
+    GeneralCommandType::MoveRight,
+    GeneralCommandType::Select,
+    GeneralCommandType::Back,
+    GeneralCommandType::PageUp,
+    GeneralCommandType::PageDown,
+    GeneralCommandType::PreviousLetter,
+    GeneralCommandType::NextLetter,
+    GeneralCommandType::GoHome,
+    GeneralCommandType::GoToSearch,
+    GeneralCommandType::GoToSettings,
+    GeneralCommandType::ToggleContextMenu,
+    GeneralCommandType::ToggleOsd,
+    GeneralCommandType::ToggleOsdMenu,
+    GeneralCommandType::ToggleFullscreen,
+    GeneralCommandType::ToggleStats,
+    GeneralCommandType::SetRepeatMode,
+    GeneralCommandType::SetShuffleQueue,
+    GeneralCommandType::SetPlaybackOrder,
+    GeneralCommandType::PlayMediaSource,
+];
+
+/// docs/31 §3: the body of `POST /Sessions/Capabilities/Full`.
+pub fn capabilities(mode: RemoteControl) -> ClientCapabilitiesDto {
+    let supported_commands = match mode {
+        RemoteControl::Off => Vec::new(),
+        RemoteControl::FixedVolume => [PARITY_COMMANDS, BEYOND_PARITY_COMMANDS].concat(),
+        RemoteControl::AdjustableVolume => {
+            [PARITY_COMMANDS, VOLUME_COMMANDS, BEYOND_PARITY_COMMANDS].concat()
+        }
+    };
+    ClientCapabilitiesDto {
+        playable_media_types: vec![MediaType::Video, MediaType::Audio],
+        supported_commands,
+        supports_media_control: Some(mode != RemoteControl::Off),
+        ..Default::default()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ReportContext {
     pub item_id: String,
@@ -113,6 +188,27 @@ pub struct ReportContext {
     /// starts a fresh `ReportingSession` instead.
     pub play_method: jellyfin_api::ReportPlayMethod,
     pub media: ReportMedia,
+    /// docs/31 §4.4: reads the system volume as each Start/Progress is built; `None` reports full
+    /// and unmuted.
+    pub volume: Option<VolumeSource>,
+}
+
+/// docs/31 §4.4: the system stream's volume, `level` 0-100.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Volume {
+    pub level: u8,
+    pub muted: bool,
+}
+
+/// docs/31 §4.4: a reader of the current [`Volume`], called on the reporting actor's thread with
+/// no lock held.
+#[derive(Clone)]
+pub struct VolumeSource(pub std::sync::Arc<dyn Fn() -> Volume + Send + Sync>);
+
+impl std::fmt::Debug for VolumeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VolumeSource")
+    }
 }
 
 /// docs/feature-dev/music-design-brief.md §1.3: what a session plays. Audio names its queue on
@@ -300,6 +396,119 @@ mod tests {
             decide_playback(&client(), "item-1", &info).expect_err("test assertion"),
             CoreError::NoPlayableSource
         ));
+    }
+
+    // --- capabilities ---------------------------------------------
+
+    /// The wire body of `capabilities(mode)`, so the pinned names are the JSON the server reads.
+    fn capabilities_body(mode: RemoteControl) -> serde_json::Value {
+        serde_json::to_value(capabilities(mode)).expect("capabilities serialize")
+    }
+
+    fn sorted_commands(body: &serde_json::Value) -> Vec<String> {
+        let mut names: Vec<String> = body["SupportedCommands"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    fn expected_commands(names: &[&str]) -> Vec<String> {
+        let mut names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        names.sort();
+        names
+    }
+
+    const PARITY_NAMES: [&str; 5] = [
+        "DisplayContent",
+        "SetSubtitleStreamIndex",
+        "SetAudioStreamIndex",
+        "DisplayMessage",
+        "SendString",
+    ];
+    const VOLUME_NAMES: [&str; 6] = [
+        "VolumeUp",
+        "VolumeDown",
+        "SetVolume",
+        "Mute",
+        "Unmute",
+        "ToggleMute",
+    ];
+    const BEYOND_PARITY_NAMES: [&str; 22] = [
+        "MoveUp",
+        "MoveDown",
+        "MoveLeft",
+        "MoveRight",
+        "Select",
+        "Back",
+        "PageUp",
+        "PageDown",
+        "PreviousLetter",
+        "NextLetter",
+        "GoHome",
+        "GoToSearch",
+        "GoToSettings",
+        "ToggleContextMenu",
+        "ToggleOsd",
+        "ToggleOsdMenu",
+        "ToggleFullscreen",
+        "ToggleStats",
+        "SetRepeatMode",
+        "SetShuffleQueue",
+        "SetPlaybackOrder",
+        "PlayMediaSource",
+    ];
+
+    /// docs/31 §3 table: video and audio, media control on, parity plus beyond-parity commands,
+    /// and no volume commands while the TV's volume is fixed.
+    #[test]
+    fn fixed_volume_advertises_everything_but_the_volume_commands() {
+        let body = capabilities_body(RemoteControl::FixedVolume);
+        assert_eq!(
+            body["PlayableMediaTypes"],
+            serde_json::json!(["Video", "Audio"])
+        );
+        assert_eq!(body["SupportsMediaControl"], serde_json::json!(true));
+        let want: Vec<&str> = PARITY_NAMES
+            .iter()
+            .chain(&BEYOND_PARITY_NAMES)
+            .copied()
+            .collect();
+        assert_eq!(sorted_commands(&body), expected_commands(&want));
+    }
+
+    #[test]
+    fn adjustable_volume_adds_the_six_volume_commands() {
+        let body = capabilities_body(RemoteControl::AdjustableVolume);
+        assert_eq!(
+            body["PlayableMediaTypes"],
+            serde_json::json!(["Video", "Audio"])
+        );
+        assert_eq!(body["SupportsMediaControl"], serde_json::json!(true));
+        let want: Vec<&str> = PARITY_NAMES
+            .iter()
+            .chain(&VOLUME_NAMES)
+            .chain(&BEYOND_PARITY_NAMES)
+            .copied()
+            .collect();
+        assert_eq!(sorted_commands(&body), expected_commands(&want));
+    }
+
+    /// docs/31 §8: off posts media control false and no commands.
+    #[test]
+    fn off_advertises_no_media_control_and_no_commands() {
+        let body = capabilities_body(RemoteControl::Off);
+        assert_eq!(body["SupportsMediaControl"], serde_json::json!(false));
+        assert!(sorted_commands(&body).is_empty(), "{body}");
+        assert_eq!(
+            body["PlayableMediaTypes"],
+            serde_json::json!(["Video", "Audio"])
+        );
     }
 
     // --- recv_bus -------------------------------------------------

@@ -513,6 +513,102 @@ class PlayerFlowReduceTest {
         assertFalse(PlayerFlow().isActive)
     }
 
+    /** docs/31 §5: a remote Play with MainActivity hidden and no player to take it is dropped, never queued for a later reopen. */
+    @Test
+    fun `a remote Play while hidden over nothing is dropped`() {
+        val req = remote(1, ITEM_A)
+        val step = reduce(home(None), HostEvent.Arrive(req), null)
+        assertEquals(listOf(PlayerEffect.RemoteDropped(req.id)), step.effects)
+        assertEquals(Request.None, step.state.request)
+        assertEquals("a later reopen launches nothing", emptyList<PlayerEffect>(), run(step.state, HostEvent.MainShown).effects)
+    }
+
+    /** docs/31 §4.1: a remote Play joins a fullscreen player at once, though the player hides MainActivity. */
+    @Test
+    fun `a remote Play over a fullscreen player is delivered while MainActivity is hidden`() {
+        val req = remote(1, ITEM_B)
+        val step = reduce(home(Fullscreen(1)), HostEvent.Arrive(req), ITEM_A)
+        assertEquals(listOf(PlayerEffect.Deliver(1, req)), step.effects)
+        assertEquals(Fullscreen(1), step.state.player)
+        assertEquals(Request.None, step.state.request)
+    }
+
+    /** docs/31 §5 (approved Q1): the mini player is a visible window, so a remote Play expands it even over another app. */
+    @Test
+    fun `a remote Play over a mini player expands it while MainActivity is hidden`() {
+        val req = remote(1, ITEM_B)
+        val step = reduce(home(Pip(1)), HostEvent.Arrive(req), ITEM_A)
+        assertEquals(listOf(PlayerEffect.Deliver(1, req)), step.effects)
+        assertEquals(Expanding(1, req), step.state.player)
+    }
+
+    /** docs/31 §4.3: DisplayContent is ignored under a fullscreen player, which hides MainActivity. */
+    @Test
+    fun `a remote detail request under a fullscreen player is dropped`() {
+        val req = remoteDetail(1, ITEM_B)
+        listOf(Fullscreen(1), Shrinking(1), Closing(1), None).forEach { player ->
+            val step = reduce(home(player), HostEvent.Arrive(req), ITEM_A)
+            assertEquals("$player", listOf(PlayerEffect.RemoteDropped(req.id)), step.effects)
+            assertEquals("$player", Request.None, step.state.request)
+        }
+    }
+
+    /** docs/31 §5 (approved Q1): the mini player is a visible window, so a remote detail over another app brings MainActivity forward and opens there. */
+    @Test
+    fun `a remote detail over a mini player while hidden brings MainActivity forward and opens there`() {
+        val req = remoteDetail(1, ITEM_B)
+        val step = reduce(home(Pip(1)), HostEvent.Arrive(req), ITEM_A)
+        assertEquals(listOf(PlayerEffect.ShowMain), step.effects)
+        assertEquals(Request.Waiting(req, Policy.Any), step.state.request)
+
+        val shown = run(step.state, HostEvent.MainShown)
+        assertEquals("it waits on Home for its DetailDone", Request.Waiting(req, Policy.Any), shown.state.request)
+        assertEquals(Request.None, run(shown.state, HostEvent.DetailDone(req.id)).state.request)
+        assertEquals(emptyList<PlayerEffect>(), run(shown.state, HostEvent.DetailDone(req.id)).effects)
+
+        val dismissed = reduce(step.state, PlayerEvent.PipExited(1, started = false), ITEM_A)
+        assertEquals("a mini player closed first takes it along", listOf(PlayerEffect.Close(1), PlayerEffect.RemoteDropped(req.id)), dismissed.effects)
+        assertEquals(Request.None, dismissed.state.request)
+    }
+
+    /** docs/31 §5: a remote request waiting on a closing player is dropped once MainActivity hides, not kept for its return. */
+    @Test
+    fun `a remote Play waiting on a closing player is dropped when MainActivity hides`() {
+        val req = remote(1, ITEM_B)
+        val waiting = run(home(Closing(1), Main.Shown), HostEvent.Arrive(req))
+        assertEquals(emptyList<PlayerEffect>(), waiting.effects)
+        assertEquals(Request.Waiting(req, Policy.Any), waiting.state.request)
+        val hidden = reduce(waiting.state, HostEvent.MainHidden, null)
+        assertEquals(listOf(PlayerEffect.RemoteDropped(req.id)), hidden.effects)
+        assertEquals(emptyList<PlayerEffect>(), run(hidden.state, PlayerEvent.Destroyed(1), HostEvent.MainShown).effects)
+    }
+
+    /** docs/31 §4.1: a signed-out remote Play is dropped without the sign-in toast an intent gets. */
+    @Test
+    fun `a signed-out remote Play is dropped without a toast`() {
+        val req = remote(1, ITEM_A)
+        val step = reduce(PlayerFlow(main = Main.Shown, root = Root.SignedOut), HostEvent.Arrive(req), null)
+        assertEquals(listOf(PlayerEffect.RemoteDropped(req.id)), step.effects)
+        assertEquals(Request.None, step.state.request)
+    }
+
+    /** docs/31 §5: a remote expand the platform interrupts while MainActivity is hidden is dropped, not relaunched later. */
+    @Test
+    fun `an interrupted remote expand while hidden is dropped`() {
+        val req = remote(1, ITEM_B)
+        val step = reduce(home(Expanding(1, req)), PlayerEvent.PipEntered(1), ITEM_A)
+        assertEquals(listOf(PlayerEffect.RemoteDropped(req.id)), step.effects)
+        assertEquals(Pip(1), step.state.player)
+        assertEquals(Request.None, step.state.request)
+    }
+
+    /** docs/31 §4.1: with MainActivity shown a remote Play follows an in-app one: it launches, or waits for a closing player. */
+    @Test
+    fun `a remote Play with MainActivity shown launches like an in-app Play`() {
+        val req = remote(1, ITEM_A)
+        assertEquals(listOf(PlayerEffect.Launch(req)), reduce(home(None, Main.Shown), HostEvent.Arrive(req), null).effects)
+    }
+
     /**
      * Every sequence of up to four events from five seeds, over Created, each player event aimed at the slot's,
      * a draining and a stale generation, and every host event, an in-app and a group request and a group stop among them;
@@ -572,6 +668,8 @@ class PlayerFlowReduceTest {
             add(HostEvent.Arrive(detail(path.nextId, ITEM_A)))
             add(HostEvent.Arrive(inApp(path.nextId, ITEM_A)))
             add(HostEvent.Arrive(group(path.nextId, ITEM_A)))
+            add(HostEvent.Arrive(remote(path.nextId, ITEM_A)))
+            add(HostEvent.Arrive(remoteDetail(path.nextId, ITEM_A)))
             add(if (state.main == Main.Shown) HostEvent.MainHidden else HostEvent.MainShown)
             Root.entries.filter { it != state.root }.forEach { add(HostEvent.RootChanged(it)) }
             add(HostEvent.AccountReset)
@@ -647,7 +745,8 @@ class PlayerFlowReduceTest {
             when (val p = after.player) {
                 is Expanding -> {
                     same(Expanding(deliver.g, deliver.req), p, "a deliver into PiP expands it")
-                    same(Main.Shown, after.main, "a deliver into PiP only while MainActivity is shown")
+                    // docs/31 §5: a remote Play expands a mini player that floats over another app.
+                    if (deliver.req.origin != Req.Origin.Remote) same(Main.Shown, after.main, "a deliver into PiP only while MainActivity is shown")
                 }
                 else -> same(Fullscreen(deliver.g), p, "a deliver joins a fullscreen player")
             }
@@ -679,15 +778,18 @@ class PlayerFlowReduceTest {
         // An expand that ends without landing: a group load, or one an app exit, account change, group stop or failed
         // start took, is gone; otherwise a newer waiting request wins, else it is launched, delivered, held, or dropped by the sign-in gate.
         val expanding = before.player as? Expanding
+        val expandRetired = expanding != null && (
+            event == PlayerEvent.Resumed(expanding.g) || event == HostEvent.AppExit || event == HostEvent.AccountReset ||
+                event == HostEvent.GroupStop || event == HostEvent.LaunchFailed(expanding.req.id) || expanding.req.origin == Req.Origin.Group
+            )
         if (expanding != null && after.player != expanding) {
             val r = expanding.req
             val carried = held == r || r in started
-            val retired = event == PlayerEvent.Resumed(expanding.g) || event == HostEvent.AppExit || event == HostEvent.AccountReset ||
-                event == HostEvent.GroupStop || event == HostEvent.LaunchFailed(r.id) || r.origin == Req.Origin.Group
             when {
-                retired -> holds(!carried, "a retired expand is never relaunched")
+                expandRetired -> holds(!carried, "a retired expand is never relaunched")
                 before.request is Request.Waiting -> holds(!carried, "a newer waiting request replaces an interrupted expand")
-                else -> holds(carried || after.root == Root.SignedOut, "an interrupted expand is relaunched once")
+                // docs/31 §5: a remote one MainActivity can't show is dropped instead.
+                else -> holds(carried || after.root == Root.SignedOut || (r.origin == Req.Origin.Remote && after.main == Main.Hidden), "an interrupted expand is relaunched once")
             }
         }
 
@@ -710,6 +812,27 @@ class PlayerFlowReduceTest {
             same(Request.None, after.request, "leaving the app drops the request")
             same(Root.Pending, after.root, "leaving the app drops the root")
         }
+
+        // docs/31 §5 T1, T2: a remote request waits only while MainActivity is shown, but a detail over a mini player (approved Q1), and never as Fresh.
+        (after.request as? Request.Waiting)?.takeIf { it.req.origin == Req.Origin.Remote }?.let { waiting ->
+            val overMini = waiting.req.kind is Req.Kind.OpenDetail && after.player is Pip
+            holds(after.main == Main.Shown || overMini, "T1 a remote request waits hidden only as a detail over a mini player")
+            same(Policy.Any, waiting.policy, "T2 a remote request is never Fresh")
+        }
+        // T3: the sign-in toast is an intent's; a remote request leaves silently.
+        val arrived = (event as? HostEvent.Arrive)?.req
+        // T5 (approved Q1): MainActivity is brought forward exactly when a remote detail arrives over a mini player it can't see.
+        val showsMain = arrived != null && arrived.origin == Req.Origin.Remote && arrived.kind is Req.Kind.OpenDetail &&
+            after.main == Main.Hidden && after.player is Pip && held == arrived
+        same(if (showsMain) 1 else 0, effects.count { it == PlayerEffect.ShowMain }, "T5 MainActivity brought forward")
+        val requeued = expanding?.req?.takeIf { after.player != expanding && !expandRetired && before.request !is Request.Waiting }
+        val inPlay = listOfNotNull((before.request as? Request.Waiting)?.req, arrived, requeued).distinct()
+        if (PlayerEffect.SignInRequired in effects) holds(inPlay.none { it.origin == Req.Origin.Remote }, "T3 no toast for a remote request")
+        // T4: a remote request that waited, arrived or was requeued and leaves without a start is reported dropped, once.
+        val dropped = inPlay.filter { r ->
+            r.origin == Req.Origin.Remote && held != r && r !in started && event != HostEvent.DetailDone(r.id)
+        }
+        same(dropped.map { PlayerEffect.RemoteDropped(it.id) }, effects.filterIsInstance<PlayerEffect.RemoteDropped>(), "T4 remote drops")
 
         // The slot's generation is never draining.
         afterLive?.let { holds(it.g !in after.draining, "the slot's generation is not draining") }
@@ -775,6 +898,8 @@ class PlayerFlowReduceTest {
         fun inApp(id: Long, item: String) = play(id, item, origin = Req.Origin.InApp)
         fun group(id: Long, item: String) = play(id, item, origin = Req.Origin.Group)
         fun detail(id: Long, item: String) = Req(id, Req.Kind.OpenDetail(item), Req.Origin.External)
+        fun remote(id: Long, item: String) = play(id, item, origin = Req.Origin.Remote)
+        fun remoteDetail(id: Long, item: String) = Req(id, Req.Kind.OpenDetail(item), Req.Origin.Remote)
 
         /** A launch count restarts when a player instance is created or a launch ends without one. */
         fun resetsLaunches(before: PlayerFlow, event: FlowEvent, after: PlayerFlow): Boolean =

@@ -169,8 +169,12 @@ class FakePlaybackPlayer : PlaybackPlayer {
         if (onLanded != null) groupLanded = onLanded
     }
 
+    var playCallCount: Int = 0
+        private set
+
     override fun play() {
         playWhenReady = true
+        playCallCount++
     }
 
     /** Runs on every [addListener], which is where the real holder first builds its lazy ExoPlayer. */

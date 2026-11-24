@@ -18,6 +18,8 @@ Shelf order, empty-shelf hiding and the hero are decided in the core (`core/ffi/
 
 Shelves beyond the first two mount progressively, one per frame, once initial focus has landed, rather than composing every shelf's cards in the first content frame. Any D-pad move or focus-memory restore that reaches an unmounted shelf mounts the rest immediately before the move completes.
 
+A refresh that changes a shelf's first card (new item in Latest, a reorder or finished item in Continue Watching or Next Up) rewinds that shelf to its start, so the new card shows at the left instead of off-screen (`shelvesToRewind`). The shelf holding focus, or owed it back on return (docs/15 §3), is never moved; its new cards are a Left press away. A shelf seen for the first time is left as laid out.
+
 Hero: item = shelves[0].items[0]. Full-bleed backdrop (own tag, else ancestor), 42% viewport height, min 320px. Eyebrow = series name (episodes only); title = item name; metadata = `"S{s} E{e} · {runtime} · {year}"` (episode) / `"{year}"` (movie). Resume + "More Info" buttons.
 
 Card sizes:

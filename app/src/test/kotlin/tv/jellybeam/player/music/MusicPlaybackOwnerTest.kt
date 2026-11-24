@@ -18,6 +18,13 @@ import org.junit.Test
 import tv.jellybeam.AppGraph
 import tv.jellybeam.data.CoreGateway
 import tv.jellybeam.data.FakeCoreGateway
+import tv.jellybeam.player.MusicCall
+import tv.jellybeam.player.MusicLive
+import tv.jellybeam.player.PlayerFlow
+import tv.jellybeam.player.RemoteAction
+import tv.jellybeam.player.RemoteLive
+import tv.jellybeam.player.VideoLive
+import tv.jellybeam.player.route
 import tv.jellybeam.player.music.MusicFlow.Net
 import tv.jellybeam.player.music.MusicFlow.Pending
 import tv.jellybeam.player.music.MusicFlow.Phase
@@ -26,7 +33,17 @@ import tv.jellybeam.ui.cards.testCard
 import uniffi.jellybeam_core.AudioEnd
 import uniffi.jellybeam_core.AudioStream
 import uniffi.jellybeam_core.AudioTrackPlan
+import uniffi.jellybeam_core.GridSort
+import uniffi.jellybeam_core.GridSortField
+import uniffi.jellybeam_core.MixSeedFfi
+import uniffi.jellybeam_core.PlayCommandFfi
+import uniffi.jellybeam_core.RemoteCommandFfi
+import uniffi.jellybeam_core.RemoteItems
+import uniffi.jellybeam_core.RemotePlay
 import uniffi.jellybeam_core.PlaybackRequest
+import uniffi.jellybeam_core.RemoteRepeatFfi
+import uniffi.jellybeam_core.RemoteShuffleFfi
+import uniffi.jellybeam_core.ReportFactsFfi
 
 /** Music brief §1.3: the owner runs the reducer's effects in order against the service, the video close and the core's reports. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -428,6 +445,68 @@ class MusicPlaybackOwnerTest {
         assertEquals(QueueOrigin.Source, originOf(null))
     }
 
+    /** docs/31 §4.1: a remote Play's songs queue as sent, from the start row; Rust already expanded the containers. */
+    @Test
+    fun `remote songs queue as sent from the start row`() = runTest {
+        val owner = owner()
+        owner.play(MusicSource.Items(listOf(song("s0"), song("a"), song("s9"))), startIndex = 1)
+        val session = (owner.state.value.phase as Phase.Starting).session
+        assertEquals(listOf("s0", "a", "s9"), session.items.map { it.item })
+        assertEquals(1, session.start)
+    }
+
+    /** docs/31 §4.1: a remote Next or Last appends the sent songs. */
+    @Test
+    fun `remote songs enqueue appends them`() = runTest {
+        val owner = owner()
+        val g = owner.playing()
+        owner.enqueue(EnqueueMode.AddToQueue, MusicSource.Items(listOf(song("s0"), song("s9"))), title = null)
+        assertEquals("insert AddToQueue [s0, s9]", port.calls.last())
+        assertEquals(g, (owner.state.value.phase as Phase.Active).g)
+    }
+
+    /** docs/31 §4.1 invariant I12: a remote songs or mix Play reaches the owner from the sent value alone, never reading cards by id. */
+    @Test
+    fun `a remote songs or mix play never reads cards by id`() = runTest {
+        val live = RemoteLive(E1, VideoLive.None, MusicLive.None, PlayerFlow.Main.Shown)
+        fun play(items: RemoteItems) = (route(E1, RemoteCommandFfi.Play(RemotePlay(items, 0u, null, PlayCommandFfi.PLAY_NOW, null, null, null)), live) as RemoteAction.Music).call as MusicCall.Play
+        gateway.instantMixResult = listOf(song("m1"))
+        val owner = owner()
+        for (call in listOf(play(RemoteItems.Songs(listOf(song("s0")))), play(RemoteItems.Mix(MixSeedFfi.Album(ALBUM))))) {
+            owner.play(call.source, call.start, call.shuffled)
+        }
+        assertEquals(listOf<MixSeedFfi>(MixSeedFfi.Album(ALBUM)), gateway.instantMixSeeds)
+        assertEquals(0, gateway.cardsByIdsCalls)
+    }
+
+    /** docs/31 §4.2: a remote command reaches the player, then the playing track reports at once with its modes. */
+    @Test
+    fun `a remote command reaches the player and reports now`() = runTest {
+        val owner = owner()
+        val g = owner.playing()
+        owner.publish(g, now().copy(repeat = RepeatMode.All, shuffle = true))
+        port.position = 120
+        owner.remote(MusicEvent.Transport(TransportOp.Next))
+        assertEquals("apply ${TransportOp.Next}", port.calls.last())
+        assertEquals(listOf("now ps-a@0", "now ps-a@120"), gateway.reportNowLog)
+        assertEquals(ReportFactsFfi.Audio(RemoteRepeatFfi.ALL, RemoteShuffleFfi.SHUFFLED), gateway.reportNowFacts.last())
+    }
+
+    /** docs/31 §4.5: repeat and shuffle reach the server when they change, as a pause does; the core starts each track with neither. */
+    @Test
+    fun `publish reports repeat and shuffle only when they change`() = runTest {
+        val owner = owner()
+        val g = owner.playing()
+        owner.publish(g, now())
+        owner.publish(g, now().copy(repeat = RepeatMode.One))
+        owner.publish(g, now().copy(repeat = RepeatMode.One))
+        owner.publish(g, now().copy(repeat = RepeatMode.One, shuffle = true))
+        assertEquals(
+            listOf(ReportFactsFfi.Audio(RemoteRepeatFfi.ONE, RemoteShuffleFfi.SORTED), ReportFactsFfi.Audio(RemoteRepeatFfi.ONE, RemoteShuffleFfi.SHUFFLED)),
+            gateway.reportNowFacts,
+        )
+    }
+
     private fun now() = MusicNow(listOf(QueueEntry("a", QueueOrigin.Source)), listOf(0), 0, true, 0, 1_000, false, RepeatMode.Off)
 
     private class FakePort : MusicPlayerPort {
@@ -457,6 +536,13 @@ class MusicPlaybackOwnerTest {
             started += ticket
         }
         override fun stop() { stops++ }
+    }
+
+    /** docs/31 §4.1: the remote and in-app queues share these rules; Rust's `QUEUE_FETCH_LIMIT` and `ARTIST_QUEUE_SORT` (core/ffi/src/remote.rs) are the same values. */
+    @Test
+    fun `queue fetch limit and artist sort equal Rust's consts`() {
+        assertEquals(2_000u, QUEUE_FETCH_LIMIT)
+        assertEquals(GridSort(GridSortField.YEAR, descending = false), ARTIST_QUEUE_SORT)
     }
 
     private companion object {

@@ -96,3 +96,28 @@ class PlaybackOsdController(
  */
 fun pauseRevealsOsd(paused: Boolean, groupPhase: SyncPlayPhase?): Boolean =
     groupPhase == null || (paused && groupPhase == SyncPlayPhase.PAUSED)
+
+/** What a remote's ToggleOsd does to the OSD. */
+internal enum class OsdToggleStep { HIDE, REVEAL, UNAVAILABLE }
+
+/** docs/31 §4.5: hides or reveals the OSD as Back and a wake key do; an open menu, sheet or delay strip owns the screen. */
+internal fun osdToggleStep(osdVisible: Boolean, surface: OpenSurface): OsdToggleStep = when {
+    surface !is OpenSurface.None -> OsdToggleStep.UNAVAILABLE
+    osdVisible -> OsdToggleStep.HIDE
+    else -> OsdToggleStep.REVEAL
+}
+
+/** What a remote's ToggleOsdMenu does. */
+internal enum class OsdMenuStep { CLOSE, OPEN_SPEED, OPEN_CHAPTERS, UNAVAILABLE }
+
+/**
+ * docs/31 §4.5, docs/12 §12: closes any open surface as Menu does; otherwise opens the speed menu, else chapters,
+ * only when [buttons] shows its button and no next-up or still-watching card holds the screen.
+ */
+internal fun osdMenuStep(surface: OpenSurface, cardShown: Boolean, buttons: List<ControlButton>): OsdMenuStep = when {
+    surface !is OpenSurface.None -> OsdMenuStep.CLOSE
+    cardShown -> OsdMenuStep.UNAVAILABLE
+    ControlButton.SPEED in buttons -> OsdMenuStep.OPEN_SPEED
+    ControlButton.CHAPTERS in buttons -> OsdMenuStep.OPEN_CHAPTERS
+    else -> OsdMenuStep.UNAVAILABLE
+}

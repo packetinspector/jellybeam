@@ -39,6 +39,7 @@ import tv.jellybeam.player.OkHttpSheetFetcher
 import tv.jellybeam.player.SheetFetcher
 import tv.jellybeam.player.ass.SeekIndexStore
 import tv.jellybeam.player.PlayerHolder
+import tv.jellybeam.player.RemoteControlBridge
 import tv.jellybeam.player.music.AndroidMusicServiceHost
 import tv.jellybeam.player.music.MusicPlaybackOwner
 import tv.jellybeam.player.playbackActivityTracker
@@ -110,6 +111,10 @@ object AppGraph {
     private lateinit var appContext: Context
 
     lateinit var gateway: CoreGateway
+        private set
+
+    /** docs/31 §9: the remote command listener, built with [gateway]; MainActivity attaches its UI port here. */
+    internal lateinit var remoteControl: RemoteControlBridge
         private set
 
     /** docs/27 §3: [tv.jellybeam.i18n.UiStrings] for ViewModels, which outlive any one Activity. */
@@ -229,7 +234,8 @@ object AppGraph {
             core
         }
         val deviceCapsReady = CompletableDeferred<Unit>()
-        gateway = RealCoreGateway(coreDeferred, processScope, deviceCapsReady)
+        remoteControl = RemoteControlBridge(appContext)
+        gateway = RealCoreGateway(coreDeferred, processScope, deviceCapsReady, remoteControl = remoteControl)
         launchWarmup = LaunchWarmup(gateway, processScope)
 
         // Coil's ImageLoader is otherwise built lazily on the main thread by the first card
@@ -263,7 +269,9 @@ object AppGraph {
         processScope.launch(Dispatchers.Default) {
             try {
                 withTimeoutOrNull(FIRST_FRAME_WAIT_MS) { firstFrameSignal.await() }
-                PerfLog.timed("deviceCaps.probe") { runCatchingCancellable { pushDeviceCaps(gateway) } }
+                // docs/31 §4.4: volume commands are advertised only where the stream volume can move.
+                val probe = { DeviceCapsProbe.probe().copy(volumeAdjustable = remoteControl.volume.adjustable) }
+                PerfLog.timed("deviceCaps.probe") { runCatchingCancellable { pushDeviceCaps(gateway, probe) } }
             } finally {
                 // First playback waits for this decision to be final rather than racing the probe.
                 deviceCapsReady.complete(Unit)

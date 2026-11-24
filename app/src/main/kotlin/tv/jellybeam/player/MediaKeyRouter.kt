@@ -5,7 +5,7 @@ import androidx.compose.ui.input.key.Key
 
 /**
  * docs/17 §2: the MediaSession's transport commands routed to the [PlaybackViewModel], so a
- * remote's Stop/FF/REW/Play/Pause end, seek and toggle exactly as Back and the on-screen controls
+ * remote's Stop/FF/REW/Play/Pause/Next/Previous end, seek, toggle and skip exactly as Back and the on-screen controls
  * do (Stop reports the final position; FF/REW use the viewer's skip settings), not as raw Media3
  * calls that bypass the app.
  */
@@ -15,8 +15,14 @@ class MediaKeyRouter(
     private val seekToMs: (positionMs: Long) -> Unit,
     private val skipForwardMs: () -> Long,
     private val skipBackMs: () -> Long,
-    private val playWhenReady: () -> Boolean,
-    private val togglePlayPause: () -> Unit,
+    /** docs/31 §4.2: the view model's idempotent, group-aware play and pause, so a repeated Play never pauses. */
+    private val play: () -> Unit,
+    private val pause: () -> Unit,
+    /** docs/31 §4.1.1: the on-screen Next and Previous buttons' calls (group-aware, walking the remote list first). */
+    private val next: () -> Unit,
+    private val previous: () -> Unit,
+    private val hasNext: () -> Boolean,
+    private val hasPrevious: () -> Boolean,
 ) {
     fun onStop() = stop()
 
@@ -31,14 +37,18 @@ class MediaKeyRouter(
 
     fun onSeekTo(positionMs: Long) = seekToMs(positionMs)
 
-    /** Toggles only when the intent changes, so a repeated Play never pauses. */
-    fun onPlay() {
-        if (!playWhenReady()) togglePlayPause()
-    }
+    fun onPlay() = play()
 
-    fun onPause() {
-        if (playWhenReady()) togglePlayPause()
-    }
+    fun onPause() = pause()
+
+    fun onNext() = next()
+
+    fun onPrevious() = previous()
+
+    /** docs/12 §8: the session offers a skip only while the OSD shows its button. */
+    fun canSkipNext(): Boolean = hasNext()
+
+    fun canSkipPrevious(): Boolean = hasPrevious()
 }
 
 /** docs/12 §9: what [PlaybackScreen]'s key handler does with a hardware media key. */
@@ -60,7 +70,7 @@ enum class MediaKeyRoute {
  * ([consumeWithoutSession]) so they cannot reach another app's session.
  */
 object MediaKeys {
-    private val SILENT: Set<Key> = setOf(Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause, Key.MediaStop)
+    private val SILENT: Set<Key> = setOf(Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause, Key.MediaStop, Key.MediaNext, Key.MediaPrevious)
     private val REVEALING: Set<Key> = setOf(Key.MediaFastForward, Key.MediaRewind)
 
     /** Every key Android hands the app's media session, or another app's when ours is absent. */

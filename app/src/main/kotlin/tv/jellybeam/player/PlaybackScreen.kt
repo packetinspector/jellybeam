@@ -37,6 +37,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
@@ -50,6 +51,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
@@ -245,21 +247,20 @@ enum class ControlButton {
 /**
  * docs/12 §8's table + §3's density rows. No "disabled" state: an unavailable action omits its
  * button rather than graying it out, so the list itself changes with
- * [isEpisode]/[hasPrev]/[hasNext]/[hasChapters]/[osdDetail].
+ * [hasPrev]/[hasNext]/[hasChapters]/[osdDetail]; docs/31 §4.1.1: a remote list gives any item neighbours, so they alone decide the edges.
  */
 fun visibleControls(
     osdDetail: OsdDetailSetting,
-    isEpisode: Boolean,
     hasPrev: Boolean,
     hasNext: Boolean,
     hasChapters: Boolean,
     group: Boolean,
 ): List<ControlButton> = buildList {
-    if (isEpisode && hasPrev) add(ControlButton.PREV_EPISODE)
+    if (hasPrev) add(ControlButton.PREV_EPISODE)
     add(ControlButton.SKIP_BACK)
     add(ControlButton.PLAY_PAUSE)
     add(ControlButton.SKIP_FORWARD)
-    if (isEpisode && hasNext) add(ControlButton.NEXT_EPISODE)
+    if (hasNext) add(ControlButton.NEXT_EPISODE)
     // docs/28 §1: a group plays at one speed, so its menu is off.
     if (osdDetail == OsdDetailSetting.FULL && !group) add(ControlButton.SPEED)
     add(ControlButton.TRACKS)
@@ -705,7 +706,7 @@ private val TRACK_ROW_H_PADDING = 16.dp
 // OptIn: PlayerView.subtitleView / SubtitleView.setBottomPaddingFraction are @UnstableApi.
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-fun PlaybackScreen(
+internal fun PlaybackScreen(
     viewModel: PlaybackViewModel,
     focusRestoreEpoch: Long = 0L,
     /** docs/17 §2/§3: true for the span between PiP enter/exit; gates everything below the player
@@ -713,6 +714,8 @@ fun PlaybackScreen(
     inPictureInPicture: Boolean = false,
     /** [BackAction.EXIT]'s handler: [PlaybackActivity] tries PiP first, else finishes (docs/17 §3). */
     onExitRequested: () -> Unit,
+    /** docs/31 §4.5: receives this screen's handler for a remote's OSD toggles while composed, `null` once it leaves. */
+    onRemoteOsd: (((VideoOp.Osd) -> DropWhy?)?) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
     val previewTile by viewModel.previewTile.collectAsState()
@@ -838,10 +841,9 @@ fun PlaybackScreen(
     // reorder), feeding the speed/chapters menu anchor.
     val buttonCentersPx = remember { mutableStateOf(emptyMap<ControlButton, Float>()) }
 
-    val visibleButtons = remember(state.osdDetail, state.itemType, state.hasPreviousEpisode, state.hasNextEpisode, state.chapters, state.seekability, state.syncPlay) {
+    val visibleButtons = remember(state.osdDetail, state.hasPreviousEpisode, state.hasNextEpisode, state.chapters, state.seekability, state.syncPlay) {
         visibleControls(
             osdDetail = state.osdDetail,
-            isEpisode = state.itemType == "Episode",
             hasPrev = state.hasPreviousEpisode,
             hasNext = state.hasNextEpisode,
             hasChapters = SeekGuard.chaptersButtonVisible(state.chapters.isNotEmpty(), state.seekability),
@@ -889,7 +891,6 @@ fun PlaybackScreen(
      * [visibleButtons] snapshot -- used wherever a fresh read matters (e.g. the key handler). */
     fun currentVisibleButtons(state: PlaybackUiState = viewModel.state.value): List<ControlButton> = visibleControls(
         osdDetail = state.osdDetail,
-        isEpisode = state.itemType == "Episode",
         hasPrev = state.hasPreviousEpisode,
         hasNext = state.hasNextEpisode,
         hasChapters = SeekGuard.chaptersButtonVisible(state.chapters.isNotEmpty(), state.seekability),
@@ -913,6 +914,40 @@ fun PlaybackScreen(
         osdVisible = true
         val buttons = currentVisibleButtons()
         focusedButton = if (buttons.contains(ControlButton.PLAY_PAUSE)) ControlButton.PLAY_PAUSE else buttons.firstOrNull()
+    }
+
+    // docs/31 §4.5: a remote's OSD toggles take the paths Back, a wake key and the Speed/Chapters buttons take.
+    val remoteOsd by rememberUpdatedState<(VideoOp.Osd) -> DropWhy?> { op ->
+        val current = viewModel.state.value
+        when (op) {
+            VideoOp.ToggleOsd -> when (osdToggleStep(osdVisible, current.openSurface)) {
+                OsdToggleStep.HIDE -> null.also {
+                    osd.hide()
+                    osdVisible = false
+                }
+                OsdToggleStep.REVEAL -> null.also { revealOsdToPlayPause() }
+                OsdToggleStep.UNAVAILABLE -> DropWhy.NotApplicable
+            }
+            VideoOp.ToggleOsdMenu -> when (osdMenuStep(current.openSurface, current.nextUp != null || current.stillWatching != null, currentVisibleButtons(current))) {
+                OsdMenuStep.CLOSE -> null.also {
+                    viewModel.closeSurface()
+                    restoreInvokerFocus(current)
+                }
+                OsdMenuStep.OPEN_SPEED -> null.also {
+                    menuInvoker = ControlButton.SPEED
+                    viewModel.openSpeedMenu()
+                }
+                OsdMenuStep.OPEN_CHAPTERS -> null.also {
+                    menuInvoker = ControlButton.CHAPTERS
+                    viewModel.openChaptersMenu()
+                }
+                OsdMenuStep.UNAVAILABLE -> DropWhy.NotApplicable
+            }
+        }
+    }
+    DisposableEffect(onRemoteOsd) {
+        onRemoteOsd { remoteOsd(it) }
+        onDispose { onRemoteOsd(null) }
     }
 
     BackHandler(onBack = {

@@ -21,6 +21,7 @@ mod next_episode;
 mod object;
 mod persistence;
 mod person;
+mod remote;
 mod seerr;
 mod seerr_types;
 mod session;
@@ -48,6 +49,11 @@ pub use music_playback::{
 };
 pub use object::{ChangeListener, JellybeamCore};
 pub use person::{PersonPage, TitleTmdbRef};
+pub use remote::{
+    GeneralCommandFfi, PlayCommandFfi, PlaystateCommandFfi, RemoteCommandFfi,
+    RemoteControlListener, RemoteItems, RemotePlay, RemoteRepeatFfi, RemoteShuffleFfi,
+    ReportFactsFfi, ReportListFfi, VolumeFfi,
+};
 pub use seerr_types::{
     SeerrActiveRequest, SeerrAuthMethod, SeerrAvailability, SeerrBrowseFilters, SeerrBrowseKind,
     SeerrCard, SeerrGenre, SeerrHome, SeerrHomeRow, SeerrMediaType, SeerrMovieDetail,

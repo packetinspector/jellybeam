@@ -128,6 +128,7 @@ import tv.jellybeam.ui.focus.RefreshRestoreOwner
 import tv.jellybeam.ui.focus.rememberRefreshRestoreOwner
 import tv.jellybeam.ui.focus.asFocusTarget
 import tv.jellybeam.ui.focus.focusKey
+import tv.jellybeam.ui.focus.invokerFor
 import tv.jellybeam.ui.focus.LocalFocusSeat
 import tv.jellybeam.ui.focus.refreshGuardEligible
 import tv.jellybeam.ui.focus.PlacementToken
@@ -349,10 +350,7 @@ internal fun ClassicHomeScreen(
             // a becoming-top pass cancelling this same effect mid-loop actually stops it here.
             // [shelfListStates] only holds entries for mounted shelves (docs/07 §1), so a shelf
             // progressive mounting hasn't reached yet is never visited here -- nothing to reset.
-            val targetShelfId = memory.lastKey
-                ?.takeIf { it.startsWith("shelf:") }
-                ?.removePrefix("shelf:")
-                ?.substringBefore("/card:")
+            val targetShelfId = shelfIdOf(memory.lastKey)
             shelfListStates.entries.toList().forEach { (shelfId, listState) ->
                 if (shelfId != targetShelfId) {
                     try {
@@ -536,7 +534,17 @@ internal fun ClassicHomeScreen(
     // blocks its replacement (`frozenBesides`), a drawer or navigation freeze does; `eligible`
     // reads [latestIsTop] live after the frame, so a waiting trigger never outlives a loss.
     val latestIsTop by rememberUpdatedState(isTop)
+    // docs/07 §1: head card per shelf as of the last refresh, read by [shelvesToRewind].
+    val seenShelfHeads = remember { HashMap<String, String?>() }
     LaunchedEffect(shelves, hero) {
+        val heads = shelves.associate { it.id to it.items.firstOrNull()?.id }
+        val kept = shelfIdOf(invokerFor(memory.focusedKey, memory.lastKey))
+        shelvesToRewind(seenShelfHeads, heads, kept).forEach { id ->
+            val listState = shelfListStates[id] ?: return@forEach
+            // Screen scope: a newer refresh must not cancel a rewind whose head it already recorded.
+            coroutineScope.launch { listState.scrollToItem(0) }
+        }
+        seenShelfHeads.putAll(heads)
         refreshOwner.onContentChanged(
             scope = coroutineScope,
             frame = { withFrameNanos {} },
@@ -872,10 +880,7 @@ private fun homeRefreshFallback(
     shelfListStates: Map<String, LazyListState>,
     homeFallback: () -> FocusTarget?,
 ): FocusTarget? {
-    val shelfId = memory.lastKey
-        ?.takeIf { it.startsWith("shelf:") }
-        ?.removePrefix("shelf:")
-        ?.substringBefore("/card:")
+    val shelfId = shelfIdOf(memory.lastKey)
     val spec = shelfId?.let { id -> shelves.find { it.id == id } }
     val listState = shelfId?.let { shelfListStates[it] }
     if (spec != null && listState != null && spec.items.isNotEmpty()) {

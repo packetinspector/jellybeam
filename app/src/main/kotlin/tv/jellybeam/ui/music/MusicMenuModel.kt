@@ -263,7 +263,8 @@ internal fun enqueueSource(target: MusicMenuTarget): MusicSource = when (target.
 internal fun musicNoticeText(notice: MusicNotice, strings: UiStrings): String = when (notice) {
     is MusicNotice.Queued -> {
         val label = if (notice.mode == EnqueueMode.PlayNext) R.string.music_notice_playing_next else R.string.music_notice_added_to_queue
-        "${strings.get(label).uppercaseUi()} │ ${notice.title}"
+        val text = strings.get(label).uppercaseUi()
+        notice.title?.let { "$text │ $it" } ?: text
     }
     is MusicNotice.AddedToPlaylist ->
         if (notice.again) strings.get(R.string.music_notice_added_again).uppercaseUi() else "${strings.get(R.string.music_notice_added_to).uppercaseUi()} ${notice.playlist}"

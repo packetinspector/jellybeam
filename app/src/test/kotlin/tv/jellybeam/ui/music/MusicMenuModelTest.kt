@@ -198,6 +198,7 @@ class MusicMenuModelTest {
     fun `the bar confirms in mono with names verbatim`() {
         assertEquals("ADDED TO QUEUE │ Song a", musicNoticeText(MusicNotice.Queued(1, EnqueueMode.AddToQueue, "Song a"), strings))
         assertEquals("PLAYING NEXT │ Song a", musicNoticeText(MusicNotice.Queued(1, EnqueueMode.PlayNext, "Song a"), strings))
+        assertEquals("a remote's items have no name to show", "PLAYING NEXT", musicNoticeText(MusicNotice.Queued(1, EnqueueMode.PlayNext, null), strings))
         assertEquals("ADDED TO Night drive", musicNoticeText(MusicNotice.AddedToPlaylist(2, "Night drive", again = false), strings))
         assertEquals("ALREADY IN · ADDED AGAIN", musicNoticeText(MusicNotice.AddedToPlaylist(2, "Night drive", again = true), strings))
     }

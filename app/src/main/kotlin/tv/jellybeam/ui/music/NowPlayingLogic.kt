@@ -173,7 +173,7 @@ internal fun sourceKindOf(source: MusicSource): SourceKind = when (source) {
     is MusicSource.Album, is MusicSource.Single -> SourceKind.Album
     is MusicSource.Artist -> SourceKind.Artist
     is MusicSource.Playlist -> SourceKind.Playlist
-    is MusicSource.Songs, is MusicSource.Mix -> SourceKind.List
+    is MusicSource.Songs, is MusicSource.Mix, is MusicSource.Items -> SourceKind.List
 }
 
 /** The id whose mirror name names [source], or a fixed list's own title; [Single] reads its song's album. */
@@ -189,6 +189,7 @@ internal fun sourceLookup(source: MusicSource): SourceLookup = when (source) {
     is MusicSource.Artist -> SourceLookup.ById(source.id)
     is MusicSource.Playlist -> SourceLookup.ById(source.id)
     is MusicSource.Single -> source.song.album?.ifEmpty { null }?.let { SourceLookup.Verbatim(it) } ?: SourceLookup.None
+    is MusicSource.Items -> SourceLookup.None
     is MusicSource.Mix -> when (val seed = source.seed) {
         is uniffi.jellybeam_core.MixSeedFfi.Song -> SourceLookup.ById(seed.id)
         is uniffi.jellybeam_core.MixSeedFfi.Album -> SourceLookup.ById(seed.id)

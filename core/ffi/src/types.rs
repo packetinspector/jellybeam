@@ -1700,13 +1700,16 @@ impl From<VideoCaps> for jellyfin_core::VideoCodecCaps {
     }
 }
 
-/// Mirrors `jellyfin_core::AndroidTvCaps` 1:1, passed to
-/// [`crate::JellybeamCore::set_device_caps`]; never calling it gets
+/// Mirrors `jellyfin_core::AndroidTvCaps` 1:1 plus the volume fact remote control advertises,
+/// passed to [`crate::JellybeamCore::set_device_caps`]; never calling it gets
 /// `jellyfin_core`'s conservative baseline floor.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Default)]
 pub struct DeviceCaps {
     pub max_streaming_bitrate: Option<u32>,
     pub video: Vec<VideoCaps>,
+    /// docs/31 §4.4: `!AudioManager.isVolumeFixed`; false until the probe says otherwise.
+    #[uniffi(default = false)]
+    pub volume_adjustable: bool,
 }
 
 impl From<DeviceCaps> for jellyfin_core::AndroidTvCaps {
@@ -2211,6 +2214,39 @@ pub(crate) struct NamedStreams {
     pub(crate) subtitle: Option<i32>,
 }
 
+/// docs/31 §4.1: a remote Play's audio and subtitle stream indices (`-1` subtitle is off), each
+/// standing in for the policy's pick of its kind when the source lists it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StreamHints {
+    pub(crate) audio: Option<i32>,
+    pub(crate) subtitle: Option<i32>,
+}
+
+impl StreamHints {
+    /// `decision` with each listed hint in place of its kind's pick; an unlisted index is ignored.
+    fn overlay(
+        self,
+        decision: playback_policy::tracks::TrackDecision,
+        rows: &[TrackRowFfi],
+    ) -> playback_policy::tracks::TrackDecision {
+        use playback_policy::tracks::SubtitleDecision;
+        let listed = |index: i32, kind: TrackKindFfi| {
+            rows.iter()
+                .any(|r| r.stream_index == index && r.kind == kind)
+        };
+        let audio = self.audio.filter(|&i| listed(i, TrackKindFfi::Audio));
+        let subtitle = match self.subtitle {
+            Some(-1) => SubtitleDecision::Off,
+            Some(i) if listed(i, TrackKindFfi::Subtitle) => SubtitleDecision::Track(i64::from(i)),
+            _ => decision.subtitle,
+        };
+        playback_policy::tracks::TrackDecision {
+            audio: audio.map(i64::from).or(decision.audio),
+            subtitle,
+        }
+    }
+}
+
 /// docs/18 §3.1: whether a second negotiation follows the first anyway (Auto's) or costs one
 /// more `PlaybackInfo` (Cap's, a fallback's), which only a burn worth removing earns.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2231,10 +2267,11 @@ pub(crate) fn policy_streams_for_transcode(
     series_pref: Option<&playback_policy::prefs::SeriesTrackPref>,
     global: &playback_policy::prefs::LanguagePrefs,
     second: SecondNegotiation,
+    hints: StreamHints,
 ) -> (TrackDecisionFfi, Option<NamedStreams>) {
     use playback_policy::tracks::{resolve_track_selection, SubtitleDecision, Track};
     let tracks: Vec<Track> = rows.iter().map(Track::from).collect();
-    let decision = resolve_track_selection(&tracks, series_pref, global);
+    let decision = hints.overlay(resolve_track_selection(&tracks, series_pref, global), rows);
     let row = |id: i64| rows.iter().find(|r| i64::from(r.stream_index) == id);
     let audio = decision
         .audio
@@ -2745,6 +2782,7 @@ mod tests {
             series_pref,
             global,
             SecondNegotiation::IfNamed,
+            StreamHints::default(),
         )
         .1
     }
@@ -3786,6 +3824,7 @@ mod tests {
                 max_height: Some(2160),
                 unsupported_video_ranges: vec!["DOVI".to_string()],
             }],
+            volume_adjustable: true,
         };
         let android: jellyfin_core::AndroidTvCaps = caps.into();
         assert_eq!(android.max_streaming_bitrate, Some(6_000_000));

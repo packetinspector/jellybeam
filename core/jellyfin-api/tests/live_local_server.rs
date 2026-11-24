@@ -259,6 +259,9 @@ async fn playback_report_lifecycle_does_not_400() {
         play_session_id: play_session_id.clone(),
         play_method: jellyfin_api::ReportPlayMethod::DirectPlay,
         now_playing_queue: Default::default(),
+        is_muted: false,
+        queue_index: None,
+        queue_modes: None,
     };
     client
         .report_playback(base.clone())

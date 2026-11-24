@@ -1,6 +1,6 @@
 # 31 — Remote control from the server
 
-Status: planned for the next release.
+Status: implemented for the next release.
 
 Jellybeam answers the Jellyfin server's remote-control protocol, so any
 controller that drives a Jellyfin session can drive the TV. That includes the
@@ -15,7 +15,8 @@ Goals:
 
 - The server lists the TV as controllable, so controllers enable their buttons.
 - Play, Playstate and the GeneralCommands in §4 work on video and music.
-- They work in the mini player and while music plays in the background.
+- They work in the mini player, including a mini player floating over
+  another app, and while music plays in the background.
 - Controllers show the true state: paused, position, audio and subtitle
   track, volume. They update right after each command, not at the next
   10-second tick.
@@ -56,7 +57,7 @@ body:
 |---|---|
 | `PlayableMediaTypes` | `Video`, `Audio` |
 | `SupportsMediaControl` | `true`; `false` when the setting is off |
-| `SupportedCommands` | Parity: `DisplayContent`, `SetSubtitleStreamIndex`, `SetAudioStreamIndex`, `DisplayMessage`, `SendString`; plus `VolumeUp`, `VolumeDown`, `SetVolume`, `Mute`, `Unmute`, `ToggleMute` only when volume is controllable (§4.4). Beyond parity (§4.5): the navigation, OSD, stats, bitrate and music-mode commands, plus `PlayTrailers` / Live TV commands only once those features ship. |
+| `SupportedCommands` | Parity: `DisplayContent`, `SetSubtitleStreamIndex`, `SetAudioStreamIndex`, `DisplayMessage`, `SendString`; plus `VolumeUp`, `VolumeDown`, `SetVolume`, `Mute`, `Unmute`, `ToggleMute` only when volume is controllable (§4.4). Beyond parity (§4.5): the navigation, OSD, stats and music-mode commands, plus `PlayTrailers` / Live TV commands only once those features ship. |
 
 The device facts ride the existing capability probe that Kotlin already
 passes over the FFI (docs/18 §1).
@@ -90,9 +91,9 @@ Item kinds:
 | Items | Route |
 |---|---|
 | One video (Movie, Episode, Video, MusicVideo) | Video player |
-| One Series, Season or BoxSet | Core Play pick (`series_summary_read`, docs/11 item 11), then the video player |
+| One Series, Season or BoxSet | Core Play pick (`series_summary_read`, docs/11 item 11), then the video player; a Season or BoxSet not yet synced reads its children with one live request, a Series not yet synced is dropped |
 | Several videos | Video player with a remote list (§4.1.1) |
-| Audio, MusicAlbum, MusicArtist, Playlist of audio | `MusicPlaybackOwner.play` with a new `MusicSource.Items(ids, startIndex)` (docs/29 §4) |
+| Audio, MusicAlbum, MusicArtist, Playlist of audio | The core resolves the songs (mirror first, one live request for an album or artist not yet synced), then `MusicPlaybackOwner.play` with `MusicSource.Items(songs)` (docs/29 §4) |
 
 `PlayCommand`:
 
@@ -119,10 +120,23 @@ Watch Together: a remote Play of other content leaves the group, exactly as
 
 #### 4.1.1 Remote list (video)
 
-A Play with several video ids gives the live video session an ordered list.
+A Play with several video ids gives the live video session an ordered list
+of ids; each step plays its item by id, with no card fetched ahead.
 
-- Next and previous walk the list before falling back to episode neighbours.
-- At the end of the list, normal next-up applies.
+- Next and previous walk the list before falling back to episode neighbours,
+  from the remote, the on-screen buttons and media keys alike.
+- At an item's natural end the next list item plays, even with autoplay off,
+  as a music queue does. At the end of the list, normal next-up applies.
+- The list beats next-up: a list with a next item hides the next-up card, and
+  a "Still watching?" Continue plays the list's next item.
+- A remote Play of the playing item without a list ends the list.
+- A new session under a list reports its list once, at once; with no list
+  its Start already says so.
+- In a Watch Together group the group's queue decides, so a list or
+  PlayNext / PlayLast is refused (one drop line).
+- PlayNext / PlayLast over a video with no list start one: the playing item,
+  then the new ones. A playback parked on another account counts as nothing
+  playing.
 - The list lives inside the existing playback session owner, not a new
   owner. It dies with the session.
 - It is reported as `NowPlayingQueue` and `PlaylistItemId`, the same shape
@@ -152,6 +166,9 @@ The live player is reached through a new transport port on the existing
 
 Every applied command asks the reporting session for an immediate Progress
 report, through a `report_now` hook on the existing actor (docs/18 §2).
+A video's position, pause, facts and immediate reports leave through one
+serial queue in call order, and `report_now` feeds the position watch, so a
+report never carries a position older than one already sent.
 
 ### 4.3 `GeneralCommand`: tracks, navigation, messages
 
@@ -167,8 +184,12 @@ index of `-1` means off.
 
 `DisplayContent` takes `ItemId` and `ItemType`:
 
-- It arrives as `Req.Kind.OpenDetail`, and `CollectionFolder` / `UserView`
-  opens that library.
+- It arrives as `Req.Kind.OpenDetail`; `CollectionFolder` / `UserView` (the
+  server's `ItemType`) opens that library the way the drawer does, also over
+  a mini player floating on another app, and closes music ambient first. A
+  library the views don't list, an item with no card, a stack not rooted on
+  Home, or a sign-in, server or crash screen up when it lands drops it with
+  one drop line.
 - It is ignored while a full-screen player is up, as in the official client.
 
 `DisplayMessage` / `SendString` take `Header`, `Text` or `String`:
@@ -204,15 +225,16 @@ These are commands the protocol defines and the official client ignores.
 Each one goes to an existing owner, and none adds cost when unused (§2).
 
 Typing and navigation (MainActivity on top; in the player, the player owns
-the keys):
+the keys). Over music ambient (docs/29 §6) each op first closes ambient, as
+a key press does, then acts:
 
 | Command | Effect |
 |---|---|
-| `SendString` (`String`) | A focused text field (Search, sign-in server URL) gets the text inserted at the cursor, as if typed; no field focused: shown as a message (§4.3). This replaces the on-screen keyboard from a phone. |
-| `MoveUp` / `MoveDown` / `MoveLeft` / `MoveRight`, `Select`, `Back`, `PageUp` / `PageDown` | Dispatched as the matching D-pad key to our own window's `dispatchKeyEvent`, so focus rules (docs/15) apply unchanged. Never injected into other apps. |
+| `SendString` (`String`) | A focused text field (Search, sign-in server URL) gets the text as key presses to our own window, as if typed: the field keeps its own cursor, selection and IME; line breaks and characters with no key are dropped; no field focused: shown as a message (§4.3). This replaces the on-screen keyboard from a phone. |
+| `MoveUp` / `MoveDown` / `MoveLeft` / `MoveRight`, `Select`, `Back`, `PageUp` / `PageDown` | Dispatched as the matching D-pad key to our own window's `dispatchKeyEvent`, so focus rules (docs/15) apply unchanged; `Back` goes to the Activity's back dispatcher, since a synthetic Back key skips predictive back. Never injected into other apps. |
 | `PreviousLetter` / `NextLetter` | The library index rail steps one letter (docs/16) |
 | `GoHome` / `GoToSearch` / `GoToSettings` | Navigate to that destination; ignored while a full-screen player is up |
-| `ToggleContextMenu` | Opens the `···` menu on Detail (docs/19), else the focused card's menu |
+| `ToggleContextMenu` | Opens the `···` menu on Detail (docs/19), else the focused item's Menu-key action (music track rows) |
 | `ToggleOsd` / `ToggleOsdMenu` | In the player: show or hide the OSD / the speed and chapters menu (docs/12) |
 | `ToggleFullscreen` | Mini player ↔ full screen (docs/17) |
 
@@ -221,15 +243,15 @@ Playback extras:
 | Command | Effect |
 |---|---|
 | `ToggleStats` | Opens or closes the player's stats sheet (docs/12 row 10): HDR format, codecs, Direct Play or transcode reason, dropped frames |
-| `SetMaxStreamingBitrate` (`MaxBitrate`) | Maps to the nearest Quality step (docs/18) for the current playback only, renegotiating as an OSD Quality change does. It is not persisted, and Direct Play stays the default for the next item. |
 | `SetRepeatMode` (`RepeatMode`) | Music `Transport(Repeat)`; ignored for video |
 | `SetShuffleQueue` (`ShuffleMode`), `SetPlaybackOrder` | Music `Transport(Shuffle)`; ignored for video |
 | `PlayMediaSource` | Same as `Play` with `MediaSourceId` (§4.1) |
 | `PlayTrailers` (`ItemId`) | Plays the item's trailers. Advertised only once trailer playback ships. |
+| `SetMaxStreamingBitrate` (`MaxBitrate`) | Not advertised: Quality is a Settings choice (docs/18) with no per-playback change to map onto. |
 | `Guide`, `ChannelUp` / `ChannelDown` | Advertised only if Live TV playback ships; not part of this release |
 
-Reports gain `RepeatMode` and `ShuffleMode` for music, so controllers show
-the real mode.
+Reports gain `RepeatMode` and `PlaybackOrder` (the wire name for shuffle)
+for music, so controllers show the real mode.
 
 Launch when closed: the server cannot reach an app that isn't running. A
 controller that can run ADB (Home Assistant's Android TV integration, for
@@ -265,16 +287,20 @@ for minutes and then plays is worse than nothing.
   installed account (epoch match). A playback parked on another account
   after a switch (docs/18 §2.1) is not commandable from either server, and
   its own server shows it as not controllable.
-- Multi-server proxies (docs/28 §7): whether the proxy forwards session
-  commands is verified on the dev proxy before release. If it doesn't, we
-  document it and ship nothing proxy-specific.
+- Multi-server proxies (docs/28 §7), verified on Jellyswarrm: a TV signed
+  in through the proxy is controllable from clients signed in through the
+  same proxy (Play ids are the proxy's, which the TV also uses). A client
+  signed in straight to a backend server sees the TV as not controllable.
+  Nothing proxy-specific ships.
 
 ## 7. Reporting fixes this needs
 
 These close gaps in `ReportingSession` (docs/18 §2):
 
-- `AudioStreamIndex` / `SubtitleStreamIndex`: set from TrackChoice on start
-  and on every change, sent on Start and Progress.
+- `AudioStreamIndex` / `SubtitleStreamIndex`: set from TrackChoice on every
+  change, which rides the next report; a remote change reports at once. A
+  Direct Play Start is sent before the tracks are known, so a later Progress
+  carries them.
 - `VolumeLevel` / `IsMuted`: real values (§4.4).
 - `CanSeek`: false for live TV; otherwise true.
 - `NowPlayingQueue` / `PlaylistItemId` for a video remote list (§4.1.1).
@@ -331,8 +357,7 @@ owner.
   - `SendString` into a focused Search field versus no field (message).
   - D-pad commands move focus exactly like key presses, per the docs/15
     fixtures.
-  - `SetMaxStreamingBitrate` maps to Quality steps, and the next item is
-    back to Direct Play.
+  - `SetMaxStreamingBitrate` is not advertised and decodes as unsupported.
   - Music repeat and shuffle round-trip into reports.
 - **TTFF:** a remote Play of the perf-ab item is within the spread of an
   in-app Play.
