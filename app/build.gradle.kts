@@ -26,8 +26,8 @@ android {
         applicationId = "tv.jellybeam"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = providers.gradleProperty("jellybeam.updateVersionCode").orNull?.toInt() ?: 24
-        versionName = providers.gradleProperty("jellybeam.updateVersionName").orNull ?: "0.1.23"
+        versionCode = providers.gradleProperty("jellybeam.updateVersionCode").orNull?.toInt() ?: 25
+        versionName = providers.gradleProperty("jellybeam.updateVersionName").orNull ?: "0.1.24"
         buildConfigField("boolean", "UPDATE_FIXTURE", if (updateFixtureBuild) "true" else "false")
         buildConfigField("String", "SHIPPED_LANGUAGES", "\"${shippedLanguages.joinToString(",")}\"")
         // Only the ABIs the Rust core is built for. JNA's AAR also ships x86, mips and armeabi
